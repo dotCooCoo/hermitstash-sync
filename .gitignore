@@ -3,9 +3,11 @@ build/*.blob
 build/bundle.js
 build/hermitstash-sync
 build/hermitstash-sync.exe
+*.tgz
 dist/
 
-# Node
+# npm
+.npmignore
 node_modules/
 
 # State (user data, never committed)
