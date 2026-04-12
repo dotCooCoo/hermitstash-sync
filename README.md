@@ -2,9 +2,15 @@
   <img src="public/img/logos/green.svg" alt="HermitStash Sync" width="120" />
 </p>
 
-# HermitStash Sync
+<h1 align="center">HermitStash Sync</h1>
 
-Desktop file sync client for [HermitStash](https://github.com/dotCooCoo/hermitstash) — post-quantum encrypted, self-hosted file sync.
+<p align="center">
+  Desktop file sync client for <a href="https://github.com/dotCooCoo/hermitstash">HermitStash</a> — post-quantum encrypted, self-hosted file sync.
+</p>
+
+<p align="center">
+  <a href="LICENSE">MIT License</a> · <a href="SECURITY.md">Security Policy</a> · <a href="https://ko-fi.com/dotcoocoo">Support on Ko-fi</a>
+</p>
 
 ---
 
@@ -50,7 +56,7 @@ cd hermitstash-sync
 # Download from Releases for your platform
 ```
 
-## Quick Start
+## Quick start
 
 ```bash
 # 1. Set up the connection
@@ -72,11 +78,11 @@ hermitstash-sync stop
 ## Commands
 
 | Command | Description |
-|---------|-------------|
+| --- | --- |
 | `init` | Interactive setup — server URL, API key, sync folder |
 | `start` | Start sync in foreground |
 | `start --daemon` | Start sync as background daemon |
-| `status` | Show sync status (running/stopped, file count, errors) |
+| `status` | Show sync status, file count, last sync time, errors |
 | `stop` | Stop the background daemon |
 | `log` | Show last 50 log lines |
 | `log --follow`, `-f` | Tail the log file in real-time |
@@ -104,12 +110,12 @@ Config file: `~/.hermitstash-sync/config.json`
 }
 ```
 
-### Ignore Patterns
+### Ignore patterns
 
 The following patterns are always excluded from sync:
 
 | Pattern | Reason |
-|---------|--------|
+| --- | --- |
 | `.DS_Store`, `.Spotlight-V100/**`, `.Trashes/**` | macOS system files |
 | `Thumbs.db`, `ehthumbs.db`, `desktop.ini` | Windows system files |
 | `.git/**`, `.svn/**` | Version control |
@@ -118,47 +124,27 @@ The following patterns are always excluded from sync:
 | `.hermitstash-sync/**` | Client config directory |
 
 Add custom patterns in:
+
 - `config.json` → `ignore` array
 - `.hermitstash-ignore` file in the sync folder root (one pattern per line, `#` comments supported)
 
 Supported pattern syntax: exact filename (`file.txt`), extension (`*.log`), and directory recursion (`build/**`).
 
-### API Key Storage
+### API key storage
 
 The API key is stored in your OS keychain:
+
 - **macOS:** Keychain Access
 - **Linux:** GNOME Keyring / KDE Wallet (via `secret-tool`)
 - **Windows:** Windows Credential Manager
 
 Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless systems.
 
-## Security
-
-- **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
-- **mTLS** client certificates for server authentication (optional, certs cached in memory)
-- **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
-- **Path traversal protection** — all server-provided paths validated against sync folder boundary
-- **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
-- **API key** in OS keychain, never in plaintext config or log files
-- **Atomic writes** — downloads write to `.tmp` file, verify checksum, then rename
-- **Stale temp cleanup** — orphaned `.tmp` files from interrupted downloads removed on startup
-- **Download suppression** — files written by the sync engine don't trigger re-upload
-- **PID file locking** — exclusive create prevents two daemon instances from racing
-- **State DB integrity** — SQLite integrity check on startup with auto-recovery on corruption
-- **HTTP timeouts** — all requests time out after 30 seconds to prevent hangs
-- **Log rotation** — log file rotated at 10MB to prevent disk exhaustion
-- **Log symlink protection** — log path checked for symlinks before opening
-- **Disk space guard** — downloads pause if free space drops below 100 MB
-- **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
-- **Filename sanitization** — multipart upload headers strip injection characters
-- **Response body limiting** — error responses capped at 64 KB to prevent memory exhaustion
-- **Zero npm dependencies** — entire codebase is auditable
-
 ## How sync works
 
 1. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server.
 2. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes.
-3. If the connection drops, the client reconnects with exponential backoff (1s → 2s → 4s → ... → 5 min max). On reconnect, it sends the last known sequence number so the server can replay missed events.
+3. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 4. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
 5. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
 
@@ -167,7 +153,7 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 The `status` command shows which state the daemon is in:
 
 | State | Meaning |
-|-------|---------|
+| --- | --- |
 | `DISCONNECTED` | Not connected to server |
 | `CONNECTING` | Establishing WebSocket connection |
 | `CATCHING_UP` | Downloading changes missed while offline |
@@ -177,22 +163,46 @@ The `status` command shows which state the daemon is in:
 | `RECONNECTING` | Connection lost, waiting to retry |
 | `ERROR` | Something went wrong (check logs) |
 
+## Security
+
+- **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
+- **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
+- **mTLS** client certificates for server authentication (optional, certs cached in memory)
+- **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
+- **Path traversal protection** — all server-provided paths validated against sync folder boundary
+- **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
+- **API key** in OS keychain, never in plaintext config or log files
+- **Atomic writes** — downloads write to `.tmp` file, verify checksum, then rename
+- **Stale temp cleanup** — orphaned `.tmp` files from interrupted downloads removed on startup
+- **Download suppression** — files written by the sync engine don't trigger re-upload
+- **Disk space guard** — downloads pause if free space drops below 100 MB
+- **PID file locking** — exclusive create prevents two daemon instances from racing
+- **State DB integrity** — SQLite integrity check on startup with auto-recovery on corruption
+- **Filename sanitization** — multipart upload headers strip injection characters
+- **Response body limiting** — error responses capped at 64 KB to prevent memory exhaustion
+- **HTTP timeouts** — all requests time out after 30 seconds to prevent hangs
+- **Log rotation** — log file rotated at 10 MB to prevent disk exhaustion
+- **Log symlink protection** — log path checked for symlinks before opening
+- **Zero npm dependencies** — entire codebase is auditable
+
 ## Logging
 
-Logs are written to `~/.hermitstash-sync/hermitstash-sync.log` in JSON format (one object per line with `ts`, `level`, `msg` fields). Log levels: `debug`, `info`, `warn`, `error`.
+Logs are written to `~/.hermitstash-sync/hermitstash-sync.log` in JSON format — one object per line with `ts`, `level`, and `msg` fields.
 
-The log file is rotated at 10 MB — the current log is renamed to `.log.1` and a fresh file is started. Only one rotated copy is kept.
+Log levels: `debug`, `info`, `warn`, `error`.
+
+The log file is rotated at 10 MB. The current log is renamed to `.log.1` and a fresh file is started. Only one rotated copy is kept.
 
 ## Platform notes
 
 | | macOS | Linux | Windows |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Keychain | Keychain Access | GNOME Keyring / KDE Wallet | Credential Manager |
 | Daemon | `start --daemon` | `start --daemon` | `start --daemon` |
-| Resync signal | `SIGHUP` | `SIGHUP` | Not supported — restart the daemon |
+| Resync signal | `SIGHUP` | `SIGHUP` | Not supported — restart daemon |
 | Auto-start | launchd | systemd | Task Scheduler |
 
-## Auto-start (Optional)
+## Auto-start (optional)
 
 ### Linux (systemd)
 
@@ -236,7 +246,7 @@ systemctl --user start hermitstash-sync
 </plist>
 ```
 
-## Building SEA Binary
+## Building SEA binary
 
 ```bash
 # Requires Node.js 22+ and postject
@@ -255,7 +265,7 @@ HermitStash Sync is a security-focused project maintained by one person. Reviewi
 That said, there are a lot of ways to help that I genuinely welcome:
 
 - **Bug reports.** If something doesn't work, or works in a way that surprises you, please open an issue. Steps to reproduce help a lot.
-- **Security findings.** If you spot a cryptographic issue, a misuse of a primitive, or anything that contradicts a security claim in the README, please report it privately — see SECURITY.md for how.
+- **Security findings.** If you spot a cryptographic issue, a misuse of a primitive, or anything that contradicts a security claim in the README, please report it privately — see [SECURITY.md](SECURITY.md) for how.
 - **Feature requests.** Open an issue describing the use case. I can't promise I'll build it, but I want to hear what people would find useful.
 - **Documentation feedback.** If something in the README is unclear, wrong, or missing, an issue is great. Documentation issues are some of the most useful kinds of feedback I get.
 - **Questions.** If you're trying to use HermitStash Sync and something isn't clear, asking is welcome.
@@ -266,9 +276,11 @@ This may change in the future. If HermitStash Sync grows to a point where I can 
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
-## A final note
+---
+
+### A final note
 
 If you've read this far — thank you. Building and sharing HermitStash has been one of the most rewarding things I've worked on, and the fact that you took the time to look at it means a lot.
 
