@@ -1,5 +1,6 @@
 # Build artifacts
 build/*.blob
+build/bundle.js
 build/hermitstash-sync
 build/hermitstash-sync.exe
 dist/

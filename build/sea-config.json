@@ -1,5 +1,5 @@
 {
-  "main": "bin/hermitstash-sync.js",
+  "main": "build/bundle.js",
   "output": "build/hermitstash-sync.blob",
   "disableExperimentalSEAWarning": true,
   "useSnapshot": false,
