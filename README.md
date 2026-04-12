@@ -1,6 +1,26 @@
+<p align="center">
+  <img src="public/img/logos/green.svg" alt="HermitStash Sync" width="120" />
+</p>
+
 # HermitStash Sync
 
 Desktop file sync client for [HermitStash](https://github.com/dotCooCoo/hermitstash) — post-quantum encrypted, self-hosted file sync.
+
+---
+
+### A quick note
+
+HermitStash Sync is the companion to [HermitStash](https://github.com/dotCooCoo/hermitstash) — same author, same philosophy, same caveats. If you haven't read the note at the top of the main repo, the short version is: this is a personal project, built by someone who is not a cryptographer, and it hasn't been audited.
+
+This client inherits its security posture from HermitStash and from Node.js's OpenSSL 3.5 — I'm not rolling my own TLS or inventing key exchanges. But a sync client introduces its own surface area (file watching, state tracking, daemon lifecycle), and those parts are entirely my own work. I've tried to be careful, but "tried to be careful" is not a substitute for a professional review.
+
+If you're already running HermitStash and you want your files to show up on the other end without dragging them there yourself — this is for that. If you're evaluating it for something where reliability and security truly matter, please factor in that it's one person, spare time, and zero formal review.
+
+— .CooCoo ([@dotCooCoo](https://github.com/dotCooCoo))
+
+> **Status:** Personal project · Not audited · API may change · Use at your own risk
+
+---
 
 ## What it does
 
@@ -169,6 +189,30 @@ npx postject build/hermitstash-sync NODE_SEA_BLOB build/hermitstash-sync.blob \
   --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 ```
 
+## Contributing
+
+I want to be straightforward about this: I'm not currently accepting code contributions, and I want to explain why rather than just saying no.
+
+HermitStash Sync is a security-focused project maintained by one person. Reviewing external code contributions to a cryptographic system is something I don't feel I can do responsibly right now — I'm still learning, and I'd rather not merge code I can't fully evaluate myself. Accepting PRs would mean either rubber-stamping changes I don't understand (bad) or asking contributors to wait indefinitely while I figure it out (also bad). The honest answer is that I'm not set up for it yet.
+
+That said, there are a lot of ways to help that I genuinely welcome:
+
+- **Bug reports.** If something doesn't work, or works in a way that surprises you, please open an issue. Steps to reproduce help a lot.
+- **Security findings.** If you spot a cryptographic issue, a misuse of a primitive, or anything that contradicts a security claim in the README, please report it privately — see SECURITY.md for how.
+- **Feature requests.** Open an issue describing the use case. I can't promise I'll build it, but I want to hear what people would find useful.
+- **Documentation feedback.** If something in the README is unclear, wrong, or missing, an issue is great. Documentation issues are some of the most useful kinds of feedback I get.
+- **Questions.** If you're trying to use HermitStash Sync and something isn't clear, asking is welcome.
+
+If you've built something on top of HermitStash, or you're running it somewhere interesting, I'd love to hear about that too — feel free to open an issue just to say hi.
+
+This may change in the future. If HermitStash Sync grows to a point where I can responsibly review external code, I'll update this section. Until then: thank you for understanding, and thank you for being interested enough to consider contributing in the first place.
+
 ## License
 
 MIT
+
+## A final note
+
+If you've read this far — thank you. Building and sharing HermitStash has been one of the most rewarding things I've worked on, and the fact that you took the time to look at it means a lot.
+
+If HermitStash has been useful to you and you'd like to buy me a coffee, you can do so at [ko-fi.com/dotcoocoo](https://ko-fi.com/dotcoocoo). It's never expected, always appreciated.
