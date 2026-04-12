@@ -79,7 +79,7 @@ hermitstash-sync stop
 
 | Command | Description |
 | --- | --- |
-| `init` | Interactive setup — server URL, API key, sync folder |
+| `init` | Interactive setup — enrollment code or API key, server URL, sync folder |
 | `start` | Start sync in foreground |
 | `start --daemon` | Start sync as background daemon |
 | `status` | Show sync status, file count, last sync time, errors |
@@ -142,8 +142,8 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 
 ## How sync works
 
-1. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server.
-2. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes.
+1. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server. Existing local files are verified against server checksums using parallel SHA3-512 hashing across the worker thread pool.
+2. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. All checksum computations are dispatched to the worker pool to keep the main thread responsive.
 3. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 4. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
 5. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
@@ -168,6 +168,7 @@ The `status` command shows which state the daemon is in:
 - **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
 - **mTLS** client certificates for server authentication (optional, certs cached in memory)
+- **Hybrid ECIES key exchange** — session keys delivered via ML-KEM-1024 + ECDH P-384 + HKDF-SHA3-512 + XChaCha20-Poly1305 (no plaintext keys in HTTP)
 - **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
 - **Path traversal protection** — all server-provided paths validated against sync folder boundary
 - **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
@@ -183,6 +184,7 @@ The `status` command shows which state the daemon is in:
 - **HTTP timeouts** — all requests time out after 30 seconds to prevent hangs
 - **Log rotation** — log file rotated at 10 MB to prevent disk exhaustion
 - **Log symlink protection** — log path checked for symlinks before opening
+- **Worker thread pool** — SHA3-512 checksums computed in parallel across CPU cores, keeping the main thread responsive to WebSocket heartbeats during bulk sync
 - **Zero npm dependencies** — entire codebase is auditable
 
 ## Logging
@@ -244,6 +246,26 @@ systemctl --user start hermitstash-sync
   <key>KeepAlive</key><true/>
 </dict>
 </plist>
+```
+
+## File structure
+
+```
+bin/hermitstash-sync.js       CLI entry point
+lib/cli.js                    Command parser and dispatcher
+lib/config.js                 Config file management
+lib/constants.js              All constants, message types, defaults
+lib/checksum.js               SHA3-512 hashing (single + worker pool)
+lib/daemon.js                 Daemonization, PID file, signal handlers
+lib/http-client.js            HTTP client with PQC agent + ECIES
+lib/keychain.js               OS keychain for API key storage
+lib/logger.js                 Structured JSON logger with rotation
+lib/state-db.js               Local SQLite state database (node:sqlite)
+lib/sync-engine.js            Core sync loop orchestrator
+lib/watcher.js                fs.watch with debounce and ignore patterns
+lib/worker-pool.js            Generic worker thread pool
+lib/workers/checksum-worker.js  SHA3-512 hashing worker thread
+lib/ws-client.js              Minimal WebSocket client with PQC TLS
 ```
 
 ## Building SEA binary
