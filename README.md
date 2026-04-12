@@ -34,6 +34,7 @@ Watches a local folder and keeps it in sync with a HermitStash server:
 
 - **New files** are uploaded automatically
 - **Modified files** are re-uploaded (server detects and replaces)
+- **Renamed/moved files** are detected by checksum matching — server updates the path without re-uploading the file
 - **Deleted files** are removed from the server
 - **Server-side changes** are downloaded in real-time via WebSocket
 - **Conflict resolution** is last-write-wins — if both sides change a file, the most recent write takes priority
