@@ -168,7 +168,7 @@ The `status` command shows which state the daemon is in:
 - **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
 - **mTLS** client certificates for server authentication (optional, certs cached in memory)
-- **Hybrid ECIES key exchange** — session keys delivered via ML-KEM-1024 + ECDH P-384 + HKDF-SHA3-512 + XChaCha20-Poly1305 (no plaintext keys in HTTP)
+- **Hybrid ECIES key exchange** — session keys delivered via ML-KEM-1024 + ECDH P-384 + HKDF-SHA3-512 + XChaCha20-Poly1305 with protocol version byte for algorithm agility (no plaintext keys in HTTP)
 - **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
 - **Path traversal protection** — all server-provided paths validated against sync folder boundary
 - **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
