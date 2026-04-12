@@ -30,8 +30,9 @@ Watches a local folder and keeps it in sync with a HermitStash server:
 - **Modified files** are re-uploaded (server detects and replaces)
 - **Deleted files** are removed from the server
 - **Server-side changes** are downloaded in real-time via WebSocket
+- **Conflict resolution** is last-write-wins — if both sides change a file, the most recent write takes priority
 
-All connections use PQC TLS (X25519MLKEM768 hybrid key exchange) with optional mTLS client certificates.
+All connections use PQC TLS (X25519MLKEM768 hybrid key exchange, TLS 1.3 minimum) with optional mTLS client certificates.
 
 ## Requirements
 
@@ -78,9 +79,10 @@ hermitstash-sync stop
 | `status` | Show sync status (running/stopped, file count, errors) |
 | `stop` | Stop the background daemon |
 | `log` | Show last 50 log lines |
-| `log --follow` | Tail the log file in real-time |
+| `log --follow`, `-f` | Tail the log file in real-time |
 | `resync` | Force a full re-sync from scratch |
 | `version` | Show version and OpenSSL info |
+| `--help`, `-h` | Show usage information |
 
 ## Configuration
 
@@ -104,9 +106,22 @@ Config file: `~/.hermitstash-sync/config.json`
 
 ### Ignore Patterns
 
-Default ignore patterns are always applied (`.DS_Store`, `.git/**`, `node_modules/**`, etc.). Add custom patterns in:
+The following patterns are always excluded from sync:
+
+| Pattern | Reason |
+|---------|--------|
+| `.DS_Store`, `.Spotlight-V100/**`, `.Trashes/**` | macOS system files |
+| `Thumbs.db`, `ehthumbs.db`, `desktop.ini` | Windows system files |
+| `.git/**`, `.svn/**` | Version control |
+| `node_modules/**`, `__pycache__/**` | Package/build artifacts |
+| `*.tmp`, `*.swp`, `*.swo`, `*~` | Editor temp files |
+| `.hermitstash-sync/**` | Client config directory |
+
+Add custom patterns in:
 - `config.json` → `ignore` array
-- `.hermitstash-ignore` file in the sync folder root (gitignore-style)
+- `.hermitstash-ignore` file in the sync folder root (one pattern per line, `#` comments supported)
+
+Supported pattern syntax: exact filename (`file.txt`), extension (`*.log`), and directory recursion (`build/**`).
 
 ### API Key Storage
 
@@ -133,7 +148,49 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 - **HTTP timeouts** — all requests time out after 30 seconds to prevent hangs
 - **Log rotation** — log file rotated at 10MB to prevent disk exhaustion
 - **Log symlink protection** — log path checked for symlinks before opening
+- **Disk space guard** — downloads pause if free space drops below 100 MB
+- **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
+- **Filename sanitization** — multipart upload headers strip injection characters
+- **Response body limiting** — error responses capped at 64 KB to prevent memory exhaustion
 - **Zero npm dependencies** — entire codebase is auditable
+
+## How sync works
+
+1. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server.
+2. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes.
+3. If the connection drops, the client reconnects with exponential backoff (1s → 2s → 4s → ... → 5 min max). On reconnect, it sends the last known sequence number so the server can replay missed events.
+4. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
+5. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
+
+### Sync states
+
+The `status` command shows which state the daemon is in:
+
+| State | Meaning |
+|-------|---------|
+| `DISCONNECTED` | Not connected to server |
+| `CONNECTING` | Establishing WebSocket connection |
+| `CATCHING_UP` | Downloading changes missed while offline |
+| `SYNCED` | Fully synchronized, watching for changes |
+| `UPLOADING` | Actively uploading files |
+| `DOWNLOADING` | Actively downloading files |
+| `RECONNECTING` | Connection lost, waiting to retry |
+| `ERROR` | Something went wrong (check logs) |
+
+## Logging
+
+Logs are written to `~/.hermitstash-sync/hermitstash-sync.log` in JSON format (one object per line with `ts`, `level`, `msg` fields). Log levels: `debug`, `info`, `warn`, `error`.
+
+The log file is rotated at 10 MB — the current log is renamed to `.log.1` and a fresh file is started. Only one rotated copy is kept.
+
+## Platform notes
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Keychain | Keychain Access | GNOME Keyring / KDE Wallet | Credential Manager |
+| Daemon | `start --daemon` | `start --daemon` | `start --daemon` |
+| Resync signal | `SIGHUP` | `SIGHUP` | Not supported — restart the daemon |
+| Auto-start | launchd | systemd | Task Scheduler |
 
 ## Auto-start (Optional)
 
