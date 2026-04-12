@@ -1,8 +1,8 @@
 # Build artifacts
 build/*.blob
 build/bundle.js
-build/hermitstash-sync
-build/hermitstash-sync.exe
+build/hermitstash-sync-*
+build/gpg-public-key.asc
 *.tgz
 dist/
 
