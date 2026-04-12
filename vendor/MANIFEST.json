@@ -1,4 +1,19 @@
 {
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages.",
-  "packages": {}
+  "packages": {
+    "@noble/ciphers": {
+      "version": "2.1.1",
+      "file": "vendor/noble-ciphers.cjs",
+      "exports": ["xchacha20poly1305"],
+      "source": "https://github.com/paulmillr/noble-ciphers",
+      "copiedFrom": "hermitstash-private/lib/vendor/noble-ciphers.cjs"
+    },
+    "@noble/post-quantum": {
+      "version": "0.6.0",
+      "file": "vendor/noble-pq.cjs",
+      "exports": ["ml_kem512", "ml_kem768", "ml_kem1024"],
+      "source": "https://github.com/paulmillr/noble-post-quantum",
+      "copiedFrom": "hermitstash-private/lib/vendor/noble-pq.cjs"
+    }
+  }
 }
