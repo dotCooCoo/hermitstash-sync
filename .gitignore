@@ -17,6 +17,9 @@ node_modules/
 Thumbs.db
 desktop.ini
 
+# Tests (local test suite, not committed)
+tests/
+
 # IDE
 .vscode/
 .idea/
