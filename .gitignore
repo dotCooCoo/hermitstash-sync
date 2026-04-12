@@ -1,0 +1,25 @@
+# Build artifacts
+build/*.blob
+build/hermitstash-sync
+build/hermitstash-sync.exe
+dist/
+
+# Node
+node_modules/
+
+# State (user data, never committed)
+*.db
+*.pid
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

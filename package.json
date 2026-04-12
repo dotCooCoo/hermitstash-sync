@@ -1,0 +1,24 @@
+{
+  "name": "hermitstash-sync",
+  "version": "0.1.0",
+  "description": "Desktop sync client for HermitStash — post-quantum encrypted file sync",
+  "main": "bin/hermitstash-sync.js",
+  "bin": {
+    "hermitstash-sync": "bin/hermitstash-sync.js"
+  },
+  "scripts": {
+    "start": "node bin/hermitstash-sync.js start",
+    "build:sea": "node build/build-sea.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dotCooCoo/hermitstash-sync.git"
+  },
+  "author": "dotCooCoo",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
