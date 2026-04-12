@@ -1,7 +1,8 @@
 {
   "name": "hermitstash-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop sync client for HermitStash — post-quantum encrypted file sync",
+  "type": "commonjs",
   "main": "bin/hermitstash-sync.js",
   "bin": {
     "hermitstash-sync": "bin/hermitstash-sync.js"

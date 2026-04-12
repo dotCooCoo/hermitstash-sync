@@ -99,11 +99,20 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 
 ## Security
 
-- **PQC TLS** on every connection (X25519MLKEM768 hybrid key exchange)
-- **mTLS** client certificates for server authentication (optional)
-- **SHA3-512** checksums verified after every download
-- **API key** in OS keychain, never in plaintext config
-- **Atomic writes** — downloads write to `.tmp` file then rename
+- **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
+- **mTLS** client certificates for server authentication (optional, certs cached in memory)
+- **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
+- **Path traversal protection** — all server-provided paths validated against sync folder boundary
+- **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
+- **API key** in OS keychain, never in plaintext config or log files
+- **Atomic writes** — downloads write to `.tmp` file, verify checksum, then rename
+- **Stale temp cleanup** — orphaned `.tmp` files from interrupted downloads removed on startup
+- **Download suppression** — files written by the sync engine don't trigger re-upload
+- **PID file locking** — exclusive create prevents two daemon instances from racing
+- **State DB integrity** — SQLite integrity check on startup with auto-recovery on corruption
+- **HTTP timeouts** — all requests time out after 30 seconds to prevent hangs
+- **Log rotation** — log file rotated at 10MB to prevent disk exhaustion
+- **Log symlink protection** — log path checked for symlinks before opening
 - **Zero npm dependencies** — entire codebase is auditable
 
 ## Auto-start (Optional)
