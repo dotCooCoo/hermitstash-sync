@@ -1,0 +1,256 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            arch: x64
+            ext: .exe
+          # Future: uncomment to build for other platforms
+          # - os: ubuntu-latest
+          #   platform: linux
+          #   arch: x64
+          #   ext: ''
+          # - os: macos-latest
+          #   platform: macos
+          #   arch: arm64
+          #   ext: ''
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "exe_name=hermitstash-sync-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build SEA binary
+        run: node build/build-sea.js
+
+      - name: Verify binary
+        shell: bash
+        run: |
+          EXE="build/${{ steps.version.outputs.exe_name }}"
+          "${EXE}" version
+
+      # ---- Security scans ----
+
+      - name: Windows Defender scan
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          echo Updating virus definitions...
+          "C:\Program Files\Windows Defender\MpCmdRun.exe" -SignatureUpdate
+          echo Running full scan...
+          "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\${{ steps.version.outputs.exe_name }}" -DisableRemediation
+
+      - name: VirusTotal scan
+        if: vars.VIRUSTOTAL_API_KEY != ''
+        id: virustotal
+        shell: bash
+        run: |
+          EXE="build/${{ steps.version.outputs.exe_name }}"
+          FILE_SIZE=$(stat -c%s "${EXE}" 2>/dev/null || stat -f%z "${EXE}" 2>/dev/null || echo "0")
+          VT_KEY="${{ vars.VIRUSTOTAL_API_KEY }}"
+
+          # Get upload URL for large files (>32MB)
+          if [ "${FILE_SIZE}" -gt 33554432 ]; then
+            echo "Requesting large file upload URL..."
+            UPLOAD_URL=$(curl -s --request GET \
+              --url "https://www.virustotal.com/api/v3/files/upload_url" \
+              --header "x-apikey: ${VT_KEY}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data)}catch{console.log('')}})")
+          else
+            UPLOAD_URL="https://www.virustotal.com/api/v3/files"
+          fi
+
+          echo "Uploading to VirusTotal..."
+          VT_RESPONSE=$(curl -s --request POST \
+            --url "${UPLOAD_URL}" \
+            --header "x-apikey: ${VT_KEY}" \
+            --form "file=@${EXE}")
+
+          VT_ID=$(echo "${VT_RESPONSE}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data.id)}catch{console.log('')}})")
+
+          if [ -z "${VT_ID}" ]; then
+            echo "Upload failed"
+            echo "vt_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Waiting for scan (analysis: ${VT_ID})..."
+          for i in $(seq 1 30); do
+            sleep 10
+            STATUS=$(curl -s \
+              --url "https://www.virustotal.com/api/v3/analyses/${VT_ID}" \
+              --header "x-apikey: ${VT_KEY}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{var r=JSON.parse(d);console.log(r.data.attributes.status)}catch{console.log('pending')}})")
+            echo "  Poll ${i}: ${STATUS}"
+            if [ "${STATUS}" = "completed" ]; then break; fi
+          done
+
+          SHA256=$(cat "build/${{ steps.version.outputs.exe_name }}.sha256" | awk '{print $1}')
+          VT_URL="https://www.virustotal.com/gui/file/${SHA256}"
+          echo "Report: ${VT_URL}"
+          echo "vt_url=${VT_URL}" >> "$GITHUB_OUTPUT"
+
+      # ---- SignPath signing (requires approval) ----
+      # Uncomment after SignPath OSS approval:
+      #
+      # - name: Sign with SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: '<your-org-id>'
+      #     project-slug: 'hermitstash-sync'
+      #     signing-policy-slug: 'release-signing'
+      #     artifact-configuration-slug: 'exe'
+      #     github-artifact-id: '${{ steps.version.outputs.exe_name }}'
+      #     wait-for-completion: true
+
+      # ---- GPG signing ----
+
+      - name: Import GPG key
+        if: secrets.GPG_PRIVATE_KEY != ''
+        shell: bash
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep -E "^sec" | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
+
+      - name: GPG sign artifacts
+        if: env.GPG_KEY_ID != ''
+        shell: bash
+        run: |
+          EXE="build/${{ steps.version.outputs.exe_name }}"
+          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}"
+          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
+          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
+
+      # ---- Create release ----
+
+      - name: Build release notes
+        id: notes
+        shell: bash
+        run: |
+          EXE="${{ steps.version.outputs.exe_name }}"
+          SHA256=$(cat "build/${EXE}.sha256" | awk '{print $1}')
+          SHA3=$(cat "build/${EXE}.sha3-512" | awk '{print $1}')
+          VT_URL="${{ steps.virustotal.outputs.vt_url }}"
+
+          cat > release-notes.md << 'NOTES_EOF'
+          ## HermitStash Sync ${{ steps.version.outputs.tag }}
+
+          ### Downloads
+
+          | File | Description |
+          |------|-------------|
+          NOTES_EOF
+
+          echo "| \`${EXE}\` | Windows x64 binary (Node.js SEA) |" >> release-notes.md
+          echo "| \`${EXE}.sha256\` | SHA-256 checksum |" >> release-notes.md
+          echo "| \`${EXE}.sha3-512\` | SHA3-512 checksum |" >> release-notes.md
+
+          if [ -f "build/${EXE}.asc" ]; then
+            echo "| \`${EXE}.asc\` | GPG signature (binary) |" >> release-notes.md
+            echo "| \`${EXE}.sha256.asc\` | GPG signature (SHA-256) |" >> release-notes.md
+            echo "| \`${EXE}.sha3-512.asc\` | GPG signature (SHA3-512) |" >> release-notes.md
+          fi
+
+          cat >> release-notes.md << VERIFY_EOF
+
+          ### Verify integrity
+
+          \`\`\`bash
+          # SHA-256
+          echo "${SHA256}  ${EXE}" | sha256sum -c
+
+          # SHA3-512
+          echo "${SHA3}  ${EXE}" | sha3sum -c
+          \`\`\`
+          VERIFY_EOF
+
+          if [ -n "${GPG_KEY_ID:-}" ]; then
+            cat >> release-notes.md << GPG_EOF
+
+          ### Verify signature
+
+          \`\`\`bash
+          gpg --keyserver keyserver.ubuntu.com --recv-keys ${GPG_KEY_ID}
+          gpg --verify ${EXE}.asc ${EXE}
+          \`\`\`
+          GPG_EOF
+          fi
+
+          cat >> release-notes.md << SCAN_EOF
+
+          ### Security scan results
+
+          | Scanner | Result |
+          |---------|--------|
+          | Windows Defender | clean (updated definitions) |
+          SCAN_EOF
+
+          if [ -n "${VT_URL}" ]; then
+            echo "| VirusTotal (70+ engines) | [View full report](${VT_URL}) |" >> release-notes.md
+          fi
+
+          cat >> release-notes.md << INFO_EOF
+
+          ### Requirements
+
+          - HermitStash server v1.5.0+ with sync features enabled
+          - No Node.js installation needed (self-contained binary)
+
+          ### Build info
+
+          - Node.js: $(node --version)
+          - OpenSSL: $(node -e "console.log(process.versions.openssl)")
+          - Platform: ${{ matrix.platform }} ${{ matrix.arch }}
+          - Built by: GitHub Actions ([view workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}))
+          INFO_EOF
+
+      - name: Collect artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          EXE="${{ steps.version.outputs.exe_name }}"
+          FILES="build/${EXE} build/${EXE}.sha256 build/${EXE}.sha3-512"
+          if [ -f "build/${EXE}.asc" ]; then
+            FILES="${FILES} build/${EXE}.asc build/${EXE}.sha256.asc build/${EXE}.sha3-512.asc"
+          fi
+          echo "files=${FILES}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: |
+            build/${{ steps.version.outputs.exe_name }}
+            build/${{ steps.version.outputs.exe_name }}.sha256
+            build/${{ steps.version.outputs.exe_name }}.sha3-512
+            build/${{ steps.version.outputs.exe_name }}.asc
+            build/${{ steps.version.outputs.exe_name }}.sha256.asc
+            build/${{ steps.version.outputs.exe_name }}.sha3-512.asc
+          fail_on_unmatched_files: false
