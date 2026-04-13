@@ -67,54 +67,9 @@ jobs:
           echo Running full scan...
           "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\${{ steps.version.outputs.exe_name }}" -DisableRemediation
 
-      - name: VirusTotal scan
-        id: virustotal
-        env:
-          VT_KEY: ${{ vars.VIRUSTOTAL_API_KEY }}
-        if: env.VT_KEY != ''
-        shell: bash
-        run: |
-          EXE="build/${{ steps.version.outputs.exe_name }}"
-          FILE_SIZE=$(stat -c%s "${EXE}" 2>/dev/null || stat -f%z "${EXE}" 2>/dev/null || echo "0")
-
-          # Get upload URL for large files (>32MB)
-          if [ "${FILE_SIZE}" -gt 33554432 ]; then
-            echo "Requesting large file upload URL..."
-            UPLOAD_URL=$(curl -s --request GET \
-              --url "https://www.virustotal.com/api/v3/files/upload_url" \
-              --header "x-apikey: ${VT_KEY}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data)}catch{console.log('')}})")
-          else
-            UPLOAD_URL="https://www.virustotal.com/api/v3/files"
-          fi
-
-          echo "Uploading to VirusTotal..."
-          VT_RESPONSE=$(curl -s --request POST \
-            --url "${UPLOAD_URL}" \
-            --header "x-apikey: ${VT_KEY}" \
-            --form "file=@${EXE}")
-
-          VT_ID=$(echo "${VT_RESPONSE}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data.id)}catch{console.log('')}})")
-
-          if [ -z "${VT_ID}" ]; then
-            echo "Upload failed"
-            echo "vt_url=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Waiting for scan (analysis: ${VT_ID})..."
-          for i in $(seq 1 30); do
-            sleep 10
-            STATUS=$(curl -s \
-              --url "https://www.virustotal.com/api/v3/analyses/${VT_ID}" \
-              --header "x-apikey: ${VT_KEY}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{var r=JSON.parse(d);console.log(r.data.attributes.status)}catch{console.log('pending')}})")
-            echo "  Poll ${i}: ${STATUS}"
-            if [ "${STATUS}" = "completed" ]; then break; fi
-          done
-
-          SHA256=$(cat "build/${{ steps.version.outputs.exe_name }}.sha256" | awk '{print $1}')
-          VT_URL="https://www.virustotal.com/gui/file/${SHA256}"
-          echo "Report: ${VT_URL}"
-          echo "vt_url=${VT_URL}" >> "$GITHUB_OUTPUT"
+      # VirusTotal scan disabled — run locally via scripts/release.sh if needed
+      # The 91MB SEA binary requires the large file upload endpoint and takes
+      # several minutes to scan, which is better suited to the local release script.
 
       # ---- SignPath signing (requires approval) ----
       # Uncomment after SignPath OSS approval:
@@ -135,6 +90,7 @@ jobs:
       - name: Import GPG key
         env:
           GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASS: ${{ secrets.GPG_PASSPHRASE }}
         if: env.GPG_KEY != ''
         shell: bash
         run: |
@@ -144,12 +100,14 @@ jobs:
 
       - name: GPG sign artifacts
         if: env.GPG_KEY_ID != ''
+        env:
+          GPG_PASS: ${{ secrets.GPG_PASSPHRASE }}
         shell: bash
         run: |
           EXE="build/${{ steps.version.outputs.exe_name }}"
-          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}"
-          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
-          gpg --batch --yes --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}"
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
 
       # ---- Create release ----
 
@@ -160,14 +118,14 @@ jobs:
           EXE="${{ steps.version.outputs.exe_name }}"
           SHA256=$(cat "build/${EXE}.sha256" | awk '{print $1}')
           SHA3=$(cat "build/${EXE}.sha3-512" | awk '{print $1}')
-          VT_URL="${{ steps.virustotal.outputs.vt_url }}"
+          VT_URL=""
           TAG="${{ steps.version.outputs.tag }}"
           node -e "
           var fs = require('fs');
           var exe = process.env.EXE;
           var sha256 = process.env.SHA256;
           var sha3 = process.env.SHA3;
-          var vtUrl = process.env.VT_URL;
+          var vtUrl = '';
           var tag = process.env.TAG;
           var gpgKey = process.env.GPG_KEY_ID || '';
           var platform = '${{ matrix.platform }}';
