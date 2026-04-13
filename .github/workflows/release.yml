@@ -68,13 +68,14 @@ jobs:
           "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\${{ steps.version.outputs.exe_name }}" -DisableRemediation
 
       - name: VirusTotal scan
-        if: vars.VIRUSTOTAL_API_KEY != ''
         id: virustotal
+        env:
+          VT_KEY: ${{ vars.VIRUSTOTAL_API_KEY }}
+        if: env.VT_KEY != ''
         shell: bash
         run: |
           EXE="build/${{ steps.version.outputs.exe_name }}"
           FILE_SIZE=$(stat -c%s "${EXE}" 2>/dev/null || stat -f%z "${EXE}" 2>/dev/null || echo "0")
-          VT_KEY="${{ vars.VIRUSTOTAL_API_KEY }}"
 
           # Get upload URL for large files (>32MB)
           if [ "${FILE_SIZE}" -gt 33554432 ]; then
@@ -132,10 +133,12 @@ jobs:
       # ---- GPG signing ----
 
       - name: Import GPG key
-        if: secrets.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        if: env.GPG_KEY != ''
         shell: bash
         run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "${GPG_KEY}" | gpg --batch --import
           GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep -E "^sec" | head -1 | awk '{print $2}' | cut -d'/' -f2)
           echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
 
@@ -158,78 +161,76 @@ jobs:
           SHA256=$(cat "build/${EXE}.sha256" | awk '{print $1}')
           SHA3=$(cat "build/${EXE}.sha3-512" | awk '{print $1}')
           VT_URL="${{ steps.virustotal.outputs.vt_url }}"
-
-          cat > release-notes.md << 'NOTES_EOF'
-          ## HermitStash Sync ${{ steps.version.outputs.tag }}
-
-          ### Downloads
-
-          | File | Description |
-          |------|-------------|
-          NOTES_EOF
-
-          echo "| \`${EXE}\` | Windows x64 binary (Node.js SEA) |" >> release-notes.md
-          echo "| \`${EXE}.sha256\` | SHA-256 checksum |" >> release-notes.md
-          echo "| \`${EXE}.sha3-512\` | SHA3-512 checksum |" >> release-notes.md
-
-          if [ -f "build/${EXE}.asc" ]; then
-            echo "| \`${EXE}.asc\` | GPG signature (binary) |" >> release-notes.md
-            echo "| \`${EXE}.sha256.asc\` | GPG signature (SHA-256) |" >> release-notes.md
-            echo "| \`${EXE}.sha3-512.asc\` | GPG signature (SHA3-512) |" >> release-notes.md
-          fi
-
-          cat >> release-notes.md << VERIFY_EOF
-
-          ### Verify integrity
-
-          \`\`\`bash
-          # SHA-256
-          echo "${SHA256}  ${EXE}" | sha256sum -c
-
-          # SHA3-512
-          echo "${SHA3}  ${EXE}" | sha3sum -c
-          \`\`\`
-          VERIFY_EOF
-
-          if [ -n "${GPG_KEY_ID:-}" ]; then
-            cat >> release-notes.md << GPG_EOF
-
-          ### Verify signature
-
-          \`\`\`bash
-          gpg --keyserver keyserver.ubuntu.com --recv-keys ${GPG_KEY_ID}
-          gpg --verify ${EXE}.asc ${EXE}
-          \`\`\`
-          GPG_EOF
-          fi
-
-          cat >> release-notes.md << SCAN_EOF
-
-          ### Security scan results
-
-          | Scanner | Result |
-          |---------|--------|
-          | Windows Defender | clean (updated definitions) |
-          SCAN_EOF
-
-          if [ -n "${VT_URL}" ]; then
-            echo "| VirusTotal (70+ engines) | [View full report](${VT_URL}) |" >> release-notes.md
-          fi
-
-          cat >> release-notes.md << INFO_EOF
-
-          ### Requirements
-
-          - HermitStash server v1.5.0+ with sync features enabled
-          - No Node.js installation needed (self-contained binary)
-
-          ### Build info
-
-          - Node.js: $(node --version)
-          - OpenSSL: $(node -e "console.log(process.versions.openssl)")
-          - Platform: ${{ matrix.platform }} ${{ matrix.arch }}
-          - Built by: GitHub Actions ([view workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}))
-          INFO_EOF
+          TAG="${{ steps.version.outputs.tag }}"
+          node -e "
+          var fs = require('fs');
+          var exe = process.env.EXE;
+          var sha256 = process.env.SHA256;
+          var sha3 = process.env.SHA3;
+          var vtUrl = process.env.VT_URL;
+          var tag = process.env.TAG;
+          var gpgKey = process.env.GPG_KEY_ID || '';
+          var platform = '${{ matrix.platform }}';
+          var arch = '${{ matrix.arch }}';
+          var runId = '${{ github.run_id }}';
+          var repo = '${{ github.repository }}';
+          var hasAsc = fs.existsSync('build/' + exe + '.asc');
+          var lines = [];
+          lines.push('## HermitStash Sync ' + tag);
+          lines.push('');
+          lines.push('### Downloads');
+          lines.push('');
+          lines.push('| File | Description |');
+          lines.push('|------|-------------|');
+          lines.push('| \`' + exe + '\` | Windows x64 binary (Node.js SEA) |');
+          lines.push('| \`' + exe + '.sha256\` | SHA-256 checksum |');
+          lines.push('| \`' + exe + '.sha3-512\` | SHA3-512 checksum |');
+          if (hasAsc) {
+            lines.push('| \`' + exe + '.asc\` | GPG signature (binary) |');
+            lines.push('| \`' + exe + '.sha256.asc\` | GPG signature (SHA-256) |');
+            lines.push('| \`' + exe + '.sha3-512.asc\` | GPG signature (SHA3-512) |');
+          }
+          lines.push('');
+          lines.push('### Verify integrity');
+          lines.push('');
+          lines.push('\`\`\`bash');
+          lines.push('# SHA-256');
+          lines.push('echo \"' + sha256 + '  ' + exe + '\" | sha256sum -c');
+          lines.push('');
+          lines.push('# SHA3-512');
+          lines.push('echo \"' + sha3 + '  ' + exe + '\" | sha3sum -c');
+          lines.push('\`\`\`');
+          if (hasAsc && gpgKey) {
+            lines.push('');
+            lines.push('### Verify signature');
+            lines.push('');
+            lines.push('\`\`\`bash');
+            lines.push('gpg --keyserver keyserver.ubuntu.com --recv-keys ' + gpgKey);
+            lines.push('gpg --verify ' + exe + '.asc ' + exe);
+            lines.push('\`\`\`');
+          }
+          lines.push('');
+          lines.push('### Security scan results');
+          lines.push('');
+          lines.push('| Scanner | Result |');
+          lines.push('|---------|--------|');
+          lines.push('| Windows Defender | clean (updated definitions) |');
+          if (vtUrl) lines.push('| VirusTotal (70+ engines) | [View full report](' + vtUrl + ') |');
+          lines.push('');
+          lines.push('### Requirements');
+          lines.push('');
+          lines.push('- HermitStash server v1.5.0+ with sync features enabled');
+          lines.push('- No Node.js installation needed (self-contained binary)');
+          lines.push('');
+          lines.push('### Build info');
+          lines.push('');
+          lines.push('- Node.js: ' + process.version);
+          lines.push('- OpenSSL: ' + process.versions.openssl);
+          lines.push('- Platform: ' + platform + ' ' + arch);
+          lines.push('- Built by: GitHub Actions ([view workflow run](https://github.com/' + repo + '/actions/runs/' + runId + '))');
+          fs.writeFileSync('release-notes.md', lines.join('\n') + '\n');
+          console.log('Release notes generated (' + lines.length + ' lines)');
+          "
 
       - name: Collect artifacts
         id: artifacts
