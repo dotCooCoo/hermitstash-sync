@@ -262,7 +262,7 @@ NOTES="## HermitStash Sync ${TAG}
 
 | File | Description |
 |------|-------------|
-| \`${EXE_NAME}\` | Windows x64 binary (Node.js SEA) |
+| \`${EXE_NAME}\` | ${PLATFORM} ${ARCH} binary (Node.js SEA) |
 | \`${EXE_NAME}.sha256\` | SHA-256 checksum |
 | \`${EXE_NAME}.sha3-512\` | SHA3-512 checksum |"
 

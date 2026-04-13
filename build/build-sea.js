@@ -38,7 +38,14 @@ const platformTag = (PLATFORM === 'win32' ? 'win' : PLATFORM === 'darwin' ? 'mac
 const EXE_EXT = isWindows ? '.exe' : '';
 const EXE_NAME = 'hermitstash-sync-v' + VERSION + '-' + platformTag + EXE_EXT;
 const EXE_PATH = path.join(BUILD_DIR, EXE_NAME);
-const NODE_PATH = process.execPath;
+// Use --node-binary flag or NODE_BIN env var to override the Node binary
+// (Homebrew-built Node strips the SEA fuse; official binaries from nodejs.org are required)
+const NODE_PATH = (() => {
+  const flagIdx = process.argv.indexOf('--node-binary');
+  if (flagIdx !== -1 && process.argv[flagIdx + 1]) return path.resolve(process.argv[flagIdx + 1]);
+  if (process.env.NODE_BIN) return path.resolve(process.env.NODE_BIN);
+  return process.execPath;
+})();
 
 // Build commands use execSync (shell) because paths contain spaces (Dropbox).
 // All arguments are hardcoded — no user input, no injection risk.
