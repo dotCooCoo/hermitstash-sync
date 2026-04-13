@@ -27,6 +27,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Load local release config (API keys, etc.) — not committed to repo
+RELEASE_ENV="${HOME}/.hermitstash-sync/release.env"
+if [ -f "${RELEASE_ENV}" ]; then
+  set -a; source "${RELEASE_ENV}"; set +a
+fi
+
 # ---- Read version ----
 VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
 TAG="v${VERSION}"
@@ -86,7 +92,9 @@ if [ -x "${DEFENDER}" ]; then
   "${DEFENDER}" -SignatureUpdate 2>&1 | grep -E "Version|finished" || true
 
   echo "  Running full custom scan..."
-  SCAN_OUTPUT=$("${DEFENDER}" -Scan -ScanType 3 -File "${EXE_ABS}" -DisableRemediation 2>&1) || true
+  # Convert to Windows path for Defender
+  WIN_PATH=$(cygpath -w "${EXE_PATH}" 2>/dev/null || echo "${EXE_ABS}")
+  SCAN_OUTPUT=$("${DEFENDER}" -Scan -ScanType 3 -File "${WIN_PATH}" -DisableRemediation 2>&1) || true
   echo "  ${SCAN_OUTPUT}" | tail -2
 
   if echo "${SCAN_OUTPUT}" | grep -qi "found no threats"; then
@@ -113,15 +121,37 @@ VT_URL=""
 VT_API_KEY="${VIRUSTOTAL_API_KEY:-}"
 
 if [ -n "${VT_API_KEY}" ] && [ "${SKIP_VT:-}" != "1" ]; then
-  echo "  Uploading to VirusTotal (this may take a minute)..."
+  FILE_SIZE=$(stat -c%s "${EXE_PATH}" 2>/dev/null || stat -f%z "${EXE_PATH}" 2>/dev/null || echo "0")
 
-  # Upload file
-  VT_RESPONSE=$(curl -s --request POST \
-    --url "https://www.virustotal.com/api/v3/files" \
-    --header "x-apikey: ${VT_API_KEY}" \
-    --form "file=@${EXE_PATH}")
+  if [ "${FILE_SIZE}" -gt 33554432 ]; then
+    # Files >32MB need a special upload URL
+    echo "  Requesting large file upload URL (${FILE_SIZE} bytes)..."
+    UPLOAD_URL=$(curl -s --request GET \
+      --url "https://www.virustotal.com/api/v3/files/upload_url" \
+      --header "x-apikey: ${VT_API_KEY}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data)}catch{console.log('')}})")
 
+    if [ -z "${UPLOAD_URL}" ]; then
+      echo "  Failed to get upload URL. Continuing without VirusTotal."
+      VT_API_KEY=""
+    else
+      echo "  Uploading to VirusTotal (large file — may take several minutes)..."
+      VT_RESPONSE=$(curl -s --request POST \
+        --url "${UPLOAD_URL}" \
+        --header "x-apikey: ${VT_API_KEY}" \
+        --form "file=@${EXE_PATH}")
+    fi
+  else
+    echo "  Uploading to VirusTotal..."
+    VT_RESPONSE=$(curl -s --request POST \
+      --url "https://www.virustotal.com/api/v3/files" \
+      --header "x-apikey: ${VT_API_KEY}" \
+      --form "file=@${EXE_PATH}")
+  fi
+
+  VT_ANALYSIS_ID=""
+  if [ -n "${VT_API_KEY}" ]; then
   VT_ANALYSIS_ID=$(echo "${VT_RESPONSE}" | node -e "var d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).data.id)}catch{console.log('')}})")
+  fi
 
   if [ -n "${VT_ANALYSIS_ID}" ]; then
     echo "  Upload complete. Analysis ID: ${VT_ANALYSIS_ID}"
