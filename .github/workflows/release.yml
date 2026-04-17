@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build all platforms without creating a release'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -116,6 +122,7 @@ jobs:
 
   release:
     needs: build
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
