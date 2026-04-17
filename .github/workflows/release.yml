@@ -9,23 +9,31 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             platform: win
             arch: x64
             ext: .exe
-          # Future: uncomment to build for other platforms
-          # - os: ubuntu-latest
-          #   platform: linux
-          #   arch: x64
-          #   ext: ''
-          # - os: macos-latest
-          #   platform: macos
-          #   arch: arm64
-          #   ext: ''
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            ext: ''
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            ext: ''
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            ext: ''
+          - os: macos-13
+            platform: macos
+            arch: x64
+            ext: ''
 
     runs-on: ${{ matrix.os }}
 
@@ -67,24 +75,6 @@ jobs:
           echo Running full scan...
           "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\${{ steps.version.outputs.exe_name }}" -DisableRemediation
 
-      # VirusTotal scan disabled — run locally via scripts/release.sh if needed
-      # The 91MB SEA binary requires the large file upload endpoint and takes
-      # several minutes to scan, which is better suited to the local release script.
-
-      # ---- SignPath signing (requires approval) ----
-      # Uncomment after SignPath OSS approval:
-      #
-      # - name: Sign with SignPath
-      #   uses: signpath/github-action-submit-signing-request@v1
-      #   with:
-      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #     organization-id: '<your-org-id>'
-      #     project-slug: 'hermitstash-sync'
-      #     signing-policy-slug: 'release-signing'
-      #     artifact-configuration-slug: 'exe'
-      #     github-artifact-id: '${{ steps.version.outputs.exe_name }}'
-      #     wait-for-completion: true
-
       # ---- GPG signing ----
 
       - name: Import GPG key
@@ -109,71 +99,107 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
 
-      # ---- Create release ----
+      # ---- Upload artifacts for release job ----
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            build/${{ steps.version.outputs.exe_name }}
+            build/${{ steps.version.outputs.exe_name }}.sha256
+            build/${{ steps.version.outputs.exe_name }}.sha3-512
+            build/${{ steps.version.outputs.exe_name }}.asc
+            build/${{ steps.version.outputs.exe_name }}.sha256.asc
+            build/${{ steps.version.outputs.exe_name }}.sha3-512.asc
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
 
       - name: Build release notes
-        id: notes
         shell: bash
         run: |
-          EXE="${{ steps.version.outputs.exe_name }}"
-          SHA256=$(cat "build/${EXE}.sha256" | awk '{print $1}')
-          SHA3=$(cat "build/${EXE}.sha3-512" | awk '{print $1}')
-          VT_URL=""
-          TAG="${{ steps.version.outputs.tag }}"
+          VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
+          TAG="v${VERSION}"
+          GPG_KEY_ID="${{ secrets.GPG_PRIVATE_KEY && 'yes' || '' }}"
+          REPO="${{ github.repository }}"
+          RUN_ID="${{ github.run_id }}"
+
           node -e "
           var fs = require('fs');
-          var exe = process.env.EXE;
-          var sha256 = process.env.SHA256;
-          var sha3 = process.env.SHA3;
-          var vtUrl = '';
-          var tag = process.env.TAG;
-          var gpgKey = process.env.GPG_KEY_ID || '';
-          var platform = '${{ matrix.platform }}';
-          var arch = '${{ matrix.arch }}';
-          var runId = '${{ github.run_id }}';
-          var repo = '${{ github.repository }}';
-          var hasAsc = fs.existsSync('build/' + exe + '.asc');
+          var path = require('path');
+          var tag = '${TAG}';
+          var repo = '${REPO}';
+          var runId = '${RUN_ID}';
+          var hasGpg = '${GPG_KEY_ID}' !== '';
+
+          // Find all binaries
+          var artDir = 'artifacts';
+          var files = fs.readdirSync(artDir).filter(function(f) {
+            return f.startsWith('hermitstash-sync-') && !f.includes('.sha') && !f.includes('.asc');
+          }).sort();
+
+          var platforms = {
+            'win-x64': 'Windows x64',
+            'linux-x64': 'Linux x64',
+            'linux-arm64': 'Linux ARM64 (Raspberry Pi, AWS Graviton)',
+            'macos-arm64': 'macOS Apple Silicon (M1/M2/M3/M4)',
+            'macos-x64': 'macOS Intel',
+          };
+
           var lines = [];
           lines.push('## HermitStash Sync ' + tag);
           lines.push('');
           lines.push('### Downloads');
           lines.push('');
-          lines.push('| File | Description |');
-          lines.push('|------|-------------|');
-          lines.push('| \`' + exe + '\` | Windows x64 binary (Node.js SEA) |');
-          lines.push('| \`' + exe + '.sha256\` | SHA-256 checksum |');
-          lines.push('| \`' + exe + '.sha3-512\` | SHA3-512 checksum |');
-          if (hasAsc) {
-            lines.push('| \`' + exe + '.asc\` | GPG signature (binary) |');
-            lines.push('| \`' + exe + '.sha256.asc\` | GPG signature (SHA-256) |');
-            lines.push('| \`' + exe + '.sha3-512.asc\` | GPG signature (SHA3-512) |');
-          }
+          lines.push('| Platform | Binary | Checksum | Signature |');
+          lines.push('|----------|--------|----------|-----------|');
+
+          files.forEach(function(f) {
+            var m = f.match(/-(win|linux|macos)-(x64|arm64)/);
+            var label = m ? (platforms[m[1]+'-'+m[2]] || m[1]+' '+m[2]) : f;
+            var sha = fs.existsSync(path.join(artDir, f+'.sha3-512')) ? '\`sha3-512\`' : '';
+            var sig = fs.existsSync(path.join(artDir, f+'.asc')) ? '\`gpg\`' : '';
+            lines.push('| ' + label + ' | \`' + f + '\` | ' + sha + ' | ' + sig + ' |');
+          });
+
           lines.push('');
           lines.push('### Verify integrity');
           lines.push('');
           lines.push('\`\`\`bash');
-          lines.push('# SHA-256');
-          lines.push('echo \"' + sha256 + '  ' + exe + '\" | sha256sum -c');
-          lines.push('');
-          lines.push('# SHA3-512');
-          lines.push('echo \"' + sha3 + '  ' + exe + '\" | sha3sum -c');
+          lines.push('# Replace BINARY with the downloaded filename');
+          lines.push('sha256sum -c BINARY.sha256');
+          lines.push('sha3sum -c BINARY.sha3-512');
           lines.push('\`\`\`');
-          if (hasAsc && gpgKey) {
+
+          if (hasGpg) {
             lines.push('');
-            lines.push('### Verify signature');
+            lines.push('### Verify GPG signature');
             lines.push('');
             lines.push('\`\`\`bash');
-            lines.push('gpg --keyserver keyserver.ubuntu.com --recv-keys ' + gpgKey);
-            lines.push('gpg --verify ' + exe + '.asc ' + exe);
+            lines.push('gpg --verify BINARY.asc BINARY');
             lines.push('\`\`\`');
           }
-          lines.push('');
-          lines.push('### Security scan results');
-          lines.push('');
-          lines.push('| Scanner | Result |');
-          lines.push('|---------|--------|');
-          lines.push('| Windows Defender | clean (updated definitions) |');
-          if (vtUrl) lines.push('| VirusTotal (70+ engines) | [View full report](' + vtUrl + ') |');
+
           lines.push('');
           lines.push('### Requirements');
           lines.push('');
@@ -184,32 +210,16 @@ jobs:
           lines.push('');
           lines.push('- Node.js: ' + process.version);
           lines.push('- OpenSSL: ' + process.versions.openssl);
-          lines.push('- Platform: ' + platform + ' ' + arch);
+          lines.push('- TLS: SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768 (Level 5 preferred)');
           lines.push('- Built by: GitHub Actions ([view workflow run](https://github.com/' + repo + '/actions/runs/' + runId + '))');
+          lines.push('- Platforms: ' + files.length + ' (' + files.map(function(f) { var m = f.match(/-(win|linux|macos)-(x64|arm64)/); return m ? m[1]+'/'+m[2] : '?'; }).join(', ') + ')');
           fs.writeFileSync('release-notes.md', lines.join('\n') + '\n');
-          console.log('Release notes generated (' + lines.length + ' lines)');
+          console.log('Release notes: ' + lines.length + ' lines, ' + files.length + ' binaries');
           "
-
-      - name: Collect artifacts
-        id: artifacts
-        shell: bash
-        run: |
-          EXE="${{ steps.version.outputs.exe_name }}"
-          FILES="build/${EXE} build/${EXE}.sha256 build/${EXE}.sha3-512"
-          if [ -f "build/${EXE}.asc" ]; then
-            FILES="${FILES} build/${EXE}.asc build/${EXE}.sha256.asc build/${EXE}.sha3-512.asc"
-          fi
-          echo "files=${FILES}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
-          files: |
-            build/${{ steps.version.outputs.exe_name }}
-            build/${{ steps.version.outputs.exe_name }}.sha256
-            build/${{ steps.version.outputs.exe_name }}.sha3-512
-            build/${{ steps.version.outputs.exe_name }}.asc
-            build/${{ steps.version.outputs.exe_name }}.sha256.asc
-            build/${{ steps.version.outputs.exe_name }}.sha3-512.asc
+          files: artifacts/*
           fail_on_unmatched_files: false
