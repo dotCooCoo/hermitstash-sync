@@ -269,7 +269,37 @@ lib/workers/checksum-worker.js  SHA3-512 hashing worker thread
 lib/ws-client.js              Minimal WebSocket client with PQC TLS
 ```
 
-## Building SEA binary
+## Deployment
+
+### Platform: Node.js SEA (Single Executable Application)
+
+The sync client ships as a standalone binary — no Node.js installation required on the target machine.
+
+| | |
+|---|---|
+| **Runtime** | Node.js SEA binary (Node.js + app bundled into a single executable) |
+| **Build** | GitHub Actions on tag push (`v*`) — automated via `.github/workflows/release.yml` |
+| **Artifacts** | `hermitstash-sync-vX.Y.Z-win-x64.exe` + SHA3-512 checksum + GPG signature |
+| **Signing** | GPG (P-384 key) — Authenticode code signing pending |
+| **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) |
+| **Dependencies** | Zero npm runtime packages — all vendored |
+
+### Release workflow
+
+```
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+GitHub Actions automatically:
+1. Builds the SEA binary for Windows x64
+2. Generates SHA3-512 checksum (matches the server's hash algorithm)
+3. Scans with Windows Defender (updated definitions)
+4. GPG signs the binary + checksum (`secrets.GPG_PRIVATE_KEY`)
+5. Creates a GitHub Release with all artifacts and release notes
+
+Download the latest release from the [Releases page](https://github.com/dotCooCoo/hermitstash-sync/releases).
+
+### Building locally
 
 ```bash
 # Requires Node.js 22+ and postject
@@ -278,6 +308,8 @@ cp $(which node) build/hermitstash-sync
 npx postject build/hermitstash-sync NODE_SEA_BLOB build/hermitstash-sync.blob \
   --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 ```
+
+Or use the local release script: `bash scripts/release.sh` (builds + signs + optional VirusTotal scan).
 
 ## Contributing
 
