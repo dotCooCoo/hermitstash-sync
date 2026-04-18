@@ -222,6 +222,7 @@ jobs:
           lines.push('');
           lines.push('### Build info');
           lines.push('');
+          lines.push('- License: AGPL-3.0-or-later');
           lines.push('- Node.js: ' + process.version);
           lines.push('- OpenSSL: ' + process.versions.openssl);
           lines.push('- TLS: SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768 (Level 5 preferred)');
