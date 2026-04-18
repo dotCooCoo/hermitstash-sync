@@ -39,10 +39,12 @@ jobs:
             platform: macos
             arch: arm64
             ext: ''
-          - os: macos-13
-            platform: macos
-            arch: x64
-            ext: ''
+          # macos-13 (Intel) disabled — runner queue times exceed 60 min.
+          # Intel Mac users can run the ARM64 binary via Rosetta 2.
+          # - os: macos-13
+          #   platform: macos
+          #   arch: x64
+          #   ext: ''
 
     runs-on: ${{ matrix.os }}
 
