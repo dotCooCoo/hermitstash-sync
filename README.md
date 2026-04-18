@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE">MIT License</a> · <a href="SECURITY.md">Security Policy</a> · <a href="https://ko-fi.com/dotcoocoo">Support on Ko-fi</a>
+  <a href="LICENSE">AGPL-3.0</a> · <a href="SECURITY.md">Security Policy</a> · <a href="https://ko-fi.com/dotcoocoo">Support on Ko-fi</a>
 </p>
 
 ---
@@ -331,7 +331,7 @@ This may change in the future. If HermitStash Sync grows to a point where I can 
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE)
 
 ---
 
