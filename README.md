@@ -39,11 +39,11 @@ Watches a local folder and keeps it in sync with a HermitStash server:
 - **Server-side changes** are downloaded in real-time via WebSocket
 - **Conflict resolution** is last-write-wins — if both sides change a file, the most recent write takes priority
 
-All connections use PQC TLS (X25519MLKEM768 hybrid key exchange, TLS 1.3 minimum) with optional mTLS client certificates.
+All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group list (`SecP384r1MLKEM1024` → `X25519MLKEM768` → `SecP256r1MLKEM768`, Level 5 preferred) plus optional mTLS client certificates. Client certs auto-renew on startup when within 60 days of expiry — no admin action needed.
 
 ## Requirements
 
-- Node.js 24+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
+- Node.js 22+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
 - HermitStash server v1.3.4+ with sync features enabled
 
 ## Install
@@ -88,6 +88,7 @@ hermitstash-sync stop
 | `log` | Show last 50 log lines |
 | `log --follow`, `-f` | Tail the log file in real-time |
 | `resync` | Force a full re-sync from scratch |
+| `repair` | Re-provision mTLS certificate using an admin-issued enrollment code (run this if your cert is revoked or the daemon can't connect after a certificate reissue) |
 | `version` | Show version and OpenSSL info |
 | `--help`, `-h` | Show usage information |
 
@@ -143,11 +144,12 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 
 ## How sync works
 
-1. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server. Existing local files are verified against server checksums using parallel SHA3-512 hashing across the worker thread pool.
-2. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. All checksum computations are dispatched to the worker pool to keep the main thread responsive.
-3. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
-4. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
-5. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
+1. On startup, if an mTLS client certificate is configured and within 60 days of expiring, the daemon silently calls `POST /sync/renew-cert` to rotate it using the current API key. No admin action needed unless the cert has already been revoked (use `repair` for that).
+2. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server. Existing local files are verified against server checksums using parallel SHA3-512 hashing across the worker thread pool.
+3. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`, `file_renamed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. All checksum computations are dispatched to the worker pool to keep the main thread responsive.
+4. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
+5. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
+6. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
 
 ### Sync states
 
@@ -166,9 +168,9 @@ The `status` command shows which state the daemon is in:
 
 ## Security
 
-- **PQC TLS** on every connection — both `ecdhCurve` and `groups` set for X25519MLKEM768 compatibility
+- **PQC TLS** on every connection — three-tier hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` (NIST Level 5 preferred, Level 3 and Level 1 fallback for broad server compatibility). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds.
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
-- **mTLS** client certificates for server authentication (optional, certs cached in memory)
+- **mTLS** client certificates for server authentication (optional, certs cached in memory). Certificates auto-renew on startup when within 60 days of expiry — no admin intervention required.
 - **Hybrid ECIES key exchange** — session keys delivered via ML-KEM-1024 + ECDH P-384 + HKDF-SHA3-512 + XChaCha20-Poly1305 with protocol version byte for algorithm agility (no plaintext keys in HTTP)
 - **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
 - **Path traversal protection** — all server-provided paths validated against sync folder boundary
@@ -279,7 +281,8 @@ The sync client ships as a standalone binary — no Node.js installation require
 |---|---|
 | **Runtime** | Node.js SEA binary (Node.js + app bundled into a single executable) |
 | **Build** | GitHub Actions on tag push (`v*`) — automated via `.github/workflows/release.yml` |
-| **Artifacts** | `hermitstash-sync-vX.Y.Z-win-x64.exe` + SHA3-512 checksum + GPG signature |
+| **Platforms** | Windows x64, Linux x64, Linux ARM64, macOS ARM64 (Intel Macs: use the ARM64 binary under Rosetta 2) |
+| **Artifacts** | `hermitstash-sync-vX.Y.Z-{win,linux,macos}-{x64,arm64}[.exe]` + SHA3-512 checksum + GPG signature, per platform |
 | **Signing** | GPG (P-384 key) — Authenticode code signing pending |
 | **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) |
 | **Dependencies** | Zero npm runtime packages — all vendored |
@@ -291,11 +294,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 GitHub Actions automatically:
-1. Builds the SEA binary for Windows x64
-2. Generates SHA3-512 checksum (matches the server's hash algorithm)
-3. Scans with Windows Defender (updated definitions)
-4. GPG signs the binary + checksum (`secrets.GPG_PRIVATE_KEY`)
-5. Creates a GitHub Release with all artifacts and release notes
+1. Builds the SEA binary for Windows x64, Linux x64, Linux ARM64, and macOS ARM64
+2. Generates a SHA3-512 checksum per binary (matches the server's hash algorithm)
+3. Scans the Windows binary with Windows Defender (updated definitions)
+4. GPG-signs each binary + checksum (`secrets.GPG_PRIVATE_KEY`)
+5. Creates a GitHub Release attaching every platform's binary, checksum, and signature
 
 Download the latest release from the [Releases page](https://github.com/dotCooCoo/hermitstash-sync/releases).
 
