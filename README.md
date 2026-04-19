@@ -43,7 +43,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group l
 
 ## Requirements
 
-- Node.js 22+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
+- Node.js 24+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
 - HermitStash server v1.3.4+ with sync features enabled
 
 ## Install
@@ -305,7 +305,7 @@ Download the latest release from the [Releases page](https://github.com/dotCooCo
 ### Building locally
 
 ```bash
-# Requires Node.js 22+ and postject
+# Requires Node.js 24+ and postject
 node --experimental-sea-config build/sea-config.json
 cp $(which node) build/hermitstash-sync
 npx postject build/hermitstash-sync NODE_SEA_BLOB build/hermitstash-sync.blob \
