@@ -154,6 +154,23 @@ Disable per-invocation with `start --no-autoupdate`, or globally by setting `"au
 
 The signing key is held only by the release pipeline; the daemon cannot install a binary signed by anything else. If no pubkey is embedded in this build, auto-update is disabled and logged at startup.
 
+### Windows SmartScreen on first launch
+
+Windows binaries are not Authenticode-signed. The first time you run `hermitstash-sync.exe`, Windows Defender SmartScreen may show a "Windows protected your PC" dialog and require you to click **More info → Run anyway**. This is a reputation-based warning for unsigned executables; it goes away as more users download and run the same binary.
+
+If you want to verify authenticity before running:
+
+```bash
+# SHA3-512 checksum
+sha3sum -a 512 -c hermitstash-sync-vX.Y.Z-win-x64.exe.sha3-512
+
+# GPG signature (import the public key once, then verify)
+gpg --import gpg-public-key.asc
+gpg --verify hermitstash-sync-vX.Y.Z-win-x64.exe.asc hermitstash-sync-vX.Y.Z-win-x64.exe
+```
+
+Both files are attached to every release. The GPG key fingerprint and the ECDSA auto-update pubkey are both baked into the binary itself, so once the first release is trusted, subsequent auto-updates verify against those keys without any further ceremony.
+
 ## How sync works
 
 1. On startup, if an mTLS client certificate is configured and within 60 days of expiring, the daemon silently calls `POST /sync/renew-cert` to rotate it using the current API key. No admin action needed unless the cert has already been revoked (use `repair` for that).
@@ -295,7 +312,7 @@ The sync client ships as a standalone binary — no Node.js installation require
 | **Build** | GitHub Actions on tag push (`v*`) — automated via `.github/workflows/release.yml` |
 | **Platforms** | Windows x64, Linux x64, Linux ARM64, macOS ARM64 (Intel Macs: use the ARM64 binary under Rosetta 2) |
 | **Artifacts** | `hermitstash-sync-vX.Y.Z-{win,linux,macos}-{x64,arm64}[.exe]` + SHA3-512 checksum + GPG signature, per platform |
-| **Signing** | GPG (P-384 key) — Authenticode code signing pending |
+| **Signing** | GPG (P-384) for humans + raw P-384 ECDSA over SHA3-512 digest for the auto-update channel. No Authenticode — see Windows note below. |
 | **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) |
 | **Dependencies** | Zero npm runtime packages — all vendored |
 
