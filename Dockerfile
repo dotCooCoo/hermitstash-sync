@@ -17,7 +17,11 @@
 
 ARG VERSION
 ARG NODE_VERSION=24.8.0-slim
-ARG RUNTIME_BASE=debian:trixie-slim
+# Runtime base: Chainguard wolfi-base — glibc-dynamic, apk-based, rebuilt
+# continuously by Chainguard when upstream CVE fixes land. Typical CVE
+# count at any given digest is near zero; chosen over debian-slim to avoid
+# the unfixed systemd/ncurses/util-linux base-image noise flagged by Trivy.
+ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base:latest
 
 # ---------- Stage 1: download + verify the signed binary ----------
 FROM node:${NODE_VERSION} AS verify
@@ -76,16 +80,18 @@ LABEL org.opencontainers.image.title="hermitstash-sync" \
 # newest image digest for the currently-used tag on a schedule — the
 # Podman equivalent of the systemd timer path in deploy/update.sh.
 
-# ca-certificates is required for TLS to the HermitStash server. tini is
-# PID 1 so SIGTERM/SIGINT reach the daemon directly (Node handles its own
-# signals cleanly, but tini guarantees zombie reaping if the daemon ever
-# spawns helpers).
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/* \
+# Packages:
+#   ca-certificates-bundle — TLS roots for outbound HTTPS to the server
+#   tini                   — PID 1 signal forwarding + zombie reaping
+#   bash                   — docker/entrypoint.sh uses `set -euo pipefail`
+#   shadow                 — provides groupadd/useradd on wolfi (busybox
+#                             ships addgroup/adduser with a different flag
+#                             surface; easier to keep the Debian-style
+#                             invocations consistent with install.sh)
+# hadolint ignore=DL3018
+RUN apk add --no-cache ca-certificates-bundle tini bash shadow \
     && groupadd --system --gid 1000 hermit \
-    && useradd  --system --uid 1000 --gid 1000 --home-dir /config --shell /usr/sbin/nologin hermit \
+    && useradd  --system --uid 1000 --gid 1000 --home-dir /config --shell /sbin/nologin hermit \
     && mkdir -p /data /config \
     && chown hermit:hermit /data /config
 
