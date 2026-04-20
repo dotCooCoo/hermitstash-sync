@@ -81,6 +81,7 @@ hermitstash-sync stop
 | Command | Description |
 | --- | --- |
 | `init` | Interactive setup — enrollment code or API key, server URL, sync folder |
+| `init --non-interactive` | Headless enrollment from env vars (`HERMITSTASH_SERVER_URL`, `HERMITSTASH_ENROLLMENT_CODE`, `HERMITSTASH_SYNC_FOLDER`, `HERMITSTASH_AUTO_UPDATE`) — intended for Docker/CI |
 | `start` | Start sync in foreground |
 | `start --daemon` | Start sync as background daemon |
 | `start --no-autoupdate` | Start without polling GitHub Releases for new binaries |
@@ -95,7 +96,7 @@ hermitstash-sync stop
 
 ## Configuration
 
-Config file: `~/.hermitstash-sync/config.json`
+Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR/config.json` — useful for containers, where `/config` is a common mount point).
 
 ```json
 {
