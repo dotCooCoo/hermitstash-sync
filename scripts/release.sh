@@ -30,8 +30,10 @@ cd "$(dirname "$0")/.."
 # Load local release config (API keys, etc.) — not committed to repo
 RELEASE_ENV="${HOME}/.hermitstash-sync/release.env"
 if [ -f "${RELEASE_ENV}" ]; then
+  set -a
   # shellcheck source=/dev/null
-  set -a; source "${RELEASE_ENV}"; set +a
+  source "${RELEASE_ENV}"
+  set +a
 fi
 
 # ---- Read version ----
