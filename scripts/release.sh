@@ -27,13 +27,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Load local release config (API keys, etc.) — not committed to repo
+# Load local release config (API keys, etc.) — not committed to repo.
+# Parsed rather than sourced so ShellCheck can analyze statically and so
+# arbitrary shell inside the file can't execute.
 RELEASE_ENV="${HOME}/.hermitstash-sync/release.env"
 if [ -f "${RELEASE_ENV}" ]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "${RELEASE_ENV}"
-  set +a
+  while IFS='=' read -r _k _v; do
+    case "${_k}" in
+      ''|\#*) continue ;;
+    esac
+    # Strip optional surrounding single or double quotes from the value.
+    case "${_v}" in
+      \"*\") _v="${_v#\"}"; _v="${_v%\"}" ;;
+      \'*\') _v="${_v#\'}"; _v="${_v%\'}" ;;
+    esac
+    export "${_k}=${_v}"
+  done < "${RELEASE_ENV}"
+  unset _k _v
 fi
 
 # ---- Read version ----
