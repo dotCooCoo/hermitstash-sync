@@ -82,6 +82,19 @@ Auto-update is always disabled inside the container (binary self-replace would v
 
 **Testing:** PRs touching `Dockerfile`, `docker/`, or `scripts/verify-release.js` trigger `.github/workflows/docker-e2e.yml`, which builds the image against the latest published release and runs packaging checks (OCI labels, non-root user, volumes, env defaults, entrypoint error paths). Full container-to-server e2e (enrollment, bidirectional sync, restart persistence, graceful shutdown) runs locally via `node tests/run-all.js` when Docker is available on the dev machine.
 
+## Other deployment platforms
+
+In addition to the Docker image, the repo ships reference configs for running the daemon natively or on common orchestration platforms. Each is self-contained and shows the sync-client-specific shape: outbound-only, two volumes (`/config` + `/data`), enrollment via env vars on first run.
+
+| Platform | File | Notes |
+| --- | --- | --- |
+| **Unraid** | `unraid-template.xml` | Community Apps template. Point the template URL at `https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/unraid-template.xml` to install. |
+| **systemd (native Linux)** | `deploy/install.sh` + `deploy/hermitstash-sync.service` | `curl | sudo bash` one-liner: downloads the signed SEA binary, verifies SHA3-512 + P-384 ECDSA, installs under `/usr/local/bin/hermitstash-sync`, creates a `hermit` system user, and lays down a hardened systemd unit. |
+| **Podman** | `deploy/podman.sh` | Rootless by default (RHEL/Fedora/Alma/Rocky idiomatic). Also generates a user or system systemd unit for auto-restart. |
+| **Kubernetes** | `kubernetes.yml` | Namespace + 2 PVCs + Deployment (replicas=1, strategy=Recreate) + Secret for enrollment. No Service — the client is outbound-only. `runAsNonRoot`, `readOnlyRootFilesystem`, dropped capabilities. |
+
+For fleet deployment, use `deploy/install.sh` inside Ansible / SaltStack / your config-management tool of choice — it's idempotent and respects the standard `VERSION`, `INSTALL_DIR`, `CONFIG_DIR`, `SYNC_DIR`, `SERVICE_USER` env overrides.
+
 ## Quick start
 
 ```bash

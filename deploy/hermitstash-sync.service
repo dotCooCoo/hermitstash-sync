@@ -1,0 +1,76 @@
+# hermitstash-sync — systemd service for native Linux installs
+#
+# Install:
+#   sudo cp hermitstash-sync.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hermitstash-sync
+#
+# Prerequisites (handled by deploy/install.sh):
+#   - Binary at /usr/local/bin/hermitstash-sync (verified SEA from GH Release)
+#   - User 'hermit' created: sudo useradd -r -m -d /var/lib/hermitstash-sync -s /usr/sbin/nologin hermit
+#   - Config dir: /var/lib/hermitstash-sync/  (writable by hermit)
+#   - Enrollment already performed: sudo -u hermit HERMITSTASH_SYNC_CONFIG_DIR=/var/lib/hermitstash-sync \
+#       hermitstash-sync init   # interactive, or use init --non-interactive with env vars
+#   - Sync folder: /srv/hermitstash-sync/  (or wherever the config points)
+
+[Unit]
+Description=HermitStash Sync — Post-quantum encrypted file sync client
+Documentation=https://github.com/dotCooCoo/hermitstash-sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermit
+Group=hermit
+WorkingDirectory=/var/lib/hermitstash-sync
+
+# Config dir (holds config.json, state.db, mTLS certs, logs, credentials,
+# update-pending marker). Override with HERMITSTASH_SYNC_CONFIG_DIR to match
+# whatever path you enrolled against.
+Environment=HERMITSTASH_SYNC_CONFIG_DIR=/var/lib/hermitstash-sync
+
+# Security hardening — the daemon is outbound-only, never binds a port,
+# never needs elevated privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# MemoryDenyWriteExecute is intentionally NO — the SEA binary maps its
+# embedded JS bundle as executable at launch.
+
+# Writable paths: config dir + whatever sync folder the config declares.
+# Adjust the second line if your config.syncFolder points elsewhere.
+ReadWritePaths=/var/lib/hermitstash-sync
+ReadWritePaths=/srv/hermitstash-sync
+
+# Capability drop — daemon needs none.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System call filter — standard permissive profile for Node.js workloads.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Process
+ExecStart=/usr/local/bin/hermitstash-sync start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Logging — journal picks up the CLI's plain stdout/stderr. The daemon also
+# writes structured JSON to $HERMITSTASH_SYNC_CONFIG_DIR/hermitstash-sync.log.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermitstash-sync
+
+[Install]
+WantedBy=multi-user.target
