@@ -50,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Verify license is AGPL-3.0
         shell: bash
@@ -60,7 +60,7 @@ jobs:
           echo "License check passed"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '24'
 
@@ -117,16 +117,42 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
 
+      # ---- Auto-update signing (raw P-384 ECDSA over SHA3-512 digest) ----
+      # Separate from GPG — this is the key embedded in lib/constants.js that
+      # the daemon verifies against when self-updating. Zero npm deps on the
+      # verify path (node:crypto only).
+
+      - name: ECDSA sign binary for auto-update
+        env:
+          SIGNING_KEY: ${{ secrets.AUTOUPDATE_SIGNING_KEY }}
+        if: env.SIGNING_KEY != ''
+        shell: bash
+        run: |
+          EXE="build/${{ steps.version.outputs.exe_name }}"
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "${SIGNING_KEY}" > "$KEY_FILE"
+          node -e "
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const key = crypto.createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
+          const digest = crypto.createHash('sha3-512').update(fs.readFileSync(process.argv[2])).digest();
+          const sig = crypto.sign('sha512', digest, { key, dsaEncoding: 'ieee-p1363' });
+          fs.writeFileSync(process.argv[2] + '.sig', sig);
+          console.log('Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, ieee-p1363)');
+          " "$KEY_FILE" "$EXE"
+
       # ---- Upload artifacts for release job ----
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             build/${{ steps.version.outputs.exe_name }}
             build/${{ steps.version.outputs.exe_name }}.sha256
             build/${{ steps.version.outputs.exe_name }}.sha3-512
+            build/${{ steps.version.outputs.exe_name }}.sig
             build/${{ steps.version.outputs.exe_name }}.asc
             build/${{ steps.version.outputs.exe_name }}.sha256.asc
             build/${{ steps.version.outputs.exe_name }}.sha3-512.asc
@@ -138,15 +164,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '24'
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
@@ -238,7 +264,7 @@ jobs:
           "
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           body_path: release-notes.md
           files: artifacts/*

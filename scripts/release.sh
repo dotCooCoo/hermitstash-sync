@@ -229,6 +229,26 @@ if [ -n "${GPG_KEY_ID}" ]; then
 else
   echo "  No GPG key found — skipping signatures."
 fi
+
+# ---- Auto-update ECDSA signing (separate from GPG) ----
+# Signs the SHA3-512 digest with a P-384 key. This is the .sig that the
+# daemon verifies with the pubkey embedded in lib/constants.js.
+AUTOUPDATE_KEY="${AUTOUPDATE_SIGNING_KEY_FILE:-${HOME}/.hermitstash-sync/autoupdate-signing.key}"
+if [ -f "${AUTOUPDATE_KEY}" ]; then
+  echo "  Signing for auto-update with ${AUTOUPDATE_KEY}"
+  node -e "
+  const fs = require('node:fs');
+  const crypto = require('node:crypto');
+  const key = crypto.createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
+  const digest = crypto.createHash('sha3-512').update(fs.readFileSync(process.argv[2])).digest();
+  const sig = crypto.sign('sha512', digest, { key, dsaEncoding: 'ieee-p1363' });
+  fs.writeFileSync(process.argv[2] + '.sig', sig);
+  console.log('  Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes)');
+  " "${AUTOUPDATE_KEY}" "${EXE_PATH}"
+else
+  echo "  No auto-update signing key at ${AUTOUPDATE_KEY} — skipping .sig."
+  echo "  (Generate with: openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out ${AUTOUPDATE_KEY})"
+fi
 echo ""
 
 # ---- Step 6: Git tag ----
@@ -335,6 +355,9 @@ ${CHANGES}
 
 # Collect artifacts
 ARTIFACTS=("build/${EXE_NAME}" "build/${EXE_NAME}.sha256" "build/${EXE_NAME}.sha3-512")
+if [ -f "build/${EXE_NAME}.sig" ]; then
+  ARTIFACTS+=("build/${EXE_NAME}.sig")
+fi
 if [ -f "build/${EXE_NAME}.asc" ]; then
   ARTIFACTS+=("build/${EXE_NAME}.asc" "build/${EXE_NAME}.sha256.asc" "build/${EXE_NAME}.sha3-512.asc")
 fi
