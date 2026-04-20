@@ -83,6 +83,7 @@ hermitstash-sync stop
 | `init` | Interactive setup — enrollment code or API key, server URL, sync folder |
 | `start` | Start sync in foreground |
 | `start --daemon` | Start sync as background daemon |
+| `start --no-autoupdate` | Start without polling GitHub Releases for new binaries |
 | `status` | Show sync status, file count, last sync time, errors |
 | `stop` | Stop the background daemon |
 | `log` | Show last 50 log lines |
@@ -108,7 +109,8 @@ Config file: `~/.hermitstash-sync/config.json`
     "ca": "/path/to/ca.crt"
   },
   "ignore": ["*.log", "build/**"],
-  "logLevel": "info"
+  "logLevel": "info",
+  "autoUpdate": true
 }
 ```
 
@@ -141,6 +143,16 @@ The API key is stored in your OS keychain:
 - **Windows:** Windows Credential Manager
 
 Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless systems.
+
+### Auto-update
+
+Binary (SEA) installs poll GitHub Releases every 6 hours. When a newer version exists, the daemon downloads the binary for its platform, verifies the SHA3-512 checksum, and verifies a raw P-384 ECDSA signature over that digest using a public key embedded in the binary at build time. Only after both checks pass does it rename the current binary to `.prev`, write the new one in place, and spawn itself. If the new binary crashes within 60 seconds of first start, the next launch restores `.prev`.
+
+Source installs (running from `git clone`) do not self-replace — the daemon logs a notice when a new version is out and expects you to `git pull` yourself.
+
+Disable per-invocation with `start --no-autoupdate`, or globally by setting `"autoUpdate": false` in `config.json`.
+
+The signing key is held only by the release pipeline; the daemon cannot install a binary signed by anything else. If no pubkey is embedded in this build, auto-update is disabled and logged at startup.
 
 ## How sync works
 
