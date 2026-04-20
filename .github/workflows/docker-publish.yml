@@ -1,0 +1,135 @@
+name: Docker
+
+on:
+  # Runs after the Release workflow completes successfully on a tag push.
+  # Release workflow publishes the signed SEA binaries first; this one then
+  # pulls those binaries inside the Dockerfile's verify stage.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches-ignore: []
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 0.4.7). Must match an existing GitHub Release."
+        required: true
+        type: string
+      dry_run:
+        description: "Build multi-arch without pushing to registry"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write  # cosign keyless signing via GitHub OIDC
+
+env:
+  IMAGE: ghcr.io/dotcoocoo/hermitstash-sync
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    # workflow_run fires on both success and failure — gate on success.
+    # For workflow_dispatch, github.event.workflow_run is null so the guard
+    # shortcircuits truthy.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # For workflow_run, check out the SHA that triggered the upstream
+          # workflow so VERSION matches the release that was just published.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building image for v${VERSION}"
+
+      - name: Set up QEMU (for ARM64 cross-build)
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=v${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Install cosign
+        if: ${{ !inputs.dry_run }}
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ !inputs.dry_run }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Sign image with cosign (keyless, GitHub OIDC)
+        if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # Sign each tag we pushed. Tags share one digest, so one sign
+          # call per digest is enough — but we verify by digest below.
+          cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Docker publish"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Image | \`${{ env.IMAGE }}\` |"
+            echo "| Version | v${{ steps.version.outputs.version }} |"
+            echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |"
+            echo "| Digest | \`${{ steps.build.outputs.digest || 'n/a' }}\` |"
+            echo "| Pushed | ${{ !inputs.dry_run && '✅' || '⏭️ dry run' }} |"
+            echo "| Signed | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ cosign keyless' || '⏭️' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
