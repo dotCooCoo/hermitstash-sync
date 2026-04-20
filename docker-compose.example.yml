@@ -1,0 +1,29 @@
+# hermitstash-sync — reference compose file
+#
+# Copy to docker-compose.yml and edit:
+#   HERMITSTASH_SERVER_URL        your HermitStash server URL
+#   HERMITSTASH_ENROLLMENT_CODE   code from Admin → Customers → Enroll
+#   ./sync-data                   host path that will receive synced files
+#
+# First `docker compose up -d` enrolls against the server, writes the API
+# key + mTLS certs to the hermitstash-sync-config volume, and begins
+# syncing. Subsequent restarts skip enrollment automatically.
+
+services:
+  hermitstash-sync:
+    image: ghcr.io/dotcoocoo/hermitstash-sync:latest
+    container_name: hermitstash-sync
+    restart: unless-stopped
+    environment:
+      HERMITSTASH_SERVER_URL: https://hermitstash.example.com
+      HERMITSTASH_ENROLLMENT_CODE: HSTASH-XXXX-XXXX-XXXX
+      # Optional: HERMITSTASH_SYNC_FOLDER defaults to /data in the image.
+      # Optional: set a log level (debug|info|warn|error)
+      # HERMITSTASH_LOG_LEVEL: info
+    volumes:
+      - hermitstash-sync-config:/config
+      - ./sync-data:/data
+    # Container talks outbound only. No ports exposed.
+
+volumes:
+  hermitstash-sync-config:
