@@ -236,19 +236,33 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
 
-      - name: Scan image with Trivy (all severities)
+      # Visibility scan — every severity, include unfixed upstream CVEs.
+      # Never blocks: its job is to let us see the full surface area each
+      # release so we notice new CVE classes before a fix exists. The gate
+      # below is what actually fails the build.
+      - name: Trivy — full visibility scan (all severities, incl. unfixed)
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: table
-          # Report-only: don't fail the build on findings while we learn the
-          # baseline. Flip to a non-zero value once the noise floor is known.
           exit-code: '0'
           severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
-          # Surface unfixed issues too — we want full visibility, even for
-          # CVEs without an upstream patch yet.
           ignore-unfixed: false
+
+      # Release gate — blocks on actionable findings only: CRITICAL or HIGH
+      # severity WITH an available fix (ignore-unfixed filters out upstream
+      # CVEs that don't have a patched version yet). Separate run so the
+      # visibility scan above isn't contaminated by this filter.
+      - name: Trivy — release gate (CRITICAL+HIGH, fixable only)
+        if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
 
       - name: Generate SHA3-512 digest of image
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
@@ -281,7 +295,7 @@ jobs:
             echo "| Digest | \`${{ steps.build.outputs.digest || 'n/a' }}\` |"
             echo "| Pushed | ${{ !inputs.dry_run && '✅' || '⏭️ dry run' }} |"
             echo "| Signed | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ cosign keyless' || '⏭️' }} |"
-            echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ full scan (all severities, incl. unfixed)' || '⏭️' }} |"
+            echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ full scan + gated on CRITICAL/HIGH fixable' || '⏭️' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Pull the JUST-PUBLISHED image by digest and run the shared packaging
