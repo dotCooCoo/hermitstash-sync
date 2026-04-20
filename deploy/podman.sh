@@ -99,6 +99,10 @@ RUN_ARGS=(
   --restart=unless-stopped
   --cap-drop=ALL
   --security-opt=no-new-privileges:true
+  # podman-auto-update checks the registry for a newer digest on the
+  # currently-used tag. Enable with: sudo systemctl enable --now
+  # podman-auto-update.timer (or the --user variant for rootless).
+  --label "io.containers.autoupdate=registry"
   -v "${CONFIG_VOL}:/config:Z"
   -v "${DATA_DIR}:/data:Z"
   -e "HERMITSTASH_LOG_LEVEL=${LOG_LEVEL}"
@@ -117,6 +121,14 @@ echo ""
 echo "Container started."
 echo "  podman logs -f ${CONTAINER_NAME}"
 echo "  podman exec ${CONTAINER_NAME} hermitstash-sync status"
+echo ""
+echo "Auto-update: image carries the podman-auto-update label. Enable the"
+echo "system or user timer to have the registry digest checked on a schedule:"
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  sudo systemctl enable --now podman-auto-update.timer"
+else
+  echo "  systemctl --user enable --now podman-auto-update.timer"
+fi
 echo ""
 
 # ---- systemd unit generation ----

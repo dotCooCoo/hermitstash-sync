@@ -70,7 +70,11 @@ LABEL org.opencontainers.image.title="hermitstash-sync" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="https://github.com/dotCooCoo/hermitstash-sync" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.vendor="dotCooCoo"
+      org.opencontainers.image.vendor="dotCooCoo" \
+      io.containers.autoupdate="registry"
+# io.containers.autoupdate=registry lets `podman auto-update` pull the
+# newest image digest for the currently-used tag on a schedule — the
+# Podman equivalent of the systemd timer path in deploy/update.sh.
 
 # ca-certificates is required for TLS to the HermitStash server. tini is
 # PID 1 so SIGTERM/SIGINT reach the daemon directly (Node handles its own
