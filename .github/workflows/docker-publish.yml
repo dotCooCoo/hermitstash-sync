@@ -236,15 +236,19 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
 
-      - name: Scan image with Trivy (HIGH + CRITICAL)
+      - name: Scan image with Trivy (all severities)
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: table
+          # Report-only: don't fail the build on findings while we learn the
+          # baseline. Flip to a non-zero value once the noise floor is known.
           exit-code: '0'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          # Surface unfixed issues too — we want full visibility, even for
+          # CVEs without an upstream patch yet.
+          ignore-unfixed: false
 
       - name: Generate SHA3-512 digest of image
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
@@ -277,7 +281,7 @@ jobs:
             echo "| Digest | \`${{ steps.build.outputs.digest || 'n/a' }}\` |"
             echo "| Pushed | ${{ !inputs.dry_run && '✅' || '⏭️ dry run' }} |"
             echo "| Signed | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ cosign keyless' || '⏭️' }} |"
-            echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ HIGH+CRITICAL scanned' || '⏭️' }} |"
+            echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ full scan (all severities, incl. unfixed)' || '⏭️' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Pull the JUST-PUBLISHED image by digest and run the shared packaging
