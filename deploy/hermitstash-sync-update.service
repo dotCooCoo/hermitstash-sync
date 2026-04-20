@@ -1,0 +1,46 @@
+# hermitstash-sync — auto-update oneshot service
+#
+# Activated by hermitstash-sync-update.timer. Runs deploy/update.sh with the
+# defaults baked into the script. Override via /etc/default/hermitstash-sync-update
+# (KEY=VALUE lines; see update.sh header for the full list).
+#
+# Runs as root so it can atomically swap /usr/local/bin/hermitstash-sync and
+# systemctl restart the daemon. The updater writes its lock under /var/lock
+# and its logs go to the journal.
+#
+# Manual invocation:
+#   sudo systemctl start hermitstash-sync-update
+#   sudo DRY_RUN=1 /usr/local/lib/hermitstash-sync/update.sh
+
+[Unit]
+Description=hermitstash-sync — check for and apply updates
+Documentation=https://github.com/dotCooCoo/hermitstash-sync
+After=network-online.target hermitstash-sync.service
+Wants=network-online.target
+# Don't race with a fresh install whose first enrollment hasn't finished.
+ConditionPathExists=/usr/local/bin/hermitstash-sync
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/hermitstash-sync-update
+ExecStart=/usr/local/lib/hermitstash-sync/update.sh
+
+# The updater shells out to curl, node (for verify-release.js), systemctl,
+# flock, and sudo -u hermit for the health check. No network namespace
+# isolation — we explicitly need to reach github.com and raw.githubusercontent.com.
+#
+# MemoryDenyWriteExecute is not set because node's V8 allocates W+X pages
+# for its JIT when running verify-release.js.
+
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/usr/local/bin /usr/local/lib/hermitstash-sync /var/lock
+NoNewPrivileges=yes
+
+# Don't auto-restart the updater itself on failure — the timer picks up
+# the next tick and re-evaluates.
+Restart=no
+
+[Install]
+# No WantedBy — the timer pulls this in. Enabling the service directly
+# would make it run at every boot.

@@ -30,6 +30,17 @@ WorkingDirectory=/var/lib/hermitstash-sync
 # whatever path you enrolled against.
 Environment=HERMITSTASH_SYNC_CONFIG_DIR=/var/lib/hermitstash-sync
 
+# Disable the daemon's in-binary self-replace. Under this unit the daemon
+# runs as 'hermit' and the binary sits at /usr/local/bin (root-owned, and
+# blocked from writes by ProtectSystem=strict). Updates come from the
+# external hermitstash-sync-update.service timer instead — which runs as
+# root and can atomically swap the binary + systemctl restart us.
+Environment=HERMITSTASH_AUTO_UPDATE=false
+
+# Operators can layer extra env via /etc/default/hermitstash-sync
+# (e.g. HERMITSTASH_LOG_LEVEL=debug).
+EnvironmentFile=-/etc/default/hermitstash-sync
+
 # Security hardening — the daemon is outbound-only, never binds a port,
 # never needs elevated privileges.
 NoNewPrivileges=yes

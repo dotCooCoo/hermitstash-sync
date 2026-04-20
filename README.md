@@ -89,11 +89,23 @@ In addition to the Docker image, the repo ships reference configs for running th
 | Platform | File | Notes |
 | --- | --- | --- |
 | **Unraid** | `unraid-template.xml` | Community Apps template. Point the template URL at `https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/unraid-template.xml` to install. |
-| **systemd (native Linux)** | `deploy/install.sh` + `deploy/hermitstash-sync.service` | `curl | sudo bash` one-liner: downloads the signed SEA binary, verifies SHA3-512 + P-384 ECDSA, installs under `/usr/local/bin/hermitstash-sync`, creates a `hermit` system user, and lays down a hardened systemd unit. |
-| **Podman** | `deploy/podman.sh` | Rootless by default (RHEL/Fedora/Alma/Rocky idiomatic). Also generates a user or system systemd unit for auto-restart. |
-| **Kubernetes** | `kubernetes.yml` | Namespace + 2 PVCs + Deployment (replicas=1, strategy=Recreate) + Secret for enrollment. No Service — the client is outbound-only. `runAsNonRoot`, `readOnlyRootFilesystem`, dropped capabilities. |
+| **systemd (native Linux)** | `deploy/install.sh` + `deploy/hermitstash-sync.service` | `curl | sudo bash` one-liner: downloads the signed SEA binary, verifies SHA3-512 + P-384 ECDSA, installs under `/usr/local/bin/hermitstash-sync`, creates a `hermit` system user, and lays down a hardened systemd unit. Pair with `deploy/update.sh` + timer for unattended updates. Uninstall via `deploy/uninstall.sh`. |
+| **Podman** | `deploy/podman.sh` | Rootless by default (RHEL/Fedora/Alma/Rocky idiomatic). Also generates a user or system systemd unit for auto-restart. Image carries the `io.containers.autoupdate=registry` label so `podman-auto-update.timer` can refresh it. |
+| **Kubernetes** | `deploy/kubernetes.yml` | Namespace + 2 PVCs + Deployment (replicas=1, strategy=Recreate) + Secret for enrollment. No Service — the client is outbound-only. `runAsNonRoot`, `readOnlyRootFilesystem`, dropped capabilities. |
 
 For fleet deployment, use `deploy/install.sh` inside Ansible / SaltStack / your config-management tool of choice — it's idempotent and respects the standard `VERSION`, `INSTALL_DIR`, `CONFIG_DIR`, `SYNC_DIR`, `SERVICE_USER` env overrides.
+
+### Update mechanisms
+
+Each deployment shape has its own update path. The in-binary self-replace only runs when the daemon has write access to its own executable — otherwise an external updater handles it.
+
+| Deployment | Update path | Enabled by default |
+| --- | --- | --- |
+| **Bare binary** (no systemd) | In-daemon: polls GitHub every 6h, verifies SHA3-512 + ECDSA, renames current → `.prev`, spawns new, 60s probation + auto-rollback on crash. | Yes — config `"autoUpdate": true` |
+| **systemd** (via `install.sh`) | External: `hermitstash-sync-update.timer` fires daily + 4h random delay; `update.sh` downloads + verifies + atomic swap + `systemctl restart`, rolls back if the daemon doesn't report RUNNING within 60s. In-daemon path is disabled (can't cross the root/hermit permission boundary under `ProtectSystem=strict`). | Opt-in — install with `HERMITSTASH_AUTO_UPDATE=yes` to enable the timer |
+| **Docker** | Pull a new image tag manually (`docker pull ... && docker restart ...`). In-daemon self-replace is hard-disabled — mutating `/usr/local/bin` inside a running image violates the immutable-image model. | No |
+| **Podman** | `podman auto-update` reads the image's `io.containers.autoupdate=registry` label and pulls the newest digest for the current tag. Enable `podman-auto-update.timer` (system or `--user`) to run on a schedule. | Opt-in via timer |
+| **Kubernetes** | Bump the image tag in your manifest and `kubectl apply`. `imagePullPolicy: IfNotPresent` means you need to delete the pod or roll the Deployment to pick up a floating tag. Consider a pinned digest + a GitOps flow for production. | No |
 
 ## Quick start
 
