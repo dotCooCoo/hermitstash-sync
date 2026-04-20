@@ -54,6 +54,7 @@ jobs:
       - name: Run ESLint
         id: eslint
         run: |
+          set +e
           cat > eslint.ci.config.js << 'ESLINT_CONFIG'
           var security = require("eslint-plugin-security");
           module.exports = [
@@ -97,19 +98,52 @@ jobs:
             },
           ];
           ESLINT_CONFIG
-          npx eslint --config eslint.ci.config.js .
+          ESLINT_OUTPUT=$(npx eslint --config eslint.ci.config.js . 2>&1)
+          ESLINT_CODE=$?
+          set -e
+          printf '%s\n' "${ESLINT_OUTPUT}"
+          echo "exit_code=${ESLINT_CODE}" >> "$GITHUB_OUTPUT"
+          exit ${ESLINT_CODE}
 
       - name: Run Hadolint
+        if: always()
+        id: hadolint
         uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: Dockerfile
           failure-threshold: error
 
       - name: Run ShellCheck
+        if: always()
+        id: shellcheck
         run: |
+          set +e
           SCRIPTS=$(find . -name '*.sh' -not -path './node_modules/*' -not -path './tests/*' -not -path './build/*' | sort)
           echo "Checking: $SCRIPTS"
           echo "$SCRIPTS" | xargs shellcheck --severity=warning --format=gcc
+          CODE=$?
+          set -e
+          echo "exit_code=${CODE}" >> "$GITHUB_OUTPUT"
+          exit ${CODE}
+
+      - name: Lint summary
+        if: always()
+        run: |
+          pass='✅'; fail='❌'
+          eslint_icon=$( [ "${{ steps.eslint.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
+          hadolint_icon=$( [ "${{ steps.hadolint.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
+          shellcheck_icon=$( [ "${{ steps.shellcheck.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
+          {
+            echo "### Lint Results"
+            echo ""
+            echo "Gating docker-publish on the same rules as ci.yml."
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| ESLint (JS + security) | ${eslint_icon} |"
+            echo "| Hadolint (Dockerfile)  | ${hadolint_icon} |"
+            echo "| ShellCheck (shell)     | ${shellcheck_icon} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
     needs: lint
