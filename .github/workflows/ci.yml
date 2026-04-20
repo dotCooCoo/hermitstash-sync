@@ -1,0 +1,317 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Install ESLint
+        run: npm install --no-save eslint@^10 eslint-plugin-security@^4
+
+      # ── ESLint ─────────────────────────────────────────────────
+      - name: Run ESLint
+        id: eslint
+        run: |
+          cat > eslint.ci.config.js << 'ESLINT_CONFIG'
+          var security = require("eslint-plugin-security");
+          module.exports = [
+            {
+              ignores: [
+                "tests/", "node_modules/**", "vendor/**", "build/**",
+                "eslint.ci.config.js",
+              ],
+            },
+            {
+              files: ["**/*.js"],
+              plugins: { security: security },
+              linterOptions: { reportUnusedDisableDirectives: "off" },
+              languageOptions: {
+                ecmaVersion: 2022,
+                sourceType: "commonjs",
+                globals: {
+                  require: "readonly", module: "readonly", exports: "readonly",
+                  __dirname: "readonly", __filename: "readonly",
+                  process: "readonly", console: "readonly", Buffer: "readonly",
+                  setTimeout: "readonly", setInterval: "readonly", setImmediate: "readonly",
+                  clearTimeout: "readonly", clearInterval: "readonly",
+                  URL: "readonly", URLSearchParams: "readonly",
+                  global: "readonly", crypto: "readonly",
+                  TextEncoder: "readonly", TextDecoder: "readonly",
+                  Atomics: "readonly", SharedArrayBuffer: "readonly", Int32Array: "readonly",
+                },
+              },
+              rules: {
+                // Built-in
+                "no-unused-vars": ["warn", { argsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }],
+                "no-console": "off",
+                "no-eval": "error",
+                "no-implied-eval": "error",
+                "no-new-func": "error",
+                "no-self-compare": "error",
+                "no-constructor-return": "error",
+                "no-new-wrappers": "error",
+                "no-throw-literal": "error",
+                // Security plugin
+                "security/detect-eval-with-expression": "error",
+                "security/detect-child-process": "warn",
+                "security/detect-unsafe-regex": "error",
+                "security/detect-buffer-noassert": "error",
+                "security/detect-new-buffer": "error",
+                "security/detect-possible-timing-attacks": "warn",
+                "security/detect-pseudoRandomBytes": "warn",
+                "security/detect-object-injection": "off",
+                "security/detect-non-literal-fs-filename": "off",
+                "security/detect-non-literal-require": "off",
+                "security/detect-non-literal-regexp": "off",
+              },
+            },
+          ];
+          ESLINT_CONFIG
+
+          set +e
+          OUTPUT=$(npx eslint --config eslint.ci.config.js . 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "output<<ESLINT_EOF"
+            echo "$OUTPUT"
+            echo "ESLINT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::ESLint found issues"
+          fi
+          exit $EXIT_CODE
+
+      # ── Hadolint (Dockerfile) ──────────────────────────────────
+      # Guarded: only runs when a Dockerfile is present. Will activate
+      # automatically once a Dockerfile is added for containerized builds.
+      - name: Check for Dockerfile
+        if: always()
+        id: dockerfile_check
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile found — skipping Hadolint"
+          fi
+
+      - name: Run Hadolint
+        if: always() && steps.dockerfile_check.outputs.present == 'true'
+        id: hadolint
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Capture Hadolint result
+        if: always()
+        id: hadolint_result
+        env:
+          DOCKERFILE_PRESENT: ${{ steps.dockerfile_check.outputs.present }}
+          HADOLINT_RESULTS: ${{ steps.hadolint.outputs.results }}
+        run: |
+          if [ "$DOCKERFILE_PRESENT" != "true" ]; then
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            echo "output=" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HADOLINT_RESULTS" ]; then
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "output=" >> "$GITHUB_OUTPUT"
+          else
+            echo "exit_code=1" >> "$GITHUB_OUTPUT"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            {
+              echo "output<<HADOLINT_EOF"
+              printf '%s\n' "$HADOLINT_RESULTS"
+              echo "HADOLINT_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── ShellCheck ─────────────────────────────────────────────
+      - name: Run ShellCheck
+        if: always()
+        id: shellcheck
+        run: |
+          SCRIPTS=$(find . -name '*.sh' -not -path './node_modules/*' -not -path './tests/*' -not -path './build/*' | sort)
+          if [ -z "$SCRIPTS" ]; then
+            echo "No shell scripts found — skipping"
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            echo "output=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Checking: $SCRIPTS"
+
+          set +e
+          OUTPUT=$(echo "$SCRIPTS" | xargs shellcheck --severity=warning --format=gcc 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "output<<SHELLCHECK_EOF"
+            echo "$OUTPUT"
+            echo "SHELLCHECK_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::ShellCheck found issues"
+          fi
+          exit $EXIT_CODE
+
+      # ── Summary + PR comment ───────────────────────────────────
+      - name: Build summary
+        if: always()
+        id: summary
+        env:
+          ESLINT_OUTPUT: ${{ steps.eslint.outputs.output }}
+          HADOLINT_OUTPUT: ${{ steps.hadolint_result.outputs.output }}
+          HADOLINT_STATUS: ${{ steps.hadolint_result.outputs.status }}
+          SHELLCHECK_OUTPUT: ${{ steps.shellcheck.outputs.output }}
+        run: |
+          ESLINT_OK=${{ steps.eslint.outcome == 'success' }}
+          SHELLCHECK_OK=${{ steps.shellcheck.outcome == 'success' }}
+
+          PASS="✅"
+          FAIL="❌"
+          SKIP="⏭️"
+
+          ESLINT_ICON=$( [ "$ESLINT_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+          SHELLCHECK_ICON=$( [ "$SHELLCHECK_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+
+          if [ "$HADOLINT_STATUS" = "skipped" ]; then
+            HADOLINT_ICON="$SKIP"
+            HADOLINT_OK=true
+          elif [ "$HADOLINT_STATUS" = "pass" ]; then
+            HADOLINT_ICON="$PASS"
+            HADOLINT_OK=true
+          else
+            HADOLINT_ICON="$FAIL"
+            HADOLINT_OK=false
+          fi
+
+          ALL_OK=true
+          [ "$ESLINT_OK" = "true" ] && [ "$HADOLINT_OK" = "true" ] && [ "$SHELLCHECK_OK" = "true" ] || ALL_OK=false
+
+          {
+            echo "body<<SUMMARY_EOF"
+            if [ "$ALL_OK" = "true" ]; then
+              echo "🎉   Linting finished with no errors or warnings   🎉"
+              echo ""
+            fi
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| ESLint (JS + security) | $ESLINT_ICON |"
+            echo "| Hadolint (Dockerfile) | $HADOLINT_ICON |"
+            echo "| ShellCheck (shell scripts) | $SHELLCHECK_ICON |"
+
+            if [ "$ESLINT_OK" != "true" ] && [ -n "$ESLINT_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>ESLint output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$ESLINT_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$HADOLINT_STATUS" = "fail" ] && [ -n "$HADOLINT_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>Hadolint output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$HADOLINT_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$SHELLCHECK_OK" != "true" ] && [ -n "$SHELLCHECK_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>ShellCheck output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$SHELLCHECK_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "all_ok=$ALL_OK" >> "$GITHUB_OUTPUT"
+
+          # Step summary
+          echo "### Lint Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ESLint | $ESLINT_ICON |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Hadolint | $HADOLINT_ICON |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ShellCheck | $SHELLCHECK_ICON |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        with:
+          script: |
+            const body = process.env.PR_BODY;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Linting')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+        env:
+          PR_BODY: ${{ steps.summary.outputs.body }}
+
+      - name: Fail if any linter failed
+        if: always()
+        run: |
+          if [ "${{ steps.summary.outputs.all_ok }}" != "true" ]; then
+            echo "One or more linters failed"
+            exit 1
+          fi
