@@ -55,7 +55,30 @@ cd hermitstash-sync
 
 # Or use pre-built binary (no Node.js required)
 # Download from Releases for your platform
+
+# Or run in Docker (see below)
+docker pull ghcr.io/dotcoocoo/hermitstash-sync:latest
 ```
+
+## Docker
+
+The image pulls the signed SEA binary from the matching GitHub Release during build, verifies its SHA3-512 checksum and P-384 ECDSA signature before installing, and runs non-root with a minimal Debian-slim base. Two volumes: `/config` holds persistent state (API key, mTLS certs, state DB, logs), `/data` is the sync folder.
+
+```bash
+# First run — enrolls and starts syncing
+docker run -d \
+  --name hermitstash-sync \
+  -e HERMITSTASH_SERVER_URL=https://hermitstash.example.com \
+  -e HERMITSTASH_ENROLLMENT_CODE=HSTASH-XXXX-XXXX-XXXX \
+  -v hermitstash-sync-config:/config \
+  -v /path/on/host:/data \
+  --restart unless-stopped \
+  ghcr.io/dotcoocoo/hermitstash-sync:latest
+```
+
+Subsequent restarts skip enrollment — the API key and mTLS certs persist on the `hermitstash-sync-config` volume. A Compose file is available at `docker-compose.example.yml`.
+
+Auto-update is always disabled inside the container (binary self-replace would violate the immutable-image model — pull a new image tag to upgrade). All other features (mTLS cert auto-renewal, PQC TLS, SHA3-512 checksums, sync bundle semantics) work identically to the native binary.
 
 ## Quick start
 
