@@ -88,8 +88,15 @@ LABEL org.opencontainers.image.title="hermitstash-sync" \
 #                             ships addgroup/adduser with a different flag
 #                             surface; easier to keep the Debian-style
 #                             invocations consistent with install.sh)
+#   libstdc++              — Node.js SEA binary is dynamically linked
+#                             against libstdc++.so.6 (V8's C++ runtime).
+#                             Wolfi-base doesn't ship it by default; the
+#                             Debian slim images we replaced happened to
+#                             have it pulled in by apt's base set. Without
+#                             it `hermitstash-sync` fails at load time with
+#                             "cannot open shared object file".
 # hadolint ignore=DL3018
-RUN apk add --no-cache ca-certificates-bundle tini bash shadow \
+RUN apk add --no-cache ca-certificates-bundle tini bash shadow libstdc++ \
     && groupadd --system --gid 1000 hermit \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /config --shell /sbin/nologin hermit \
     && mkdir -p /data /config \

@@ -83,9 +83,13 @@ if [ "$CODE" -eq 0 ]; then
   echo "$OUT"
   fail "expected nonzero exit on unreachable server"
 fi
-if ! echo "$OUT" | grep -qE "(\[init\] Enrolling with https://127\.0\.0\.1:9/|Running first-time enrollment)"; then
+# Require the Node-emitted "[init] Enrolling with ..." line — NOT the
+# entrypoint bash's "Running first-time enrollment" banner, which would
+# still appear even if the binary failed to load (e.g. missing libstdc++).
+# This is how we caught the wolfi-base libstdc++ regression.
+if ! echo "$OUT" | grep -qE "\[init\] Enrolling with https://127\.0\.0\.1:9/"; then
   echo "$OUT"
-  fail "entrypoint didn't reach init step — binary likely broken"
+  fail "binary did not reach init step — failed to load or crashed early"
 fi
 
 # ── status command ──────────────────────────────────────────────────────
