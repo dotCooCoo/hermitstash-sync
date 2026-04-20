@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (e.g. 0.4.7). Must match an existing GitHub Release."
+        description: "Version to build (e.g. 0.4.8). Must match an existing GitHub Release."
         required: true
         type: string
       dry_run:
@@ -29,26 +29,113 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
-    # workflow_run fires on both success and failure — gate on success.
-    # For workflow_dispatch, github.event.workflow_run is null so the guard
-    # shortcircuits truthy.
+  # Lint must pass before a release image is published. Mirrors ci.yml's
+  # lint job (same rules, same pins) so a red ci.yml always implies a red
+  # docker-publish. No PR comment here — tag pushes aren't PR events.
+  lint:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # For workflow_run, check out the SHA that triggered the upstream
-          # workflow so VERSION matches the release that was just published.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
+
+      - name: Install ESLint
+        run: npm install --no-save eslint@^10 eslint-plugin-security@^4
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          cat > eslint.ci.config.js << 'ESLINT_CONFIG'
+          var security = require("eslint-plugin-security");
+          module.exports = [
+            { ignores: ["tests/", "node_modules/**", "vendor/**", "build/**", "eslint.ci.config.js"] },
+            {
+              files: ["**/*.js"],
+              plugins: { security: security },
+              linterOptions: { reportUnusedDisableDirectives: "off" },
+              languageOptions: {
+                ecmaVersion: 2022, sourceType: "commonjs",
+                globals: {
+                  require: "readonly", module: "readonly", exports: "readonly",
+                  __dirname: "readonly", __filename: "readonly",
+                  process: "readonly", console: "readonly", Buffer: "readonly",
+                  setTimeout: "readonly", setInterval: "readonly", setImmediate: "readonly",
+                  clearTimeout: "readonly", clearInterval: "readonly",
+                  URL: "readonly", URLSearchParams: "readonly",
+                  global: "readonly", crypto: "readonly",
+                  TextEncoder: "readonly", TextDecoder: "readonly",
+                  Atomics: "readonly", SharedArrayBuffer: "readonly", Int32Array: "readonly",
+                },
+              },
+              rules: {
+                "no-unused-vars": ["warn", { argsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }],
+                "no-console": "off",
+                "no-eval": "error", "no-implied-eval": "error", "no-new-func": "error",
+                "no-self-compare": "error", "no-constructor-return": "error",
+                "no-new-wrappers": "error", "no-throw-literal": "error",
+                "security/detect-eval-with-expression": "error",
+                "security/detect-child-process": "warn",
+                "security/detect-unsafe-regex": "error",
+                "security/detect-buffer-noassert": "error",
+                "security/detect-new-buffer": "error",
+                "security/detect-possible-timing-attacks": "warn",
+                "security/detect-pseudoRandomBytes": "warn",
+                "security/detect-object-injection": "off",
+                "security/detect-non-literal-fs-filename": "off",
+                "security/detect-non-literal-require": "off",
+                "security/detect-non-literal-regexp": "off",
+              },
+            },
+          ];
+          ESLINT_CONFIG
+          npx eslint --config eslint.ci.config.js .
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Run ShellCheck
+        run: |
+          SCRIPTS=$(find . -name '*.sh' -not -path './node_modules/*' -not -path './tests/*' -not -path './build/*' | sort)
+          echo "Checking: $SCRIPTS"
+          echo "$SCRIPTS" | xargs shellcheck --severity=warning --format=gcc
+
+  build-and-push:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Verify license is AGPL-3.0
+        shell: bash
+        run: |
+          grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" LICENSE || { echo "::error::LICENSE does not contain AGPL-3.0"; exit 1; }
+          grep -q '"AGPL-3.0-or-later"' package.json || { echo "::error::package.json license is not AGPL-3.0-or-later"; exit 1; }
+          echo "License check passed"
 
       - name: Resolve version
         id: version
@@ -113,12 +200,36 @@ jobs:
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          # Sign each tag we pushed. Tags share one digest, so one sign
-          # call per digest is enough — but we verify by digest below.
-          cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
+        run: cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
 
-      - name: Summary
+      - name: Scan image with Trivy (HIGH + CRITICAL)
+        if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: '0'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Generate SHA3-512 digest of image
+        if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
+        id: sha3
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+          HASH=$(docker save "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" | openssl dgst -sha3-512 | awk '{print $NF}')
+          echo "sha3=${HASH}" >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "#### SHA3-512 of the published image"
+            echo '```'
+            echo "${HASH}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build summary
         if: always()
         run: |
           {
@@ -132,4 +243,56 @@ jobs:
             echo "| Digest | \`${{ steps.build.outputs.digest || 'n/a' }}\` |"
             echo "| Pushed | ${{ !inputs.dry_run && '✅' || '⏭️ dry run' }} |"
             echo "| Signed | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ cosign keyless' || '⏭️' }} |"
+            echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ HIGH+CRITICAL scanned' || '⏭️' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Pull the JUST-PUBLISHED image by digest and run the shared packaging
+  # smoke checks against it. Proves the signed/attested artifact on GHCR
+  # actually boots end-to-end, not just the intermediate local build.
+  smoke-test:
+    needs: build-and-push
+    if: ${{ !inputs.dry_run && needs.build-and-push.outputs.digest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout (for scripts/docker-smoke.sh)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Log in to GHCR (image may be private until first public pull)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull published image by digest
+        run: docker pull "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}"
+
+      - name: Run packaging smoke checks
+        run: bash scripts/docker-smoke.sh "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}"
+
+      - name: Verify reported version matches the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=$(docker run --rm --entrypoint /usr/local/bin/hermitstash-sync \
+            "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}" version)
+          echo "$OUT"
+          EXPECT="hermitstash-sync v${{ needs.build-and-push.outputs.version }}"
+          echo "$OUT" | grep -qF "$EXPECT" || { echo "::error::image reports wrong version"; exit 1; }
+
+      - name: Smoke-test summary
+        if: always()
+        run: |
+          {
+            echo "### Published-image smoke test"
+            echo ""
+            echo "Image: \`${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}\`"
+            echo ""
+            echo "- Pulled by digest (immutable ref)"
+            echo "- Packaging checks via scripts/docker-smoke.sh"
+            echo "- Version matches tag v${{ needs.build-and-push.outputs.version }}"
           } >> "$GITHUB_STEP_SUMMARY"
