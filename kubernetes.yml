@@ -1,0 +1,135 @@
+# hermitstash-sync — Kubernetes Deployment
+#
+# Quick start:
+#   1. Edit the Secret below with your server URL + enrollment code.
+#   2. kubectl apply -f kubernetes.yml
+#   3. Watch the first boot:
+#      kubectl -n hermitstash-sync logs -l app.kubernetes.io/name=hermitstash-sync -f
+#   4. Once enrolled, you can blank out the Secret — the config PVC holds
+#      the API key + mTLS certs persistently.
+#
+# Sync client is outbound-only — no Service, no Ingress. If you want an
+# external process to read the synced files, mount the data PVC elsewhere
+# (another Deployment, a PVC volumeMount in a frontend pod, etc.).
+#
+# Single-replica StatefulSet would also work, but since each client is a
+# unique ownership identity (API key + cert), a Deployment with
+# strategy=Recreate is cleaner than rolling-updating a StatefulSet.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hermitstash-sync
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hermitstash-sync-enrollment
+  namespace: hermitstash-sync
+type: Opaque
+stringData:
+  # REQUIRED on first boot — consumed by the entrypoint's init flow.
+  # After enrollment, the client writes API key + certs to the config PVC;
+  # you can clear these to empty strings on subsequent reboots without
+  # triggering re-enrollment (the entrypoint checks for existing config
+  # before attempting init).
+  HERMITSTASH_SERVER_URL: "https://hermitstash.example.com"
+  HERMITSTASH_ENROLLMENT_CODE: "HSTASH-XXXX-XXXX-XXXX"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermitstash-sync-config
+  namespace: hermitstash-sync
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermitstash-sync-data
+  namespace: hermitstash-sync
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermitstash-sync
+  namespace: hermitstash-sync
+  labels:
+    app.kubernetes.io/name: hermitstash-sync
+    # Omit app.kubernetes.io/version here — it would drift from the image tag
+    # every release. Set it in your Kustomize/Helm/GitOps overlay where you
+    # control the tag.
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single-owner identity; no rolling update semantics
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermitstash-sync
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermitstash-sync
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hermitstash-sync
+          image: ghcr.io/dotcoocoo/hermitstash-sync:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: hermitstash-sync-enrollment
+          env:
+            - name: HERMITSTASH_LOG_LEVEL
+              value: info
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            exec:
+              command: [hermitstash-sync, status]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: hermitstash-sync-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: hermitstash-sync-data

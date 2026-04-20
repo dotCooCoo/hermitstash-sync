@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<Container version="2">
+    <Name>hermitstash-sync</Name>
+    <Beta>false</Beta>
+    <Category>Cloud: Backup: Productivity:</Category>
+    <Repository>ghcr.io/dotcoocoo/hermitstash-sync:latest</Repository>
+    <Registry>https://github.com/dotCooCoo/hermitstash-sync/pkgs/container/hermitstash-sync</Registry>
+    <Network>bridge</Network>
+    <Privileged>false</Privileged>
+    <Shell>sh</Shell>
+    <GitHub>https://github.com/dotCooCoo/hermitstash-sync</GitHub>
+    <ReadMe>https://github.com/dotCooCoo/hermitstash-sync#readme</ReadMe>
+    <Project>https://hermitstash.com</Project>
+    <Support>https://github.com/dotCooCoo/hermitstash-sync/issues</Support>
+    <TemplateURL>https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/unraid-template.xml</TemplateURL>
+    <Overview>Sync client daemon for a HermitStash server. Watches a local folder and keeps it in sync with a HermitStash bundle over a post-quantum TLS connection with mTLS client certificates. Outbound-only (no exposed ports). First run uses an enrollment code from the server's admin UI to bootstrap API key + mTLS certs, which then persist on the config volume. Run one container per sync target — multiple folders need multiple containers.</Overview>
+    <Icon>https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/public/img/logos/green.svg</Icon>
+    <ExtraParams>--init --security-opt=no-new-privileges:true --cap-drop=ALL</ExtraParams>
+    <Requires>Requires a HermitStash server (v1.3.4+) reachable from this host and an enrollment code from that server (Admin → Customers → Enroll).</Requires>
+
+    <!-- Volumes -->
+    <Config Name="Config" Target="/config" Default="/mnt/user/appdata/hermitstash-sync" Mode="rw" Description="Persistent client state: API key, mTLS certificates, state.db, logs, update marker. Back this up — losing it means re-enrolling with a new code." Type="Path" Display="always" Required="true" Mask="false"/>
+    <Config Name="Sync Folder" Target="/data" Default="/mnt/user/synced" Mode="rw" Description="The folder that's kept in sync with the server bundle. Changes here go up; server changes come down." Type="Path" Display="always" Required="true" Mask="false"/>
+
+    <!-- Container user -->
+    <Config Name="PUID" Target="PUID" Default="99" Description="User ID for synced file ownership. Use 99 (nobody) for Unraid's shared storage model." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+    <Config Name="PGID" Target="PGID" Default="100" Description="Group ID for synced file ownership. Use 100 (users) for Unraid's shared storage model." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+    <Config Name="Timezone" Target="TZ" Default="" Description="Container timezone, e.g. America/New_York. Used for log timestamps." Type="Variable" Display="always" Required="false" Mask="false"/>
+
+    <!-- Enrollment — required on first start only; can be unset after initial sync -->
+    <Config Name="Server URL" Target="HERMITSTASH_SERVER_URL" Default="" Description="Base URL of your HermitStash server, e.g. https://hermitstash.example.com. Required on first start." Type="Variable" Display="always" Required="false" Mask="false"/>
+    <Config Name="Enrollment Code" Target="HERMITSTASH_ENROLLMENT_CODE" Default="" Description="Code from Admin → Customers → Enroll, e.g. HSTASH-XXXX-XXXX-XXXX. Required on first start; delete this env var after enrollment so restarts don't attempt re-enroll." Type="Variable" Display="always" Required="false" Mask="true"/>
+
+    <!-- Logging -->
+    <Config Name="Log Level" Target="HERMITSTASH_LOG_LEVEL" Default="info" Description="One of: debug, info, warn, error." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>
