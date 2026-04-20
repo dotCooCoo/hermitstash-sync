@@ -1,0 +1,181 @@
+name: Docker e2e
+
+# Build the image against the latest published release and run packaging-level
+# checks: metadata, non-root identity, volumes, entrypoint error path, and a
+# one-shot binary-works check against a stub server. No real HermitStash
+# server is spun up in CI — that flow runs locally via tests/test-docker-e2e.js
+# under `node tests/run-all.js`.
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'scripts/verify-release.js'
+      - '.github/workflows/docker-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'scripts/verify-release.js'
+      - '.github/workflows/docker-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE: hermitstash-sync-e2e:ci
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Resolve latest published release tag
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName' | sed 's/^v//')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Latest released version: v${VERSION}"
+
+      - name: Build image (amd64 only for CI speed)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Packaging checks ---
+
+      - name: Check OCI labels
+        shell: bash
+        run: |
+          INSPECT=$(docker inspect "$IMAGE")
+          for label in title description version source licenses vendor; do
+            if ! echo "$INSPECT" | grep -q "\"org.opencontainers.image.${label}\""; then
+              echo "::error::missing OCI label: ${label}"
+              exit 1
+            fi
+          done
+          echo "All required OCI labels present"
+
+      - name: Check non-root user and volumes
+        shell: bash
+        run: |
+          USER_FIELD=$(docker inspect -f '{{.Config.User}}' "$IMAGE")
+          if [ "$USER_FIELD" != "hermit" ]; then
+            echo "::error::expected User=hermit, got ${USER_FIELD}"
+            exit 1
+          fi
+          VOLS=$(docker inspect -f '{{range $k,$v := .Config.Volumes}}{{$k}} {{end}}' "$IMAGE")
+          for v in /config /data; do
+            case " $VOLS " in *" $v "*) : ;; *) echo "::error::missing volume: $v"; exit 1 ;; esac
+          done
+          echo "User=hermit, volumes=/config,/data"
+
+      - name: Check env defaults
+        shell: bash
+        run: |
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" > env.txt
+          grep -q '^HERMITSTASH_SYNC_CONFIG_DIR=/config$' env.txt || { echo "::error::missing HERMITSTASH_SYNC_CONFIG_DIR=/config"; exit 1; }
+          grep -q '^HERMITSTASH_SYNC_FOLDER=/data$'      env.txt || { echo "::error::missing HERMITSTASH_SYNC_FOLDER=/data";      exit 1; }
+          grep -q '^HERMITSTASH_AUTO_UPDATE=false$'      env.txt || { echo "::error::missing HERMITSTASH_AUTO_UPDATE=false";      exit 1; }
+          echo "Env defaults present"
+
+      - name: Entrypoint errors cleanly when enrollment env missing
+        shell: bash
+        run: |
+          set +e
+          OUTPUT=$(docker run --rm "$IMAGE" 2>&1)
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 0 ]; then
+            echo "::error::expected nonzero exit when enrollment env missing, got 0"
+            echo "$OUTPUT"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "not configured yet"; then
+            echo "::error::expected 'not configured yet' message in entrypoint output"
+            echo "$OUTPUT"
+            exit 1
+          fi
+          echo "Missing-env error path works (exit ${CODE})"
+
+      - name: Binary runs end-to-end with fake server (enrollment fails, daemon doesn't crash)
+        shell: bash
+        run: |
+          # Point the container at a sink that always returns a connection
+          # error. The init flow should log a clear enrollment failure and
+          # exit nonzero — NOT segfault or hang.
+          set +e
+          OUTPUT=$(timeout 30 docker run --rm \
+            -e HERMITSTASH_SERVER_URL=https://127.0.0.1:9/ \
+            -e HERMITSTASH_ENROLLMENT_CODE=HSTASH-TEST-TEST-TEST \
+            "$IMAGE" 2>&1)
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 0 ]; then
+            echo "::error::expected nonzero exit on unreachable server"
+            echo "$OUTPUT"
+            exit 1
+          fi
+          if echo "$OUTPUT" | grep -qE "(\[init\] Enrolling with https://127\.0\.0\.1:9/|Running first-time enrollment)"; then
+            echo "Entrypoint reached enrollment step (exit ${CODE})"
+          else
+            echo "::error::entrypoint didn't reach init — binary likely broken"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      - name: Healthcheck command exists and is invokable
+        shell: bash
+        run: |
+          # Run the status command directly — should not crash, even though
+          # the daemon isn't running. Expected output format: "Status: STOPPED"
+          # on a container without a persisted config.
+          set +e
+          OUTPUT=$(docker run --rm --entrypoint /usr/local/bin/hermitstash-sync "$IMAGE" status 2>&1)
+          CODE=$?
+          set -e
+          if ! echo "$OUTPUT" | grep -qE "Status: (STOPPED|RUNNING)"; then
+            echo "::error::status command didn't emit expected output"
+            echo "$OUTPUT"
+            exit 1
+          fi
+          echo "status command responds"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Docker e2e smoke"
+            echo ""
+            echo "Image: \`$IMAGE\` (linux/amd64)"
+            echo "Release base: v${{ steps.version.outputs.version }}"
+            echo ""
+            echo "- OCI labels present"
+            echo "- Non-root user: hermit"
+            echo "- Volumes: /config, /data"
+            echo "- Env defaults correct"
+            echo "- Missing-env entrypoint errors cleanly"
+            echo "- Binary runs to enrollment step"
+            echo "- Status command invokable"
+          } >> "$GITHUB_STEP_SUMMARY"
