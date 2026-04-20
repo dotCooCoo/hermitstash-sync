@@ -80,6 +80,8 @@ Subsequent restarts skip enrollment — the API key and mTLS certs persist on th
 
 Auto-update is always disabled inside the container (binary self-replace would violate the immutable-image model — pull a new image tag to upgrade). All other features (mTLS cert auto-renewal, PQC TLS, SHA3-512 checksums, sync bundle semantics) work identically to the native binary.
 
+**Testing:** PRs touching `Dockerfile`, `docker/`, or `scripts/verify-release.js` trigger `.github/workflows/docker-e2e.yml`, which builds the image against the latest published release and runs packaging checks (OCI labels, non-root user, volumes, env defaults, entrypoint error paths). Full container-to-server e2e (enrollment, bidirectional sync, restart persistence, graceful shutdown) runs locally via `node tests/run-all.js` when Docker is available on the dev machine.
+
 ## Quick start
 
 ```bash
