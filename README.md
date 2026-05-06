@@ -268,6 +268,11 @@ The `status` command shows which state the daemon is in:
 - **Log rotation** — log file rotated at 10 MB to prevent disk exhaustion
 - **Log symlink protection** — log path checked for symlinks before opening
 - **Worker thread pool** — SHA3-512 checksums computed in parallel across CPU cores, keeping the main thread responsive to WebSocket heartbeats during bulk sync
+- **Hardened wire layer via blamejs primitives** — the WebSocket client (`b.wsClient`) inherits decompression-bomb defence, UTF-8 fatal validation on text + close-reason, control-frame ≤125-byte cap with FIN=1 enforcement, RSV1-on-continuation rejection, permanent-vs-transient error classifier (no auth-failure hammering); the HTTP client (`b.httpClient.request`) adds an SSRF gate with DNS pinning that closes the resolve-vs-connect TOCTOU window on the configured server, AbortSignal cancellation, and an idle vs wall-clock timeout split; the auto-update GitHub-release fetcher inherits the same posture with the SSRF gate left fully closed in production so a hijacked release index can't pivot the download to an internal target
+- **safeJson on every untrusted parse** — server response bodies, the user-edited `config.json`, and the enrollment response all run through `b.safeJson.parse`'s depth + size + prototype-pollution caps, so a malformed or hostile JSON document can't mutate `Object.prototype` or exhaust the heap
+- **Atomic config + cert writes** — `config.json` and the enrolled mTLS client/cert/key/CA trio are written via `b.atomicFile.writeSync` (temp file, fsync, rename, parent-dir fsync) so a crash mid-write leaves the previous good copy intact instead of a torn file
+- **Phase-ordered graceful shutdown** — SIGTERM/SIGINT routes through `b.appShutdown` with per-phase time budgets and idempotent semantics, so a double signal during drain doesn't kick off a parallel teardown
+- **Crypto-strength retry jitter** — upload retries use `b.retry.withRetry`'s full-jitter exponential backoff sourced from `crypto.randomInt`, so retry timing isn't predictable from `Math.random`
 - **Zero npm dependencies** — entire codebase is auditable
 
 ## Logging

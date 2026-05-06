@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@main
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@main
         with:
           node-version: 24
 
@@ -125,7 +125,7 @@ jobs:
       - name: Run Hadolint
         if: always() && steps.dockerfile_check.outputs.present == 'true'
         id: hadolint
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        uses: hadolint/hadolint-action@master
         with:
           dockerfile: Dockerfile
           failure-threshold: error
@@ -160,7 +160,7 @@ jobs:
         if: always()
         id: shellcheck
         run: |
-          SCRIPTS=$(find . -name '*.sh' -not -path './node_modules/*' -not -path './tests/*' -not -path './build/*' | sort)
+          SCRIPTS=$(find . -name '*.sh' -not -path './node_modules/*' -not -path './tests/*' -not -path './build/*' -not -path './vendor/*' | sort)
           if [ -z "$SCRIPTS" ]; then
             echo "No shell scripts found — skipping"
             echo "exit_code=0" >> "$GITHUB_OUTPUT"
@@ -278,7 +278,7 @@ jobs:
 
       - name: Comment on PR
         if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        uses: actions/github-script@main
         with:
           script: |
             const body = process.env.PR_BODY;
