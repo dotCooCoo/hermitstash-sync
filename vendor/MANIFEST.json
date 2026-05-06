@@ -1,19 +1,19 @@
 {
-  "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages.",
+  "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
-    "@noble/ciphers": {
-      "version": "2.1.1",
-      "file": "vendor/noble-ciphers.cjs",
-      "exports": ["xchacha20poly1305"],
-      "source": "https://github.com/paulmillr/noble-ciphers",
-      "copiedFrom": "hermitstash-private/lib/vendor/noble-ciphers.cjs"
-    },
-    "@noble/post-quantum": {
-      "version": "0.6.0",
-      "file": "vendor/noble-pq.cjs",
-      "exports": ["ml_kem512", "ml_kem768", "ml_kem1024"],
-      "source": "https://github.com/paulmillr/noble-post-quantum",
-      "copiedFrom": "hermitstash-private/lib/vendor/noble-pq.cjs"
+    "blamejs": {
+      "version": "0.8.0",
+      "license": "Apache-2.0",
+      "directory": "vendor/blamejs/",
+      "source": "https://github.com/blamejs/blamejs",
+      "tag": "v0.8.0",
+      "consumed": [
+        "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
+        "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
+        "vendor/blamejs/lib/vendor/noble-ciphers.cjs#xchacha20poly1305 — symmetric AEAD for the HermitStash ECIES session key",
+        "vendor/blamejs/lib/vendor/noble-post-quantum.cjs#ml_kem1024 — KEM leg of the HermitStash hybrid ECIES bootstrap"
+      ],
+      "transitive_manifest": "vendor/blamejs/lib/vendor/MANIFEST.json"
     }
   }
 }
