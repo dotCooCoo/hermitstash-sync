@@ -44,7 +44,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group l
 ## Requirements
 
 - Node.js 24+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
-- HermitStash server v1.3.4+ with sync features enabled
+- HermitStash server v1.9.15+ with sync features enabled (earlier servers used a legacy ECIES envelope this client no longer speaks — see CLAUDE.md "Security Invariants" rule 4)
 
 ## Install
 
@@ -251,7 +251,7 @@ The `status` command shows which state the daemon is in:
 - **PQC TLS** on every connection — three-tier hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` (NIST Level 5 preferred, Level 3 and Level 1 fallback for broad server compatibility). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds.
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
 - **mTLS** client certificates for server authentication (optional, certs cached in memory). Certificates auto-renew on startup when within 60 days of expiry — no admin intervention required.
-- **Hybrid ECIES key exchange** — session keys delivered via ML-KEM-1024 + ECDH P-384 + HKDF-SHA3-512 + XChaCha20-Poly1305 with protocol version byte for algorithm agility (no plaintext keys in HTTP)
+- **Per-session PQC envelope** on encryption-grade JSON POSTs (`/drop/init`, `/drop/finalize/:bundleId`, `/sync/rename`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, server keypair fetched once from `/.well-known/blamejs-pubkey` and cached. Strict-monotonic counter on the wire blocks replay. Other Bearer-authed sync calls send plain JSON over the PQC TLS + mTLS layer (transport encryption is the floor — see CLAUDE.md "Security Invariants" rule 4).
 - **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder
 - **Path traversal protection** — all server-provided paths validated against sync folder boundary
 - **Symlink protection** — symlinks skipped during directory walk and file watching (prevents escape)
@@ -345,7 +345,7 @@ lib/config.js                 Config file management
 lib/constants.js              All constants, message types, defaults
 lib/checksum.js               SHA3-512 hashing (single + worker pool)
 lib/daemon.js                 Daemonization, PID file, signal handlers
-lib/http-client.js            HTTP client with PQC agent + ECIES
+lib/http-client.js            HTTP client with PQC agent + blamejs apiEncrypt for write paths
 lib/keychain.js               OS keychain for API key storage
 lib/logger.js                 Structured JSON logger with rotation
 lib/state-db.js               Local SQLite state database (node:sqlite)
