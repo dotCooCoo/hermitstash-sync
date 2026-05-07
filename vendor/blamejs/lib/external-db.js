@@ -946,9 +946,27 @@ function _connectAs(rawConnect, query, opts) {
     for (var gn in opts.gucs) {
       var gv = opts.gucs[gn];
       if (typeof gv === "number") {
+        // Numeric GUCs must be finite — Infinity / NaN serialize as
+        // tokens that Postgres would reject at parse time, but only
+        // AFTER the connection started using a half-set state. Refuse
+        // at config-time instead.
+        if (!isFinite(gv)) {
+          throw _err("INVALID_CONFIG",
+            "connectAs: gucs[" + gn + "] number must be finite (got " + gv + ")",
+            true);
+        }
         stmts.push('SET "' + gn + '" TO ' + gv);
       } else {
         var gvs = String(gv).replace(/'/g, "''");
+        // Refuse embedded NUL / line breaks in GUC string values —
+        // they have no legitimate use and would terminate the SET
+        // statement early in some drivers.
+        // eslint-disable-next-line no-control-regex
+        if (/[\r\n\u0000]/.test(gvs)) {
+          throw _err("INVALID_CONFIG",
+            "connectAs: gucs[" + gn + "] string value must not contain NUL or newline characters",
+            true);
+        }
         stmts.push('SET "' + gn + '" TO \'' + gvs + "'");
       }
     }

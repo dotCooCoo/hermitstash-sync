@@ -245,7 +245,12 @@ var FRAMEWORK_SCHEMA = [
   {
     name: "_blamejs_audit_purge_anchor",
     columns: {
-      scope:             "TEXT PRIMARY KEY",
+      // CHECK constraint: scope is one of the framework's audit-
+      // chain anchor scopes (`audit` / `consent`). Pre-v0.8.37 a
+      // typo silently created a parallel anchor; the chain verifier
+      // walked the wrong anchor and missed tampering. The CHECK
+      // refuses unknown scope strings at INSERT time.
+      scope:             "TEXT PRIMARY KEY CHECK (scope IN ('audit', 'consent'))",
       lastPurgedCounter: "INTEGER NOT NULL",
       lastPurgedRowHash: "TEXT NOT NULL",
       archiveBundleId:   "TEXT NOT NULL",
@@ -704,6 +709,20 @@ async function init(opts) {
   // delete, which the framework's audit-and-DSR-erase path already
   // dominates with audit-chain emissions and cascade fan-out.
   runSql(database, "PRAGMA secure_delete=ON");
+  // PRAGMA trusted_schema=OFF — refuses to call functions / virtual-
+  // table modules referenced from a malicious shadow schema. Defends
+  // the CVE-2018-8740 family where an attacker who can write to the
+  // database file (backups, logs, restore-from-untrusted) plants
+  // schema entries that fire on next access.
+  try { runSql(database, "PRAGMA trusted_schema=OFF"); } catch (_e) { /* sqlite < 3.31 */ }
+  // PRAGMA cell_size_check=ON — refuses pages with corrupted cell
+  // sizes at parse time rather than crashing later. Cheap defense
+  // against malformed-page attacks.
+  try { runSql(database, "PRAGMA cell_size_check=ON"); } catch (_e) { /* sqlite < 3.26 */ }
+  // node:sqlite does not expose loadExtension at all — extensions must
+  // be statically linked into the runtime. The framework's surface is
+  // therefore implicitly extension-free; no runtime defense is needed
+  // beyond the trusted_schema + cell_size_check PRAGMAs above.
 
   // Boot-time integrity check — refuse to boot on B-tree corruption.
   // SQLite normally surfaces corruption only when a query stumbles on
@@ -744,13 +763,20 @@ async function init(opts) {
     }
   }
 
-  // Refuse app schema entries that collide with framework-reserved names
+  // Refuse app schema entries that collide with framework-reserved names.
+  // Pre-v0.8.18 this was an exact-match Set; an app could ship
+  // `_blamejs_audit_log_archive` (or similar prefix-collision) and the
+  // framework would silently provision it next to the reserved
+  // namespace, allowing a row-by-row look-alike attack against audit
+  // archive tooling.
   for (var ri = 0; ri < opts.schema.length; ri++) {
-    if (RESERVED_TABLE_NAMES.has(opts.schema[ri].name)) {
+    var appName = opts.schema[ri].name;
+    if (RESERVED_TABLE_NAMES.has(appName) ||
+        (typeof appName === "string" && appName.indexOf("_blamejs_") === 0)) {
       throw new DbError("db/reserved-table-name",
-        "table name '" + opts.schema[ri].name + "' is reserved by the framework. " +
+        "table name '" + appName + "' is reserved by the framework. " +
         "Pick a different name (the framework provisions audit_log, consent_log, " +
-        "and _blamejs_* tables automatically).");
+        "and any '_blamejs_*'-prefixed tables automatically).");
     }
   }
 
@@ -759,6 +785,56 @@ async function init(opts) {
   for (var si = 0; si < opts.schema.length; si++) {
     var st = opts.schema[si];
     if (st.subjectField) {
+      // Validate personalDataCategories shape + audit-emit on
+      // unknown vocabulary. Pre-v0.8.37 this was a free-form JSON
+      // blob; a typo silently dropped the column from subject-export
+      // / erase walks. The framework checks the value is a string
+      // (catches null / number / object typos) and emits a warning
+      // audit when the category is outside the GDPR Art 9 + general
+      // vocabulary so operators can audit-trail their custom labels.
+      if (st.personalDataCategories) {
+        if (typeof st.personalDataCategories !== "object" || Array.isArray(st.personalDataCategories)) {
+          throw new DbError("db/bad-personal-data-categories",
+            "table '" + st.name + "': personalDataCategories must be an object mapping field name → category");
+        }
+        var FRAMEWORK_CATEGORY_VOCAB = [
+          "name", "email", "phone", "address", "ip", "id-document",
+          "biometric", "health", "genetic", "sexual-orientation",
+          "racial-or-ethnic-origin", "political-opinion", "religious-belief",
+          "trade-union-membership", "criminal-record",
+          "financial", "location", "behavioral", "device-id",
+          "child-data", "education", "employment", "operator-defined",
+        ];
+        Object.keys(st.personalDataCategories).forEach(function (field) {
+          var cat = st.personalDataCategories[field];
+          if (typeof cat !== "string" || cat.length === 0) {
+            throw new DbError("db/bad-personal-data-category",
+              "table '" + st.name + "' field '" + field +
+              "': category must be a non-empty string");
+          }
+          if (FRAMEWORK_CATEGORY_VOCAB.indexOf(cat) === -1) {
+            // Unknown — emit a one-time audit per (table,field,category)
+            // tuple so operators see typos in their categorical
+            // taxonomy. Lazy require to avoid circular load (audit
+            // imports db for chain hashing).
+            try {
+              var auditMod = require("./audit");                                              // allow:inline-require — circular-load defense (audit imports db)
+              auditMod.safeEmit({
+                action:   "db.personal_data_category_unknown",
+                outcome:  "success",
+                metadata: {
+                  severity: "warning",
+                  table:    st.name,
+                  field:    field,
+                  category: cat,
+                  vocabHint: "use one of: " + FRAMEWORK_CATEGORY_VOCAB.join(", ") +
+                             " (or operator-defined for genuinely-custom)",
+                },
+              });
+            } catch (_e) { /* drop-silent */ }
+          }
+        });
+      }
       subjectTables.push({
         name:                   st.name,
         subjectField:           st.subjectField,
@@ -995,9 +1071,52 @@ function stream(sql) {
   });
 }
 
+// DDL_RE — case-insensitive prefix match for the eight statement
+// shapes that MUTATE schema. Audited individually so a forensic
+// review can reconstruct schema evolution from the chain alone (D-M1).
+var DDL_RE = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|ATTACH|DETACH|REINDEX)\b/i;
+
 function execRaw(sql) {
   _requireInit();
-  return runSql(database, sql);
+  var startedAt = Date.now();
+  var auditMod = (function () { try { return require("./audit"); } catch (_e) { return null; } })(); // allow:inline-require — circular-load defense (audit imports db)
+  // DDL_RE only matches the leading keyword — bounded by `/\s*(KEYWORD)\b/`
+  // so the test is constant-time regardless of the rest of the query.
+  var isDdl = typeof sql === "string" && DDL_RE.test(sql);                                    // allow:regex-no-length-cap — leading-keyword anchor; constant-time test
+  try {
+    var result = runSql(database, sql);
+    if (isDdl && auditMod) {
+      auditMod.safeEmit({
+        action:   "db.ddl.executed",
+        outcome:  "success",
+        metadata: {
+          // OTel db.* semconv (F-RFC-4) — emit framework-conventional
+          // attributes alongside the audit row so dashboards built on
+          // OTel can correlate without an adapter.
+          "db.system":     "sqlite",
+          "db.operation":  String(sql).match(DDL_RE)[1].toUpperCase(),
+          "db.statement":  String(sql).slice(0, 256),                                          // allow:raw-byte-literal — log-truncation length, not bytes
+          durationMs:      Date.now() - startedAt,
+        },
+      });
+    }
+    return result;
+  } catch (e) {
+    if (isDdl && auditMod) {
+      auditMod.safeEmit({
+        action:   "db.ddl.executed",
+        outcome:  "failure",
+        reason:   (e && e.message) || String(e),
+        metadata: {
+          "db.system":     "sqlite",
+          "db.operation":  String(sql).match(DDL_RE)[1].toUpperCase(),
+          "db.statement":  String(sql).slice(0, 256),                                          // allow:raw-byte-literal — log-truncation length, not bytes
+          durationMs:      Date.now() - startedAt,
+        },
+      });
+    }
+    throw e;
+  }
 }
 
 function transaction(fn) {
