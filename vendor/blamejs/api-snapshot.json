@@ -1,8 +1,261 @@
 {
   "version": 1,
-  "frameworkVersion": "0.8.4",
-  "createdAt": "2026-05-06T21:42:58.016Z",
+  "frameworkVersion": "0.8.40",
+  "createdAt": "2026-05-07T16:26:54.225Z",
   "exports": {
+    "a2a": {
+      "type": "object",
+      "members": {
+        "canonicalize": {
+          "type": "function",
+          "arity": 1
+        },
+        "createCard": {
+          "type": "function",
+          "arity": 1
+        },
+        "signCard": {
+          "type": "function",
+          "arity": 3
+        },
+        "verifyCard": {
+          "type": "function",
+          "arity": 3
+        }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "members": {
+        "adverseDecision": {
+          "type": "object",
+          "members": {
+            "AdverseDecisionError": {
+              "type": "function",
+              "arity": 4
+            },
+            "REGIME_DEADLINES": {
+              "type": "object",
+              "members": {
+                "ai-act-86": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "colorado-ai-act": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "ecoa-1002.9": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "fcra-615": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "gdpr-22": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "nyc-ll-144": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "operator-defined": {
+                  "type": "object",
+                  "members": {
+                    "appeal": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "explanation": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "humanReview": {
+                      "type": "primitive",
+                      "valueType": "null"
+                    },
+                    "regulation": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "VALID_REGIMES": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "wrap": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        },
+        "input": {
+          "type": "object",
+          "members": {
+            "PATTERN_IDS": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "classify": {
+              "type": "function",
+              "arity": 2
+            },
+            "refuseIfMalicious": {
+              "type": "function",
+              "arity": 2
+            }
+          }
+        }
+      }
+    },
+    "aiPref": {
+      "type": "object",
+      "members": {
+        "AiPrefError": {
+          "type": "function",
+          "arity": 4
+        },
+        "INFER_VALUES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "SNIPPET_VALUES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "TRAIN_VALUES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "middleware": {
+          "type": "function",
+          "arity": 1
+        },
+        "parseHeader": {
+          "type": "function",
+          "arity": 1
+        },
+        "refusePaidCrawl": {
+          "type": "function",
+          "arity": 3
+        },
+        "robotsBlock": {
+          "type": "function",
+          "arity": 1
+        },
+        "serializeHeader": {
+          "type": "function",
+          "arity": 1
+        }
+      }
+    },
     "apiKey": {
       "type": "object",
       "members": {
@@ -102,6 +355,10 @@
           "valueType": "number"
         },
         "create": {
+          "type": "function",
+          "arity": 1
+        },
+        "pidLock": {
           "type": "function",
           "arity": 1
         },
@@ -483,6 +740,14 @@
           "type": "function",
           "arity": 1
         },
+        "reSignAll": {
+          "type": "function",
+          "arity": 2
+        },
+        "rotateSigningKey": {
+          "type": "function",
+          "arity": 1
+        },
         "sign": {
           "type": "function",
           "arity": 1
@@ -517,6 +782,10 @@
           "arity": 1
         },
         "exportSlice": {
+          "type": "function",
+          "arity": 1
+        },
+        "forensicSnapshot": {
           "type": "function",
           "arity": 1
         },
@@ -604,6 +873,23 @@
             "meets": {
               "type": "function",
               "arity": 2
+            }
+          }
+        },
+        "accessLock": {
+          "type": "object",
+          "members": {
+            "AccessLockError": {
+              "type": "function",
+              "arity": 4
+            },
+            "VALID_MODES": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "create": {
+              "type": "function",
+              "arity": 1
             }
           }
         },
@@ -1018,6 +1304,19 @@
               "arity": 1
             },
             "register": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        },
+        "atoKillSwitch": {
+          "type": "object",
+          "members": {
+            "AtoKillSwitchError": {
+              "type": "function",
+              "arity": 4
+            },
+            "trigger": {
               "type": "function",
               "arity": 1
             }
@@ -2438,6 +2737,834 @@
         }
       }
     },
+    "breach": {
+      "type": "object",
+      "members": {
+        "BreachError": {
+          "type": "function",
+          "arity": 4
+        },
+        "deadline": {
+          "type": "object",
+          "members": {
+            "STATE_DEADLINES": {
+              "type": "object",
+              "members": {
+                "AK": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "AL": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "AR": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "AZ": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "CA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "CO": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "CT": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "DC": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "DE": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "FL": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "GA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "HI": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "IA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "ID": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "IL": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "IN": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "KS": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "KY": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "LA": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MD": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "ME": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MI": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MN": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MO": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MS": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "MT": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NC": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "ND": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NE": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NH": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NJ": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NM": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NV": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "NY": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "OH": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "OK": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "OR": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "PA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "PR": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "RI": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "SC": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "SD": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "TN": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "TX": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "UT": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "VA": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "VT": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "WA": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "WI": {
+                  "type": "object",
+                  "members": {
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "WV": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                },
+                "WY": {
+                  "type": "object",
+                  "members": {
+                    "asapCeilingDays": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "days": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    },
+                    "statute": {
+                      "type": "primitive",
+                      "valueType": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "WITHOUT_UNREASONABLE_DELAY": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "forStates": {
+              "type": "function",
+              "arity": 2
+            }
+          }
+        },
+        "report": {
+          "type": "object",
+          "members": {
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        }
+      }
+    },
     "breakGlass": {
       "type": "object",
       "members": {
@@ -2509,6 +3636,35 @@
         "unsealRowAsService": {
           "type": "function",
           "arity": 4
+        }
+      }
+    },
+    "budr": {
+      "type": "object",
+      "members": {
+        "BudrError": {
+          "type": "function",
+          "arity": 4
+        },
+        "CRITICALITIES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "TIERS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "declare": {
+          "type": "function",
+          "arity": 1
+        },
+        "get": {
+          "type": "function",
+          "arity": 1
+        },
+        "list": {
+          "type": "function",
+          "arity": 0
         }
       }
     },
@@ -2615,6 +3771,23 @@
         "FRAMEWORK_SQL_TIMEOUT_MS": {
           "type": "primitive",
           "valueType": "number"
+        },
+        "create": {
+          "type": "function",
+          "arity": 1
+        }
+      }
+    },
+    "circuitBreaker": {
+      "type": "object",
+      "members": {
+        "CircuitBreaker": {
+          "type": "function",
+          "arity": 2
+        },
+        "RetryError": {
+          "type": "primitive",
+          "valueType": "undefined"
         },
         "create": {
           "type": "function",
@@ -3602,6 +4775,23 @@
           "type": "function",
           "arity": 1
         },
+        "eaa": {
+          "type": "object",
+          "members": {
+            "ComplianceEaaError": {
+              "type": "function",
+              "arity": 4
+            },
+            "VALID_CONFORMANCE": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        },
         "list": {
           "type": "function",
           "arity": 0
@@ -3770,6 +4960,10 @@
           "arity": 4
         },
         "create": {
+          "type": "function",
+          "arity": 1
+        },
+        "verifyVendorIntegrity": {
           "type": "function",
           "arity": 1
         }
@@ -3991,6 +5185,35 @@
         }
       }
     },
+    "contentCredentials": {
+      "type": "object",
+      "members": {
+        "ContentCredentialsError": {
+          "type": "function",
+          "arity": 4
+        },
+        "REQUIRED_FIELDS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "build": {
+          "type": "function",
+          "arity": 1
+        },
+        "required": {
+          "type": "function",
+          "arity": 1
+        },
+        "sign": {
+          "type": "function",
+          "arity": 2
+        },
+        "verify": {
+          "type": "function",
+          "arity": 3
+        }
+      }
+    },
     "cookies": {
       "type": "object",
       "members": {
@@ -4013,6 +5236,24 @@
         "serialize": {
           "type": "function",
           "arity": 3
+        }
+      }
+    },
+    "cra": {
+      "type": "object",
+      "members": {
+        "report": {
+          "type": "object",
+          "members": {
+            "CraReportError": {
+              "type": "function",
+              "arity": 4
+            },
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
         }
       }
     },
@@ -4285,6 +5526,43 @@
         "stringify": {
           "type": "function",
           "arity": 2
+        }
+      }
+    },
+    "darkPatterns": {
+      "type": "object",
+      "members": {
+        "CHANNELS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "DarkPatternsError": {
+          "type": "function",
+          "arity": 4
+        },
+        "POSTURES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "assertParity": {
+          "type": "function",
+          "arity": 3
+        },
+        "attest": {
+          "type": "function",
+          "arity": 1
+        },
+        "middleware": {
+          "type": "function",
+          "arity": 1
+        },
+        "recordCancelFlow": {
+          "type": "function",
+          "arity": 1
+        },
+        "recordSignupFlow": {
+          "type": "function",
+          "arity": 1
         }
       }
     },
@@ -4882,6 +6160,56 @@
         }
       }
     },
+    "fapi2": {
+      "type": "object",
+      "members": {
+        "Fapi2Error": {
+          "type": "function",
+          "arity": 4
+        },
+        "SENDER_CONSTRAINTS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "assertConformance": {
+          "type": "function",
+          "arity": 1
+        },
+        "assertOAuthConfig": {
+          "type": "function",
+          "arity": 1
+        },
+        "posture": {
+          "type": "function",
+          "arity": 0
+        }
+      }
+    },
+    "fdx": {
+      "type": "object",
+      "members": {
+        "FDX_RESOURCES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "FdxError": {
+          "type": "function",
+          "arity": 4
+        },
+        "bind": {
+          "type": "function",
+          "arity": 1
+        },
+        "consentReceipt": {
+          "type": "function",
+          "arity": 1
+        },
+        "validateResponse": {
+          "type": "function",
+          "arity": 2
+        }
+      }
+    },
     "fileType": {
       "type": "object",
       "members": {
@@ -5077,6 +6405,14 @@
     "frameworkError": {
       "type": "object",
       "members": {
+        "A2aError": {
+          "type": "function",
+          "arity": 4
+        },
+        "AiInputError": {
+          "type": "function",
+          "arity": 4
+        },
         "ApiKeyError": {
           "type": "function",
           "arity": 4
@@ -5118,6 +6454,10 @@
           "arity": 2
         },
         "GateContractError": {
+          "type": "function",
+          "arity": 4
+        },
+        "GraphqlFederationError": {
           "type": "function",
           "arity": 4
         },
@@ -5249,6 +6589,10 @@
           "type": "function",
           "arity": 4
         },
+        "McpError": {
+          "type": "function",
+          "arity": 4
+        },
         "NotifyError": {
           "type": "function",
           "arity": 4
@@ -5286,6 +6630,10 @@
           "arity": 4
         },
         "SmtpPolicyError": {
+          "type": "function",
+          "arity": 4
+        },
+        "SseError": {
           "type": "function",
           "arity": 4
         },
@@ -5463,6 +6811,45 @@
         "workerThreadGate": {
           "type": "function",
           "arity": 2
+        }
+      }
+    },
+    "gdpr": {
+      "type": "object",
+      "members": {
+        "ropa": {
+          "type": "object",
+          "members": {
+            "GdprRopaError": {
+              "type": "function",
+              "arity": 4
+            },
+            "REQUIRED_ACTIVITY_FIELDS": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "VALID_LEGAL_BASES": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        }
+      }
+    },
+    "graphqlFederation": {
+      "type": "object",
+      "members": {
+        "guardSdl": {
+          "type": "function",
+          "arity": 1
+        },
+        "queryProbesSdl": {
+          "type": "function",
+          "arity": 1
         }
       }
     },
@@ -21955,12 +23342,33 @@
         }
       }
     },
+    "honeytoken": {
+      "type": "object",
+      "members": {
+        "HoneytokenError": {
+          "type": "function",
+          "arity": 4
+        },
+        "KINDS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "create": {
+          "type": "function",
+          "arity": 1
+        }
+      }
+    },
     "htmlBalance": {
       "type": "object",
       "members": {
         "check": {
           "type": "function",
           "arity": 1
+        },
+        "checkSafe": {
+          "type": "function",
+          "arity": 2
         }
       }
     },
@@ -22116,6 +23524,129 @@
         }
       }
     },
+    "iabMspa": {
+      "type": "object",
+      "members": {
+        "ALL_SECTIONS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "DATA_USES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "IabMspaError": {
+          "type": "function",
+          "arity": 4
+        },
+        "SECTION_IDS": {
+          "type": "object",
+          "members": {
+            "7": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "8": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "9": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "10": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "11": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "12": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "13": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "14": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "15": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "16": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "17": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "18": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "19": {
+              "type": "primitive",
+              "valueType": "string"
+            },
+            "20": {
+              "type": "primitive",
+              "valueType": "string"
+            }
+          }
+        },
+        "checkOptOut": {
+          "type": "function",
+          "arity": 2
+        },
+        "gpcFromHeaders": {
+          "type": "function",
+          "arity": 1
+        },
+        "parseGpp": {
+          "type": "function",
+          "arity": 1
+        },
+        "refuseProcessing": {
+          "type": "function",
+          "arity": 2
+        }
+      }
+    },
+    "iabTcf": {
+      "type": "object",
+      "members": {
+        "IabTcfError": {
+          "type": "function",
+          "arity": 4
+        },
+        "TCF_V23_CORE_VERSION": {
+          "type": "primitive",
+          "valueType": "number"
+        },
+        "TCF_V23_POLICY_VERSION": {
+          "type": "primitive",
+          "valueType": "number"
+        },
+        "checkVendor": {
+          "type": "function",
+          "arity": 2
+        },
+        "parseString": {
+          "type": "function",
+          "arity": 1
+        },
+        "requireV23Disclosed": {
+          "type": "function",
+          "arity": 2
+        }
+      }
+    },
     "inbox": {
       "type": "object",
       "members": {
@@ -22126,6 +23657,135 @@
         "create": {
           "type": "function",
           "arity": 1
+        }
+      }
+    },
+    "incident": {
+      "type": "object",
+      "members": {
+        "report": {
+          "type": "object",
+          "members": {
+            "DEFAULT_DEADLINES": {
+              "type": "object",
+              "members": {
+                "final": {
+                  "type": "primitive",
+                  "valueType": "number"
+                },
+                "initial": {
+                  "type": "primitive",
+                  "valueType": "number"
+                },
+                "intermediate": {
+                  "type": "primitive",
+                  "valueType": "number"
+                }
+              }
+            },
+            "IncidentReportError": {
+              "type": "function",
+              "arity": 4
+            },
+            "REGIME_DEADLINES": {
+              "type": "object",
+              "members": {
+                "cra": {
+                  "type": "object",
+                  "members": {
+                    "final": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "initial": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "intermediate": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    }
+                  }
+                },
+                "dora": {
+                  "type": "object",
+                  "members": {
+                    "final": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "initial": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "intermediate": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    }
+                  }
+                },
+                "gdpr": {
+                  "type": "object",
+                  "members": {
+                    "final": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "initial": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "intermediate": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    }
+                  }
+                },
+                "hipaa": {
+                  "type": "object",
+                  "members": {
+                    "final": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "initial": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "intermediate": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    }
+                  }
+                },
+                "nis2": {
+                  "type": "object",
+                  "members": {
+                    "final": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "initial": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    },
+                    "intermediate": {
+                      "type": "primitive",
+                      "valueType": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "VALID_STAGES": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
         }
       }
     },
@@ -22456,6 +24116,23 @@
         }
       }
     },
+    "mcp": {
+      "type": "object",
+      "members": {
+        "parseRequest": {
+          "type": "function",
+          "arity": 2
+        },
+        "refuse": {
+          "type": "function",
+          "arity": 4
+        },
+        "serverGuard": {
+          "type": "function",
+          "arity": 1
+        }
+      }
+    },
     "metrics": {
       "type": "object",
       "members": {
@@ -22484,6 +24161,10 @@
     "middleware": {
       "type": "object",
       "members": {
+        "ageGate": {
+          "type": "function",
+          "arity": 1
+        },
         "aiActDisclosure": {
           "type": "function",
           "arity": 1
@@ -22512,6 +24193,10 @@
           "type": "function",
           "arity": 1
         },
+        "botDisclose": {
+          "type": "function",
+          "arity": 1
+        },
         "botGuard": {
           "type": "function",
           "arity": 1
@@ -22532,7 +24217,15 @@
           "type": "function",
           "arity": 1
         },
+        "cspReport": {
+          "type": "function",
+          "arity": 1
+        },
         "csrfProtect": {
+          "type": "function",
+          "arity": 1
+        },
+        "dailyByteQuota": {
           "type": "function",
           "arity": 1
         },
@@ -22607,6 +24300,10 @@
         "requireMethods": {
           "type": "function",
           "arity": 2
+        },
+        "requireMtls": {
+          "type": "function",
+          "arity": 1
         },
         "requireStepUp": {
           "type": "function",
@@ -22748,6 +24445,15 @@
         "NetworkError": {
           "type": "function",
           "arity": 4
+        },
+        "allowlist": {
+          "type": "object",
+          "members": {
+            "create": {
+              "type": "function",
+              "arity": 1
+            }
+          }
         },
         "bootFromEnv": {
           "type": "function",
@@ -22966,7 +24672,7 @@
                 },
                 "tlsa": {
                   "type": "function",
-                  "arity": 2
+                  "arity": 3
                 },
                 "verifyChain": {
                   "type": "function",
@@ -22979,7 +24685,7 @@
               "members": {
                 "fetch": {
                   "type": "function",
-                  "arity": 1
+                  "arity": 2
                 },
                 "matchMx": {
                   "type": "function",
@@ -23007,7 +24713,7 @@
                     },
                     "tlsa": {
                       "type": "function",
-                      "arity": 2
+                      "arity": 3
                     },
                     "verifyChain": {
                       "type": "function",
@@ -23020,7 +24726,7 @@
                   "members": {
                     "fetch": {
                       "type": "function",
-                      "arity": 1
+                      "arity": 2
                     },
                     "matchMx": {
                       "type": "function",
@@ -23216,6 +24922,10 @@
                 }
               }
             },
+            "pinsetDriftMonitor": {
+              "type": "function",
+              "arity": 1
+            },
             "pqc": {
               "type": "object",
               "members": {
@@ -23250,6 +24960,28 @@
               "arity": 2
             },
             "useSystemTrust": {
+              "type": "function",
+              "arity": 1
+            }
+          }
+        }
+      }
+    },
+    "nis2": {
+      "type": "object",
+      "members": {
+        "report": {
+          "type": "object",
+          "members": {
+            "Nis2ReportError": {
+              "type": "function",
+              "arity": 4
+            },
+            "VALID_ENTITY_TYPES": {
+              "type": "instance",
+              "ctorName": "Array"
+            },
+            "create": {
               "type": "function",
               "arity": 1
             }
@@ -26030,6 +27762,10 @@
         "resolveRoute": {
           "type": "function",
           "arity": 1
+        },
+        "safeHeadersDistinct": {
+          "type": "function",
+          "arity": 1
         }
       }
     },
@@ -26745,6 +28481,23 @@
         }
       }
     },
+    "secCyber": {
+      "type": "object",
+      "members": {
+        "FINDINGS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "SecCyberError": {
+          "type": "function",
+          "arity": 4
+        },
+        "eightKArtifact": {
+          "type": "function",
+          "arity": 1
+        }
+      }
+    },
     "security": {
       "type": "object",
       "members": {
@@ -26862,6 +28615,31 @@
       "type": "function",
       "arity": 2
     },
+    "sse": {
+      "type": "object",
+      "members": {
+        "MAX_DATA_BYTES": {
+          "type": "primitive",
+          "valueType": "number"
+        },
+        "MAX_EVENT_BYTES": {
+          "type": "primitive",
+          "valueType": "number"
+        },
+        "MAX_ID_BYTES": {
+          "type": "primitive",
+          "valueType": "number"
+        },
+        "create": {
+          "type": "function",
+          "arity": 3
+        },
+        "serializeEvent": {
+          "type": "function",
+          "arity": 2
+        }
+      }
+    },
     "ssrfGuard": {
       "type": "object",
       "members": {
@@ -26878,6 +28656,10 @@
           "arity": 2
         },
         "classify": {
+          "type": "function",
+          "arity": 1
+        },
+        "createAllowlist": {
           "type": "function",
           "arity": 1
         },
@@ -27017,6 +28799,31 @@
           "arity": 2
         },
         "restrict": {
+          "type": "function",
+          "arity": 2
+        }
+      }
+    },
+    "tcpa10dlc": {
+      "type": "object",
+      "members": {
+        "DISCLOSURE_PARTIES": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
+        "Tcpa10dlcError": {
+          "type": "function",
+          "arity": 4
+        },
+        "lookup": {
+          "type": "function",
+          "arity": 1
+        },
+        "recordConsent": {
+          "type": "function",
+          "arity": 1
+        },
+        "revoke": {
           "type": "function",
           "arity": 2
         }
@@ -27231,6 +29038,10 @@
     "vault": {
       "type": "object",
       "members": {
+        "SealPemFileError": {
+          "type": "function",
+          "arity": 4
+        },
         "VaultError": {
           "type": "function",
           "arity": 4
@@ -27293,6 +29104,10 @@
           "arity": 1
         },
         "seal": {
+          "type": "function",
+          "arity": 1
+        },
+        "sealPemFile": {
           "type": "function",
           "arity": 1
         },
@@ -27630,6 +29445,10 @@
           "type": "primitive",
           "valueType": "number"
         },
+        "REFUSED_AUTH_QUERY_PARAMS": {
+          "type": "instance",
+          "ctorName": "Array"
+        },
         "WebSocketConnection": {
           "type": "function",
           "arity": 2
@@ -27668,7 +29487,7 @@
         },
         "validateUpgradeRequest": {
           "type": "function",
-          "arity": 1
+          "arity": 2
         }
       }
     },
