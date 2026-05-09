@@ -13,7 +13,47 @@
         "vendor/blamejs/lib/vendor/noble-ciphers.cjs#xchacha20poly1305 — symmetric AEAD for the HermitStash ECIES session key",
         "vendor/blamejs/lib/vendor/noble-post-quantum.cjs#ml_kem1024 — KEM leg of the HermitStash hybrid ECIES bootstrap"
       ],
-      "transitive_manifest": "vendor/blamejs/lib/vendor/MANIFEST.json"
+      "transitive_manifest": "vendor/blamejs/lib/vendor/MANIFEST.json",
+      "files": {
+        "index": "vendor/blamejs/index.js",
+        "safe-json": "vendor/blamejs/lib/safe-json.js",
+        "safe-url": "vendor/blamejs/lib/safe-url.js",
+        "pqc-agent": "vendor/blamejs/lib/pqc-agent.js",
+        "pqc-software": "vendor/blamejs/lib/pqc-software.js",
+        "http-client": "vendor/blamejs/lib/http-client.js",
+        "ws-client": "vendor/blamejs/lib/ws-client.js",
+        "log-stream": "vendor/blamejs/lib/log-stream.js",
+        "log-stream-local": "vendor/blamejs/lib/log-stream-local.js",
+        "atomic-file": "vendor/blamejs/lib/atomic-file.js",
+        "app-shutdown": "vendor/blamejs/lib/app-shutdown.js",
+        "retry": "vendor/blamejs/lib/retry.js",
+        "framework-error": "vendor/blamejs/lib/framework-error.js",
+        "process-spawn": "vendor/blamejs/lib/process-spawn.js",
+        "config-drift": "vendor/blamejs/lib/config-drift.js",
+        "middleware-api-encrypt": "vendor/blamejs/lib/middleware/api-encrypt.js",
+        "noble-post-quantum": "vendor/blamejs/lib/vendor/noble-post-quantum.cjs",
+        "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
+      },
+      "hashes": {
+        "index": "sha256:cb21bd2188dc9b2efa76e854a8ba57dc42a469daa1f62c367b903cef889a7307",
+        "safe-json": "sha256:e16cee8b7f277931c8b8f10d6d7e6aec677e2da1a4c6fc3913e946cd5cbfbd7e",
+        "safe-url": "sha256:98c9b0b822994b6ea1acdc24a07f553d6cf107a82ad74513d9dcb9b690ea4be2",
+        "pqc-agent": "sha256:f6ba04d3d41815871d730cc1631929b4d92561a2d7d3c1d6ea3fbb7db7a493a7",
+        "pqc-software": "sha256:329aa86d52facd289e72780e182be23e86840399124cd8e7a8b8d7d77daec3cf",
+        "http-client": "sha256:31470ac72489f164e2b1fabd9c65faa465ed796d84527a156a70885f3ecaa806",
+        "ws-client": "sha256:94d2b4d437746136447b4568ea2f13a0b5965bd1b4bb88bd45d164b755bdd123",
+        "log-stream": "sha256:84cd595d8830bcb90668fe5817ca929c9ad4bc3a30ef37c76fbc713d22b843b9",
+        "log-stream-local": "sha256:03b01e5fcdc7ae6aa7cad1668313190f8fe56b045c3859abfaf9624cb1411558",
+        "atomic-file": "sha256:5bbd3cedcd266791d050213529889299761deef064ef565dd8ab125212653ac0",
+        "app-shutdown": "sha256:b0251a2c1585066fde883d835ce692eaa06978f3b28caf8b151875aa12c1430c",
+        "retry": "sha256:0373485e263472b04da1defbfb932babaa09103c0022836b6212f24f92acbe92",
+        "framework-error": "sha256:6fe2d3f47db93be4ea5702e3fa7d8fc343fd97a6928413ce84b4d68885b8ddaa",
+        "process-spawn": "sha256:6565c48b6046eb10494ca96aa0c5ab43d0cd18e4b189c685f1ae5f6dc6fd6c33",
+        "config-drift": "sha256:365255f9a64b0d3cf4d1b2fc3dcc1a0cdd4979afa6fcc7c94ec165021d07905f",
+        "middleware-api-encrypt": "sha256:603370db71e1ee72db2d049b33aa8a92a70238095c7533dc03297e3ef4d27efc",
+        "noble-post-quantum": "sha256:f9190309daadca4c2e2cc2b76beaa6b96e463429cc3c390bd9f0ceaf7b588c68",
+        "noble-ciphers": "sha256:5d539dfc9ef47121d4c09bd7256d76448a1f5ac47ee09ac44c78ff6a062af9ab"
+      }
     }
   }
 }

@@ -49,5 +49,48 @@
   }
 })();
 
+// Vendor-tree integrity check. Re-hash every consumed blamejs entry
+// point against the recorded SHA256s in vendor/MANIFEST.json and refuse
+// to start on mismatch. Catches a half-applied vendor refresh, a
+// corrupted clone, or post-commit tampering with a vendored cjs that
+// would silently swap a primitive's behavior. The manifest is populated
+// by `node scripts/vendor-hash.js` after every vendor refresh; CI / the
+// release workflow should run that script's output against HEAD to
+// detect drift.
+(function _verifyVendorIntegrity() {
+  try {
+    var b = require('../vendor/blamejs');
+    var path = require('node:path');
+    // Resolve relative to the bin/ entry, not cwd — the daemon may be
+    // launched from any working directory.
+    var manifestPath = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
+    var r = b.configDrift.verifyVendorIntegrity({
+      manifestPath: manifestPath,
+      libVendorDir: path.join(__dirname, '..'),
+    });
+    if (!r.ok) {
+      process.stderr.write(
+        'hermitstash-sync: vendor integrity check failed.\n' +
+        '  ' + r.mismatches.length + ' file(s) do not match the recorded SHA256 in\n' +
+        '  vendor/MANIFEST.json. Mismatches:\n'
+      );
+      for (var i = 0; i < r.mismatches.length && i < 5; i += 1) {
+        var m = r.mismatches[i];
+        process.stderr.write('    - ' + m.path + '\n');
+      }
+      process.stderr.write(
+        '  Re-clone the repository or run `node scripts/vendor-hash.js`\n' +
+        '  if the vendor was deliberately refreshed.\n'
+      );
+      process.exit(70); // EX_SOFTWARE
+    }
+  } catch (e) {
+    process.stderr.write(
+      'hermitstash-sync: vendor integrity check threw (' + e.message + ').\n'
+    );
+    process.exit(70);
+  }
+})();
+
 const { run } = require('../lib/cli');
 run(process.argv.slice(2));
