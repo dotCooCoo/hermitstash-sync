@@ -44,7 +44,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group l
 ## Requirements
 
 - Node.js 24+ (for `node:sqlite` and OpenSSL 3.5+ PQC support)
-- HermitStash server v1.9.15+ with sync features enabled (earlier servers used a legacy ECIES envelope this client no longer speaks — see CLAUDE.md "Security Invariants" rule 4)
+- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43 which emits 0xE2-magic envelopes; this client (also on v0.8.43) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 
 ## Install
 
