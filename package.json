@@ -1,6 +1,6 @@
 {
   "name": "hermitstash-sync",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "description": "Desktop sync client for HermitStash — post-quantum encrypted file sync",
   "type": "commonjs",
   "main": "bin/hermitstash-sync.js",
@@ -18,7 +18,7 @@
   "author": "dotCooCoo",
   "license": "AGPL-3.0-or-later",
   "engines": {
-    "node": ">=24.4.0"
+    "node": ">=24.14.1"
   },
   "dependencies": {},
   "devDependencies": {}

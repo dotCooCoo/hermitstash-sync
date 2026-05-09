@@ -43,7 +43,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group l
 
 ## Requirements
 
-- Node.js 24.4+ (vendored blamejs requires `>=24.4.0`; also covers `node:sqlite` and OpenSSL 3.5+ PQC support)
+- Node.js 24.14.1+ (vendored blamejs's effective floor; also covers `node:sqlite` and OpenSSL 3.5+ PQC support)
 - HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43 which emits 0xE2-magic envelopes; this client (also on v0.8.43) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 
 ## Install
@@ -390,7 +390,7 @@ Download the latest release from the [Releases page](https://github.com/dotCooCo
 ### Building locally
 
 ```bash
-# Requires Node.js 24.4+ and postject
+# Requires Node.js 24.14.1+ and postject
 node --experimental-sea-config build/sea-config.json
 cp $(which node) build/hermitstash-sync
 npx postject build/hermitstash-sync NODE_SEA_BLOB build/hermitstash-sync.blob \
