@@ -1,0 +1,22 @@
+# Force LF line endings for the vendored blamejs tree.
+#
+# Without this, git's autocrlf=true on Windows checks out vendor/blamejs/
+# files with CRLF line endings, while Linux/macOS checkouts (and CI runners)
+# get LF. Our boot-time integrity gate (`b.configDrift.verifyVendorIntegrity`
+# in bin/hermitstash-sync.js) hashes filesystem bytes against the recorded
+# SHA256 in vendor/MANIFEST.json — line-ending drift means the hashes
+# computed on a Windows dev machine don't match the bytes a Linux CI
+# runner sees, and the integrity check fails on the workflow's first
+# `hermitstash-sync version` invocation.
+#
+# Pinning the vendor tree to LF makes Windows + Linux + macOS see
+# identical bytes regardless of autocrlf, which is the only way the
+# hash-recorded-against-disk-bytes contract holds cross-platform.
+vendor/blamejs/** text eol=lf
+vendor/blamejs/lib/vendor/*.cjs text eol=lf
+
+# scripts/ are also size-sensitive (vendor-hash.js itself shouldn't drift).
+scripts/*.js text eol=lf
+
+# bin/ entry point — same reason; if anything ever hashes it.
+bin/*.js text eol=lf
