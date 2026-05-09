@@ -244,8 +244,11 @@ else
 fi
 
 # ---- Auto-update ECDSA signing (separate from GPG) ----
-# Signs the SHA3-512 digest with a P-384 key. This is the .sig that the
-# daemon verifies with the pubkey embedded in lib/constants.js.
+# ECDSA P-384 over the binary, DER encoding — matches what
+# crypto.verify(null, binary, pubkey, sig) (the call b.crypto.verify
+# makes inside b.selfUpdate.verify) accepts. Hard break from the v0.6.13
+# format (raw ieee-p1363 over SHA3-512 digest); existing v0.6.x binaries
+# cannot auto-update across this boundary.
 AUTOUPDATE_KEY="${AUTOUPDATE_SIGNING_KEY_FILE:-${HOME}/.hermitstash-sync/autoupdate-signing.key}"
 if [ -f "${AUTOUPDATE_KEY}" ]; then
   echo "  Signing for auto-update with ${AUTOUPDATE_KEY}"
@@ -253,10 +256,9 @@ if [ -f "${AUTOUPDATE_KEY}" ]; then
   const fs = require('node:fs');
   const crypto = require('node:crypto');
   const key = crypto.createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
-  const digest = crypto.createHash('sha3-512').update(fs.readFileSync(process.argv[2])).digest();
-  const sig = crypto.sign('sha512', digest, { key, dsaEncoding: 'ieee-p1363' });
+  const sig = crypto.sign(null, fs.readFileSync(process.argv[2]), key);
   fs.writeFileSync(process.argv[2] + '.sig', sig);
-  console.log('  Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes)');
+  console.log('  Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, DER)');
   " "${AUTOUPDATE_KEY}" "${EXE_PATH}"
 else
   echo "  No auto-update signing key at ${AUTOUPDATE_KEY} — skipping .sig."

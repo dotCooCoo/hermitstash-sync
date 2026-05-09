@@ -117,10 +117,16 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
 
-      # ---- Auto-update signing (raw P-384 ECDSA over SHA3-512 digest) ----
+      # ---- Auto-update signing (ECDSA P-384 over binary, DER) ----
       # Separate from GPG — this is the key embedded in lib/constants.js that
-      # the daemon verifies against when self-updating. Zero npm deps on the
-      # verify path (node:crypto only).
+      # the daemon verifies against via b.selfUpdate.verify when self-updating.
+      # Zero npm deps on the verify path (node:crypto only).
+      #
+      # Signature shape: ECDSA P-384, sha384 hash, DER encoding — matches what
+      # `crypto.verify(null, binary, pubkey, sig)` (the call b.crypto.verify
+      # makes internally) accepts. Hard break from the v0.6.13 format (raw
+      # ieee-p1363 over SHA3-512 digest); existing v0.6.x binaries cannot
+      # auto-update across this boundary and must reinstall manually.
 
       - name: ECDSA sign binary for auto-update
         env:
@@ -136,10 +142,9 @@ jobs:
           const fs = require('node:fs');
           const crypto = require('node:crypto');
           const key = crypto.createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
-          const digest = crypto.createHash('sha3-512').update(fs.readFileSync(process.argv[2])).digest();
-          const sig = crypto.sign('sha512', digest, { key, dsaEncoding: 'ieee-p1363' });
+          const sig = crypto.sign(null, fs.readFileSync(process.argv[2]), key);
           fs.writeFileSync(process.argv[2] + '.sig', sig);
-          console.log('Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, ieee-p1363)');
+          console.log('Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, DER)');
           " "$KEY_FILE" "$EXE"
 
       # ---- Upload artifacts for release job ----

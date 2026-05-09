@@ -197,7 +197,9 @@ Falls back to `~/.hermitstash-sync/credentials` (permissions `0600`) on headless
 
 ### Auto-update
 
-Binary (SEA) installs poll GitHub Releases every 6 hours. When a newer version exists, the daemon downloads the binary for its platform, verifies the SHA3-512 checksum, and verifies a raw P-384 ECDSA signature over that digest using a public key embedded in the binary at build time. Only after both checks pass does it rename the current binary to `.prev`, write the new one in place, and spawn itself. If the new binary crashes within 60 seconds of first start, the next launch restores `.prev`.
+Binary (SEA) installs poll GitHub Releases every 6 hours. When a newer version exists, the daemon downloads the binary for its platform and verifies a P-384 ECDSA signature (DER) over the binary bytes against a public key embedded at build time. Only after the signature verifies does it copy the current binary to `.prev`, atomically rename the new one in place, and spawn itself. If the new binary crashes within 60 seconds of first start, the next launch restores `.prev`.
+
+The verify path runs through `b.selfUpdate.verify` (auto-detects the algorithm from the embedded public key) and the swap runs through `b.selfUpdate.swap` (atomic rename with cross-device fallback and rollback on failure). Releases v0.6.13 and earlier signed the SHA3-512 digest with raw `ieee-p1363` encoding; v0.6.14+ signs the binary directly with DER. **An existing v0.6.13 binary cannot auto-update across the v0.6.14 boundary** — the signature format mismatch will be reported as a verification failure and the install refused. Manually download and reinstall v0.6.14+ once to bridge the gap.
 
 Source installs (running from `git clone`) do not self-replace — the daemon logs a notice when a new version is out and expects you to `git pull` yourself.
 
@@ -368,7 +370,7 @@ The sync client ships as a standalone binary — no Node.js installation require
 | **Build** | GitHub Actions on tag push (`v*`) — automated via `.github/workflows/release.yml` |
 | **Platforms** | Windows x64, Linux x64, Linux ARM64, macOS ARM64 (Intel Macs: use the ARM64 binary under Rosetta 2) |
 | **Artifacts** | `hermitstash-sync-vX.Y.Z-{win,linux,macos}-{x64,arm64}[.exe]` + SHA3-512 checksum + GPG signature, per platform |
-| **Signing** | GPG (P-384) for humans + raw P-384 ECDSA over SHA3-512 digest for the auto-update channel. No Authenticode — see Windows note below. |
+| **Signing** | GPG (P-384) for humans + P-384 ECDSA (DER) over the binary bytes for the auto-update channel (verified via `b.selfUpdate.verify`). No Authenticode — see Windows note below. |
 | **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) |
 | **Dependencies** | Zero npm runtime packages — all vendored |
 
