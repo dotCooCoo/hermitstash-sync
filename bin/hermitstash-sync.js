@@ -66,8 +66,25 @@
 // by `node scripts/vendor-hash.js` after every vendor refresh; CI / the
 // release workflow should run that script's output against HEAD to
 // detect drift.
+//
+// SEA bypass: when running as a Single Executable Application (Node ≥21
+// `node:sea`), the vendor tree is bundled into the binary and there's no
+// vendor/ sibling directory on disk to re-hash. SEA integrity is
+// established at release time via the P-384 ECDSA signature over the
+// SHA3-512 of the binary, verified by `lib/updater.js` before any swap.
+// Running this gate on an SEA would always fail with "MANIFEST.json
+// missing", which is exactly what broke v0.6.6 → v0.6.8 docker smoke
+// tests. Skip the gate in SEA mode; the from-source integrity check
+// remains active for `node bin/hermitstash-sync.js`.
 (function _verifyVendorIntegrity() {
   try {
+    // node:sea is only available on Node ≥21; older Nodes throw on
+    // require. Wrap so a non-SEA Node without the module still proceeds
+    // to the gate (the Node-floor gate above already enforces ≥24.14).
+    var sea;
+    try { sea = require('node:sea'); } catch (_e) { sea = null; }
+    if (sea && typeof sea.isSea === 'function' && sea.isSea()) return;
+
     var b = require('../vendor/blamejs');
     var path = require('node:path');
     // Resolve relative to the bin/ entry, not cwd — the daemon may be
