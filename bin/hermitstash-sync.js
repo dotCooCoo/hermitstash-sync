@@ -21,5 +21,33 @@
   process.exit(78); // EX_CONFIG (sysexits)
 })();
 
+// Boot-time PQC Known-Answer Test. Validates the vendored ML-KEM-1024
+// keygen → encapsulate → decapsulate round-trip produces matching 32-byte
+// shared secrets before the daemon performs any real crypto. If the
+// vendored noble-post-quantum bundle is corrupted or the build truncated
+// it (vendor-tree refresh gone wrong, partial download, etc.) we fail
+// here instead of inside the first apiEncrypt envelope decapsulation
+// where the failure mode would be a confusing "session-unknown" loop.
+(function _runPqcKAT() {
+  try {
+    var b = require('../vendor/blamejs');
+    var r = b.pqcSoftware.runKnownAnswerTest();
+    if (!r || !r.ok) {
+      process.stderr.write(
+        'hermitstash-sync: PQC self-test failed (' +
+        (r && r.reason ? r.reason : 'unknown') + ').\n' +
+        'The vendored cryptographic bundle in vendor/blamejs/ may be\n' +
+        'corrupted. Re-clone the repository or refresh vendor/blamejs/.\n'
+      );
+      process.exit(70); // EX_SOFTWARE
+    }
+  } catch (e) {
+    process.stderr.write(
+      'hermitstash-sync: PQC self-test threw (' + e.message + ').\n'
+    );
+    process.exit(70);
+  }
+})();
+
 const { run } = require('../lib/cli');
 run(process.argv.slice(2));
