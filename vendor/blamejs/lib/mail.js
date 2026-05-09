@@ -1,66 +1,59 @@
 "use strict";
 /**
- * mail — message contract + pluggable transports.
+ * @module b.mail
+ * @featured true
+ * @nav    Communication
+ * @title  Mail
  *
- * Both the contract and the transport surface ship together. Operators
- * can also pass any function or `{ send }` object as a custom transport.
+ * @intro
+ *   SMTP / HTTP-API email send with multipart RFC 5322 message
+ *   composition, DKIM signing on the way out, and full inbound mail-
+ *   authentication parsing on the way in. Builds a multipart/alternative
+ *   body for text+html, multipart/related for inline images via `cid:`
+ *   references, multipart/mixed when attachments are present, and
+ *   handles SMTPUTF8 (RFC 6531) + IDN domain Punycode (RFC 3492) for
+ *   internationalized addresses.
  *
- *   mail.transports.console — logs message to stderr (dev default)
- *   mail.transports.memory  — captures into a `sent[]` array (tests)
- *   mail.transports.smtp    — raw RFC 5321 over net/tls with STARTTLS,
- *                             AUTH LOGIN, and PQC-friendly TLS opts
- *   mail.transports.http    — generic HTTP-API transport: operator
- *                             supplies endpoint, headers, serialize(),
- *                             and interpret() — works with any vendor
- *                             that speaks JSON-over-HTTPS (Postmark,
- *                             Mailgun, SES HTTP, SendGrid, Resend, …)
- *   mail.transports.resend  — thin preset that wires http to the
- *                             Resend API (illustrates the pattern)
+ *   Transports ship as `b.mail.transports.*`: `console` (stderr dev
+ *   default), `memory` (captures to `sent[]` for fixtures), `smtp`
+ *   (raw RFC 5321 over net / tls with STARTTLS, AUTH LOGIN, and PQC-
+ *   friendly TLS opts), `http` (generic JSON-over-HTTPS for any vendor
+ *   speaking that contract — Postmark / Mailgun / SES HTTP / SendGrid /
+ *   Resend), `resend` (thin preset wiring `http` to the Resend API as
+ *   the worked example). Operators can also pass any function or
+ *   `{ send }` object as a custom transport.
  *
- * Public API:
+ *   DKIM-Signature header generation lives at `b.mail.dkim` (rsa-sha256
+ *   default, ed25519-sha256 opt-in, dual-signer per RFC 8463 §3 for
+ *   transition windows). Inbound authentication-results parsing —
+ *   SPF (RFC 7208), DMARC (RFC 7489), ARC chain trust evaluation
+ *   (RFC 8617) — is exposed as `b.mail.spf` / `b.mail.dmarc` /
+ *   `b.mail.arc` / `b.mail.authResults`. BIMI (RFC draft) is at
+ *   `b.mail.bimi`. RFC 8058 one-click List-Unsubscribe lives at
+ *   `b.mail.unsubscribe` and folds in automatically when the message
+ *   carries `unsubscribe: { url | mailto, oneClick? }`.
  *
- *   mail.create({ transport?, defaults?, audit? }) → instance
+ *   CAN-SPAM Act §7704 enforcement is on-by-default for instances
+ *   created with `commercial: true`: every send refuses unless the
+ *   instance supplied `postalAddress` AND the message exposes a
+ *   functional opt-out (List-Unsubscribe header or `unsubscribe.{url|
+ *   mailto}` on the message). The postal address auto-appends to both
+ *   text and html bodies via the configured separator; operators
+ *   override the html footer with `footerHtml` (must still contain the
+ *   country + postal-code bytes — the framework refuses operator
+ *   overrides that drop the legally-required address).
  *
- *     transport — function(message) | { send(message) }; default: console.
- *     defaults  — { from, replyTo, headers, ... } merged into every
- *                 message unless the message overrides.
- *     audit     — emit mail.send.success / .failure audit events
- *                 (default true).
+ *   Validation surface uses `MailError` (a `FrameworkError` subclass)
+ *   with stable codes per failure: `missing-to` / `missing-from` /
+ *   `missing-body` / `invalid-recipient` / `mail/transport-failed` /
+ *   `smtp-*` / `http-*` / `resend-*`. Vendor-specific presets carry
+ *   their own code prefix so diagnostic logs identify the provider
+ *   that rejected the message. Audit emits `mail.send.success` /
+ *   `mail.send.failure` / `mail.canspam.refused` and records recipient
+ *   COUNTS only — addresses are PII, never auto-logged.
  *
- *   await instance.send(message)
- *     message: {
- *       to:       "x@y" | ["x@y", ...]
- *       cc:       string | string[]
- *       bcc:      string | string[]
- *       from:     "Name <noreply@app>"        (or instance default)
- *       replyTo:  "..."
- *       subject:  "..."
- *       text:     "plain body"                (at least one of text/html)
- *       html:     "<p>...</p>"
- *       headers:  { "X-Custom": "v" }         (merged with defaults)
- *       attachments: [{
- *         filename:           "report.pdf",        // required
- *         content:             buf,                // Buffer or string
- *         contentType:         "application/pdf",  // default application/octet-stream
- *         contentDisposition:  "attachment",       // or "inline"
- *         cid:                 "logo-1",            // for inline images:
- *                                                  // <img src="cid:logo-1">
- *       }, ...]
- *     }
- *     → whatever the transport returned
- *
- * When attachments are present the SMTP transport wraps the body in
- * multipart/mixed; text+html bodies still use multipart/alternative
- * inside. Resend's http preset forwards attachments via the Resend API
- * shape (base64 content + content_id for inline). Operators wiring
- * other vendors against httpTransport include attachments in their
- * own serialize() per-vendor.
- *
- * Validation surface uses MailError (FrameworkError subclass) with
- * permanent flag. Distinct codes per failure: missing-to, missing-from,
- * missing-body, invalid-recipient, transport-failed, smtp-*, http-*,
- * resend-*. Vendor-specific presets carry their own code prefix so
- * diagnostic logs identify the provider that rejected the message.
+ * @card
+ *   SMTP / HTTP-API email send with multipart RFC 5322 message composition, DKIM signing on the way out, and full inbound mail- authentication parsing on the way in.
  */
 var C = require("./constants");
 var crypto = require("./crypto");
@@ -119,9 +112,26 @@ function _isAscii(s) {
   return !NON_ASCII_RE.test(s);
 }
 
-// IDN domain encode — domain MUST be the part after '@'. Returns the
-// Punycode-encoded ASCII domain, OR null if the input isn't a valid
-// IDN-encodable domain.
+/**
+ * @primitive b.mail.toAscii
+ * @signature b.mail.toAscii(domain)
+ * @since     0.7.16
+ * @status    stable
+ * @related   b.mail.toUnicode, b.mail.create
+ *
+ * RFC 3492 Punycode encode an IDN domain to its ASCII-compatible form.
+ * `domain` MUST be the part after `@` — pass the local part separately.
+ * Returns the encoded ASCII string, or `null` when the input isn't a
+ * valid IDN-encodable domain. Used internally by `send()` to convert
+ * IDN domain parts before the pre-SMTPUTF8 ASCII regex check; surfaced
+ * publicly so operators wiring custom transports can apply the same
+ * normalization.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var ascii = b.mail.toAscii("münchen.de");
+ *   // → "xn--mnchen-3ya.de"
+ */
 function toAscii(domain) {
   if (typeof domain !== "string" || domain.length === 0) return null;
   var ascii;
@@ -131,6 +141,24 @@ function toAscii(domain) {
   return ascii;
 }
 
+/**
+ * @primitive b.mail.toUnicode
+ * @signature b.mail.toUnicode(domain)
+ * @since     0.7.16
+ * @status    stable
+ * @related   b.mail.toAscii, b.mail.create
+ *
+ * Decode an ASCII-Compatible-Encoding (Punycode `xn--…`) domain back
+ * to its Unicode form. Returns `null` when the input isn't a valid
+ * IDN domain. Operators rendering received-from / authentication-
+ * results trace lines use this to display the human-readable form
+ * alongside the on-the-wire ASCII representation.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var u = b.mail.toUnicode("xn--mnchen-3ya.de");
+ *   // → "münchen.de"
+ */
 function toUnicode(domain) {
   if (typeof domain !== "string" || domain.length === 0) return null;
   try { return nodeUrl.domainToUnicode(domain); }
@@ -210,6 +238,87 @@ function _normalizeRecipientList(value, label) {
     }
   }
   return arr;
+}
+
+// CAN-SPAM postal-address validation. Accepts either a 5-field object
+// shape (street/city/region/postalCode/country) or a non-empty string
+// (operators with an irregular address layout — e.g. EU multi-line —
+// pass a pre-rendered string and the framework appends it as-is).
+//
+// Returns null on valid; a description string on invalid. The framework
+// converts the description into a MailError code at the call-site.
+function _validatePostalAddress(addr) {
+  if (addr == null) return "postalAddress is required";
+  if (typeof addr === "string") {
+    if (addr.trim().length === 0) return "postalAddress (string) must be non-empty";
+    return null;
+  }
+  if (typeof addr !== "object") {
+    return "postalAddress must be an object or non-empty string";
+  }
+  var REQUIRED = ["street", "city", "region", "postalCode", "country"];
+  for (var i = 0; i < REQUIRED.length; i += 1) {
+    var k = REQUIRED[i];
+    var v = addr[k];
+    if (typeof v !== "string" || v.trim().length === 0) {
+      return "postalAddress." + k + " is required (non-empty string)";
+    }
+    if (/[\r\n\0]/.test(v)) {                                                                                      // allow:regex-no-length-cap — short typo-surfacing check; address fields are operator config not network bytes
+      return "postalAddress." + k + " contains forbidden control characters (CR/LF/NUL)";
+    }
+  }
+  return null;
+}
+
+// Pull a single field out of the address shape (object or string).
+// Returns "" when the field isn't present (string-shape addresses don't
+// carry structured fields).
+function _addressField(addr, field) {
+  if (addr && typeof addr === "object" && typeof addr[field] === "string") {
+    return addr[field];
+  }
+  return "";
+}
+
+// Render the structured address as a single text block for the
+// CAN-SPAM footer. String-shape inputs render verbatim.
+function _renderPostalAddressText(addr) {
+  if (typeof addr === "string") return addr;
+  if (!addr || typeof addr !== "object") return "";
+  var line2 = [addr.city, addr.region, addr.postalCode].filter(Boolean).join(", ");
+  return [addr.street, line2, addr.country].filter(Boolean).join("\n");
+}
+
+function _renderPostalAddressHtml(addr) {
+  if (typeof addr === "string") {
+    return _htmlEscape(addr).replace(/\n/g, "<br>");
+  }
+  if (!addr || typeof addr !== "object") return "";
+  var parts = [];
+  if (addr.street)      parts.push(_htmlEscape(addr.street));
+  var line2 = [addr.city, addr.region, addr.postalCode].filter(Boolean).join(", ");
+  if (line2)            parts.push(_htmlEscape(line2));
+  if (addr.country)     parts.push(_htmlEscape(addr.country));
+  return parts.join("<br>");
+}
+
+function _htmlEscape(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function _hasUnsubscribe(message) {
+  if (message.unsubscribe && typeof message.unsubscribe === "object") return true;
+  var headers = message.headers;
+  if (!headers || typeof headers !== "object") return false;
+  var keys = Object.keys(headers);
+  for (var i = 0; i < keys.length; i += 1) {
+    if (keys[i].toLowerCase() === "list-unsubscribe") return true;
+  }
+  return false;
 }
 
 function _validateMessage(message) {
@@ -1029,10 +1138,45 @@ function resendTransport(opts) {
 
 // ---- Engine instance ----
 
+/**
+ * @primitive b.mail.create
+ * @signature b.mail.create(opts)
+ * @since     0.1.0
+ * @status    stable
+ * @compliance gdpr, soc2, hipaa
+ * @related   b.mail.toAscii, b.mail.toUnicode
+ *
+ * Build a mail instance bound to a transport + defaults. Returns
+ * `{ send, transport, defaults }`: `send(message)` validates the
+ * merged message against the framework contract, applies CAN-SPAM
+ * footer + unsubscribe enforcement when `commercial: true`, runs
+ * RFC 8058 List-Unsubscribe header expansion when the message carries
+ * `unsubscribe`, then delegates to the transport. Audit rows record
+ * recipient counts only (addresses are PII).
+ *
+ * @opts
+ *   transport:       function (message) | { send(message), name? },   // default: console
+ *   defaults:        { from, replyTo, headers, ... },                 // merged into every message
+ *   audit:           boolean,                                          // default true
+ *   commercial:      boolean,                                          // CAN-SPAM §7704 enforcement
+ *   regulated:       boolean,                                          // alias for commercial:true
+ *   postalAddress:   { street, city, region, postalCode, country } | string,
+ *   footerSeparator: string,                                           // default "\n\n----\n" / "<hr>"
+ *   footerHtml:      string,                                           // override for html-part footer
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var mail = b.mail.create({
+ *     transport: b.mail.transports.memory(),
+ *     defaults:  { from: "Acme <noreply@acme.test>" },
+ *   });
+ *   // → { send, transport, defaults }
+ */
 function create(opts) {
   opts = opts || {};
   validateOpts(opts, [
     "transport", "defaults", "audit",
+    "commercial", "postalAddress", "footerSeparator", "footerHtml", "regulated",
   ], "mail");
   var transport = opts.transport || consoleTransport();
   if (typeof transport === "function") {
@@ -1044,6 +1188,55 @@ function create(opts) {
   }
   var defaults = opts.defaults || {};
   var auditOn = opts.audit !== false;
+
+  // CAN-SPAM Act §7704(a)(5) — every commercial-content message MUST
+  // include the sender's valid physical postal address. Validate the
+  // address shape at create() so a typo / blank field surfaces at boot,
+  // not silently on first send. Operators marking an instance
+  // commercial:true also opt every send() into the unsubscribe-required
+  // posture (CAN-SPAM §7704(a)(3) — RFC 8058 List-Unsubscribe header
+  // already wired via b.mail.unsubscribe).
+  var commercial = opts.commercial === true || opts.regulated === true;
+  var postalAddress = opts.postalAddress != null ? opts.postalAddress : null;
+  if (commercial) {
+    var addrError = _validatePostalAddress(postalAddress);
+    if (addrError) {
+      throw new MailError("mail/missing-postal-address",
+        "mail.create({ commercial: true }): " + addrError +
+        " — CAN-SPAM Act §7704(a)(5) requires a valid physical postal address.",
+        true);
+    }
+  }
+  var footerSeparator = (typeof opts.footerSeparator === "string")
+    ? opts.footerSeparator : null;
+  var footerHtml = (typeof opts.footerHtml === "string") ? opts.footerHtml : null;
+  if (footerHtml && commercial) {
+    var addrText = _renderPostalAddressText(postalAddress);
+    // Country + postal-code presence check — operator-supplied HTML
+    // overrides MUST still carry the address bytes. We don't lex HTML
+    // here; substring match against the rendered address is enough to
+    // catch "operator forgot to interpolate the address into their
+    // override template" without parsing markup.
+    var country = _addressField(postalAddress, "country");
+    var postalCode = _addressField(postalAddress, "postalCode");
+    if (country && footerHtml.indexOf(country) === -1) {
+      throw new MailError("mail/bad-footer-html",
+        "mail.create({ footerHtml }): override must contain the postalAddress.country '" +
+        country + "' (CAN-SPAM §7704(a)(5)). Got: " + footerHtml.slice(0, 200),                                   // allow:raw-byte-literal — diagnostic clamp characters, not bytes
+        true);
+    }
+    if (postalCode && footerHtml.indexOf(postalCode) === -1) {
+      throw new MailError("mail/bad-footer-html",
+        "mail.create({ footerHtml }): override must contain the postalAddress.postalCode '" +
+        postalCode + "' (CAN-SPAM §7704(a)(5))",
+        true);
+    }
+    // Suppress the "unused-variable" lint signal for addrText — the
+    // sanity-render establishes the address shape is renderable before
+    // we trust the operator override; the rendered text isn't itself
+    // injected when footerHtml overrides.
+    void addrText;
+  }
 
   function _emit(action, info) {
     if (!auditOn) return;
@@ -1079,6 +1272,50 @@ function create(opts) {
       merged.headers = Object.assign({}, merged.headers || {}, unsubHeaders);
       delete merged.unsubscribe;
     }
+
+    // CAN-SPAM §7704(a) — every commercial-content message must carry
+    // a valid physical postal address (auto-appended to the body) and
+    // a clear opt-out path. The address shape was validated at
+    // create(); this block (a) re-asserts the unsubscribe path is
+    // present, (b) appends the formatted footer to text + html parts,
+    // and (c) emits a structured audit row when the send refuses.
+    if (commercial) {
+      if (!_hasUnsubscribe(merged)) {
+        try {
+          audit().safeEmit({
+            action:  "mail.canspam.refused",
+            outcome: "denied",
+            metadata: {
+              reason: "missing-unsubscribe",
+              transport: transport.name || "custom",
+            },
+          });
+        } catch (_e) { /* audit best-effort */ }
+        throw new MailError("mail/canspam-no-unsubscribe",
+          "mail.send: commercial:true requires either message.unsubscribe = " +
+          "{ url|mailto, oneClick? } OR a List-Unsubscribe header. CAN-SPAM " +
+          "§7704(a)(3)/(4) — every commercial message must give recipients a " +
+          "clear opt-out mechanism.", true);
+      }
+      var sepText = footerSeparator != null ? footerSeparator : "\n\n----\n";
+      var sepHtml = footerSeparator != null ? footerSeparator : "<hr>";
+      var addrText = _renderPostalAddressText(postalAddress);
+      var addrHtml = footerHtml || _renderPostalAddressHtml(postalAddress);
+      // Append-only — operators who want the address in a different
+      // location render it themselves and disable commercial:true (or
+      // pass footerHtml with the operator-controlled layout).
+      if (typeof merged.text === "string" && merged.text.length > 0 &&
+          merged.text.indexOf(addrText) === -1) {
+        merged.text = merged.text + sepText + addrText + "\n";
+      } else if (merged.text == null && addrText) {
+        merged.text = addrText + "\n";
+      }
+      if (typeof merged.html === "string" && merged.html.length > 0 &&
+          merged.html.indexOf(addrHtml) === -1) {
+        merged.html = merged.html + sepHtml + addrHtml;
+      }
+    }
+
     _validateMessage(merged);
 
     var t0 = Date.now();
