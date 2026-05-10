@@ -83,6 +83,13 @@ async function run() {
     check("watcher.create: returns stop + root",
       typeof w.stop === "function" && w.root === path.resolve(tmpDir));
 
+    // Wait for the watcher to fully prime BEFORE the test writes
+    // anything. macOS fs.watch (FSEvents) needs an event-loop turn
+    // after construction before it begins delivering events; without
+    // this priming wait, file writes race the watcher startup and
+    // events for those writes get dropped on Darwin CI runners.
+    await new Promise(function (r) { setTimeout(r, 200); });
+
     // Write a regular file → onChange (after flush).
     fs.writeFileSync(path.join(tmpDir, "a.txt"), "hello");
     // Write an ignored file → no onChange.
@@ -93,10 +100,16 @@ async function run() {
     fs.mkdirSync(path.join(tmpDir, "skip-dir"));
     fs.writeFileSync(path.join(tmpDir, "skip-dir", "inside.txt"), "x");
 
-    // Drain — fs.watch is async on every kernel; give the OS a tick to
-    // deliver pending events into the watcher's queue.
-    await new Promise(function (r) { setTimeout(r, 300); });
-    w._flushForTest();
+    // Poll-until-event with a generous cap. macOS fs.watch on CI
+    // runners can take 2-3s to deliver write events under load;
+    // exit early when we've seen the target event so fast platforms
+    // (Linux/Windows) finish in milliseconds.
+    var deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      w._flushForTest();
+      if (changes.some(function (e) { return e.relativePath === "a.txt" && e.type === "file"; })) break;
+      await new Promise(function (r) { setTimeout(r, 100); });
+    }
 
     var sawA = changes.some(function (e) { return e.relativePath === "a.txt" && e.type === "file"; });
     check("watcher.create: surface onChange for non-ignored file", sawA);
@@ -114,14 +127,14 @@ async function run() {
     changes.length = 0;
     deletes.length = 0;
     fs.unlinkSync(path.join(tmpDir, "a.txt"));
-    await new Promise(function (r) { setTimeout(r, 300); });
+    await new Promise(function (r) { setTimeout(r, 1500); });
     w._flushForTest();
     var sawDelete = deletes.some(function (e) { return e.relativePath === "a.txt"; });
     check("watcher.create: emits onDelete on unlink", sawDelete);
 
     // onChange shape — exercise via fresh write + flush.
     fs.writeFileSync(path.join(tmpDir, "shape.txt"), "1234");
-    await new Promise(function (r) { setTimeout(r, 300); });
+    await new Promise(function (r) { setTimeout(r, 1500); });
     w._flushForTest();
     var shape = changes.find(function (e) { return e.relativePath === "shape.txt"; });
     check("watcher.create: onChange has type/relativePath/fullPath/size/mtime",
@@ -135,7 +148,7 @@ async function run() {
       changes.length = 0;
       try {
         fs.symlinkSync(os.tmpdir(), path.join(tmpDir, "symlink-out"));
-        await new Promise(function (r) { setTimeout(r, 300); });
+        await new Promise(function (r) { setTimeout(r, 1500); });
         w._flushForTest();
         var sawSymlink = changes.some(function (e) { return e.relativePath === "symlink-out"; });
         check("watcher.create: skips symlink events", !sawSymlink);
