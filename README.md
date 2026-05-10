@@ -28,6 +28,36 @@ If you're already running HermitStash and you want your files to show up on the 
 
 ---
 
+## Built on [blamejs](https://github.com/blamejs/blamejs)
+
+<p align="center">
+  <a href="https://github.com/blamejs/blamejs">
+    <img src="https://raw.githubusercontent.com/blamejs/blamejs/main/assets/BlameJS_Logo.svg" alt="blamejs" width="120" />
+  </a>
+</p>
+
+<p align="center">
+  <strong><em>The Node framework that owns its stack.</em></strong>
+</p>
+
+HermitStash Sync vendors [**blamejs**](https://github.com/blamejs/blamejs) — a single, audit-able framework that bundles its own crypto, transports, validation, and process-lifecycle primitives instead of pulling them from forty transitive npm packages. That's how this client ships with **zero npm runtime dependencies** while still getting:
+
+- **PQC TLS 1.3 agent** (`b.pqcAgent`) — `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` posture pinned for both the mTLS sync transport and the auto-update GitHub-release downloader
+- **Hardened HTTP client** (`b.httpClient.request`) — SSRF gate with DNS pinning that closes the resolve-vs-connect TOCTOU window, AbortSignal, idle-vs-wall-clock timeout split, permanent-vs-transient classifier, h2 via ALPN
+- **Hardened WebSocket client** (`b.wsClient`) — RFC 6455 with decompression-bomb defence, UTF-8 fatal validation, ≤125-byte control-frame cap, RSV1-on-continuation rejection, permanent-error classifier
+- **Per-session encryption envelope** (`b.middleware.apiEncrypt` / `b.httpClient.encrypted`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, identity-agile 4-byte version header
+- **Daemon lifecycle** (`b.daemon`, `b.appShutdown.pidLock`) — atomic-create pidfile, SIGTERM→SIGKILL escalation, phase-ordered graceful shutdown
+- **Cross-platform file watcher** (`b.watcher`) — fs.watch + event coalescing + symlink-skip + debounce on real kernels, polling fallback for bind mounts and FUSE filesystems
+- **Self-update lifecycle** (`b.selfUpdate.{poll,verify,swap,rollback}`) — semver-aware GitHub Releases poll, ECDSA P-384 detached-signature verify, atomic backup-and-rename swap with rollback
+- **Validation primitives** (`b.safeJson`, `b.safeUrl`, `b.atomicFile`, `b.retry`, `b.safeAsync.repeating`) — depth/size/prototype caps, atomic-rename + fsync, full-jitter exponential backoff, error-swallowing recurring timers
+- **Vendored ML-KEM-1024 + XChaCha20-Poly1305** via blamejs's own pinned `noble-post-quantum` / `noble-ciphers` cjs bundles
+
+The client sits as a thin specialization on top — sync engine, file watcher integration, state DB, and CLI surface — while the wire layer, crypto layer, and process layer are blamejs's responsibility. Every refresh of `vendor/blamejs/` carries upstream security backports across all of those primitives at once.
+
+If you're building something else and find yourself reaching for this same set of primitives, give blamejs a look: <https://github.com/blamejs/blamejs>.
+
+---
+
 ## What it does
 
 Watches a local folder and keeps it in sync with a HermitStash server:
