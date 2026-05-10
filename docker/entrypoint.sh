@@ -26,6 +26,16 @@ CONFIG_FILE="${CONFIG_DIR}/config.json"
 # Never allow the daemon's binary self-replace inside a container image.
 export HERMITSTASH_AUTO_UPDATE=false
 
+# Default the file watcher to polling mode in containers. Bind-mounted
+# /data on Docker Desktop (Windows / macOS hosts via gRPC-FUSE /
+# VirtioFS) and on NFS / SMB / FUSE mounts does not propagate kernel
+# inotify events into the container — fs.watch goes silent and
+# host-written files never trigger upload. Polling sidesteps the
+# event-bridge entirely. Operators who know their bind-mount fires
+# inotify (Linux host + native bind mount, no FS virtualization) can
+# override with HERMITSTASH_WATCHER_MODE=fs in the container env.
+export HERMITSTASH_WATCHER_MODE="${HERMITSTASH_WATCHER_MODE:-poll}"
+
 if [ ! -f "${CONFIG_FILE}" ]; then
   if [ -z "${HERMITSTASH_ENROLLMENT_CODE:-}" ] || [ -z "${HERMITSTASH_SERVER_URL:-}" ]; then
     cat >&2 <<MSG
