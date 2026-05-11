@@ -154,6 +154,234 @@ async function _testLoadDbBacked() {
   } catch (e) { threw2 = e; }
   helpers.check("config.loadDbBacked: intervalMs must be positive finite",
     threw2 && threw2.code === "config/bad-interval");
+
+  var threw3;
+  try {
+    b.config.loadDbBacked({
+      schema:         { safeParse: function () { return { ok: true, value: {} }; }, parse: function () { return {}; } },
+      fetchRows:      function () { return []; },
+      intervalMs:     1000,
+      transformValue: "not-a-function",
+    });
+  } catch (e) { threw3 = e; }
+  helpers.check("config.loadDbBacked: transformValue must be a function",
+    threw3 && threw3.code === "config/bad-transform-value");
+}
+
+async function _testLoadDbBackedTransformValue() {
+  // Per-row transform — common shape is sealed-value unseal. We use a
+  // simple `sealed:<plain>` transform so the test stays vendor-free.
+  var s = b.safeSchema;
+  var rows = [
+    { key: "STRIPE_SECRET", sealed: "sealed:sk_live_AAA" },
+    { key: "JWT_KEY",       sealed: "sealed:jwt_BBB" },
+    { key: "BAD_KEY",       sealed: "missing-prefix" },     // transform throws → row skipped
+  ];
+  var transformCalls = 0;
+  var cfg = b.config.loadDbBacked({
+    schema:         s.object({
+      STRIPE_SECRET: s.string().default("env-fallback-stripe"),
+      JWT_KEY:       s.string().default("env-fallback-jwt"),
+      BAD_KEY:       s.string().default("env-fallback-bad"),
+    }),
+    env:            {},
+    fetchRows:      function () { return rows; },
+    intervalMs:     50,
+    transformValue: function (row) {
+      transformCalls += 1;
+      if (typeof row.sealed !== "string" || row.sealed.indexOf("sealed:") !== 0) {
+        throw new Error("bad seal prefix");
+      }
+      return row.sealed.slice("sealed:".length);
+    },
+  });
+  await cfg.hydrated;
+  helpers.check("loadDbBacked: transformValue ran per row",
+    transformCalls >= 3);
+  helpers.check("loadDbBacked: transformValue unseals STRIPE_SECRET",
+    cfg.value.STRIPE_SECRET === "sk_live_AAA");
+  helpers.check("loadDbBacked: transformValue unseals JWT_KEY",
+    cfg.value.JWT_KEY === "jwt_BBB");
+  helpers.check("loadDbBacked: transformValue failure falls back to env default",
+    cfg.value.BAD_KEY === "env-fallback-bad");
+  cfg.stop();
+}
+
+async function _testLoadDbBackedRefresh() {
+  // Save-triggered reload: refresh() runs one tick on demand, so
+  // admin save handlers don't wait intervalMs for the new value to
+  // become active. Subscribers fire synchronously inside the reload.
+  var s = b.safeSchema;
+  var current = "initial";
+  var observed = [];
+  var cfg = b.config.loadDbBacked({
+    schema:     s.object({ K: s.string().default("d") }),
+    env:        {},
+    fetchRows:  function () { return [{ key: "K", value: current }]; },
+    intervalMs: 60 * 1000,   // 60s — well outside the test budget;
+                             // refresh() must drive every update
+  });
+  await cfg.hydrated;
+  helpers.check("loadDbBacked.refresh: initial hydration applied",
+    cfg.value.K === "initial");
+
+  cfg.subscribe(function (v) { observed.push(v.K); });
+
+  // Simulate admin save → write row → fire refresh().
+  current = "post-save-1";
+  await cfg.refresh();
+  helpers.check("loadDbBacked.refresh: post-save value active immediately",
+    cfg.value.K === "post-save-1");
+  helpers.check("loadDbBacked.refresh: subscriber fired with new value",
+    observed[observed.length - 1] === "post-save-1");
+
+  // A second save, to confirm refresh() is repeatable + subscribers
+  // get every transition.
+  current = "post-save-2";
+  await cfg.refresh();
+  helpers.check("loadDbBacked.refresh: second save propagates",
+    cfg.value.K === "post-save-2");
+  helpers.check("loadDbBacked.refresh: subscribers see every transition",
+    observed.indexOf("post-save-1") !== -1 && observed.indexOf("post-save-2") !== -1);
+
+  // refresh() returns a Promise that resolves (never rejects) even
+  // when the underlying fetch throws — last-good value stays put.
+  var brokenCfg = b.config.loadDbBacked({
+    schema:     s.object({ K: s.string().default("d") }),
+    env:        {},
+    fetchRows:  function () { throw new Error("simulated db outage"); },
+    intervalMs: 60 * 1000,
+  });
+  await brokenCfg.hydrated;
+  var rejected = false;
+  await brokenCfg.refresh().catch(function () { rejected = true; });
+  helpers.check("loadDbBacked.refresh: never rejects on fetch failure",
+    rejected === false);
+  helpers.check("loadDbBacked.refresh: last-good value preserved on fetch failure",
+    brokenCfg.value.K === "d");
+  brokenCfg.stop();
+  cfg.stop();
+}
+
+async function _testLoadDbBackedConcurrentRefreshRace() {
+  // Two refresh()es back-to-back where the FIRST fetchRows is slower
+  // than the SECOND. Without sequence-guarded apply, the older read
+  // resolves last and overwrites the newer save. Verifies the
+  // drop-stale invariant: the latest-STARTED tick's data wins,
+  // regardless of which tick finishes last.
+  var s = b.safeSchema;
+  var saveOrder = [];
+  var current = "initial";
+  function _sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  var callIndex = 0;
+  var cfg = b.config.loadDbBacked({
+    schema:     s.object({ K: s.string().default("d") }),
+    env:        {},
+    fetchRows:  async function () {
+      callIndex += 1;
+      var mine = callIndex;            // capture per-call so concurrent
+                                       // calls don't read each other's index
+      var captured = current;
+      var lat = (mine === 1) ? 200 : 20;  // first slow, second fast
+      saveOrder.push("fetch-" + mine + "-start@" + captured);
+      await _sleep(lat);
+      saveOrder.push("fetch-" + mine + "-end@" + captured);
+      return [{ key: "K", value: captured }];
+    },
+    intervalMs: 60 * 1000,             // poll out of test window
+  });
+  await cfg.hydrated;
+  helpers.check("concurrent-refresh: initial hydration applied",
+    cfg.value.K === "initial");
+
+  // Reset so the race is between two refresh()es only (hydration
+  // already ran with callIndex=1 above; advance counters so the
+  // race's "first call" is slow, "second" is fast).
+  callIndex = 0;
+
+  // Save 1, refresh — fetch will be slow (200ms).
+  current = "save-1";
+  var p1 = cfg.refresh();
+  // Tiny gap to ensure the second refresh starts AFTER the first
+  // entered its fetch (so its seq is strictly greater).
+  await _sleep(10);
+  // Save 2, refresh — fetch will be fast (20ms).
+  current = "save-2";
+  var p2 = cfg.refresh();
+
+  // p2 should resolve first (faster fetch) and leave cfg at "save-2".
+  // p1 should resolve later but DROP its older overlay.
+  await Promise.all([p1, p2]);
+  helpers.check("concurrent-refresh: latest save wins (save-2)",
+    cfg.value.K === "save-2");
+
+  // Verify the slow tick actually finished AFTER the fast tick — i.e.,
+  // the race scenario the user described actually occurred.
+  var fastEndIx = saveOrder.indexOf("fetch-2-end@save-2");
+  var slowEndIx = saveOrder.indexOf("fetch-1-end@save-1");
+  helpers.check("concurrent-refresh: slow tick finished after fast tick",
+    fastEndIx !== -1 && slowEndIx !== -1 && slowEndIx > fastEndIx);
+  cfg.stop();
+}
+
+async function _testLoadDbBackedFailedReloadDoesNotSuppressOlderValid() {
+  // refresh(valid)-slow followed by refresh(invalid)-fast. The newer
+  // tick finishes first and fails validation; without the
+  // "advance-only-on-success" invariant, the failed reload would
+  // bump the high-water mark to seq=2 and cause the older valid
+  // tick (seq=1) to drop as stale when it finally lands —
+  // silently keeping stale config active even though a valid update
+  // was in-flight at the time.
+  var s = b.safeSchema;
+  function _sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  var callIndex = 0;
+  var nextValue = "valid-data";   // hydration uses this
+  var cfg = b.config.loadDbBacked({
+    schema:     s.object({ K: s.string().min(4).default("default-ok") }),
+    env:        {},
+    fetchRows:  async function () {
+      callIndex += 1;
+      var mine = callIndex;
+      var captured = nextValue;
+      // Hydration (#1) fast, refresh1 (#2) slow, refresh2 (#3) fast.
+      var lat = (mine === 2) ? 200 : 20;
+      await _sleep(lat);
+      return [{ key: "K", value: captured }];
+    },
+    intervalMs: 60 * 1000,
+  });
+  await cfg.hydrated;
+  helpers.check("failed-reload: initial hydration applied valid value",
+    cfg.value.K === "valid-data");
+
+  // refresh1 — slow valid (200ms).
+  nextValue = "newer-valid-data";
+  var p1 = cfg.refresh();
+  await _sleep(10);
+  // refresh2 — fast invalid (will fail s.string().min(4) at apply).
+  nextValue = "x";
+  var p2 = cfg.refresh();
+
+  await Promise.all([p1, p2]);
+
+  // refresh2 (newer-finishes-first) reload threw, watermark NOT
+  // advanced. refresh1 (older-finishes-later) still passes the
+  // stale-check, applies its valid overlay. cfg has "newer-valid-data".
+  helpers.check("failed-reload: older valid tick applied after newer invalid failed",
+    cfg.value.K === "newer-valid-data");
+  cfg.stop();
+}
+
+async function _testCryptoFieldDocAliases() {
+  // sealDoc / unsealDoc are doc-shaped aliases of sealRow / unsealRow.
+  helpers.check("b.cryptoField.sealDoc exists",
+    typeof b.cryptoField.sealDoc === "function");
+  helpers.check("b.cryptoField.unsealDoc exists",
+    typeof b.cryptoField.unsealDoc === "function");
+  helpers.check("b.cryptoField.sealDoc === sealRow",
+    b.cryptoField.sealDoc === b.cryptoField.sealRow);
+  helpers.check("b.cryptoField.unsealDoc === unsealRow",
+    b.cryptoField.unsealDoc === b.cryptoField.unsealRow);
 }
 
 async function _testHotReload() {
@@ -172,7 +400,16 @@ async function _testHotReload() {
   helpers.check("config.reload: subscriber notified", observed && observed.X === "second");
 }
 
-module.exports = { run: async function () { await run(); await _testLoadDbBacked(); await _testHotReload(); } };
+module.exports = { run: async function () {
+  await run();
+  await _testLoadDbBacked();
+  await _testLoadDbBackedTransformValue();
+  await _testLoadDbBackedRefresh();
+  await _testLoadDbBackedConcurrentRefreshRace();
+  await _testLoadDbBackedFailedReloadDoesNotSuppressOlderValid();
+  await _testCryptoFieldDocAliases();
+  await _testHotReload();
+} };
 
 if (require.main === module) {
   run().then(
