@@ -185,14 +185,25 @@ function create(opts) {
     return value;
   }
 
-  return {
-    value:     value,
+  // `.value` is a getter, not a captured property. Without this,
+  // `cfg.value.X` reads from the object that was current at create()
+  // and never reflects subsequent reload() updates — operators looking
+  // at `cfg.value.FEATURE_X` would see stale values forever, while
+  // `cfg.get("FEATURE_X")` saw fresh ones. The @primitive docs
+  // (loadDbBacked example) promise `cfg.value.X` always works, so the
+  // getter is the contract.
+  var handle = {
     get:       function (key) { return value[key]; },
     has:       function (key) { return Object.prototype.hasOwnProperty.call(value, key); },
     redacted:  redactedView,
     subscribe: subscribe,
     reload:    reload,
   };
+  Object.defineProperty(handle, "value", {
+    get: function () { return value; },
+    enumerable: true,
+  });
+  return handle;
 }
 
 /**
@@ -209,16 +220,45 @@ function create(opts) {
  * via the underlying handle's `reload`, and re-validates. Reload
  * failures emit a `config.reload.failed` audit row but DO NOT
  * clobber the previous value — the running app stays on the
- * last-good config. The returned handle is the same shape as
- * `create()` plus a `.stop()` method that halts the poller.
+ * last-good config.
+ *
+ * Returns immediately with a synchronous handle, but kicks off one
+ * immediate hydration tick on construction so the first DB read
+ * happens at t=0 rather than t=intervalMs. Callers that need to wait
+ * for first-data-applied can `await handle.hydrated` before the app
+ * starts serving traffic; the Promise resolves after the first tick
+ * settles (success OR audit-on-failure path) and never rejects, so
+ * the boot path never deadlocks on a temporarily-unreachable DB.
+ *
+ * The returned handle is the same shape as `create()` plus:
+ *   - `.hydrated` — Promise<void> for the first tick
+ *   - `.refresh()`— run one tick on demand (save-triggered reload);
+ *                   returns Promise<void> that never rejects
+ *   - `.stop()`   — halts the poller
+ *
+ * Three tiers of precedence (highest wins): the DB-row overlay
+ * resolved at each `_tick` > the `opts.env` baseline > defaults
+ * declared on the schema (`s.string().default(...)` and friends).
+ * The `.subscribe(fn)` callback registered through `create()` fires
+ * synchronously inside every successful reload — operators reach for
+ * it to invalidate caches, recompute derived state, or hot-rebuild
+ * middleware that closed over the previous config value.
  *
  * @opts
- *   schema:      b.safeSchema instance (required),
- *   env:         object  (env baseline; default process.env),
- *   redactKeys:  Array<string>,
- *   fetchRows:   async () => Array<{ key: string, value: string }>  (required),
- *   intervalMs:  number   (positive finite poll interval),
- *   audit:       boolean  (default true; reserved for future per-poll audit),
+ *   schema:         b.safeSchema instance (required),
+ *   env:            object  (env baseline; default process.env),
+ *   redactKeys:     Array<string>,
+ *   fetchRows:      async () => Array<{ key: string, value: string }>  (required),
+ *   intervalMs:     number   (positive finite poll interval),
+ *   transformValue: (row) => string | Promise<string>   (optional per-row
+ *                   transform — receives `{ key, value, ...rest }` so the
+ *                   row can carry envelope metadata; returns the value
+ *                   that flows into the schema. Common shape: unseal a
+ *                   `b.vault`-sealed ciphertext column before validation.
+ *                   Rows whose transform throws or returns a non-string
+ *                   are skipped with a `config.reload.failed` audit so a
+ *                   single bad row never crashes the poller),
+ *   audit:          boolean  (default true; reserved for future per-poll audit),
  *
  * @example
  *   var s = b.safeSchema;
@@ -234,10 +274,42 @@ function create(opts) {
  *   });
  *   cfg.value.FEATURE_X;    // → false  (until first poll tick lands)
  *   cfg.stop();             // halt the poller on shutdown
+ *
+ * @example
+ *   // Sealed values — column stores `b.vault.seal(plain)` ciphertext.
+ *   var cfg = b.config.loadDbBacked({
+ *     schema:     s.object({ STRIPE_SECRET: s.string() }),
+ *     fetchRows:  async function () {
+ *       return await db.all("SELECT key, sealed FROM _config WHERE sealed IS NOT NULL");
+ *     },
+ *     transformValue: function (row) {
+ *       return b.vault.unseal(row.sealed).toString("utf8");
+ *     },
+ *     intervalMs: 30 * 1000,
+ *   });
+ *
+ * @example
+ *   // Save-triggered reload — admin UI writes a row, fires refresh()
+ *   // so the new value is active immediately without waiting for
+ *   // intervalMs. cfg.subscribe(...) sees the change inline.
+ *   var cfg = b.config.loadDbBacked({
+ *     schema:     s.object({ FEATURE_X: b.config.coerce.boolean().default(false) }),
+ *     fetchRows:  async function () { return await db.all("SELECT key, value FROM _config"); },
+ *     intervalMs: 5 * 60 * 1000,                  // safety-net interval
+ *   });
+ *   await cfg.hydrated;                            // boot path waits
+ *   cfg.subscribe(function (next) { cache.invalidate(); });
+ *
+ *   adminApp.post("/settings", async function (req, res) {
+ *     await db.run("INSERT OR REPLACE INTO _config(key,value) VALUES (?,?)",
+ *                  req.body.key, req.body.value);
+ *     await cfg.refresh();                         // active immediately
+ *     res.json({ ok: true });
+ *   });
  */
 function loadDbBacked(opts) {
   opts = opts || {};
-  validateOpts(opts, ["schema", "env", "redactKeys", "fetchRows", "intervalMs", "audit"],
+  validateOpts(opts, ["schema", "env", "redactKeys", "fetchRows", "intervalMs", "transformValue", "audit"],
     "config.loadDbBacked");
   if (typeof opts.fetchRows !== "function") {
     throw new ConfigError("config/bad-fetch-rows",
@@ -247,10 +319,32 @@ function loadDbBacked(opts) {
     throw new ConfigError("config/bad-interval",
       "loadDbBacked: opts.intervalMs must be a positive finite number");
   }
+  var transformValue = validateOpts.optionalFunction(
+    opts.transformValue, "loadDbBacked: opts.transformValue",
+    ConfigError, "config/bad-transform-value") || null;
   var cfg = create({ schema: opts.schema, env: opts.env, redactKeys: opts.redactKeys });
   var stopped = false;
+  // Concurrency guard. _tick() runs `await opts.fetchRows()` + per-row
+  // `await transformValue(row)`, so multiple ticks (poll firing while
+  // refresh() is in-flight, or two refresh()es back-to-back) can
+  // overlap. Without coordination, whichever tick FINISHES last applies
+  // its overlay last — and "finishes last" is not "started last" when
+  // fetchRows latency varies. The result: an admin save followed by
+  // await refresh() can be silently rolled back by an older in-flight
+  // tick whose fetchRows started before the save.
+  //
+  // Fix: every tick claims a monotonic seq at start. At apply time, if
+  // a newer tick has already applied (ticksAppliedMax >= my seq), drop
+  // — its data is more recent than mine. The seq check + reload are
+  // both synchronous (no awaits between them) so the check-and-apply
+  // is atomic on Node's single thread. fetch / transform failures do
+  // NOT advance ticksAppliedMax: they short-circuit before the apply
+  // path, leaving newer ticks free to apply later.
+  var ticksStarted = 0;
+  var ticksAppliedMax = -1;
   async function _tick() {
     if (stopped) return;
+    var mySeq = ++ticksStarted;
     var rows;
     try { rows = await opts.fetchRows(); }
     catch (e) {
@@ -265,11 +359,53 @@ function loadDbBacked(opts) {
     if (!Array.isArray(rows)) return;
     var overlay = {};
     for (var i = 0; i < rows.length; i++) {
-      if (rows[i] && typeof rows[i].key === "string") {
-        overlay[rows[i].key] = rows[i].value;
+      var row = rows[i];
+      if (!row || typeof row.key !== "string") continue;
+      var value = row.value;
+      if (transformValue) {
+        try {
+          value = await transformValue(row);
+        } catch (e) {
+          try {
+            lazyAudit().safeEmit({
+              action: "config.reload.failed", outcome: "failure",
+              metadata: { phase: "transform", key: row.key, reason: e && e.message },
+            });
+          } catch (_e) { /* audit best-effort */ }
+          continue;
+        }
+        if (typeof value !== "string") {
+          try {
+            lazyAudit().safeEmit({
+              action: "config.reload.failed", outcome: "failure",
+              metadata: { phase: "transform", key: row.key, reason: "transformValue did not return a string" },
+            });
+          } catch (_e) { /* audit best-effort */ }
+          continue;
+        }
       }
+      overlay[row.key] = value;
     }
-    try { cfg.reload(overlay); }
+    // Drop-stale: a tick that started after me has already finished and
+    // applied its newer fetch — my overlay would clobber fresher data.
+    if (mySeq <= ticksAppliedMax) {
+      try {
+        lazyAudit().safeEmit({
+          action: "config.reload.skipped", outcome: "success",
+          metadata: { phase: "stale-tick", mySeq: mySeq, appliedMax: ticksAppliedMax },
+        });
+      } catch (_e) { /* audit best-effort */ }
+      return;
+    }
+    // Advance the watermark ONLY after a successful reload. A newer
+    // tick whose validation fails must not suppress an older in-flight
+    // tick that still has valid data — otherwise refresh(valid)
+    // followed by refresh(invalid) could silently keep the previous
+    // config active even though the valid update is about to land.
+    try {
+      cfg.reload(overlay);
+      ticksAppliedMax = mySeq;
+    }
     catch (e) {
       try {
         lazyAudit().safeEmit({
@@ -279,7 +415,25 @@ function loadDbBacked(opts) {
       } catch (_e) { /* audit best-effort */ }
     }
   }
+  // Fire one immediate hydration before the interval kicks in so
+  // callers can `await cfg.hydrated` and not get an empty config window
+  // (env defaults only) for the first intervalMs of process lifetime.
+  // The interval still fires every intervalMs afterwards for ongoing
+  // drift detection. The hydration Promise NEVER rejects — _tick
+  // swallows fetch / transform / validate failures via audit, matching
+  // the established "last-good config stays in place" contract.
+  cfg.hydrated = _tick();
   var handle = safeAsync.repeating(_tick, opts.intervalMs, { name: "config-db-reload" });
+  // Save-triggered reload — admin save handlers / settings-management
+  // UIs invoke cfg.refresh() right after writing a row to drop the
+  // intervalMs-worth of staleness latency between save and active.
+  // Returns the same Promise<void> shape as cfg.hydrated: resolves
+  // after the tick settles (success OR audit-on-failure), never
+  // rejects so the save handler never deadlocks on a flaky DB.
+  // Subscribers fire synchronously inside cfg.reload() within the
+  // tick, matching the save-then-invalidate-cache pattern operators
+  // expect when an admin flips a feature flag.
+  cfg.refresh = function () { return _tick(); };
   cfg.stop = function () { stopped = true; if (handle) { handle.stop(); handle = null; } };
   return cfg;
 }
