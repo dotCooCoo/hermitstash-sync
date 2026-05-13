@@ -52,6 +52,25 @@ var pqcSoftware = require("./pqc-software");
 // rotates (scripts/vendor-data-keygen.js).
 var PUBKEY_PEM = require("./vendor/vendor-data-pubkey");
 
+// Downstream patch (hermitstash-sync): static dispatch table so esbuild
+// bundling for the SEA build can trace every .data.js target at build
+// time. The `require(entry.module)` call below is dynamic — esbuild
+// flags it as an unresolvable computed require and falls back to a
+// runtime `__require()` shim that fails inside the SEA with
+// "No such built-in module: ./vendor/<name>.data" (the bundled module
+// never made it into the SEA blob). Pre-loading each known target as
+// a static require pins them into the bundle; the loader below reads
+// from this map instead of doing a dynamic require. NOT in
+// vendor/MANIFEST.json's consumed-files set so the integrity gate
+// remains green. Carry this patch forward on each blamejs refresh
+// until upstream switches to static dispatch — track via the same
+// process as the old SEA-PSL patch we shed at v0.7.3.
+var _STATIC_VENDOR_DATA = {
+  "public-suffix-list":         require("./vendor/public-suffix-list.data"),
+  "common-passwords-top-10000": require("./vendor/common-passwords-top-10000.data"),
+  "bimi-trust-anchors":         require("./vendor/bimi-trust-anchors.data"),
+};
+
 var VendorDataError = defineClass("VendorDataError", { alwaysPermanent: true });
 
 // KNOWN_VENDOR_DATA — the canonical list of vendored data names. Each
@@ -104,7 +123,11 @@ function _loadAndVerify(name) {
 
   var mod;
   try {
-    mod = require(entry.module);
+    // Downstream patch (hermitstash-sync): pull from the static dispatch
+    // map populated at module-init instead of doing a dynamic require()
+    // that esbuild's SEA-bundling pass can't trace.
+    mod = _STATIC_VENDOR_DATA[name];
+    if (!mod) throw new Error("static dispatch entry missing for '" + name + "'");
   } catch (e) {
     throw new VendorDataError("vendor-data/module-missing",
       "vendorData: '" + name + "' module not loadable at " + entry.module +
@@ -298,7 +321,8 @@ function inventory() {
     var name = names[i];
     var entry = KNOWN_VENDOR_DATA[name];
     _loadAndVerify(name);
-    var mod = require(entry.module);
+    // Downstream patch (hermitstash-sync): static dispatch (see top of file).
+    var mod = _STATIC_VENDOR_DATA[name];
     var meta = mod.metadata;
     out.push({
       name:        name,
