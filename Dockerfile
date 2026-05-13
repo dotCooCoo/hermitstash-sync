@@ -38,8 +38,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the parts of the repo the verifier needs (and only those — smaller
-# build context, clearer layer).
-COPY lib/constants.js /build/lib/constants.js
+# build context, clearer layer). lib/autoupdate-pubkey.js is the
+# zero-dep module that carries the P-384 verify key; the full
+# lib/constants.js depends transitively on vendor/blamejs which we
+# don't ship into the verify stage.
+COPY lib/autoupdate-pubkey.js /build/lib/autoupdate-pubkey.js
 COPY scripts/verify-release.js /build/scripts/verify-release.js
 
 RUN set -eux; \

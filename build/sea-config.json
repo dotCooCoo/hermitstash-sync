@@ -3,8 +3,5 @@
   "output": "build/hermitstash-sync.blob",
   "disableExperimentalSEAWarning": true,
   "useSnapshot": false,
-  "useCodeCache": true,
-  "assets": {
-    "public-suffix-list.dat": "vendor/blamejs/lib/vendor/public-suffix-list.dat"
-  }
+  "useCodeCache": true
 }

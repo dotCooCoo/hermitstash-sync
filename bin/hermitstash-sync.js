@@ -121,5 +121,32 @@
   }
 })();
 
+// Vendor-data integrity gate. blamejs v0.9.8+ ships its three vendored data
+// files (PSL, common-passwords, BIMI trust anchors) as `require()`-resolved
+// CJS modules with four orthogonal trust layers: SHA-256 + SHA3-512 +
+// SLH-DSA-SHAKE-256f signature + in-payload canary. `b.vendorData.verifyAll`
+// forces eager verification of every registered entry up front, so a
+// tampered install fails at boot instead of at first PSL lookup. This is
+// orthogonal to the JS-file integrity check above — that one re-hashes the
+// consumed source files, this one verifies the bundled data payloads. Both
+// run on every boot; mismatches in either are EX_SOFTWARE.
+(function _verifyVendorData() {
+  try {
+    var b = require('../vendor/blamejs');
+    if (b.vendorData && typeof b.vendorData.verifyAll === 'function') {
+      b.vendorData.verifyAll();
+    }
+  } catch (e) {
+    process.stderr.write(
+      'hermitstash-sync: vendor data integrity check failed (' +
+      (e && e.message ? e.message : 'unknown') + ').\n' +
+      '  One of the bundled data files (PSL / common-passwords / BIMI\n' +
+      '  anchors) failed dual-hash + SLH-DSA + canary verification.\n' +
+      '  Re-clone the repository or refresh vendor/blamejs/.\n'
+    );
+    process.exit(70); // EX_SOFTWARE
+  }
+})();
+
 const { run } = require('../lib/cli');
 run(process.argv.slice(2));
