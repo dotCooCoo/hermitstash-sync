@@ -117,16 +117,18 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
 
-      # ---- Auto-update signing (ECDSA P-384 over binary, DER) ----
-      # Separate from GPG — this is the key embedded in lib/constants.js that
-      # the daemon verifies against via b.selfUpdate.verify when self-updating.
-      # Zero npm deps on the verify path (node:crypto only).
+      # ---- Auto-update signing (ECDSA P-384 over binary, SHA3-512, DER) ----
+      # Separate from GPG — this is the key embedded in lib/autoupdate-pubkey.js
+      # that the daemon verifies against via b.selfUpdate.verify when self-
+      # updating. Zero npm deps on the verify path (node:crypto only).
       #
-      # Signature shape: ECDSA P-384, sha384 hash, DER encoding — matches what
-      # `crypto.verify(null, binary, pubkey, sig)` (the call b.crypto.verify
-      # makes internally) accepts. Hard break from the v0.6.13 format (raw
-      # ieee-p1363 over SHA3-512 digest); existing v0.6.x binaries cannot
-      # auto-update across this boundary and must reinstall manually.
+      # Signature shape: ECDSA P-384, **SHA3-512** hash, DER encoding —
+      # matches what `b.selfUpdate.standaloneVerifier` (and the in-binary
+      # b.selfUpdate.verify wired in v0.7.7+) checks against. Hard break
+      # from the v0.6.13...v0.7.6 format (ECDSA P-384 over SHA-384 inferred
+      # from the curve); existing v0.6.x and v0.7.0...v0.7.6 binaries cannot
+      # auto-update across this boundary and must reinstall via
+      # deploy/install.sh (Docker users: `docker pull`).
 
       - name: ECDSA sign binary for auto-update
         env:
@@ -142,9 +144,12 @@ jobs:
           const fs = require('node:fs');
           const crypto = require('node:crypto');
           const key = crypto.createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
-          const sig = crypto.sign(null, fs.readFileSync(process.argv[2]), key);
+          const signer = crypto.createSign('sha3-512');
+          signer.update(fs.readFileSync(process.argv[2]));
+          signer.end();
+          const sig = signer.sign({ key, dsaEncoding: 'der' });
           fs.writeFileSync(process.argv[2] + '.sig', sig);
-          console.log('Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, DER)');
+          console.log('Wrote ' + process.argv[2] + '.sig (' + sig.length + ' bytes, SHA3-512, DER)');
           " "$KEY_FILE" "$EXE"
 
       # ---- Upload artifacts for release job ----
