@@ -1,27 +1,29 @@
 'use strict';
 
-// verify-release.js — standalone verifier used by the Docker build,
-// the deploy/install.sh installer, and the deploy/update.sh updater.
+// verify-release.js — release-asset CLI shim around blamejs's zero-dep
+// `b.selfUpdate.standaloneVerifier`. Used by the Docker verify stage,
+// `deploy/install.sh`, and `deploy/update.sh` — all contexts that run
+// BEFORE vendor/blamejs is on disk. The verifier itself lives at
+// `scripts/standalone-verifier.js`, vendored verbatim from
+// `vendor/blamejs/lib/self-update-standalone-verifier.js` so we can
+// ship it alongside this CLI without dragging the full b.* surface
+// into the install pipeline. The pubkey at `lib/autoupdate-pubkey.js`
+// is operator-owned (this repo's release key).
 //
-// Given a binary and its .sig file, verify the ECDSA P-384 signature
-// over the binary bytes (DER) using the pubkey embedded in
-// lib/autoupdate-pubkey.js. Mirrors what `b.selfUpdate.verify` does at
-// runtime. Exits 0 on success, nonzero with a message on any failure.
-// No npm deps — node:crypto + node:fs only. Critically: this script
-// must require ONLY zero-dep modules so contexts that don't ship
-// vendor/blamejs (the Dockerfile verify stage, deploy/install.sh,
-// deploy/update.sh) can still run it.
+// Algorithm + format auto-detected by the standalone verifier:
+//   - ECDSA P-384 (IEEE-P1363 r||s, 96 bytes) — what release.yml emits
+//   - ECDSA P-384 (DER) — accepted for compatibility
+//   - Ed25519, ML-DSA-87 — accepted if the pubkey SPKI matches
 //
-// The .sha3-512 sidecar argument is preserved for backward compatibility
-// with existing Dockerfile / install.sh / update.sh callers, but is
-// only used as an informational digest cross-check; the signature is
-// the integrity gate. Pass `-` (a dash) when no checksum file is
-// available.
+// The .sha3-512 sidecar argument is preserved for backward compat with
+// the old Dockerfile / install.sh / update.sh callers, but is only used
+// as an informational digest cross-check; the signature is the integrity
+// gate. Pass `-` (a dash) when no checksum file is available.
 //
 // Usage: node scripts/verify-release.js <binary> <binary.sha3-512|-> <binary.sig>
 
 const fs = require('node:fs');
-const crypto = require('node:crypto');
+const verifier = require('./standalone-verifier');
 const { AUTOUPDATE_PUBKEY_PEM } = require('../lib/autoupdate-pubkey');
 
 function die(msg) {
@@ -37,26 +39,20 @@ if (!AUTOUPDATE_PUBKEY_PEM) {
   die('AUTOUPDATE_PUBKEY_PEM not embedded in lib/autoupdate-pubkey.js — cannot verify');
 }
 
-const binary = fs.readFileSync(binPath);
-const sig = fs.readFileSync(sigPath);
-
-const ok = crypto.verify(
-  null,
-  binary,
-  crypto.createPublicKey(AUTOUPDATE_PUBKEY_PEM),
-  sig,
-);
-if (!ok) die('ECDSA signature verification failed');
+let result;
+try {
+  result = verifier.verify(binPath, sigPath, AUTOUPDATE_PUBKEY_PEM);
+} catch (err) {
+  die(`signature verification failed: ${err && err.message ? err.message : String(err)}`);
+}
+if (!result || !result.ok) die('ECDSA signature verification failed');
 
 if (sumPath !== '-' && fs.existsSync(sumPath)) {
   const sumText = fs.readFileSync(sumPath, 'utf8');
   const expected = (sumText.trim().match(/^([0-9a-f]+)/i) || [])[1];
-  if (expected) {
-    const actual = crypto.createHash('sha3-512').update(binary).digest('hex');
-    if (expected.toLowerCase() !== actual.toLowerCase()) {
-      die(`SHA3-512 cross-check mismatch: expected ${expected}, got ${actual}`);
-    }
+  if (expected && expected.toLowerCase() !== result.sha3_512.toLowerCase()) {
+    die(`SHA3-512 cross-check mismatch: expected ${expected}, got ${result.sha3_512}`);
   }
 }
 
-console.log(`[verify] OK — ${binPath} passes ECDSA P-384 (DER) signature check`);
+console.log(`[verify] OK — ${binPath} passes ${result.alg} signature check`);

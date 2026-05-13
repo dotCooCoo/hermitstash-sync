@@ -63,6 +63,25 @@ function sha256File(rel) {
   return 'sha256:' + crypto.createHash('sha256').update(buf).digest('hex');
 }
 
+// Refresh the operator-shipped copy of blamejs's zero-dep standalone
+// verifier. scripts/standalone-verifier.js is consumed by the Docker
+// verify stage + deploy/install.sh + deploy/update.sh — contexts that
+// don't have vendor/blamejs/ on disk yet. We carry a verbatim copy so
+// the install pipeline only needs the trio (verify-release.js +
+// standalone-verifier.js + autoupdate-pubkey.js). Refreshing it
+// automatically as part of every vendor-hash run keeps the copy in
+// lockstep with whatever blamejs version we just vendored.
+function refreshStandaloneVerifier() {
+  const src = path.join(REPO_ROOT, 'vendor', 'blamejs', 'lib', 'self-update-standalone-verifier.js');
+  const dst = path.join(REPO_ROOT, 'scripts', 'standalone-verifier.js');
+  if (!fs.existsSync(src)) {
+    console.warn('scripts/standalone-verifier.js: upstream source not found at', src, '— skipping');
+    return false;
+  }
+  fs.copyFileSync(src, dst);
+  return true;
+}
+
 (function main() {
   const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
   const manifest = JSON.parse(raw);
@@ -81,5 +100,7 @@ function sha256File(rel) {
   manifest.packages.blamejs.hashes = hashes;
 
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
-  console.log('vendor/MANIFEST.json updated:', Object.keys(CONSUMED).length, 'file hashes recorded.');
+  const refreshed = refreshStandaloneVerifier();
+  console.log('vendor/MANIFEST.json updated:', Object.keys(CONSUMED).length, 'file hashes recorded.' +
+              (refreshed ? ' scripts/standalone-verifier.js refreshed from upstream.' : ''));
 })();

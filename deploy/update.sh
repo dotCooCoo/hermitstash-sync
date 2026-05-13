@@ -206,12 +206,14 @@ curl -fsSL --retry 3 -o "${WORK}/bin.sha3-512"  "${BASE}/${NAME}.sha3-512"
 curl -fsSL --retry 3 -o "${WORK}/bin.sig"      "${BASE}/${NAME}.sig"
 
 log "Verifying SHA3-512 + P-384 ECDSA signature"
-# Pull the verifier + autoupdate-pubkey.js for the TARGET version so the
-# pubkey matches what was in the repo at release time.
+# Pull the verify trio for the TARGET version so the pubkey + verifier
+# match what was in the repo at release time:
+#   lib/autoupdate-pubkey.js, scripts/standalone-verifier.js, scripts/verify-release.js
 RAW="https://raw.githubusercontent.com/${GITHUB_REPO}/v${TARGET}"
 mkdir -p "${WORK}/lib" "${WORK}/scripts"
-curl -fsSL --retry 3 -o "${WORK}/lib/autoupdate-pubkey.js"  "${RAW}/lib/autoupdate-pubkey.js"
-curl -fsSL --retry 3 -o "${WORK}/scripts/verify-release.js" "${RAW}/scripts/verify-release.js"
+curl -fsSL --retry 3 -o "${WORK}/lib/autoupdate-pubkey.js"       "${RAW}/lib/autoupdate-pubkey.js"
+curl -fsSL --retry 3 -o "${WORK}/scripts/standalone-verifier.js" "${RAW}/scripts/standalone-verifier.js"
+curl -fsSL --retry 3 -o "${WORK}/scripts/verify-release.js"      "${RAW}/scripts/verify-release.js"
 
 if ! ( cd "$WORK" && node scripts/verify-release.js bin bin.sha3-512 bin.sig ); then
   err "Signature verification failed — refusing to install."
@@ -229,13 +231,13 @@ cp -a "$BIN" "$ROLLBACK"
 log "Swapping ${BIN}"
 mv -f "${BIN}.new" "$BIN"
 
-# Update the verify-release.js + autoupdate-pubkey.js cached under
-# LIB_DIR so the NEXT update can verify against the newer pubkey if
-# the release ever rotates it. Also evict any stale constants.js
-# cached by a pre-v0.7.3 install so future runs land on the new
-# zero-dep layout.
-install -m 0644 "${WORK}/scripts/verify-release.js" "${LIB_DIR}/verify-release.js"
-install -m 0644 "${WORK}/lib/autoupdate-pubkey.js"  "${LIB_DIR}/autoupdate-pubkey.js"
+# Update the verify trio cached under LIB_DIR so the NEXT update can
+# verify against the newer pubkey + verifier if either rotates. Also
+# evict any stale constants.js cached by a pre-v0.7.3 install so future
+# runs land on the new zero-dep layout.
+install -m 0644 "${WORK}/scripts/verify-release.js"      "${LIB_DIR}/verify-release.js"
+install -m 0644 "${WORK}/scripts/standalone-verifier.js" "${LIB_DIR}/standalone-verifier.js"
+install -m 0644 "${WORK}/lib/autoupdate-pubkey.js"       "${LIB_DIR}/autoupdate-pubkey.js"
 rm -f "${LIB_DIR}/constants.js"
 
 # ─── Restart + health probe ─────────────────────────────────────────────
