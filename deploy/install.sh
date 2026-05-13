@@ -11,8 +11,8 @@
 # What it does:
 #   1. Detects arch (x64/arm64), resolves the latest GitHub Release
 #   2. Downloads the signed SEA binary + its SHA3-512 + its P-384 ECDSA .sig
-#   3. Verifies both against the pubkey embedded in lib/constants.js for
-#      that release (requires node; falls back to sha3sum-only with warning)
+#   3. Verifies both against the pubkey embedded in lib/autoupdate-pubkey.js
+#      for that release (requires node; falls back to sha3sum-only with warning)
 #   4. Creates a 'hermit' system user + /var/lib/hermitstash-sync
 #   5. Installs checked-in systemd units (from the same release) — hardened
 #      daemon unit + opt-in update timer + matching env files
@@ -107,12 +107,14 @@ curl -fsSL --retry 3 -o "${WORK}/bin"           "${BASE}/${NAME}"
 curl -fsSL --retry 3 -o "${WORK}/bin.sha3-512"   "${BASE}/${NAME}.sha3-512"
 curl -fsSL --retry 3 -o "${WORK}/bin.sig"       "${BASE}/${NAME}.sig"
 
-# Also pull the in-tree verify + constants for this tag so the next update
-# run can re-verify against the same pubkey that was in the repo at
-# release time.
-log "Fetching verify-release.js + constants.js for v${VERSION}"
+# Also pull the in-tree verify + autoupdate-pubkey for this tag so the next
+# update run can re-verify against the same pubkey that was in the repo at
+# release time. lib/autoupdate-pubkey.js is the zero-dep extraction of the
+# P-384 verify key — lib/constants.js itself now requires vendor/blamejs
+# (post-v0.7.1 b.constants migration), which we don't ship to operators.
+log "Fetching verify-release.js + autoupdate-pubkey.js for v${VERSION}"
 mkdir -p "${WORK}/lib" "${WORK}/scripts" "${WORK}/deploy"
-curl -fsSL --retry 3 -o "${WORK}/lib/constants.js"          "${RAW}/lib/constants.js"
+curl -fsSL --retry 3 -o "${WORK}/lib/autoupdate-pubkey.js"  "${RAW}/lib/autoupdate-pubkey.js"
 curl -fsSL --retry 3 -o "${WORK}/scripts/verify-release.js" "${RAW}/scripts/verify-release.js"
 
 # And the checked-in systemd units / env files / updater / uninstaller.
@@ -147,7 +149,7 @@ fi
 
 install -d -m 0755 "$LIB_DIR"
 install -m 0755 "${WORK}/bin"                       "${INSTALL_DIR}/hermitstash-sync"
-install -m 0644 "${WORK}/lib/constants.js"          "${LIB_DIR}/constants.js"
+install -m 0644 "${WORK}/lib/autoupdate-pubkey.js"  "${LIB_DIR}/autoupdate-pubkey.js"
 install -m 0644 "${WORK}/scripts/verify-release.js" "${LIB_DIR}/verify-release.js"
 install -m 0755 "${WORK}/deploy/update.sh"          "${LIB_DIR}/update.sh"
 install -m 0755 "${WORK}/deploy/uninstall.sh"       "${LIB_DIR}/uninstall.sh"

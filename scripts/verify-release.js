@@ -5,9 +5,12 @@
 //
 // Given a binary and its .sig file, verify the ECDSA P-384 signature
 // over the binary bytes (DER) using the pubkey embedded in
-// lib/constants.js. Mirrors what `b.selfUpdate.verify` does at runtime.
-// Exits 0 on success, nonzero with a message on any failure. No npm
-// deps — node:crypto + node:fs only.
+// lib/autoupdate-pubkey.js. Mirrors what `b.selfUpdate.verify` does at
+// runtime. Exits 0 on success, nonzero with a message on any failure.
+// No npm deps — node:crypto + node:fs only. Critically: this script
+// must require ONLY zero-dep modules so contexts that don't ship
+// vendor/blamejs (the Dockerfile verify stage, deploy/install.sh,
+// deploy/update.sh) can still run it.
 //
 // The .sha3-512 sidecar argument is preserved for backward compatibility
 // with existing Dockerfile / install.sh / update.sh callers, but is
@@ -19,7 +22,7 @@
 
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { AUTOUPDATE_PUBKEY_PEM } = require('../lib/constants');
+const { AUTOUPDATE_PUBKEY_PEM } = require('../lib/autoupdate-pubkey');
 
 function die(msg) {
   console.error(`[verify] ${msg}`);
@@ -31,7 +34,7 @@ if (!binPath || !sumPath || !sigPath) {
   die('usage: verify-release.js <binary> <binary.sha3-512|-> <binary.sig>');
 }
 if (!AUTOUPDATE_PUBKEY_PEM) {
-  die('AUTOUPDATE_PUBKEY_PEM not embedded in lib/constants.js — cannot verify');
+  die('AUTOUPDATE_PUBKEY_PEM not embedded in lib/autoupdate-pubkey.js — cannot verify');
 }
 
 const binary = fs.readFileSync(binPath);

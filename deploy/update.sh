@@ -11,7 +11,7 @@
 #      and stays within the current major
 #   3. Downloads the signed SEA binary + its SHA3-512 digest + its P-384
 #      ECDSA signature; verifies both against the pubkey embedded in the
-#      release's lib/constants.js via scripts/verify-release.js
+#      release's lib/autoupdate-pubkey.js via scripts/verify-release.js
 #   4. Captures a rollback copy of the current binary
 #   5. Atomically replaces the binary, restarts the systemd service
 #   6. Waits for the daemon to report RUNNING status; on failure, restores
@@ -92,8 +92,16 @@ if ! command -v node >/dev/null 2>&1; then
   exit 20
 fi
 
-if [ ! -f "${LIB_DIR}/verify-release.js" ] || [ ! -f "${LIB_DIR}/constants.js" ]; then
-  err "verify-release.js / constants.js not found under ${LIB_DIR}. Re-run deploy/install.sh."
+# v0.7.3 renamed lib/constants.js -> lib/autoupdate-pubkey.js in the
+# updater's cache layout. Accept either layout so an operator who
+# installed at v0.7.2 (which staged constants.js) can still run this
+# update.sh — we'll replace the stale cache with the new shape below.
+if [ ! -f "${LIB_DIR}/verify-release.js" ]; then
+  err "verify-release.js not found under ${LIB_DIR}. Re-run deploy/install.sh."
+  exit 20
+fi
+if [ ! -f "${LIB_DIR}/autoupdate-pubkey.js" ] && [ ! -f "${LIB_DIR}/constants.js" ]; then
+  err "neither autoupdate-pubkey.js nor constants.js found under ${LIB_DIR}. Re-run deploy/install.sh."
   exit 20
 fi
 
@@ -198,11 +206,11 @@ curl -fsSL --retry 3 -o "${WORK}/bin.sha3-512"  "${BASE}/${NAME}.sha3-512"
 curl -fsSL --retry 3 -o "${WORK}/bin.sig"      "${BASE}/${NAME}.sig"
 
 log "Verifying SHA3-512 + P-384 ECDSA signature"
-# Pull the verifier + constants.js for the TARGET version so the pubkey
-# matches what was in the repo at release time.
+# Pull the verifier + autoupdate-pubkey.js for the TARGET version so the
+# pubkey matches what was in the repo at release time.
 RAW="https://raw.githubusercontent.com/${GITHUB_REPO}/v${TARGET}"
 mkdir -p "${WORK}/lib" "${WORK}/scripts"
-curl -fsSL --retry 3 -o "${WORK}/lib/constants.js"          "${RAW}/lib/constants.js"
+curl -fsSL --retry 3 -o "${WORK}/lib/autoupdate-pubkey.js"  "${RAW}/lib/autoupdate-pubkey.js"
 curl -fsSL --retry 3 -o "${WORK}/scripts/verify-release.js" "${RAW}/scripts/verify-release.js"
 
 if ! ( cd "$WORK" && node scripts/verify-release.js bin bin.sha3-512 bin.sig ); then
@@ -221,11 +229,14 @@ cp -a "$BIN" "$ROLLBACK"
 log "Swapping ${BIN}"
 mv -f "${BIN}.new" "$BIN"
 
-# Update the verify-release.js / constants.js cached under LIB_DIR so the
-# NEXT update can verify against the newer pubkey if the release ever
-# rotates it.
+# Update the verify-release.js + autoupdate-pubkey.js cached under
+# LIB_DIR so the NEXT update can verify against the newer pubkey if
+# the release ever rotates it. Also evict any stale constants.js
+# cached by a pre-v0.7.3 install so future runs land on the new
+# zero-dep layout.
 install -m 0644 "${WORK}/scripts/verify-release.js" "${LIB_DIR}/verify-release.js"
-install -m 0644 "${WORK}/lib/constants.js"          "${LIB_DIR}/constants.js"
+install -m 0644 "${WORK}/lib/autoupdate-pubkey.js"  "${LIB_DIR}/autoupdate-pubkey.js"
+rm -f "${LIB_DIR}/constants.js"
 
 # ─── Restart + health probe ─────────────────────────────────────────────
 
