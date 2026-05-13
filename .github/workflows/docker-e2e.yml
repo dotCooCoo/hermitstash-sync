@@ -1,24 +1,35 @@
 name: Docker e2e
 
-# Build the image against the latest published release and run packaging-level
-# checks: metadata, non-root identity, volumes, entrypoint error path, and a
-# one-shot binary-works check against a stub server. No real HermitStash
-# server is spun up in CI — that flow runs locally via tests/test-docker-e2e.js
+# End-to-end checks that don't require a HermitStash server:
+#   1. codebase patterns — file-walk grep gates over bin/ + lib/, runs first
+#      so a JS convention violation fails fast before the docker build.
+#   2. docker packaging — build against the latest published release and
+#      verify metadata, non-root identity, volumes, entrypoint error path,
+#      binary-reaches-enrollment.
+# Full sync-against-real-server e2e runs locally via tests/test-docker-e2e.js
 # under `node tests/run-all.js`.
 
 on:
   pull_request:
     paths:
+      - 'bin/**'
+      - 'lib/**'
       - 'Dockerfile'
       - 'docker/**'
       - 'scripts/verify-release.js'
+      - 'scripts/standalone-verifier.js'
+      - 'scripts/test-codebase-patterns.js'
       - '.github/workflows/docker-e2e.yml'
   push:
     branches: [main]
     paths:
+      - 'bin/**'
+      - 'lib/**'
       - 'Dockerfile'
       - 'docker/**'
       - 'scripts/verify-release.js'
+      - 'scripts/standalone-verifier.js'
+      - 'scripts/test-codebase-patterns.js'
       - '.github/workflows/docker-e2e.yml'
   workflow_dispatch:
 
@@ -37,6 +48,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@main
+        with:
+          node-version: '>=24.14.1'
+
+      # ── Codebase patterns ──────────────────────────────────────
+      # File-walk grep gates over bin/ + lib/ — bug-class drift detectors
+      # plus the require-binding-consistency rule. Pure static analysis,
+      # no Docker / server dependency, so it runs BEFORE the buildx step
+      # to fail fast when a JS-source convention is violated.
+      - name: Run codebase patterns
+        run: node --test scripts/test-codebase-patterns.js
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@master
@@ -78,6 +102,7 @@ jobs:
             echo "Image: \`$IMAGE\` (linux/amd64)"
             echo "Release base: v${{ steps.version.outputs.version }}"
             echo ""
+            echo "- Codebase patterns (23 grep gates)"
             echo "- OCI labels present"
             echo "- Non-root user: hermit"
             echo "- Volumes: /config, /data"
