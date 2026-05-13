@@ -74,7 +74,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group l
 ## Requirements
 
 - Node.js 24.14.1+ (vendored blamejs's effective floor; also covers `node:sqlite` and OpenSSL 3.5+ PQC support)
-- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.8.80) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
+- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.9.7) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 
 ## Install
 
@@ -166,6 +166,7 @@ hermitstash-sync stop
 | `start --daemon` | Start sync as background daemon |
 | `start --no-autoupdate` | Start without polling GitHub Releases for new binaries |
 | `status` | Show sync status, file count, last sync time, errors |
+| `stats` | Print daemon telemetry — uploads/downloads/retries, WS reconnects, upload circuit-breaker state. Reads `$CONFIG_DIR/stats.json` (refreshed every 15s by the daemon). `--json` for machine-readable output, `--prometheus` for textfile-collector exposition. |
 | `stop` | Stop the background daemon |
 | `log` | Show last 50 log lines |
 | `log --follow`, `-f` | Tail the log file in real-time |
@@ -261,7 +262,8 @@ Both files are attached to every release. The GPG key fingerprint and the ECDSA 
 3. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`, `file_renamed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. All checksum computations are dispatched to the worker pool to keep the main thread responsive.
 4. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 5. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
-6. Failed uploads are retried up to 3 times with a 5-second delay between attempts.
+6. Failed uploads are retried up to 3 times with full-jitter exponential backoff (base 5s). After 5 consecutive uploads exhaust their retries, a per-target circuit breaker opens for 30 seconds and new uploads fast-fail without dialling the server. The breaker probes after the cooldown; 2 consecutive successful probes close it. This keeps the daemon from hammering a flapping server while the retry loop would otherwise happily keep firing.
+7. `hermitstash-sync stats` reads a JSON snapshot the daemon writes every 15 seconds (`$CONFIG_DIR/stats.json`) — uploads/downloads (ok/error/retries), WebSocket reconnects, upload circuit-breaker state, and last applied sequence number. Use `--json` for machine-readable output or `--prometheus` for textfile-collector-friendly exposition.
 
 ### Sync states
 
@@ -305,6 +307,8 @@ The `status` command shows which state the daemon is in:
 - **Atomic config + cert writes** — `config.json` and the enrolled mTLS client/cert/key/CA trio are written via `b.atomicFile.writeSync` (temp file, fsync, rename, parent-dir fsync) so a crash mid-write leaves the previous good copy intact instead of a torn file
 - **Phase-ordered graceful shutdown** — SIGTERM/SIGINT routes through `b.appShutdown` with per-phase time budgets and idempotent semantics, so a double signal during drain doesn't kick off a parallel teardown
 - **Crypto-strength retry jitter** — upload retries use `b.retry.withRetry`'s full-jitter exponential backoff sourced from `crypto.randomInt`, so retry timing isn't predictable from `Math.random`
+- **Boot-time wall-clock gate** — `hermitstash-sync start` runs an SNTPv4 drift check (`b.ntpCheck.bootCheck`) against `pool.ntp.org` before opening the engine. The cert-renewal threshold and the auto-update probation window both depend on `Date.now()` being roughly correct; a laptop resuming from a long sleep, a container without an RTC, or a system whose NTP daemon died can drift far enough to mis-renew certs or false-clear probation. Default thresholds: warn at 5 min, fatal at 1 hr. Unreachable NTP is non-fatal so offline boots still work. Override with `HERMITSTASH_NTP_DISABLE=1` (skip) or `HERMITSTASH_NTP_STRICT=1` (refuse to boot if unreachable).
+- **CSAF 2.1 VEX disclosures on releases** — when transitive CVEs surface in the vendored runtime that don't reach a vulnerable code path here, an OASIS CSAF 2.1 VEX document (`hermitstash-sync-vX.Y.Z.vex.json`) is published alongside the binaries. CSAF-aware scanners (e.g. `trivy --vex`, `grype --vex`) can consume it to suppress alerts on declared `known_not_affected` findings with a justification. Generated via `b.vex` from the assessments committed at `vex/statements.json`.
 - **Zero npm dependencies** — entire codebase is auditable
 
 ## Logging
