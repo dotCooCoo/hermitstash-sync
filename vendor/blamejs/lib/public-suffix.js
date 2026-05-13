@@ -184,31 +184,12 @@ var _data;
 var _sourceMeta;
 (function _init() {
   var raw;
-  // SEA bypass: when running as a Single Executable Application the
-  // PSL is embedded via the `assets` map in build/sea-config.json so
-  // the binary stays self-contained. esbuild collapses __dirname to
-  // the bundle output dir, which would resolve to a path that does
-  // not exist next to the SEA executable. The from-source `node bin/`
-  // path keeps the file-on-disk lookup below.
-  var seaApi = null;
-  try { seaApi = require("node:sea"); } catch (_e) { seaApi = null; }
-  if (seaApi && typeof seaApi.isSea === "function" && seaApi.isSea()) {
-    try {
-      raw = Buffer.from(seaApi.getRawAsset("public-suffix-list.dat"));
-    } catch (e) {
-      throw _err("public-suffix/not-loaded",
-        "publicSuffix: SEA asset 'public-suffix-list.dat' missing — " +
-        "rebuild the SEA binary with build/sea-config.json's assets map " +
-        "(" + (e && e.message ? e.message : "unknown error") + ")");
-    }
-  } else {
-    try {
-      raw = fs.readFileSync(PSL_PATH);
-    } catch (e) {
-      throw _err("public-suffix/not-loaded",
-        "publicSuffix: vendored PSL data file missing at " + PSL_PATH +
-        " (" + (e && e.message ? e.message : "unknown error") + ")");
-    }
+  try {
+    raw = fs.readFileSync(PSL_PATH);
+  } catch (e) {
+    throw _err("public-suffix/not-loaded",
+      "publicSuffix: vendored PSL data file missing at " + PSL_PATH +
+      " (" + (e && e.message ? e.message : "unknown error") + ")");
   }
   var sha256 = nodeCrypto.createHash("sha256").update(raw).digest("hex");
   var parsed = _parsePsl(raw.toString("utf8"));

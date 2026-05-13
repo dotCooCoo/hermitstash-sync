@@ -185,6 +185,18 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      - name: Build CSAF 2.1 VEX document
+        shell: bash
+        run: |
+          # Emits artifacts/hermitstash-sync-vX.Y.Z.vex.json if vex/statements.json
+          # has any entries; otherwise logs + exits 0 with no output file.
+          node scripts/build-vex.js --out artifacts
+          if [ -f artifacts/hermitstash-sync-v$(node -e "console.log(require('./lib/constants').VERSION)").vex.json ]; then
+            echo "VEX document attached to release."
+          else
+            echo "No VEX statements pending — skipping VEX attachment."
+          fi
+
       - name: Build release notes
         shell: bash
         run: |
@@ -248,6 +260,20 @@ jobs:
             lines.push('\`\`\`bash');
             lines.push('gpg --verify BINARY.asc BINARY');
             lines.push('\`\`\`');
+          }
+
+          // CSAF 2.1 VEX document — only present when vex/statements.json has entries.
+          var vexFile = files.length > 0 ? null : null;
+          var vexCandidate = 'hermitstash-sync-' + tag + '.vex.json';
+          if (fs.existsSync(path.join(artDir, vexCandidate))) {
+            vexFile = vexCandidate;
+            lines.push('');
+            lines.push('### Vulnerability disclosure (VEX)');
+            lines.push('');
+            lines.push('\`' + vexFile + '\` is an OASIS CSAF 2.1 VEX document covering this release. ' +
+                       'It declares the affected/not-affected status of CVEs against the platform binaries ' +
+                       '(\`linux-x64\`, \`linux-arm64\`, \`win-x64\`, \`macos-arm64\`) and the container image. ' +
+                       'Scanners that consume CSAF can use it to suppress alerts on transitive CVEs that don\\'t reach a vulnerable code path here.');
           }
 
           lines.push('');

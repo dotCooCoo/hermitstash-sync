@@ -368,6 +368,15 @@ ${CHANGES}
 - GPG Key: ${GPG_KEY_ID:-none}
 "
 
+# Build a CSAF 2.1 VEX document if vex/statements.json has any entries.
+# Script logs + exits 0 with no output file when the statements list is
+# empty (most releases). When present, the file ships alongside the
+# binary so CSAF-aware scanners can suppress alerts on transitive CVEs
+# we've assessed as not-affected.
+echo "  Building CSAF 2.1 VEX document..."
+node scripts/build-vex.js --out build
+VEX_FILE="build/hermitstash-sync-${TAG}.vex.json"
+
 # Collect artifacts
 ARTIFACTS=("build/${EXE_NAME}" "build/${EXE_NAME}.sha256" "build/${EXE_NAME}.sha3-512")
 if [ -f "build/${EXE_NAME}.sig" ]; then
@@ -375,6 +384,9 @@ if [ -f "build/${EXE_NAME}.sig" ]; then
 fi
 if [ -f "build/${EXE_NAME}.asc" ]; then
   ARTIFACTS+=("build/${EXE_NAME}.asc" "build/${EXE_NAME}.sha256.asc" "build/${EXE_NAME}.sha3-512.asc")
+fi
+if [ -f "${VEX_FILE}" ]; then
+  ARTIFACTS+=("${VEX_FILE}")
 fi
 
 gh release create "${TAG}" \
