@@ -38,12 +38,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the parts of the repo the verifier needs (and only those — smaller
-# build context, clearer layer). lib/autoupdate-pubkey.js is the
-# zero-dep module that carries the P-384 verify key; the full
-# lib/constants.js depends transitively on vendor/blamejs which we
-# don't ship into the verify stage.
-COPY lib/autoupdate-pubkey.js /build/lib/autoupdate-pubkey.js
-COPY scripts/verify-release.js /build/scripts/verify-release.js
+# build context, clearer layer). The trio:
+#   lib/autoupdate-pubkey.js     — zero-dep module carrying the P-384 pubkey
+#   scripts/standalone-verifier.js — zero-dep verifier (b.selfUpdate.standaloneVerifier)
+#   scripts/verify-release.js    — CLI shim that wires the above two together
+# The full lib/constants.js depends transitively on vendor/blamejs which
+# we don't ship into the verify stage.
+COPY lib/autoupdate-pubkey.js       /build/lib/autoupdate-pubkey.js
+COPY scripts/standalone-verifier.js /build/scripts/standalone-verifier.js
+COPY scripts/verify-release.js      /build/scripts/verify-release.js
 
 RUN set -eux; \
     if [ -z "${VERSION}" ]; then echo "VERSION build-arg is required" >&2; exit 1; fi; \

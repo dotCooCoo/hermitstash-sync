@@ -2,11 +2,11 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.9.12",
+      "version": "0.9.13",
       "license": "Apache-2.0",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.9.12",
+      "tag": "v0.9.13",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -46,7 +46,7 @@
         "log-stream-local": "sha256:dfc24f1dfb89d18179427e49aa1f3974135c353b0f241f8205ba0466e209bcbf",
         "atomic-file": "sha256:544c11614105d558d15f75421d2c8ec7a431b86e08cc1f67c521cb4e0ed602dc",
         "app-shutdown": "sha256:21aacfa898c151e24d6a083b923c849355d381509ff3434797eba4d6d69900b8",
-        "retry": "sha256:e307f19a9012265d71f25fcf8e43e595479d38d1358f4b607b052d0ce053abb0",
+        "retry": "sha256:cf8c9b0edd608ed1734a607de93f9bcbb262a2b641aca33f89a482e701e33add",
         "framework-error": "sha256:3a08b2166c38ec9777e38ed6cd71e96f5ec43e02dfdae6348f0b1f523129276d",
         "process-spawn": "sha256:bf1769856a26d6158998ae993fc5f0cef3298167c7849959ad4efb3678f17138",
         "config-drift": "sha256:0f44ee541d6d2b3382acee2b819fc476bb4ae9ada916a3817b4a15ff1879589b",
