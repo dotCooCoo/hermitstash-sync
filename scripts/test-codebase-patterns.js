@@ -449,6 +449,67 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('number-env-coerce', matches);
   });
 
+  // Literal `===` / `!==` on identifiers whose names suggest cryptographic
+  // material (Hash, Token, Sig, Signature, Mac, Digest, Tag) is timing-
+  // attack-prone. Should route through `b.crypto.timingSafeEqual`. From
+  // blamejs's testNoRawHashCompare detector (v0.9.x patterns suite).
+  it('hash/token/sig/mac/digest names compared with timingSafeEqual', () => {
+    var matches = _scan(
+      /\b\w*(Hash|Token|Sig|Signature|Mac|Digest|Tag)\s*(?:===|!==)\s*\w*(Hash|Token|Sig|Signature|Mac|Digest|Tag)/);
+    matches = _filterMarkers(matches, 'raw-hash-compare');
+    _assertClean('raw-hash-compare', matches);
+  });
+
+  // `Buffer.from("...")` defaults to UTF-8, but the absence of an
+  // explicit encoding masks intent — and for hex/base64 strings the
+  // default UTF-8 is wrong silently. From blamejs's
+  // testBufferFromStringEncoding (v0.9.x patterns suite).
+  it('Buffer.from(string) requires explicit encoding', () => {
+    var matches = _scan(/\bBuffer\.from\(\s*(?:"[^"]*"|'[^']*')\s*\)/);
+    matches = _filterMarkers(matches, 'buffer-from-no-encoding');
+    _assertClean('buffer-from-no-encoding', matches);
+  });
+
+  // `require(<non-literal>)` is opaque to bundler static analysis —
+  // esbuild / pkg / nexe / Bun-compile cannot include the target in
+  // the bundle, breaking packaging-mode invariance at runtime. Caught
+  // by us during the v0.9.8 vendor-data dynamic-require bug; upstream
+  // adopted the same detector at v0.9.13. From blamejs's
+  // testNoDynamicRequires.
+  it('require() argument must be a string literal (no dynamic require)', () => {
+    var matches = _scan(/\brequire\(\s*[^"'`)]/);
+    matches = _filterMarkers(matches, 'dynamic-require');
+    _assertClean('dynamic-require', matches);
+  });
+
+  // Literal NUL (0x00) bytes in source files. ESLint catches it in CI
+  // but Windows local lint may not — and any literal NUL in a string
+  // is almost always a copy-paste artifact or a hostile-paste attempt.
+  // Use ` ` escape if a NUL is genuinely needed. From blamejs's
+  // testNoLiteralNulBytesInSource.
+  it('no literal NUL (0x00) bytes in source files', () => {
+    var bad = [];
+    var files = _sourceFiles();
+    for (var fi = 0; fi < files.length; fi++) {
+      var buf;
+      try { buf = fs.readFileSync(files[fi]); }
+      catch (_e) { continue; }
+      for (var i = 0; i < buf.length; i++) {
+        if (buf[i] === 0) {
+          var lineNo = 1;
+          for (var k = 0; k < i; k++) if (buf[k] === 0x0a) lineNo += 1;
+          bad.push({
+            file: _relPath(files[fi]),
+            line: lineNo,
+            content: 'literal NUL byte at byte offset ' + i + ' (use \\u0000 escape if needed)',
+          });
+          break;
+        }
+      }
+    }
+    _assertClean('literal-nul-byte', bad);
+  });
+
   // Every `(const|let|var) <name> = require('<target>')` binding for a
   // given module MUST use the same variable name across every file in
   // the repo. Inconsistent names (`fs` vs `nodeFs`, `crypto` vs
