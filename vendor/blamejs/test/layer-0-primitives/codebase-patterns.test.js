@@ -657,6 +657,121 @@ function testNoInlineRequires() {
 
 // ---- Pattern 10a: require() with a non-literal argument ----
 
+// CANONICAL_REQUIRE_BINDINGS — for each module imported via plain
+// `var X = require("M")` shape, the framework's chosen name for X.
+// Convention: Node built-ins use a `node<X>` prefix so a local var
+// named `fs` / `path` / `crypto` can never shadow them; framework's
+// own `lib/crypto.js` is bound as `bCrypto` so it doesn't shadow
+// node:crypto either. Modules not listed fall back to majority-wins
+// (most-sites name wins; alphabetical tiebreak).
+//
+// When adding a new module, prefer adding it here over relying on
+// majority-wins so future authors copy the canonical name.
+var CANONICAL_REQUIRE_BINDINGS = {
+  // Node built-ins — node-prefix avoids shadowing common local names.
+  "fs":           "nodeFs",
+  "node:fs":      "nodeFs",
+  "path":         "nodePath",
+  "node:path":    "nodePath",
+  "crypto":       "nodeCrypto",
+  "node:crypto":  "nodeCrypto",
+  "stream":       "nodeStream",
+  "node:stream":  "nodeStream",
+  "tls":          "nodeTls",
+  "node:tls":     "nodeTls",
+  "url":          "nodeUrl",
+  "node:url":     "nodeUrl",
+  // Framework's own crypto module — `bCrypto` matches the `b.crypto`
+  // public namespace and doesn't shadow node:crypto.
+  "./crypto":     "bCrypto",
+  "../crypto":    "bCrypto",
+};
+
+function testRequireBindingConsistency() {
+  // class: require-binding-name
+  // For each module imported via the plain `var <name> = require("<module>")`
+  // shape, every file MUST bind it to the same `<name>`. Inconsistent
+  // names (`fs` vs `nodeFs`, `crypto` vs `nodeCrypto`, `path` vs
+  // `nodePath`) make grep across the lib unreliable and let reviewers
+  // miss real shadowing bugs.
+  //
+  // Canonical names are declared in CANONICAL_REQUIRE_BINDINGS above
+  // for safety-critical modules (Node built-ins, framework crypto);
+  // other modules fall back to majority-wins (most-sites name wins,
+  // alphabetical tiebreak).
+  //
+  // Scope is intentionally narrow:
+  //   - only matches whole-module bindings `var X = require("M")` —
+  //     destructuring (`var { Y } = require("M")`) and `.<prop>`
+  //     suffixes are skipped;
+  //   - `var _foo = require(...)` private bindings (leading underscore)
+  //     are intentionally locally-scoped helpers and skipped.
+  //
+  // Fix is rename, NOT allowlist. If one file has a genuine reason to
+  // bind under a different name, every other file gets renamed to
+  // match — never the other way.
+  var files = _libFiles();
+  var bindings = Object.create(null);   // module → { name → [{file,line}] }
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var src = fs.readFileSync(files[fi], "utf8");
+    var lines = src.split("\n");
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li];
+      var m = line.match(/^\s*var\s+(\w+)\s*=\s*require\(["']([^"']+)["']\)\s*;?\s*$/);
+      if (!m) continue;
+      var name = m[1];
+      var mod  = m[2];
+      if (name.indexOf("_") === 0) continue;
+      if (!bindings[mod]) bindings[mod] = Object.create(null);
+      if (!bindings[mod][name]) bindings[mod][name] = [];
+      bindings[mod][name].push({ file: rel, line: li + 1, content: line.trim() });
+    }
+  }
+  var matches = [];
+  var moduleKeys = Object.keys(bindings).sort();   // allow:bare-canonicalize-walk — stable report ordering, not canonicalize-for-hashing
+  for (var mi = 0; mi < moduleKeys.length; mi++) {
+    var mod2 = moduleKeys[mi];
+    var nameMap = bindings[mod2];
+    var nameKeys = Object.keys(nameMap);
+    var canonical;
+    if (Object.prototype.hasOwnProperty.call(CANONICAL_REQUIRE_BINDINGS, mod2)) {
+      canonical = CANONICAL_REQUIRE_BINDINGS[mod2];
+    } else if (nameKeys.length <= 1) {
+      continue;   // single name across all files → consistent
+    } else {
+      // Majority-wins fallback. Ties resolve alphabetically.
+      canonical = nameKeys[0];
+      var topCount = nameMap[nameKeys[0]].length;
+      for (var nk = 1; nk < nameKeys.length; nk++) {
+        var c = nameMap[nameKeys[nk]].length;
+        if (c > topCount || (c === topCount && nameKeys[nk] < canonical)) {
+          canonical = nameKeys[nk]; topCount = c;
+        }
+      }
+    }
+    // Report every site whose binding name is NOT the canonical pick.
+    for (var nk2 = 0; nk2 < nameKeys.length; nk2++) {
+      var thisName = nameKeys[nk2];
+      if (thisName === canonical) continue;
+      var sites = nameMap[thisName];
+      for (var si = 0; si < sites.length; si++) {
+        matches.push({
+          file:    sites[si].file,
+          line:    sites[si].line,
+          content: 'require("' + mod2 + '") bound as `' + thisName +
+                   '` — rename to canonical `' + canonical + '`',
+        });
+      }
+    }
+  }
+  matches = _filterMarkers(matches, "require-binding-name");
+  _report("require() bindings: every `var X = require(\"M\")` for a " +
+          "given module must use the canonical name (rename, don't " +
+          "allowlist — update every site to match)",
+    matches);
+}
+
 function testNoDynamicRequires() {
   // Every modern bundler (esbuild / webpack / ncc / rollup / Bun /
   // Deno) determines what to include in the bundle via STATIC
@@ -4040,6 +4155,34 @@ var KNOWN_ANTIPATTERNS = [
     reason: "SQL identifier validation is now safeSql.DEFAULT_IDENTIFIER_RE. The lib/safe-sql.js definition keeps the literal.",
   },
   {
+    id: "raw-sql-identifier-interpolation",
+    primitive: "safeSql.quoteIdentifier(name, dialect?) — runs validateIdentifier + emits the dialect-correct quoted form",
+    // Match `<KEYWORD> " + <variable> +` shapes where:
+    //   - the keyword is a known SQL DDL/DML position that takes an
+    //     identifier next (FROM / INTO / UPDATE / TABLE / INDEX /
+    //     TRIGGER / VIEW / JOIN — SELECT/INSERT are too column-heavy
+    //     to flag cleanly, but they reach an identifier via FROM/INTO);
+    //   - the next concatenated variable's name does NOT start with
+    //     `q[A-Z_]` (the project's "quoted identifier" prefix
+    //     convention, e.g. `qTable`, `q_Table`).
+    // Hits raw `"CREATE TABLE " + tableName +` shapes where the table
+    // is interpolated unquoted; the safeSql.quoteIdentifier helper
+    // emits the dialect-correct `"tableName"` (sqlite/postgres) or
+    // `` `tableName` `` (mysql) form and runs validateIdentifier
+    // internally, so future SQL-keyword + raw identifier
+    // concatenations are defense-in-depth covered too.
+    //
+    // Skips variables that signal already-quoted identifiers:
+    //   - `q` followed by letter/digit/underscore (qTable, qt, q_Table)
+    //   - `Q` followed by letter/digit/underscore (Q_TABLE, QTable)
+    //   - `quoted...` (quotedTable, quotedColumn)
+    regex: /\b(FROM|INTO|UPDATE|TABLE|INDEX|TRIGGER|VIEW|JOIN)\s+["']\s*\+\s*(?![qQ][A-Za-z0-9_]|quoted)\w+\s*\+/,
+    allowlist: [
+      "lib/safe-sql.js",   // the helper itself emits quote chars
+    ],
+    reason: "Identifier ALWAYS reaches SQL through safeSql.quoteIdentifier(name, dialect). Validates shape + quotes for the dialect; a future shape-regex bypass can't reach raw concatenation. Local variables holding quoted identifiers use a `q`/`Q`/`quoted` prefix so the detector can skip them.",
+  },
+  {
     id: "inline-optional-plain-object-validation",
     primitive: "validateOpts.optionalPlainObject(value, label, ErrorClass, code?, description?)",
     // Match the literal three-line cascade `if (X !== undefined && X !==
@@ -4624,6 +4767,7 @@ async function run() {
   testParserPrimitivesHaveFuzzHarness();
   testNoTierTerminologyInLib();
   testNoInlineRequires();
+  testRequireBindingConsistency();
   testNoDynamicRequires();
   testNoMathRandomForSecurity();
   testNoRawHashCompare();
