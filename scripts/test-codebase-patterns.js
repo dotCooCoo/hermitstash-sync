@@ -449,6 +449,74 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('number-env-coerce', matches);
   });
 
+  // Every `require("<X>")` of a Node built-in must use the `node:`
+  // prefix. Three reasons (from blamejs v0.9.17 release notes):
+  //   1. userland-package shadowing protection (npm packages CAN be
+  //      named after built-ins; without `node:`, a typo / accidental
+  //      install could shadow the built-in);
+  //   2. at-a-glance origin clarity — `node:` is the unambiguous
+  //      "this is Node, not a userland module" signal;
+  //   3. bundler / SEA static-trace clarity — esbuild / ncc / webpack
+  //      / rollup / Bun's bundler / Node's SEA static-analysis pass
+  //      all treat `node:` as the canonical Node-builtin marker.
+  it('require() of Node built-ins uses the node: prefix', () => {
+    var builtins = 'fs|path|crypto|os|net|http|https|http2|stream|tls|url|zlib|dgram|events|child_process|readline|fs\\\/promises|util|assert|buffer|querystring|process';
+    var re = new RegExp('\\brequire\\(\\s*[\'"](' + builtins + ')[\'"]\\s*\\)');
+    var matches = _scan(re);
+    matches = _filterMarkers(matches, 'bare-node-builtin-require');
+    _assertClean('bare-node-builtin-require', matches);
+  });
+
+  // Internal binding names (the framework's preferred aliases —
+  // `nodeFs`, `nodePath`, `nodeCrypto`, `nodeStream`, `nodeTls`,
+  // `nodeUrl`, `bCrypto`, etc.) must NOT appear in operator-facing
+  // surface: comment / JSDoc prose, error-message strings, audit
+  // metadata. Operators see the public-API name (`fs`, `path`,
+  // `crypto`, …), never our internal alias. From blamejs's v0.9.17
+  // `internal-binding-in-prose` detector.
+  it('internal binding names do not leak into comments or string literals', () => {
+    var internal = ['nodeFs', 'nodePath', 'nodeCrypto', 'nodeOs', 'nodeNet',
+                    'nodeHttp', 'nodeHttps', 'nodeReadline', 'nodeFsPromises',
+                    'nodeStream', 'nodeTls', 'nodeUrl', 'nodeEvents', 'bCrypto'];
+    var bad = [];
+    var files = _sourceFiles();
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        var fragments = [];
+        // Comment lines / JSDoc continuation lines — whole line counts as prose.
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) {
+          fragments.push(line);
+        }
+        // String literals — only plain `"..."` / `'...'`. Template
+        // literals (`...${expr}...`) are skipped because `${expr}` is
+        // executable code, not prose — flagging an `${internalName}`
+        // expansion would be a false positive.
+        var strRe = /(['"])((?:\\.|(?!\1).)*)\1/g;
+        var sm;
+        while ((sm = strRe.exec(line)) !== null) fragments.push(sm[0]);
+        for (var f2i = 0; f2i < fragments.length; f2i++) {
+          for (var ii = 0; ii < internal.length; ii++) {
+            var nre = new RegExp('\\b' + internal[ii] + '\\b'); // allow:dynamic-regex — internal-name token from a fixed allowlist
+            if (nre.test(fragments[f2i])) {
+              bad.push({
+                file: _relPath(files[fi]),
+                line: li + 1,
+                content: 'internal binding `' + internal[ii] + '` appears in prose / string — operator-facing surface should use the public name (drop the `node` / `b` prefix)',
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+    _assertClean('internal-binding-in-prose', bad);
+  });
+
   // Literal `===` / `!==` on identifiers whose names suggest cryptographic
   // material (Hash, Token, Sig, Signature, Mac, Digest, Tag) is timing-
   // attack-prone. Should route through `b.crypto.timingSafeEqual`. From
