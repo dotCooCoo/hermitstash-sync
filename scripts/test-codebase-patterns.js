@@ -449,19 +449,48 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('number-env-coerce', matches);
   });
 
-  // Every `(const|let|var) <name> = require('<target>')` binding for the
-  // same require target MUST use the same variable name across every file
-  // in the repo. The intent: `b` always means blamejs, `fs` always means
-  // node:fs, `https` always means node:https — a reader who greps for
-  // `b.foo()` shouldn't have to mentally check which module `b` aliases
-  // in this particular file. No allow markers — the fix is to align every
-  // file on one binding name. Pick the SAFER (less-conflicting) variant,
-  // not the most-popular one: a disambiguated alias like `nodeCrypto`
-  // beats the bare `crypto` (which collides with the global Web Crypto
-  // and with the npm `bcrypt` family); `nodeBuffer` beats `buffer`; etc.
-  // The test surfaces the variance but doesn't prescribe a winner — a
-  // human picks the safer name and migrates every file to match.
+  // Every `(const|let|var) <name> = require('<target>')` binding for a
+  // given module MUST use the same variable name across every file in
+  // the repo. Inconsistent names (`fs` vs `nodeFs`, `crypto` vs
+  // `nodeCrypto`, `path` vs `nodePath`) make grep across the lib
+  // unreliable and let shadowing bugs slip past review.
+  //
+  // CANONICAL_REQUIRE_BINDINGS is the same shape blamejs adopted at
+  // v0.9.15 — safety-first defaults: Node built-ins use a `node<X>`
+  // prefix so a local var named `fs` / `path` / `crypto` can never
+  // shadow them. Modules not listed fall back to majority-wins
+  // (most-sites name; alphabetical tiebreak).
+  //
+  // No allow markers — the fix is rename, not allowlist. If one file
+  // has a genuine reason to bind under a different name, every other
+  // file gets renamed to match — never the other way around.
   it('require() bindings name the same target the same way across all files', () => {
+    var CANONICAL_REQUIRE_BINDINGS = {
+      'fs':              'nodeFs',
+      'node:fs':         'nodeFs',
+      'node:fs/promises':'nodeFsPromises',
+      'path':            'nodePath',
+      'node:path':       'nodePath',
+      'crypto':          'nodeCrypto',
+      'node:crypto':     'nodeCrypto',
+      'os':              'nodeOs',
+      'node:os':         'nodeOs',
+      'net':             'nodeNet',
+      'node:net':        'nodeNet',
+      'http':            'nodeHttp',
+      'node:http':       'nodeHttp',
+      'https':           'nodeHttps',
+      'node:https':      'nodeHttps',
+      'readline':        'nodeReadline',
+      'node:readline':   'nodeReadline',
+      'stream':          'nodeStream',
+      'node:stream':     'nodeStream',
+      'tls':             'nodeTls',
+      'node:tls':        'nodeTls',
+      'url':             'nodeUrl',
+      'node:url':        'nodeUrl',
+    };
+
     var files = _sourceFiles();
     var bindingRe = /^\s*(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/;
     var byTarget = Object.create(null);
@@ -476,6 +505,10 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
         var m = bindingRe.exec(line);
         if (!m) continue;
         var name = m[1];
+        // Skip underscore-prefixed bindings — convention is local helpers
+        // that intentionally vary from canonical (e.g. _config inside a
+        // function that takes `config` as a param).
+        if (name.indexOf('_') === 0) continue;
         var target = m[2];
         if (!byTarget[target]) byTarget[target] = Object.create(null);
         if (!byTarget[target][name]) byTarget[target][name] = [];
@@ -486,15 +519,37 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     var targets = Object.keys(byTarget).sort();
     for (var ti = 0; ti < targets.length; ti++) {
       var t = targets[ti];
-      var names = Object.keys(byTarget[t]);
-      if (names.length < 2) continue;
-      names.sort();
-      var detail = names.map(function (n) {
-        return '      ' + n + ' (' + byTarget[t][n].length + 'x): ' +
-               byTarget[t][n].join(', ');
+      var nameMap = byTarget[t];
+      var nameKeys = Object.keys(nameMap);
+      var canonical;
+      if (Object.prototype.hasOwnProperty.call(CANONICAL_REQUIRE_BINDINGS, t)) {
+        canonical = CANONICAL_REQUIRE_BINDINGS[t];
+      } else if (nameKeys.length <= 1) {
+        continue;
+      } else {
+        // Majority-wins fallback. Ties resolve alphabetically.
+        canonical = nameKeys[0];
+        var topCount = nameMap[nameKeys[0]].length;
+        for (var nk = 1; nk < nameKeys.length; nk++) {
+          var c = nameMap[nameKeys[nk]].length;
+          if (c > topCount || (c === topCount && nameKeys[nk] < canonical)) {
+            canonical = nameKeys[nk]; topCount = c;
+          }
+        }
+      }
+      // Report every site whose binding name is NOT the canonical pick.
+      var offending = [];
+      for (var nk2 = 0; nk2 < nameKeys.length; nk2++) {
+        var n = nameKeys[nk2];
+        if (n === canonical) continue;
+        offending.push({ name: n, sites: nameMap[n] });
+      }
+      if (offending.length === 0) continue;
+      var detail = offending.map(function (o) {
+        return '      `' + o.name + '` -> rename to `' + canonical + '` at: ' +
+               o.sites.join(', ');
       }).join('\n');
-      violations.push('    require(\'' + t + '\') is bound to ' + names.length + ' names:\n' + detail +
-                      '\n      -> pick the safer (less-conflicting) name and migrate every file');
+      violations.push('    require(\'' + t + '\') canonical is `' + canonical + '`:\n' + detail);
     }
     if (violations.length > 0) {
       var msg = 'require-binding-mismatch: ' + violations.length + ' target(s):\n' +

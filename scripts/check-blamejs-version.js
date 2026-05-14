@@ -22,15 +22,15 @@
  *   2 — unable to determine upstream latest (network / API failure)
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
-const https = require('node:https');
+const nodeFs = require('node:fs');
+const nodePath = require('node:path');
+const nodeHttps = require('node:https');
 
-const MANIFEST_PATH = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
+const MANIFEST_PATH = nodePath.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 const API_URL = 'https://api.github.com/repos/blamejs/blamejs/releases/latest';
 
 function readVendoredTag() {
-  const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+  const manifest = JSON.parse(nodeFs.readFileSync(MANIFEST_PATH, 'utf8'));
   if (!manifest || !manifest.packages || !manifest.packages.blamejs ||
       typeof manifest.packages.blamejs.tag !== 'string') {
     throw new Error('vendor/MANIFEST.json does not have packages.blamejs.tag');
@@ -53,7 +53,7 @@ function fetchLatestTag() {
     if (process.env.GITHUB_TOKEN) {
       opts.headers['Authorization'] = 'Bearer ' + process.env.GITHUB_TOKEN;
     }
-    const req = https.get(API_URL, opts, res => {
+    const req = nodeHttps.get(API_URL, opts, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {

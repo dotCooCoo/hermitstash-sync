@@ -19,12 +19,12 @@
 //   downloading the per-platform artifacts. The output is uploaded
 //   alongside the binaries via softprops/action-gh-release.
 
-const fs = require('node:fs');
-const path = require('node:path');
+const nodeFs = require('node:fs');
+const nodePath = require('node:path');
 const b = require('../vendor/blamejs');
 
-const REPO_ROOT = path.resolve(__dirname, '..');
-const INPUT_PATH = path.join(REPO_ROOT, 'vex', 'statements.json');
+const REPO_ROOT = nodePath.resolve(__dirname, '..');
+const INPUT_PATH = nodePath.join(REPO_ROOT, 'vex', 'statements.json');
 
 // All platform IDs the release pipeline produces. Keep in sync with
 // .github/workflows/release.yml `build.strategy.matrix` and the
@@ -33,19 +33,19 @@ const PLATFORMS = ['linux-x64', 'linux-arm64', 'win-x64', 'macos-arm64'];
 const HAS_CONTAINER = true;
 
 function parseArgs(argv) {
-  const opts = { outDir: path.join(REPO_ROOT, 'build'), dateIso: null };
+  const opts = { outDir: nodePath.join(REPO_ROOT, 'build'), dateIso: null };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--out' && argv[i + 1]) { opts.outDir = path.resolve(argv[++i]); continue; }
+    if (argv[i] === '--out' && argv[i + 1]) { opts.outDir = nodePath.resolve(argv[++i]); continue; }
     if (argv[i] === '--date' && argv[i + 1]) { opts.dateIso = argv[++i]; continue; }
   }
   return opts;
 }
 
 function readInput() {
-  if (!fs.existsSync(INPUT_PATH)) {
+  if (!nodeFs.existsSync(INPUT_PATH)) {
     return { statements: [] };
   }
-  const raw = fs.readFileSync(INPUT_PATH, 'utf8');
+  const raw = nodeFs.readFileSync(INPUT_PATH, 'utf8');
   const parsed = b.safeJson.parse(raw, { maxBytes: b.constants.BYTES.mib(1) });
   if (!parsed || !Array.isArray(parsed.statements)) {
     throw new Error(`vex/statements.json missing top-level "statements" array`);
@@ -54,7 +54,7 @@ function readInput() {
 }
 
 function readVersion() {
-  return require(path.join(REPO_ROOT, 'lib', 'constants')).VERSION;
+  return require(nodePath.join(REPO_ROOT, 'lib', 'constants')).VERSION;
 }
 
 function expandProductScope(scope, version) {
@@ -129,11 +129,11 @@ function main() {
     tlp:                input.tlp || 'CLEAR',
   });
 
-  fs.mkdirSync(args.outDir, { recursive: true });
-  const outPath = path.join(args.outDir, `hermitstash-sync-${tag}.vex.json`);
-  fs.writeFileSync(outPath, b.vex.serialize(doc) + '\n', { mode: 0o644 });
+  nodeFs.mkdirSync(args.outDir, { recursive: true });
+  const outPath = nodePath.join(args.outDir, `hermitstash-sync-${tag}.vex.json`);
+  nodeFs.writeFileSync(outPath, b.vex.serialize(doc) + '\n', { mode: 0o644 });
   process.stderr.write(
-    `[build-vex] Wrote ${path.relative(REPO_ROOT, outPath)} ` +
+    `[build-vex] Wrote ${nodePath.relative(REPO_ROOT, outPath)} ` +
     `(${statements.length} statement${statements.length === 1 ? '' : 's'}).\n`
   );
   return 0;

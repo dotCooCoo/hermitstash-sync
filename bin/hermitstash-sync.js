@@ -89,13 +89,13 @@
     if (sea && typeof sea.isSea === 'function' && sea.isSea()) return;
 
     var b = require('../vendor/blamejs');
-    var path = require('node:path');
+    var nodePath = require('node:path');
     // Resolve relative to the bin/ entry, not cwd — the daemon may be
     // launched from any working directory.
-    var manifestPath = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
+    var manifestPath = nodePath.join(__dirname, '..', 'vendor', 'MANIFEST.json');
     var r = b.configDrift.verifyVendorIntegrity({
       manifestPath: manifestPath,
-      libVendorDir: path.join(__dirname, '..'),
+      libVendorDir: nodePath.join(__dirname, '..'),
     });
     if (!r.ok) {
       process.stderr.write(

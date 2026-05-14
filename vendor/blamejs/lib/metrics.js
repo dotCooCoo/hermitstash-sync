@@ -41,9 +41,10 @@ var C = require("./constants");
 var canonicalJson = require("./canonical-json");
 var nodeFs   = require("node:fs");
 var atomicFile = require("./atomic-file");
+var safeJson = require("./safe-json");
 var { defineClass } = require("./framework-error");
 var { boot } = require("./log");
-var nb = require("./numeric-bounds");
+var numericBounds = require("./numeric-bounds");
 var { resolveRoute, captureResponseStatus, HTTP_STATUS } = require("./request-helpers");
 var validateOpts = require("./validate-opts");
 
@@ -278,7 +279,7 @@ function create(opts) {
   ], "b.metrics");
   var namespace     = opts.namespace || "";
   var defaultLabels = opts.defaultLabels || {};
-  nb.requirePositiveFiniteIntIfPresent(opts.labelCardinalityCap,
+  numericBounds.requirePositiveFiniteIntIfPresent(opts.labelCardinalityCap,
     "labelCardinalityCap", MetricsError, "metrics/bad-opt");
   var cardinalityCap = opts.labelCardinalityCap || DEFAULT_CARDINALITY_CAP;
 
@@ -821,8 +822,14 @@ function snapshotRead(p) {
       "metrics.snapshot.read: " + p + " — " + (e && e.message ? e.message : String(e)));
   }
   var parsed;
+  // safeJson.parse with bounded maxBytes — the snapshot file is read
+  // by a separate CLI / sidecar process from where it's written, and a
+  // hostile actor with write access to the snapshot path could replace
+  // it with a multi-GB file that would OOM the reader. 4 MiB ceiling
+  // is well above the framework's expected snapshot size (~5-50 KiB)
+  // and the safeJson absolute cap stays within reach.
   try {
-    parsed = JSON.parse(raw);   // allow:bare-json-parse — snapshot is framework-internal, written by atomicFile.writeSync above
+    parsed = safeJson.parse(raw, { maxBytes: 4 * 1024 * 1024 });   // allow:raw-byte-literal — 4 MiB snapshot-file ceiling
   } catch (e) {
     throw new MetricsError("metrics-snapshot/bad-json",
       "metrics.snapshot.read: " + p + " contains invalid JSON: " + (e && e.message ? e.message : String(e)));
