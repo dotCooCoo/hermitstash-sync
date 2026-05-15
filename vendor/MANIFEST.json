@@ -2,11 +2,11 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.9.18",
+      "version": "0.9.45",
       "license": "Apache-2.0",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.9.18",
+      "tag": "v0.9.45",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -35,16 +35,16 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:d9704187426d98c9a5da67a74ee1f25eb4d5ee014e2493a65a9159f1ea1ed08e",
+        "index": "sha256:df6e1b24694cd92d17e57b8b692d70c20bcdc37a849eb679c94d1eb9709ad0a3",
         "safe-json": "sha256:1551c9a9fcd87cded411de77ba71c2f7904d0f7dacae8aacffc7ad667222efb1",
         "safe-url": "sha256:d42853bbb2895577b1a0ae45a37f114d831bf0b3c843cb4fe194dd5a2c60506e",
         "pqc-agent": "sha256:fe0836a0f0f389f40d8e07f99c7a63f62a6da1bd1ddf90fcff0a8619175eb7a8",
         "pqc-software": "sha256:d4455c58659ccfa254cba787dda8c574a7c5b56f21b59a64545ce1a5da6d6871",
-        "http-client": "sha256:151d2646d22299c1b0a41c2f9bc5c670b6a3ba2981097762d45a33b8814f0c8c",
+        "http-client": "sha256:c96c4360325789e156092d5229c4a410c93e2665cf6867ea7047a07ef0b595b6",
         "ws-client": "sha256:09f0d89c1ca0187ea678bc530b51e2fa597ae6025df873d4368a9936c7a31b94",
         "log-stream": "sha256:cd4e01642b0e6909886973f2bfb6c70d803a2e628316d13ef25f1515cb4a3dbc",
         "log-stream-local": "sha256:54db0824b192f3d9354cbea0b383057530c5c1cfffccf6edab80d31768420dde",
-        "atomic-file": "sha256:5368aac93408144df5f7ed32afcf159be73b707bdfe2aa8f3c8c7b171fb2be8e",
+        "atomic-file": "sha256:fe55bc243fb5ab855262b59734a4a2511346f373ffb96fade998279721a353d3",
         "app-shutdown": "sha256:043f3a12cdabe22c929854568b8f8e1c39a69a9843134b0ff1dbbe1024e8de7c",
         "retry": "sha256:06ecfa300e9eaac8058ac8950187657779ef0b0e81693cd68297447b8c6026ff",
         "framework-error": "sha256:3a08b2166c38ec9777e38ed6cd71e96f5ec43e02dfdae6348f0b1f523129276d",
