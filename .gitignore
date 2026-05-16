@@ -20,8 +20,11 @@ node_modules/
 Thumbs.db
 desktop.ini
 
-# Tests (local test suite, not committed)
-tests/
+# Tests — secrets + per-run fixtures stay out of version control even
+# though the test source itself ships.
+tests/.env
+tests/autoupdate-signing.key
+tests/certs/
 
 # IDE
 .vscode/
