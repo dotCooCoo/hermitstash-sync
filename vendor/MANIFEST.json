@@ -2,11 +2,11 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.9.46",
+      "version": "0.9.54",
       "license": "Apache-2.0",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.9.46",
+      "tag": "v0.9.54",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -35,7 +35,7 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:c2d4497493b6d6a0190c46fed9f9b73fceb6a33eab928c594f40d4949397c33d",
+        "index": "sha256:356ebccc0d8d646063bfdf4879154d9740f674532cd9417c1b7d564277f2f0d8",
         "safe-json": "sha256:1551c9a9fcd87cded411de77ba71c2f7904d0f7dacae8aacffc7ad667222efb1",
         "safe-url": "sha256:d42853bbb2895577b1a0ae45a37f114d831bf0b3c843cb4fe194dd5a2c60506e",
         "pqc-agent": "sha256:fe0836a0f0f389f40d8e07f99c7a63f62a6da1bd1ddf90fcff0a8619175eb7a8",
