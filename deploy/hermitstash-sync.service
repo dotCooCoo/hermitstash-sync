@@ -20,7 +20,22 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify — the daemon shells out to systemd-notify(1) once the
+# engine is up (READY=1), every 60s while running (WATCHDOG=1), and
+# on shutdown (STOPPING=1). WatchdogSec=120 means systemd auto-
+# restarts the unit if two consecutive watchdog windows are missed
+# (engine deadlock, hard hang). NotifyAccess=all because the daemon
+# spawns systemd-notify as a child to relay the assignments — Node
+# can't open a unix DGRAM socket without a native addon, and we ship
+# zero npm/native deps.
+Type=notify
+# NotifyAccess=main — the daemon spawns systemd-notify as a child to
+# relay assignments (Node can't open a unix DGRAM socket without a
+# native addon), but passes --pid=$daemon_pid so systemd attributes
+# the messages to the main daemon PID. =main rather than =all keeps
+# unrelated children from sending notifications.
+NotifyAccess=main
+WatchdogSec=120
 User=hermit
 Group=hermit
 WorkingDirectory=/var/lib/hermitstash-sync
@@ -76,6 +91,9 @@ ExecStart=/usr/local/bin/hermitstash-sync start
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+# TimeoutStartSec must comfortably exceed initial-sync wall time.
+# 120s covers a cold-start with a full bundle catch-up over a slow link.
+TimeoutStartSec=120
 
 # Logging — journal picks up the CLI's plain stdout/stderr. The daemon also
 # writes structured JSON to $HERMITSTASH_SYNC_CONFIG_DIR/hermitstash-sync.log.

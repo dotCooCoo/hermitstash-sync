@@ -172,6 +172,7 @@ hermitstash-sync stop
 | `log --follow`, `-f` | Tail the log file in real-time |
 | `resync` | Force a full re-sync from scratch |
 | `repair` | Re-provision mTLS certificate using an admin-issued enrollment code (run this if your cert is revoked or the daemon can't connect after a certificate reissue) |
+| `diagnose` | Bundle non-secret operational state (redacted config, state DB schema, cert subject, rotated logs, stats snapshot, version banner) into a single `.zip` for support handoff. Excludes credentials, the mTLS private key, sync-folder contents, and DB rows. `--out <path>` overrides the default `./hermitstash-sync-diagnose-<ISO>.zip`. |
 | `version` | Show version and OpenSSL info |
 | `--help`, `-h` | Show usage information |
 
@@ -192,7 +193,8 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
   },
   "ignore": ["*.log", "build/**"],
   "logLevel": "info",
-  "autoUpdate": true
+  "autoUpdate": true,
+  "uploadConcurrency": 4
 }
 ```
 
@@ -263,7 +265,15 @@ Both files are attached to every release. The GPG key fingerprint and the ECDSA 
 4. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 5. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
 6. Failed uploads are retried up to 3 times with full-jitter exponential backoff (base 5s). After 5 consecutive uploads exhaust their retries, a per-target circuit breaker opens for 30 seconds and new uploads fast-fail without dialling the server. The breaker probes after the cooldown; 2 consecutive successful probes close it. This keeps the daemon from hammering a flapping server while the retry loop would otherwise happily keep firing.
-7. `hermitstash-sync stats` reads a JSON snapshot the daemon writes every 15 seconds (`$CONFIG_DIR/stats.json`) — uploads/downloads (ok/error/retries), WebSocket reconnects, upload circuit-breaker state, and last applied sequence number. Use `--json` for machine-readable output or `--prometheus` for textfile-collector-friendly exposition.
+7. `hermitstash-sync stats` reads a JSON snapshot the daemon writes every 15 seconds (`$CONFIG_DIR/stats.json`) — uploads/downloads (ok/error/retries), WebSocket reconnects, upload circuit-breaker state, upload pool depth, conflict count, and last applied sequence number. Use `--json` for machine-readable output or `--prometheus` for textfile-collector-friendly exposition.
+
+### Concurrency
+
+Uploads run through a bounded-concurrency pool — default 4 in-flight at once. Both the initial-scan fan-out (when a fresh client connects to a bundle that already has files) and live watcher-driven changes route through the same pool, so a `cp -r 10000-files .` doesn't materialize 10 000 pending promises queueing for the HTTPS agent's socket pool. Tune via `"uploadConcurrency": N` in `config.json` (clamped 1..16). Higher values throughput-trade for memory and server-side load.
+
+### Conflict copies
+
+When the server sends a new version of a file you've also modified locally, the local copy is renamed to `<name>.conflict-<UTC>.<ext>` before the download overwrites it. Example: `notes.md` becomes `notes.conflict-2026-05-17T19-30-00Z.md`. Neither version is lost — open both, merge by hand, save back over `notes.md`, delete the conflict copy. The `conflicts` counter in `hermitstash-sync stats` shows how many have been saved since daemon start.
 
 ### Sync states
 
@@ -333,6 +343,10 @@ The log file is rotated at 10 MB. The current log is renamed to `.log.1` and a f
 
 ### Linux (systemd)
 
+The system-wide hardened unit at `deploy/hermitstash-sync.service` is `Type=notify` with `WatchdogSec=120` — the daemon reports `READY=1` once the engine is up, pings `WATCHDOG=1` every 60 seconds, and emits `STOPPING=1` on shutdown via the `systemd-notify(1)` CLI (no native addon required). systemd auto-restarts the unit if two consecutive watchdog windows are missed (engine deadlock).
+
+For a minimal user-level unit:
+
 ```ini
 # ~/.config/systemd/user/hermitstash-sync.service
 [Unit]
@@ -340,6 +354,9 @@ Description=HermitStash Sync
 After=network-online.target
 
 [Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
 ExecStart=/usr/local/bin/hermitstash-sync start
 Restart=on-failure
 RestartSec=10
@@ -352,6 +369,8 @@ WantedBy=default.target
 systemctl --user enable hermitstash-sync
 systemctl --user start hermitstash-sync
 ```
+
+Outside systemd (Docker, Windows, dev runs) the notify calls no-op cleanly — `$NOTIFY_SOCKET` is absent so the daemon never spawns `systemd-notify`.
 
 ### macOS (launchd)
 
@@ -379,14 +398,18 @@ systemctl --user start hermitstash-sync
 bin/hermitstash-sync.js       CLI entry point
 lib/cli.js                    Command parser and dispatcher
 lib/config.js                 Config file management
+lib/conflict-path.js          Builds filesystem-portable conflict filenames
 lib/constants.js              All constants, message types, defaults
 lib/checksum.js               SHA3-512 hashing (single + worker pool)
 lib/daemon.js                 Daemonization, PID file, signal handlers
+lib/diagnose.js               `diagnose` bundle builder
 lib/http-client.js            HTTP client with PQC agent + blamejs apiEncrypt for write paths
 lib/keychain.js               OS keychain for API key storage
 lib/logger.js                 Structured JSON logger with rotation
 lib/state-db.js               Local SQLite state database (node:sqlite)
 lib/sync-engine.js            Core sync loop orchestrator
+lib/systemd-notify.js         sd_notify wrapper (Type=notify support)
+lib/task-pool.js              Bounded-concurrency promise pool for parallel uploads
 lib/watcher.js                fs.watch with debounce and ignore patterns
 lib/worker-pool.js            Generic worker thread pool
 lib/workers/checksum-worker.js  SHA3-512 hashing worker thread
