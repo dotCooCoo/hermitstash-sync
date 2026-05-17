@@ -192,9 +192,35 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
     "ca": "/path/to/ca.crt"
   },
   "ignore": ["*.log", "build/**"],
+  "include": [],
   "logLevel": "info",
   "autoUpdate": true,
-  "uploadConcurrency": 4
+  "uploadConcurrency": 4,
+  "uploadBytesPerSec": 0,
+  "downloadBytesPerSec": 0
+}
+```
+
+### Selective sync (subdir allowlist)
+
+By default the daemon syncs every file in `syncFolder` not caught by an ignore pattern. To restrict sync to specific subtrees, set `"include": [...]` in `config.json` or drop a `.hermitstash-include` file in the sync folder. Pattern grammar matches the ignore matcher: exact path, basename (no `/`), `*.ext`, or `dir/**` for recursive subtree inclusion.
+
+```json
+{
+  "include": ["work/**", "photos/2026/**", "notes.md"]
+}
+```
+
+With selective sync on, the daemon never uploads out-of-scope local files and never downloads out-of-scope server files. Server events for out-of-scope paths are seq-acknowledged but otherwise ignored — the daemon stays in sync without ever materializing the excluded files locally. A rename that crosses the scope boundary is handled as a delete (out-of-scope side) or add (in-scope side) at file granularity. Empty `include` array = everything (default behavior).
+
+### Bandwidth limit
+
+Cap the bytes-per-second the daemon will push or pull across all concurrent transfers via `"uploadBytesPerSec"` / `"downloadBytesPerSec"` in `config.json`. Both default to `0` (unlimited). The limit is a shared token bucket per direction, so N parallel uploads share the same budget instead of each getting the full rate. Useful for users on shared connections or metered links.
+
+```json
+{
+  "uploadBytesPerSec":   524288,
+  "downloadBytesPerSec": 1048576
 }
 ```
 
@@ -406,10 +432,12 @@ lib/diagnose.js               `diagnose` bundle builder
 lib/http-client.js            HTTP client with PQC agent + blamejs apiEncrypt for write paths
 lib/keychain.js               OS keychain for API key storage
 lib/logger.js                 Structured JSON logger with rotation
+lib/path-filter.js            Shared include/ignore pattern matcher
 lib/state-db.js               Local SQLite state database (node:sqlite)
 lib/sync-engine.js            Core sync loop orchestrator
 lib/systemd-notify.js         sd_notify wrapper (Type=notify support)
 lib/task-pool.js              Bounded-concurrency promise pool for parallel uploads
+lib/throttle-stream.js        Token-bucket bandwidth limiter + pass-through Transform
 lib/watcher.js                fs.watch with debounce and ignore patterns
 lib/worker-pool.js            Generic worker thread pool
 lib/workers/checksum-worker.js  SHA3-512 hashing worker thread
