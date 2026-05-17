@@ -202,6 +202,15 @@ jobs:
             echo "No VEX statements pending — skipping VEX attachment."
           fi
 
+      - name: Build CycloneDX 1.6 SBOM
+        shell: bash
+        run: |
+          # Always emits artifacts/hermitstash-sync-vX.Y.Z.cdx.json describing
+          # the SEA's vendored surface (blamejs + transitive noble-* bundles)
+          # with CPE 2.3 + purl identifiers and per-component SHA-256 hashes.
+          node scripts/build-sbom.js --out artifacts
+          ls -l artifacts/hermitstash-sync-v$(node -e "console.log(require('./lib/constants').VERSION)").cdx.json
+
       - name: Build release notes
         shell: bash
         run: |
@@ -279,6 +288,17 @@ jobs:
                        'It declares the affected/not-affected status of CVEs against the platform binaries ' +
                        '(\`linux-x64\`, \`linux-arm64\`, \`win-x64\`, \`macos-arm64\`) and the container image. ' +
                        'Scanners that consume CSAF can use it to suppress alerts on transitive CVEs that don\\'t reach a vulnerable code path here.');
+          }
+
+          // CycloneDX 1.6 SBOM — always emitted; describes the SEA's vendored surface.
+          var sbomCandidate = 'hermitstash-sync-' + tag + '.cdx.json';
+          if (fs.existsSync(path.join(artDir, sbomCandidate))) {
+            lines.push('');
+            lines.push('### Software Bill of Materials (SBOM)');
+            lines.push('');
+            lines.push('\`' + sbomCandidate + '\` is a CycloneDX 1.6 SBOM enumerating the SEA binary\\'s vendored surface ' +
+                       '(blamejs and its transitive bundles) with CPE 2.3 + purl identifiers and per-component SHA-256 hashes. ' +
+                       'Dependency-Track, OWASP Dependency-Check, and Snyk SBOM Monitor consume the CPE field to map CVE advisories against the components actually shipping inside the binary.');
           }
 
           lines.push('');

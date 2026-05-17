@@ -381,6 +381,12 @@ echo "  Building CSAF 2.1 VEX document..."
 node scripts/build-vex.js --out build
 VEX_FILE="build/hermitstash-sync-${TAG}.vex.json"
 
+# Build a CycloneDX 1.6 SBOM describing the SEA's vendored surface.
+# Always emits (the source tree has the manifests checked in).
+echo "  Building CycloneDX 1.6 SBOM..."
+node scripts/build-sbom.js --out build
+SBOM_FILE="build/hermitstash-sync-${TAG}.cdx.json"
+
 # Collect artifacts
 ARTIFACTS=("build/${EXE_NAME}" "build/${EXE_NAME}.sha256" "build/${EXE_NAME}.sha3-512")
 if [ -f "build/${EXE_NAME}.sig" ]; then
@@ -391,6 +397,9 @@ if [ -f "build/${EXE_NAME}.asc" ]; then
 fi
 if [ -f "${VEX_FILE}" ]; then
   ARTIFACTS+=("${VEX_FILE}")
+fi
+if [ -f "${SBOM_FILE}" ]; then
+  ARTIFACTS+=("${SBOM_FILE}")
 fi
 
 gh release create "${TAG}" \

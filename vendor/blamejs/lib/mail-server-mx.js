@@ -116,7 +116,6 @@
  */
 
 var net   = require("node:net");
-var nodeTls   = require("node:tls");
 var lazyRequire = require("./lazy-require");
 var C         = require("./constants");
 var bCrypto   = require("./crypto");
@@ -128,6 +127,7 @@ var validateOpts = require("./validate-opts");
 var guardSmtpCommand = require("./guard-smtp-command");
 var guardDomain = require("./guard-domain");
 var mailServerRateLimit = require("./mail-server-rate-limit");
+var mailServerTls = require("./mail-server-tls");
 var { defineClass } = require("./framework-error");
 
 var audit = lazyRequire(function () { return require("./audit"); });
@@ -557,39 +557,46 @@ function create(opts) {
         return;
       }
       _writeReply(socket, REPLY_220_READY, "2.0.0 Ready to start TLS");
-      // STARTTLS-injection defense (CVE-2021-38371 Exim,
-      // CVE-2021-33515 Dovecot): clear the command buffer + body
-      // collector at upgrade time. Any commands pipelined (RFC 2920)
-      // BEFORE the TLS handshake are discarded — only commands sent
-      // on the post-handshake TLS socket are honored.
+      // CVE-2021-38371 (Exim) / CVE-2021-33515 (Dovecot) STARTTLS-
+      // injection defense: clear the pre-handshake command buffer +
+      // body collector AND strip the plain-socket "data" listener
+      // before wrapping in TLSSocket so bytes the peer pipelined
+      // (RFC 2920) pre-handshake cannot reach the post-TLS state
+      // machine. Listener-removal + idle-timeout re-arm live in the
+      // shared upgradeSocket helper (b.mail.server.tls.upgradeSocket).
       lineBuffer    = "";
       bodyCollector = null;
       inDataBody    = false;
-      var tlsSocket = new nodeTls.TLSSocket(socket, {
-        isServer:      true,
+      mailServerTls.upgradeSocket({
+        plainSocket:   socket,
         secureContext: opts.tlsContext,
-      });
-      tlsSocket.on("secure", function () {
-        state.tls   = true;
-        // After the handshake, the state machine restarts at EHLO
-        // (per RFC 3207 §4.2 — client MUST re-issue EHLO).
-        state.stage = "ehlo";
-        state.helo  = null;
-      });
-      tlsSocket.on("error", function (err) {
-        _emit("mail.server.mx.tls_handshake_failed",
-          { connectionId: state.id, code: (err && err.code) || "unknown",
-            message: err && err.message }, "failure");
-        _closeConnection(socket);
-      });
-      tlsSocket.on("data", function (chunk) {
-        try { _ingestBytes(state, tlsSocket, chunk); }
-        catch (err) {
-          _emit("mail.server.mx.handler_threw",
-            { connectionId: state.id, error: (err && err.message) || String(err) },
-            "failure");
+        idleTimeoutMs: idleTimeoutMs,
+        onSecure: function (_tlsSocket) {
+          state.tls   = true;
+          // After the handshake, the state machine restarts at EHLO
+          // (per RFC 3207 §4.2 — client MUST re-issue EHLO).
+          state.stage = "ehlo";
+          state.helo  = null;
+        },
+        onData: function (tlsSocket, chunk) {
+          try { _ingestBytes(state, tlsSocket, chunk); }
+          catch (err) {
+            _emit("mail.server.mx.handler_threw",
+              { connectionId: state.id, error: (err && err.message) || String(err) },
+              "failure");
+            _closeConnection(tlsSocket);
+          }
+        },
+        onError: function (err) {
+          _emit("mail.server.mx.tls_handshake_failed",
+            { connectionId: state.id, code: (err && err.code) || "unknown",
+              message: err && err.message }, "failure");
+          _closeConnection(socket);
+        },
+        onTimeout: function (tlsSocket) {
+          _writeReply(tlsSocket, REPLY_421_SERVICE_NOT_AVAIL, "4.4.2 Idle timeout");
           _closeConnection(tlsSocket);
-        }
+        },
       });
     }
 
@@ -653,8 +660,24 @@ function create(opts) {
           "4.5.3 Too many recipients (limit " + maxRcptsPerMsg + ")");
         return;
       }
+      // RFC 5321 §3.5 — RCPT-TO 550 vs 250 surfaces a mailbox-existence
+      // oracle. Once the per-IP recipient-failure cap is reached, the
+      // listener returns 421 + closes so the IP backs off; without this
+      // a scanner can RCPT-TO-flood the listener to enumerate every
+      // valid local recipient at the bare cost of an SMTP greeting.
+      var rcptAdmit = rateLimit.checkRcptAdmit(state.remoteAddress);
+      if (!rcptAdmit.ok) {
+        _emit("mail.server.mx.rcpt_rate_limit_refused",
+          { connectionId: state.id, remoteAddress: state.remoteAddress,
+            reason: rcptAdmit.reason }, "denied");
+        _writeReply(socket, REPLY_421_SERVICE_NOT_AVAIL,
+          "4.7.0 Too many RCPT failures from your IP");
+        _closeConnection(socket);
+        return;
+      }
       var match = line.match(RE_RCPT_TO);
       if (!match) {
+        rateLimit.noteRcptFailure(state.remoteAddress);
         _writeReply(socket, REPLY_501_BAD_ARGS, "5.5.4 Syntax: RCPT TO:<address>");
         return;
       }
@@ -668,6 +691,7 @@ function create(opts) {
       if (rcptDomain && rcptDomain[0] !== "[" && guardDomainProfile) {
         var rcptVerdict = _validateDomainHardened(rcptDomain, "rcpt_to");
         if (!rcptVerdict.ok) {
+          rateLimit.noteRcptFailure(state.remoteAddress);
           _writeReply(socket, REPLY_501_BAD_ARGS,
             "5.5.4 RCPT TO domain refused (" +
             (rcptVerdict.issues && rcptVerdict.issues[0] && rcptVerdict.issues[0].kind) + ")");
@@ -679,6 +703,7 @@ function create(opts) {
       if (localDomains.length > 0) {
         if (localDomains.indexOf(rcptDomain) === -1 &&
             !_isRelayAllowed(state.remoteAddress, rcpt)) {
+          rateLimit.noteRcptFailure(state.remoteAddress);
           _emit("mail.server.mx.relay_refused",
             { connectionId: state.id, mailFrom: state.mailFrom, rcptTo: rcpt,
               remoteAddress: state.remoteAddress }, "denied");
