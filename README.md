@@ -195,6 +195,7 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
   "include": [],
   "logLevel": "info",
   "autoUpdate": true,
+  "autoUpdateChannel": "stable",
   "uploadConcurrency": 4,
   "uploadBytesPerSec": 0,
   "downloadBytesPerSec": 0
@@ -265,6 +266,8 @@ Source installs (running from `git clone`) do not self-replace — the daemon lo
 Disable per-invocation with `start --no-autoupdate`, or globally by setting `"autoUpdate": false` in `config.json`.
 
 The signing key is held only by the release pipeline; the daemon cannot install a binary signed by anything else. If no pubkey is embedded in this build, auto-update is disabled and logged at startup.
+
+**Channels:** `"autoUpdateChannel": "stable"` (default) pins the daemon to releases that GitHub marks non-prerelease. Set `"autoUpdateChannel": "beta"` to also pick up prereleases — useful for following along with in-development versions. Both channels run the same P-384 ECDSA signature verification; the signing key is shared. Beta-channel rollouts that ship a stable version newer than the current beta will pick the stable one (highest semver-ish tag wins).
 
 ### Windows SmartScreen on first launch
 
@@ -362,8 +365,12 @@ The log file is rotated at 10 MB. The current log is renamed to `.log.1` and a f
 | --- | --- | --- | --- |
 | Keychain | Keychain Access | GNOME Keyring / KDE Wallet | Credential Manager |
 | Daemon | `start --daemon` | `start --daemon` | `start --daemon` |
-| Resync signal | `SIGHUP` | `SIGHUP` | Not supported — restart daemon |
+| Reload + resync signal | `SIGHUP` | `SIGHUP` | Not supported — restart daemon |
 | Auto-start | launchd | systemd | Task Scheduler |
+
+**Windows long paths:** the daemon transparently prefixes paths over ~248 chars with `\\?\` so deep node_modules-style trees keep working even on Windows installations without the `LongPathsEnabled` registry flag. POSIX paths and short Windows paths pass through unchanged.
+
+**SIGHUP** (Linux + macOS) re-reads `config.json` + `.hermitstash-ignore` + `.hermitstash-include`, pushes the new patterns to the running watcher + engine, then triggers a resync. Lets you edit selective-sync or ignore rules and apply them without bouncing the daemon.
 
 ## Auto-start (optional)
 
@@ -432,6 +439,7 @@ lib/diagnose.js               `diagnose` bundle builder
 lib/http-client.js            HTTP client with PQC agent + blamejs apiEncrypt for write paths
 lib/keychain.js               OS keychain for API key storage
 lib/logger.js                 Structured JSON logger with rotation
+lib/long-path.js              Windows `\\?\` prefix for paths over MAX_PATH
 lib/path-filter.js            Shared include/ignore pattern matcher
 lib/state-db.js               Local SQLite state database (node:sqlite)
 lib/sync-engine.js            Core sync loop orchestrator
