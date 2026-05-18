@@ -32,3 +32,6 @@ tests/certs/
 *.swp
 *.swo
 *~
+
+# Scratch — local-only stress/simulation scripts, throwaway analysis.
+.scratch/
