@@ -193,6 +193,7 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
   },
   "ignore": ["*.log", "build/**"],
   "include": [],
+  "pinnedServerSpki": [],
   "logLevel": "info",
   "autoUpdate": true,
   "autoUpdateChannel": "stable",
@@ -213,6 +214,35 @@ By default the daemon syncs every file in `syncFolder` not caught by an ignore p
 ```
 
 With selective sync on, the daemon never uploads out-of-scope local files and never downloads out-of-scope server files. Server events for out-of-scope paths are seq-acknowledged but otherwise ignored — the daemon stays in sync without ever materializing the excluded files locally. A rename that crosses the scope boundary is handled as a delete (out-of-scope side) or add (in-scope side) at file granularity. Empty `include` array = everything (default behavior).
+
+### SPKI cert pinning (opt-in)
+
+For deployments that need to bind the daemon to a specific server identity (defence against compromised public CAs, MITM via stolen-CA cert chains), set `pinnedServerSpki` to one or more SubjectPublicKeyInfo SHA-256 hashes in the `sha256/<base64>` shape:
+
+```json
+{
+  "pinnedServerSpki": [
+    "sha256/Lp4r8Y2nW/zk0+m9F1xLqHfQ4yC9XQz5RbY8WzVdH+s=",
+    "sha256/r1tEqyHFq4N6yL7/W/V1xWqHfQ4yC9XQz5RbY8WzVdH=="
+  ]
+}
+```
+
+Every TLS handshake (HTTPS + WebSocket) must produce a leaf cert whose SPKI hash matches one of the listed pins. Layered ON TOP of the default chain + hostname checks — pinning is additive, not a bypass.
+
+The pin binds to the public-key bytes, not the cert. Cert rotation that reuses the same keypair keeps the pin valid (the deliberate key-continuity property). Planned key rotations are supported by listing both old + new pins during the cutover window.
+
+To compute your server's pin: run `hermitstash-sync diagnose` and read the `spkiPin` field from `cert-info.json` inside the bundle. Or with openssl:
+
+```bash
+openssl x509 -in server.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary \
+  | base64
+# prefix with "sha256/" and add to config.pinnedServerSpki
+```
+
+Empty array (default) = no pinning, the default trust chain wins. Get the pin wrong and the daemon refuses every connection — keep at least one current + one backup pin during rotations.
 
 ### Bandwidth limit
 
@@ -294,7 +324,7 @@ Both files are attached to every release. The GPG key fingerprint and the ECDSA 
 4. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 5. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
 6. Failed uploads are retried up to 3 times with full-jitter exponential backoff (base 5s). After 5 consecutive uploads exhaust their retries, a per-target circuit breaker opens for 30 seconds and new uploads fast-fail without dialling the server. The breaker probes after the cooldown; 2 consecutive successful probes close it. This keeps the daemon from hammering a flapping server while the retry loop would otherwise happily keep firing.
-7. `hermitstash-sync stats` reads a JSON snapshot the daemon writes every 15 seconds (`$CONFIG_DIR/stats.json`) — uploads/downloads (ok/error/retries), WebSocket reconnects, upload circuit-breaker state, upload pool depth, conflict count, and last applied sequence number. Use `--json` for machine-readable output or `--prometheus` for textfile-collector-friendly exposition.
+7. `hermitstash-sync stats` reads a JSON snapshot the daemon writes every 15 seconds (`$CONFIG_DIR/stats.json`) — uploads/downloads (ok/error/retries), WebSocket reconnects, upload circuit-breaker state, upload pool depth, conflict count, average upload + download latency, and last applied sequence number. Use `--json` for machine-readable output or `--prometheus` for textfile-collector-friendly exposition. The daemon also writes a Prometheus 0.0.4 sidecar at `$CONFIG_DIR/stats.prom` with full histogram bucket counts — `stats --prometheus` reads the sidecar when present and surfaces P50/P95/P99 territory via `histogram_quantile()` queries. When the daemon is STOPPED, `stats` clearly frames the values as historical ("last known state before the daemon stopped") and points at the State DB section for current truth.
 
 ### Concurrency
 
