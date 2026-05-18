@@ -461,7 +461,6 @@ Outside systemd (Docker, Windows, dev runs) the notify calls no-op cleanly — `
 bin/hermitstash-sync.js       CLI entry point
 lib/cli.js                    Command parser and dispatcher
 lib/config.js                 Config file management
-lib/conflict-path.js          Builds filesystem-portable conflict filenames
 lib/constants.js              All constants, message types, defaults
 lib/checksum.js               SHA3-512 hashing (single + worker pool)
 lib/daemon.js                 Daemonization, PID file, signal handlers
@@ -473,9 +472,6 @@ lib/long-path.js              Windows `\\?\` prefix for paths over MAX_PATH
 lib/path-filter.js            Shared include/ignore pattern matcher
 lib/state-db.js               Local SQLite state database (node:sqlite)
 lib/sync-engine.js            Core sync loop orchestrator
-lib/systemd-notify.js         sd_notify wrapper (Type=notify support)
-lib/task-pool.js              Bounded-concurrency promise pool for parallel uploads
-lib/throttle-stream.js        Token-bucket bandwidth limiter + pass-through Transform
 lib/watcher.js                fs.watch with debounce and ignore patterns
 lib/worker-pool.js            Generic worker thread pool
 lib/workers/checksum-worker.js  SHA3-512 hashing worker thread

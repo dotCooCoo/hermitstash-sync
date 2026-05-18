@@ -124,6 +124,7 @@ var numericBounds = require("./numeric-bounds");
 var validateOpts = require("./validate-opts");
 var guardImapCommand = require("./guard-imap-command");
 var mailServerRateLimit = require("./mail-server-rate-limit");
+var mailServerRegistry = require("./mail-server-registry");
 var mailServerTls = require("./mail-server-tls");
 var { defineClass } = require("./framework-error");
 
@@ -143,6 +144,51 @@ var pkgVersion = require("../package.json").version;
 // and the per-call sites read cleanly.
 var ERR_CLAMP = 200;                                                                                  // allow:raw-byte-literal — protocol-reply error-message clamp
 var LINE_PREVIEW = 80;                                                                                // allow:raw-byte-literal — audit-line preview clamp
+
+// RFC 9051 §6.3.12 + RFC 5322 §3.3 date-time parser for IMAP APPEND.
+// Format: `DD-Mon-YYYY HH:MM:SS ±HHMM` where Mon is the 3-letter
+// English month abbreviation (case-insensitive on parse, but the IMAP
+// spec emits canonical mixed-case `Jan`/`Feb`/...). Returns the
+// millisecond epoch, or null on any parse failure — the caller emits
+// `BAD` rather than silently using `Date.now()`.
+var IMAP_MONTHS = Object.freeze({
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,                                                         // allow:raw-byte-literal — month-index table (0-5)
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,                                                       // allow:raw-byte-literal — month-index table (6-11)
+});
+var IMAP_DT_RE = /^\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-])(\d{2})(\d{2})\s*$/;
+function _parseImapDateTime(s) {
+  if (typeof s !== "string") return null;
+  var m = s.match(IMAP_DT_RE);                                                                            // allow:regex-no-length-cap — input bounded by IMAP literal cap
+  if (!m) return null;
+  var day = parseInt(m[1], 10);
+  var month = IMAP_MONTHS[m[2].toLowerCase()];
+  if (month === undefined) return null;
+  var year = parseInt(m[3], 10);
+  var hour = parseInt(m[4], 10);
+  var min  = parseInt(m[5], 10);
+  var sec  = parseInt(m[6], 10);
+  var sign = m[7] === "-" ? -1 : 1;
+  var tzH  = parseInt(m[8], 10);
+  var tzM  = parseInt(m[9], 10);
+  if (day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 || tzH > 23 || tzM > 59) return null;
+  var utcMs = Date.UTC(year, month, day, hour, min, sec);
+  if (!isFinite(utcMs)) return null;
+  // RFC 5322 §3.3 — date-time MUST be a real calendar date. `Date.UTC`
+  // silently normalises impossible inputs (`Feb 31 2026` → `Mar 3 2026`);
+  // round-trip via the calendar fields and refuse any drift so a
+  // hostile client can't smuggle a different internalDate than the
+  // wire suggests.
+  var probe = new Date(utcMs);
+  if (probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth()    !== month ||
+      probe.getUTCDate()     !== day ||
+      probe.getUTCHours()    !== hour ||
+      probe.getUTCMinutes()  !== min ||
+      probe.getUTCSeconds()  !== sec) {
+    return null;
+  }
+  return utcMs - sign * (tzH * C.TIME.hours(1) + tzM * C.TIME.minutes(1));
+}
 
 // Mailbox name validator. RFC 9051 §5.1 — UTF-8 hierarchy. Refuse
 // path-traversal (`..`), NUL, C0 controls, leading/trailing slash,
@@ -446,37 +492,147 @@ function create(opts) {
     _dispatch(state, socket, parsed, lineNoLit, pending.body);
   }
 
-  function _dispatch(state, socket, parsed, _rawLine, literalBody) {
-    var tag  = parsed.tag;
-    var verb = parsed.verb;
-    var args = parsed.args;
+  // Adapter shim — uniform `(state, socket, parsed, literalBody)`
+  // dispatch contract over the per-verb handlers. Builds the registry
+  // defaults lazily on first dispatch so the closure-scoped handler
+  // references are bound when needed (handlers are hoisted by their
+  // function-declarations; the registry init runs at dispatch time).
+  var _registry = null;
+  function _ensureRegistry() {
+    if (_registry !== null) return _registry;
+    // Per-handler resource budgets. Sized per the verb's known
+    // payload shape (LIST scans the folder tree; FETCH walks N
+    // messages; APPEND accepts a literal up to maxLiteralBytes).
+    var SHORT_MS  = 5 * 1000;                                                                        // allow:raw-time-literal — 5s short-command budget
+    var MEDIUM_MS = 30 * 1000;                                                                       // allow:raw-time-literal — 30s medium-command budget
+    var LONG_MS   = 2 * 60 * 1000;                                                                   // allow:raw-time-literal — 2 min long-command budget (FETCH / APPEND)
+    var SHORT_B   = 8 * 1024;                                                                        // allow:raw-byte-literal — 8 KiB short-command response cap
+    var MEDIUM_B  = 1024 * 1024;                                                                     // allow:raw-byte-literal — 1 MiB medium-command response cap
+    var LONG_B    = 64 * 1024 * 1024;                                                                // allow:raw-byte-literal — 64 MiB FETCH/APPEND response cap
+    var defaults = {
+      CAPABILITY:   { fn: function (s, so, p)  { return _handleCapability(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      NOOP:         { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "OK NOOP completed"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      LOGOUT:       { fn: function (s, so, p)  { return _handleLogout(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      ID:           { fn: function (s, so, p)  { return _handleId(s, so, p.tag, p.args); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      STARTTLS:     { fn: function (s, so, p)  { return _handleStartTls(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      AUTHENTICATE: { fn: function (s, so, p)  { return _handleAuthenticate(s, so, p.tag, p.args); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      LOGIN:        { fn: function (s, so, p)  { return _handleLogin(s, so, p.tag, p.args); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      ENABLE:       { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "OK ENABLED"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      SELECT:       { fn: function (s, so, p)  { return _handleSelect(s, so, p.tag, p.args, false); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      EXAMINE:      { fn: function (s, so, p)  { return _handleSelect(s, so, p.tag, p.args, true); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      LIST:         { fn: function (s, so, p)  { return _handleList(s, so, p.tag, p.args); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      STATUS:       { fn: function (s, so, p)  { return _handleStatus(s, so, p.tag, p.args); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      NAMESPACE:    { fn: function (s, so, p)  {
+                        _writeUntagged(so, "NAMESPACE ((\"\" \"/\")) NIL NIL");
+                        return _writeTagged(so, p.tag, "OK NAMESPACE completed");
+                      },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      APPEND:       { fn: function (s, so, p, lit) { return _handleAppend(s, so, p.tag, p.args, lit); },
+                      maxHandlerBytes: LONG_B,   maxHandlerMs: LONG_MS },
+      CHECK:        { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "OK CHECK completed"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      CLOSE:        { fn: function (s, so, p)  { return _handleClose(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      UNSELECT:     { fn: function (s, so, p)  { return _handleClose(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      EXPUNGE:      { fn: function (s, so, p)  { return _handleExpunge(s, so, p.tag); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      FETCH:        { fn: function (s, so, p)  { return _handleFetch(s, so, p.tag, p.args); },
+                      maxHandlerBytes: LONG_B,   maxHandlerMs: LONG_MS },
+      STORE:        { fn: function (s, so, p)  { return _handleStore(s, so, p.tag, p.args); },
+                      maxHandlerBytes: MEDIUM_B, maxHandlerMs: MEDIUM_MS },
+      UID:          { fn: function (s, so, p)  { return _handleUid(s, so, p.tag, p.args); },
+                      maxHandlerBytes: LONG_B,   maxHandlerMs: LONG_MS },
+      IDLE:         { fn: function (s, so, p)  { return _handleIdle(s, so, p.tag); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: LONG_MS },
+      DONE:         { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "BAD DONE outside IDLE"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      // Defaults for the verbs the v0.9.49 listener didn't dispatch —
+      // operators wire concrete handlers via opts.overrides.
+      SEARCH:       { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO SEARCH not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      CREATE:       { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO CREATE not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      DELETE:       { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO DELETE not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      RENAME:       { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO RENAME not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      SUBSCRIBE:    { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO SUBSCRIBE not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      UNSUBSCRIBE:  { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO UNSUBSCRIBE not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      COPY:         { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO COPY not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+      MOVE:         { fn: function (s, so, p)  { return _writeTagged(so, p.tag, "NO MOVE not configured"); },
+                      maxHandlerBytes: SHORT_B,  maxHandlerMs: SHORT_MS },
+    };
+    _registry = mailServerRegistry.create({
+      protocol:        "imap",
+      defaults:        defaults,
+      overrides:       opts.overrides || {},
+      // b.agent.tenant adoption (v0.10.12). Operators wiring multi-
+      // tenant IMAP deployments pass `tenantScope` from
+      // `b.agent.tenant.create({...})` plus the per-listener tenant id.
+      // The registry then gates every dispatch on
+      // `tenantScope.check(state.actor, agentTenantId)` before guard
+      // validation or audit emission.
+      tenantScope:     opts.tenantScope    || null,
+      agentTenantId:   opts.agentTenantId  || null,
+      notFoundHandler: function (verb, _state, socket, parsed) {
+        return _writeTagged(socket, parsed.tag,
+          "BAD Verb '" + verb + "' not implemented in v1");
+      },
+    });
+    return _registry;
+  }
 
-    switch (verb) {
-    case "CAPABILITY": return _handleCapability(state, socket, tag);
-    case "NOOP":       return _writeTagged(socket, tag, "OK NOOP completed");
-    case "LOGOUT":     return _handleLogout(state, socket, tag);
-    case "ID":         return _handleId(state, socket, tag, args);
-    case "STARTTLS":   return _handleStartTls(state, socket, tag);
-    case "AUTHENTICATE": return _handleAuthenticate(state, socket, tag, args);
-    case "LOGIN":      return _handleLogin(state, socket, tag, args);
-    case "ENABLE":     return _writeTagged(socket, tag, "OK ENABLED");
-    case "SELECT":
-    case "EXAMINE":    return _handleSelect(state, socket, tag, args, verb === "EXAMINE");
-    case "LIST":       return _handleList(state, socket, tag, args);
-    case "STATUS":     return _handleStatus(state, socket, tag, args);
-    case "NAMESPACE":  return _writeUntagged(socket, "NAMESPACE ((\"\" \"/\")) NIL NIL"), _writeTagged(socket, tag, "OK NAMESPACE completed");
-    case "APPEND":     return _handleAppend(state, socket, tag, args, literalBody);
-    case "CHECK":      return _writeTagged(socket, tag, "OK CHECK completed");
-    case "CLOSE":
-    case "UNSELECT":   return _handleClose(state, socket, tag);
-    case "EXPUNGE":    return _handleExpunge(state, socket, tag);
-    case "FETCH":      return _handleFetch(state, socket, tag, args);
-    case "STORE":      return _handleStore(state, socket, tag, args);
-    case "UID":        return _handleUid(state, socket, tag, args);
-    case "IDLE":       return _handleIdle(state, socket, tag);
-    case "DONE":       return _writeTagged(socket, tag, "BAD DONE outside IDLE");
-    default:           return _writeTagged(socket, tag, "BAD Verb '" + verb + "' not implemented in v1");
+  function _dispatch(state, socket, parsed, _rawLine, literalBody) {
+    // Registry dispatch may return a Promise (async override handler,
+    // or a safeAsync.withTimeout-wrapped Promise). The caller's
+    // try/catch is synchronous, so a Promise rejection would surface
+    // as an unhandled rejection AND the client would never receive
+    // the tagged error reply. Attach a catch that converts the
+    // rejection into a `BAD`/`NO` tagged response + audit emit.
+    var result;
+    try {
+      result = _ensureRegistry().dispatch(parsed.verb, state, socket, parsed, literalBody);
+    } catch (err) {
+      _writeTagged(socket, parsed.tag,
+        "NO " + ((err && err.message) || "handler threw").slice(0, ERR_CLAMP));
+      _emit("mail.server.imap.handler_threw",
+        { connectionId: state.id, verb: parsed.verb,
+          error: (err && err.message) || String(err) }, "failure");
+      return;
     }
+    if (result && typeof result.then === "function") {
+      result.then(
+        function () { /* tagged response already written by handler */ },
+        function (err) {
+          try {
+            _writeTagged(socket, parsed.tag,
+              "NO " + ((err && err.message) || "handler rejected").slice(0, ERR_CLAMP));
+          } catch (_we) { /* socket may already be gone */ }
+          try {
+            _emit("mail.server.imap.handler_rejected",
+              { connectionId: state.id, verb: parsed.verb,
+                error: (err && err.message) || String(err) }, "failure");
+          } catch (_ae) { /* drop-silent */ }
+        }
+      );
+    }
+    return result;
   }
 
   function _capabilityLine(state) {
@@ -707,15 +863,39 @@ function create(opts) {
 
   function _parseLoginArgs(args) {
     if (typeof args !== "string") return null;
-    // Quoted or atom — simple parser sufficient for happy path.
+    // Quoted or atom — RFC 9051 §5.1 quoted ABNF. Inside a quoted
+    // string `\"` and `\\` are escape sequences for `"` and `\`
+    // respectively; any other `\<chr>` is invalid. The earlier shape
+    // terminated the quoted string at the first `"`, so a hostile
+    // client passing `LOGIN "alice\"@example.com" "pw"` would have
+    // its username truncated at `alice` and the rest of the line
+    // reparsed as the password / literal — wrong identity bound to
+    // the AUTH state.
     var rest = args.trim();
     function _take() {
       if (rest[0] === "\"") {
-        var end = rest.indexOf("\"", 1);
-        if (end === -1) return null;
-        var v = rest.slice(1, end);
-        rest = rest.slice(end + 1).trim();
-        return v;
+        // Walk the quoted-string body, accumulating into `out` while
+        // honoring the `\"` / `\\` escape pairs. A bare `\` followed
+        // by any other character is refused (parse fails → null).
+        var out = "";
+        var i = 1;
+        while (i < rest.length) {
+          var ch = rest.charAt(i);
+          if (ch === "\\") {
+            var esc = rest.charAt(i + 1);
+            if (esc !== "\"" && esc !== "\\") return null;
+            out += esc;
+            i += 2;
+            continue;
+          }
+          if (ch === "\"") {
+            rest = rest.slice(i + 1).trim();
+            return out;
+          }
+          out += ch;
+          i += 1;
+        }
+        return null;   // unterminated quoted string
       }
       var sp = rest.indexOf(" ");
       var v2 = sp === -1 ? rest : rest.slice(0, sp);
@@ -857,6 +1037,22 @@ function create(opts) {
     }
     var name = _unquote(match[1]);
     var flags = match[2] ? match[2].split(/\s+/).filter(Boolean) : [];
+    // RFC 9051 §6.3.12 — optional date-time argument sets INTERNALDATE
+    // on the appended message. Earlier shape captured the token but
+    // never threaded it; backends now receive it as `internalDate`
+    // (ms-since-epoch) and the mail-store applies it instead of the
+    // append-time clock. Refused as syntax error when the date-time
+    // can't be parsed (rather than silently using the clock).
+    var dateTimeArg = match[3] ? _unquote(match[3]) : null;
+    var internalDate = null;
+    if (dateTimeArg) {
+      internalDate = _parseImapDateTime(dateTimeArg);
+      if (internalDate === null) {
+        _writeTagged(socket, tag, "BAD APPEND date-time '" + dateTimeArg +
+          "' not in RFC 9051 §6.3.12 / RFC 5322 §3.3 date-time grammar");
+        return;
+      }
+    }
     if (!_validateMailboxName(name, { allowLegacyMUtf7: allowLegacyMUtf7 })) {
       _writeTagged(socket, tag, "BAD Mailbox name refused");
       return;
@@ -891,10 +1087,12 @@ function create(opts) {
                 err.limit = q.capBytes;
                 throw err;
               }
-              return mailStore.appendMessage(name, literalBody, { actor: state.actor, flags: flags });
+              return mailStore.appendMessage(name, literalBody, {
+                actor: state.actor, flags: flags, internalDate: internalDate });
             });
         }
-        return mailStore.appendMessage(name, literalBody, { actor: state.actor, flags: flags });
+        return mailStore.appendMessage(name, literalBody, {
+          actor: state.actor, flags: flags, internalDate: internalDate });
       })
       .then(function (info) {
         _emit("mail.server.imap.append",
@@ -947,7 +1145,10 @@ function create(opts) {
 
   function _handleFetch(state, socket, tag, args, useUid) {
     if (!state.selectedMailbox) {
-      _writeTagged(socket, tag, "NO No mailbox selected");
+      // RFC 9051 §6.4.5 — FETCH outside of Selected state is a
+      // protocol-context violation, not a server-policy refusal.
+      // BAD signals the client to fix its dialog rather than retry.
+      _writeTagged(socket, tag, "BAD FETCH only valid in Selected state (RFC 9051 §6.4.5)");
       return;
     }
     if (typeof mailStore.fetchRange !== "function") {
@@ -988,7 +1189,11 @@ function create(opts) {
 
   function _handleStore(state, socket, tag, args, useUid) {
     if (!state.selectedMailbox) {
-      _writeTagged(socket, tag, "NO No mailbox selected");
+      // RFC 9051 §6.4.6 — STORE outside of Selected state is a
+      // protocol-context violation. BAD (not NO) is the correct
+      // response per the IMAP grammar; UID STORE has the same rule
+      // since the verb is just a `UID` prefix on STORE.
+      _writeTagged(socket, tag, "BAD STORE only valid in Selected state (RFC 9051 §6.4.6)");
       return;
     }
     if (state.selectedReadOnly) {

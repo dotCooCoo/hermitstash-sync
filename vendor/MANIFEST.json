@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.10.6",
+      "version": "0.10.13",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.10.6",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.10.6:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.10.6",
+      "tag": "v0.10.13",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.10.13:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.10.13",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -38,16 +38,16 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:9e7641a037fb8df635aa9e723704a02b6f7b0a42e3b46923d629b248fc600c71",
+        "index": "sha256:690e27888a926742b40481c8bb016c90715fee218dbcc781ef928aeb5f67b13e",
         "safe-json": "sha256:c0fe2d43b6968f434fd6d8b885fab1c198029a656cfa02ce48ca83e42b7327e5",
         "safe-url": "sha256:cec279c15d55c64aa326e0ac75869b09425118173d97435051287aa78df64c0a",
-        "pqc-agent": "sha256:e777ec50e34fb3fbc6f2a34fd37f2e940a78b1925a8a01926303318686855626",
+        "pqc-agent": "sha256:cfbe716988492832b535fc2f1907dc3b6b1fa35eed1bdc737a95215531d46e09",
         "pqc-software": "sha256:ff7ee3facdbc456f0e82ae64158dba72bfbed5de76afdc5e1c36a36671a814d4",
         "http-client": "sha256:cd70ce017a5e59d790723337c6a0ce6257b69958a607c4ee87c1f3306ebd31e3",
         "ws-client": "sha256:30526a376cd22e84d93f34b42aeee9971050fa003d4801b2a349feb90801b989",
         "log-stream": "sha256:9ffda79044835670fba447876b617b1d5cef0592abf08b52167e2ae7b6bcdba7",
         "log-stream-local": "sha256:4ce394dd251504c5a280e0d7c2e5e570110a7a648789ccb7b3069733604f6611",
-        "atomic-file": "sha256:41522010f704eb23504d4459efcf5a5b5dc08da405422ed6d2a7cd101537be35",
+        "atomic-file": "sha256:2e9e06c5d4ff1d15737085d5e01c15668ab008845cdc5dd5a521e7a7517debdd",
         "app-shutdown": "sha256:a60cf1d89d9dd6777b7cf10874619a7b1d12094a8eed5796a6c3726b9fa8ea26",
         "retry": "sha256:9b9d35a9eb109b1fcc181b0325c5bbebb048d3ef398f024069d5e03c311f4ec8",
         "framework-error": "sha256:99d65a894414d60c1d27342e706b7244291c9a68c4580ee11904fc4eb37ac363",

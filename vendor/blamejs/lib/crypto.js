@@ -390,6 +390,35 @@ function random(byteLength) {
     .digest();
 }
 
+/**
+ * @primitive b.crypto.randomInt
+ * @signature b.crypto.randomInt(min, max)
+ * @since     0.10.7
+ * @status    stable
+ *
+ * Cryptographically-secure uniform integer in `[min, max)`. Substrate
+ * wrapper that routes every framework integer draw (DNS query-ID,
+ * DMARC `pct` sampling, retry jitter) through one greppable primitive.
+ * Both bounds must be safe integers, `max > min`, and the half-open
+ * span must not exceed 2^48 (the underlying runtime's hard cap).
+ *
+ * @example
+ *   var n = b.crypto.randomInt(0, 100);
+ *   // → integer in [0, 100)
+ */
+function randomInt(min, max) {
+  if (typeof min !== "number" || !Number.isInteger(min)) {
+    throw new TypeError("b.crypto.randomInt: min must be an integer");
+  }
+  if (typeof max !== "number" || !Number.isInteger(max)) {
+    throw new TypeError("b.crypto.randomInt: max must be an integer");
+  }
+  if (max <= min) {
+    throw new RangeError("b.crypto.randomInt: max must be greater than min");
+  }
+  return nodeCrypto.randomInt(min, max);
+}
+
 function generateKeyPair(algorithm, options) {
   var pair = nodeCrypto.generateKeyPairSync(algorithm, Object.assign({
     publicKeyEncoding: { type: "spki", format: "pem" },
@@ -1189,7 +1218,13 @@ function decrypt(ciphertext, privateKeys, opts) {
   if (packed[0] !== C.ENVELOPE_MAGIC) {
     throw new Error("Invalid envelope: unsupported format");
   }
-  return decryptEnvelope(packed, privateKeys);
+  // `opts.raw: true` returns the decrypted Buffer rather than the
+  // utf8-decoded string. Callers carrying binary plaintext (JWE
+  // experimental wrapper, future signed-blob carriers) opt in to keep
+  // arbitrary bytes lossless; default stays utf8-string for backwards
+  // compatibility with the existing API contract.
+  return decryptEnvelope(packed, privateKeys,
+    opts && opts.raw === true ? { raw: true } : undefined);
 }
 
 function decryptEnvelope(packed, privateKeys, internalOpts) {
@@ -1254,9 +1289,11 @@ function decryptEnvelope(packed, privateKeys, internalOpts) {
   // dispatched on. A tampered header (algorithm-substitution attack)
   // surfaces here as a Poly1305 tag verification failure.
   var headerAad = packed.subarray(0, 4);                                          // allow:raw-byte-literal — envelope-header byte slice
-  return Buffer.from(
+  var plainBuf = Buffer.from(
     xchacha20poly1305(symmetricKey, nonce, headerAad).decrypt(packed.subarray(pos))
-  ).toString("utf8");
+  );
+  if (internalOpts && internalOpts.raw === true) return plainBuf;
+  return plainBuf.toString("utf8");
 }
 
 // ---- Symmetric buffer encrypt/decrypt (for storage) ----
@@ -1845,6 +1882,7 @@ module.exports = {
   // Random
   generateBytes:               generateBytes,
   generateToken:               generateToken,
+  randomInt:                   randomInt,
   toBase64Url:                 toBase64Url,
   fromBase64Url:               fromBase64Url,
   // Keys

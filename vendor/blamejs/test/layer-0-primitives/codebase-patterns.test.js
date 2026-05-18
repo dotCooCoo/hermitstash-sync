@@ -564,6 +564,7 @@ function testParserPrimitivesHaveFuzzHarness() {
     "lib/guard-html-wcag-tables.js":  "internal helper consumed only by guard-html.js; covered transitively by guard-html fuzz",
     "lib/guard-html-wcag-tagwalk.js": "internal helper consumed only by guard-html.js; covered transitively by guard-html fuzz",
     "lib/parsers/safe-env.js":        ".env file loader takes a filepath (not adversarial in-process bytes); operator controls the file boundary, schema-validation gates the values",
+    "lib/safe-path.js":               "operator-supplied path-segment validator over the existing guardFilename codepoint tables (reserved-name + bidi + overlong-UTF-8 inherited transitively); the per-segment regex set is deterministic + anchored + length-bounded by the caller-supplied rel, no adversarial-bytes parser surface",
   };
   var fs   = require("node:fs");
   var path = require("node:path");
@@ -2264,6 +2265,40 @@ async function testNoDuplicateCodeBlocks() {
     {
       mode:  "family-subset",
       files: [
+        "lib/auth/fido-mds3.js:_parseJws",
+        "lib/auth/jwt.js:decode",
+        "lib/auth/oauth.js:verifyBackchannelLogoutToken",
+        "lib/jose-jwe-experimental.js:decrypt",
+      ],
+      reason: "JOSE compact-serialization decode shape — base64url decode of header + structured parse + alg/type assertions. Each primitive owns its own compact-form contract (FIDO MDS3 attestation, JWT verify, OIDC back-channel logout-token verify, experimental JWE decrypt); merging would couple four spec-defined verification routines with distinct field sets.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/agent-idempotency.js:_checkArgs",
+        "lib/agent-tenant.js:_sealField",
+        "lib/atomic-file.js:copyDirRecursive",
+        "lib/ddl-change-control.js:approve",
+        "lib/ddl-change-control.js:reject",
+        "lib/deprecate.js:alias",
+        "lib/jose-jwe-experimental.js:decrypt",
+        "lib/totp.js:uri",
+      ],
+      reason: "Generic JS object-construction + buffer-coercion + typed-error throw shape. Eight unrelated primitives (agent idempotency arg check, per-tenant cryptoField seal, atomic-file recursive copy, DDL approve/reject, deprecate alias plumbing, experimental JWE compact-form header decode, TOTP URI builder) share the 50-token inline-validation shingle — each owns a distinct error class and validates a structurally different object. Extracting would couple eight domains.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/metrics.js:_shadowSetOf",
+        "lib/middleware/require-methods.js:create",
+        "lib/middleware/security-txt.js:_arrayOfStrings",
+        "lib/ws-client.js:connect",
+      ],
+      reason: "Generic array-of-non-empty-strings validator shape — typeof+length+typeof+length per-item walk. Each domain validates a structurally different array (metrics counter / gauge / info name lists; HTTP method allowlist; security.txt Contact lines; WebSocket protocol list). Extracting would force these four call sites onto one error class + one option key per validate signature; the inline shape stays per-domain typed.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
         "lib/daemon.js:_safeAuditEmit",
         "lib/mail-server-imap.js:_emit",
         "lib/mail-server-imap.js:create",
@@ -2275,9 +2310,14 @@ async function testNoDuplicateCodeBlocks() {
         "lib/mail-server-mx.js:create",
         "lib/mail-server-mx.js:listen",
         "lib/mail-server-pop3.js:_emit",
+        "lib/mail-server-pop3.js:_assertTenantOrRefuse",
         "lib/mail-sieve.js:_emit",
         "lib/mail-server-pop3.js:create",
         "lib/mail-server-pop3.js:listen",
+        "lib/mail-dav.js:_emit",
+        "lib/mail-server-managesieve.js:_emit",
+        "lib/mail-server-managesieve.js:create",
+        "lib/mail-server-managesieve.js:listen",
         "lib/mail-server-submission.js:_emit",
         "lib/mail-server-submission.js:_validateDomainHardened",
         "lib/mail-server-submission.js:create",
@@ -4859,6 +4899,46 @@ function testNoStateStampsInPublicDocs() {
 //      patterns split across lines still match.
 var KNOWN_ANTIPATTERNS = [
   {
+    // Codex P1 (v0.10.13 PR #102) — PQC AlgorithmIdentifier with NULL
+    // parameters. ML-DSA (RFC 9909 §3), SLH-DSA (RFC 9881 §3), and
+    // ML-KEM (RFC 9936 §3) all specify that the AlgorithmIdentifier's
+    // parameters field is ABSENT. Appending `NULL` makes the CMS
+    // (or X.509) structure non-conformant — strict CMS / X.509
+    // validators reject the signature/recipient. The fix is to
+    // emit `SEQUENCE { OID }` with no second element, never
+    // `SEQUENCE { OID, NULL }`, for these OIDs. cms-codec.js's
+    // `_algorithmIdentifier` dispatches off the ABSENT_PARAM_OIDS
+    // set so the right shape ships for every PQC OID.
+    id: "pqc-algid-with-null-params",
+    primitive: "ABSENT_PARAM_OIDS.has(oid) ? writeNode(SEQUENCE, writeOid(oid)) : writeNode(SEQUENCE, [writeOid(oid), writeNull()])",
+    regex: /writeOid\(\s*["']2\.16\.840\.1\.101\.3\.4\.(?:3\.(?:17|18|19|31)|4\.[23])["']\s*\)[\s\S]{0,160}?writeNull\s*\(\s*\)/,
+    allowlist: [],
+    reason: "Codex flagged cms-codec.js emitting `_algorithmIdentifier(OID.mldsaXX)` with an unconditional NULL parameter. RFC 9909 / 9881 / 9936 specify absent parameters for these OIDs. Any new emitter for PQC OIDs MUST split on the absent-params set — see cms-codec.js's ABSENT_PARAM_OIDS.",
+  },
+  {
+    // Codex P1 (v0.10.13 PR #102) — ASN.1 context-specific implicit
+    // tag bytes (0x80 | N for primitive, 0xa0 | N for constructed)
+    // hand-rolled at call sites instead of routed through the
+    // dedicated helpers. The bug class: an SKI wrap that should be
+    // [0] IMPLICIT OCTET STRING (primitive, 0x80) emitted as
+    // constructed (0xa0) because the developer wrote `0xa0 | 0`
+    // by hand and didn't think about the CHOICE alternative's
+    // primitive-vs-constructed distinction. cms-codec.js provides
+    // `_writeImplicitPrimitive` + `_writeImplicitConstructed`;
+    // callers pick by intent and the tag byte is built inside the
+    // helper, not at the call site.
+    id: "hand-rolled-context-specific-implicit-tag",
+    primitive: "_writeImplicitPrimitive(N, value)  OR  _writeImplicitConstructed(N, payload)",
+    regex: /\b(?:tagByte|tag)\s*=\s*0x(?:80|a0)\s*\|\s*\(?\s*\w+\s*&\s*0x1f\s*\)?/,
+    allowlist: [
+      // Helpers + asn1-der live here; their internal use of the bit
+      // pattern is the source-of-truth implementation.
+      "lib/cms-codec.js",
+      "lib/asn1-der.js",
+    ],
+    reason: "Codex flagged cms-codec.js _writeImplicit wrapping a SubjectKeyIdentifier in [0] CONSTRUCTED instead of [0] PRIMITIVE — strict CMS parsers reject the structure. New ASN.1 encoders MUST use the named helpers (_writeImplicitPrimitive / _writeImplicitConstructed) rather than hand-rolling the tag byte, so the primitive-vs-constructed distinction is forced by call-site naming.",
+  },
+  {
     // Codex P2 (v0.10.0) — RFC byte-cap checks measured via JS string
     // `.length` (UTF-16 code units) for fields the RFC defines as
     // octet-based. Inputs containing non-ASCII characters silently
@@ -5884,6 +5964,233 @@ function testNoBareCommaSplitOnQuotedHeader() {
     bad);
 }
 
+// ---- Pattern: opts.tenantScope without create-time `.check` validation ----
+//
+// A primitive accepts an `opts.tenantScope` parameter (a
+// `b.agent.tenant.create()` instance) but doesn't validate its shape
+// at create() time. If an operator passes a malformed scope, the
+// later `tenantScope.check(...)` throw lands in the cross-tenant
+// catch branch and refuses every auth — a configuration error
+// surfaces as a hard-to-diagnose auth outage. Surfaced by Codex on
+// v0.10.12 PR #99 for `b.mail.server.pop3`. The fix shape:
+//
+//   if (opts.tenantScope && typeof opts.tenantScope.check !== "function") {
+//     throw new ErrorClass("module/bad-tenant-scope",
+//       "create: opts.tenantScope must be a b.agent.tenant.create() instance");
+//   }
+//
+// Detector: any module that reads `opts.tenantScope` AND wraps a
+// call to `tenantScope.check(...)` in try/catch SHOULD have a shape
+// validation earlier (typeof opts.tenantScope.check check) so a bad
+// scope surfaces at create() time, not at first auth.
+function testTenantScopeShapeValidated() {
+  // class: tenant-scope-shape-not-validated
+  var files = _libFiles();
+  var bad = [];
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    // Only fires when the file BOTH reads `opts.tenantScope` AND
+    // wraps `tenantScope.check` in try/catch (the dangerous pattern).
+    if (!/opts\.tenantScope/.test(content)) continue;
+    if (!/try\s*\{[\s\S]{0,200}tenantScope\.check\s*\(/.test(content)) continue;
+    // Acceptable: the file validates `typeof opts.tenantScope.check`
+    // at create() time.
+    if (/typeof\s+opts\.tenantScope\.check\s*!==\s*["']function["']/.test(content)) continue;
+    if (/typeof\s+tenantScope\.check\s*!==\s*["']function["']/.test(content)) continue;
+    var m = content.match(/opts\.tenantScope/);
+    var lineNum = content.slice(0, m.index).split("\n").length;
+    bad.push({
+      file:    rel,
+      line:    lineNum,
+      content: "opts.tenantScope accepted + tenantScope.check wrapped in try/catch, but `typeof opts.tenantScope.check !== \"function\"` shape validation missing at create() time — a malformed scope would refuse every auth as cross-tenant instead of surfacing as a configuration error (b.mail.server.pop3 v0.10.12 finding)",
+    });
+  }
+  bad = _filterMarkers(bad, "tenant-scope-shape-not-validated");
+  _report("opts.tenantScope acceptors that catch tenantScope.check() throws MUST validate the scope's .check shape at create() time so a malformed scope doesn't masquerade as cross-tenant refusal across every auth",
+    bad);
+}
+
+// ---- Pattern: bCrypto.fromBase64Url on adversarial input outside try/catch ----
+//
+// A primitive accepts operator-supplied compact-form bytes (JWE, JWT,
+// signed blob) and decodes via `bCrypto.fromBase64Url(parts[N])`
+// WITHOUT wrapping the call in a typed try/catch. Malformed bytes
+// throw raw TypeError from the underlying buffer parser instead of
+// the module's coded refusal class. Surfaced by Codex on v0.10.10
+// PR #97 for `b.jose.jwe.experimental.decrypt` (line 162).
+//
+// The detector fires on direct `bCrypto.fromBase64Url(parts[N])` /
+// `.fromBase64Url(arr[i])` / `.fromBase64Url(input)` calls in modules
+// that decode operator-supplied compact-form input AND don't have a
+// `try {` line within 5 lines above the call. Files known to operate
+// only on framework-internal already-validated inputs are allowlisted.
+function testFromBase64UrlUntrappedOnAdversarialInput() {
+  // class: from-base64url-untrapped
+  var files = _libFiles();
+  var bad = [];
+  var ALLOWLISTED_INTERNAL = {
+    "lib/crypto.js":              "vendor-data signed-bundle verify path; bytes already gated by ML-DSA verify upstream",
+    "lib/audit-sign.js":          "internal-state signature; framework-internal bytes",
+    "lib/audit.js":               "internal audit-checkpoint signature verify",
+    "lib/vendor-data.js":         "framework-internal manifest signature verify",
+    "lib/safe-buffer.js":         "the safe-buffer module itself wraps the primitives",
+  };
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    if (ALLOWLISTED_INTERNAL[rel]) continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li += 1) {
+      if (!/\.fromBase64Url\s*\(/.test(lines[li])) continue;
+      // Allow inline marker.
+      if (/allow:from-base64url-untrapped/.test(lines[li])) continue;
+      if (li > 0 && /allow:from-base64url-untrapped/.test(lines[li - 1])) continue;
+      // `try {` on the same line wraps this call inline.
+      if (/\btry\s*\{/.test(lines[li])) continue;
+      // Look back 5 lines for `try {`. If found, this call is wrapped.
+      var hasTryAbove = false;
+      for (var lb = Math.max(0, li - 5); lb < li; lb += 1) {
+        if (/\btry\s*\{/.test(lines[lb])) { hasTryAbove = true; break; }
+      }
+      if (hasTryAbove) continue;
+      // Acceptable when the surrounding function-line carries an
+      // explicit allow-via-comment marker or when the call is part of
+      // a non-adversarial pipeline (the file is allowlisted above).
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "bCrypto.fromBase64Url(operator-supplied bytes) without surrounding try/catch — malformed input throws raw TypeError instead of the module's coded refusal class. Wrap in try/catch and surface a typed framework error per the module's err namespace (jose-jwe-experimental.decrypt v0.10.10 finding)",
+      });
+    }
+  }
+  bad = _filterMarkers(bad, "from-base64url-untrapped");
+  _report("`bCrypto.fromBase64Url(operator-input)` must run inside try/catch — malformed compact-form bytes shouldn't surface as raw TypeError outside the module's typed error class",
+    bad);
+}
+
+// ---- Pattern: hostname string-equality compare with no trailing-dot normalize ----
+//
+// A file compares a parsed hostname against a reserved-name set
+// (`localhost`, `ip6-localhost`, ...) via `===` WITHOUT first
+// stripping the trailing root-zone dot. RFC 1034 §3.1 — `foo.` is the
+// absolute form of `foo`. An attacker who appends a dot bypasses the
+// gate. Surfaced by Codex on v0.10.7 PR #90 for
+// `b.guardListUnsubscribe._isRefusedAutoFetchHost`.
+function testHostnameCompareTrailingDotNormalize() {
+  // class: hostname-compare-trailing-dot
+  var files = _libFiles();
+  var bad = [];
+  var reservedHostLiteralRe = /===\s*"(localhost|localhost\.localdomain|ip6-localhost|ip6-loopback)"/;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    if (!reservedHostLiteralRe.test(content)) continue;
+    var hasStrip = /\.charAt\([^)]*length\s*-\s*1\)\s*===\s*"\."/.test(content) ||
+                   /while[\s\S]{0,80}length\s*>\s*0[\s\S]{0,80}charAt[\s\S]{0,80}===\s*"\."/.test(content);
+    if (hasStrip) continue;
+    var m = content.match(reservedHostLiteralRe);
+    var lineNum = content.slice(0, m.index).split("\n").length;
+    bad.push({
+      file:    rel,
+      line:    lineNum,
+      content: "hostname compared against reserved-name set without trailing-dot normalize — `localhost.` resolves to the same target as `localhost` (RFC 1034 §3.1); strip trailing dots BEFORE the equality check or attackers bypass the gate by appending a dot",
+    });
+  }
+  bad = _filterMarkers(bad, "hostname-compare-trailing-dot");
+  _report("reserved-hostname string-equality compare must strip trailing root-zone dot first (RFC 1034 §3.1; SSRF gate bypass class — guard-list-unsubscribe v0.10.7 finding)",
+    bad);
+}
+
+// ---- Pattern: Date.UTC() result trusted without calendar round-trip ----
+//
+// `Date.UTC(year, month, day, ...)` silently normalises impossible
+// calendar dates (`Feb 31 2026` → `Mar 3 2026`); using the returned
+// timestamp without round-tripping through `new Date(ms)` and verifying
+// each field matches lets malformed inputs masquerade as valid.
+// Surfaced by Codex on v0.10.7 PR #90 for
+// `b.mail.server.imap._parseImapDateTime`.
+function testDateUtcRoundTripVerify() {
+  // class: date-utc-round-trip
+  //
+  // Only flag the risky shape: `Date.UTC(...)` called with arguments
+  // that include a `parseInt(...)` or `Number(...)` parse — those
+  // unfailingly come from operator-untrusted string input that
+  // Date.UTC will silently normalize. Trusted-input Date.UTC (e.g.
+  // composing from already-validated integer fields or from a
+  // `new Date().getUTC*` reflection) doesn't fire.
+  var files = _libFiles();
+  var bad = [];
+  var dateUtcPattern = /\bDate\.UTC\s*\(([^)]*)\)/g;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var fileHasRoundTrip = /new\s+Date\s*\([^)]+\)\s*\.getUTC/.test(content) ||
+                           /\.getUTC(?:FullYear|Month|Date|Hours|Minutes|Seconds)\s*\(\)/.test(content);
+    if (fileHasRoundTrip) continue;
+    dateUtcPattern.lastIndex = 0;
+    var dm;
+    while ((dm = dateUtcPattern[Symbol.for ? "exec" : "exec"](content)) !== null) {
+      var args = dm[1];
+      // Only the parsed-untrusted-input shape gets flagged.
+      if (!/parseInt\s*\(/.test(args) && !/Number\s*\(/.test(args)) continue;
+      var lineNum = content.slice(0, dm.index).split("\n").length;
+      bad.push({
+        file:    rel,
+        line:    lineNum,
+        content: "Date.UTC(...) called with parseInt / Number arguments AND file has no calendar round-trip — Date.UTC silently normalises impossible dates (Feb 31 → Mar 3); construct `var probe = new Date(utcMs); if (probe.getUTCMonth() !== month || probe.getUTCDate() !== day) return null;` before trusting the timestamp (mail-server-imap._parseImapDateTime v0.10.7 finding)",
+      });
+    }
+  }
+  bad = _filterMarkers(bad, "date-utc-round-trip");
+  _report("`Date.UTC(parseInt(...))` outputs must round-trip via `new Date(ms).getUTC*()` field-match before trust — silent calendar normalization makes impossible dates indistinguishable from valid ones",
+    bad);
+}
+
+// ---- Pattern: info/context-label wrapper branching on undefined/null only ----
+//
+// A wrapper that prepends a label to an HPKE / KDF / signature `info`
+// parameter branches on `info === undefined || info === null` to
+// decide whether to skip the prepend. An empty string / empty buffer
+// takes the prepend branch, which means `seal({})` (no info) and
+// `open({ info: "" })` (explicit empty) produce different derived
+// keys — equivalent caller inputs that can't round-trip. Surfaced by
+// Codex on v0.10.10 PR #97 for `b.crypto.hpke.pq._prependLabel`.
+function testInfoLabelEmptyVsOmitted() {
+  // class: info-label-empty-omit-mismatch
+  var files = _libFiles();
+  var bad = [];
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var m = content.match(/info\s*===\s*(undefined|null)\s*\|\|\s*info\s*===\s*(undefined|null)/);
+    if (!m) continue;
+    var hasEmptyCheck = /info[A-Za-z]*\.length\s*===\s*0/.test(content) ||
+                        /info[A-Za-z]*\.length\s*<\s*1/.test(content) ||
+                        /infoBytes\.length\s*===\s*0/.test(content);
+    if (hasEmptyCheck) continue;
+    var lineNum = content.slice(0, m.index).split("\n").length;
+    bad.push({
+      file:    rel,
+      line:    lineNum,
+      content: "info/context wrapper branches on `info === undefined || info === null` without ALSO handling empty-string/empty-buffer — RFC 9180 §5.1 treats omitted and empty info as equivalent; `seal({})` and `open({ info: \"\" })` must produce the same derived key (crypto-hpke-pq v0.10.10 finding)",
+    });
+  }
+  bad = _filterMarkers(bad, "info-label-empty-omit-mismatch");
+  _report("HPKE / KDF context-label wrappers must treat empty info equivalent to omitted info — `===` undef/null branch without empty-check breaks RFC 9180 §5.1 input-equivalence",
+    bad);
+}
+
 // ---- Pattern: scoped-context binding (e.g. SRS forwarder domain) not verified ----
 //
 // A `create({ forwarderDomain })` / `create({ realm })` /
@@ -6594,6 +6901,11 @@ async function run() {
   testEnumRankWithoutValidation();
   testNoBoolStringCoerceShape();
   testNoBareCommaSplitOnQuotedHeader();
+  testTenantScopeShapeValidated();
+  testFromBase64UrlUntrappedOnAdversarialInput();
+  testHostnameCompareTrailingDotNormalize();
+  testDateUtcRoundTripVerify();
+  testInfoLabelEmptyVsOmitted();
   testScopedContextBindingUsed();
   // v0.9.57 — mail-auth bug-class detectors
   testNoDirectNodeDnsInMail();

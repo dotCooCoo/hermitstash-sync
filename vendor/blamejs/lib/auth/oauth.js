@@ -245,7 +245,8 @@ function _b64urlEncode(buf) { return bCrypto.toBase64Url(buf); }
 
 function _b64urlDecode(s) {
   if (typeof s !== "string") throw new OAuthError("auth-oauth/bad-base64", "expected base64url string");
-  return bCrypto.fromBase64Url(s);
+  try { return bCrypto.fromBase64Url(s); }
+  catch (_e) { throw new OAuthError("auth-oauth/bad-base64", "segment is not valid base64url"); }
 }
 
 function _generateRandomToken(bytes) {
@@ -274,11 +275,22 @@ function _validateUrl(url, allowHttp, label) {
   var isLocalhostHttp = false;
   try {
     var parsed = new URL(url);                                                                  // allow:raw-new-url — RFC 9700 §4.1.1 localhost-exception lookup; safeUrl re-validates below for non-localhost paths
+    // Strip trailing root-zone dot before the localhost compare.
+    // RFC 1034 §3.1 — `localhost.` resolves identically to `localhost`;
+    // without the strip, an attacker who registers `evil.com` as a
+    // public OAuth issuer and supplies `http://localhost./...` (with
+    // a trailing dot) slips past the equality check on a name that
+    // some DNS configurations resolve to a different target than the
+    // operator expects.
+    var rawHost = parsed.hostname || "";
+    while (rawHost.length > 0 && rawHost.charAt(rawHost.length - 1) === ".") {
+      rawHost = rawHost.slice(0, -1);
+    }
     if (parsed.protocol === "http:" &&
-        (parsed.hostname === "localhost" ||
-         parsed.hostname === "127.0.0.1" ||
-         parsed.hostname === "[::1]" ||
-         parsed.hostname === "::1")) {
+        (rawHost === "localhost" ||
+         rawHost === "127.0.0.1" ||
+         rawHost === "[::1]" ||
+         rawHost === "::1")) {
       isLocalhostHttp = true;
     }
   } catch (_e) { /* malformed; let safeUrl surface the canonical error below */ }

@@ -57,6 +57,11 @@ var crypto = require("./lib/crypto");
 // remembering separate top-level namespaces. Implementations live in
 // the dedicated lib files; these are thin aliases.
 crypto.hpke = require("./lib/crypto-hpke");
+// Both PQ-HPKE drafts behind one opt-in sub-namespace — see
+// lib/crypto-hpke-pq.js. Operators that need a draft-codepoint
+// shape reach for b.crypto.hpke.pq.connolly / .wg explicitly; the
+// stable b.crypto.hpke.seal stays IANA-codepoint-neutral.
+crypto.hpke.pq = require("./lib/crypto-hpke-pq");
 crypto.httpSig = require("./lib/http-message-signature");
 var tlsExporter = require("./lib/tls-exporter");
 var router = require("./lib/router");
@@ -267,6 +272,7 @@ var time = require("./lib/time");
 var uuid = require("./lib/uuid");
 var mail = require("./lib/mail");
 mail.rbl = require("./lib/mail-rbl");
+mail.serverRegistry = require("./lib/mail-server-registry");
 mail.greylist = require("./lib/mail-greylist");
 mail.helo = require("./lib/mail-helo");
 mail.deploy = require("./lib/mail-deploy");
@@ -369,9 +375,13 @@ var watcher = require("./lib/watcher");
 var localDbThin = require("./lib/local-db-thin");
 var daemon = require("./lib/daemon");
 var selfUpdate = require("./lib/self-update");
+var cmsCodec = require("./lib/cms-codec");
+var streamThrottle = require("./lib/stream-throttle");
 
 module.exports = {
   crypto:           crypto,
+  cms:              cmsCodec,
+  streamThrottle:   streamThrottle,
   router:           router,
   constants:        constants,
   vault:            vault,
@@ -397,7 +407,19 @@ module.exports = {
   nis2:             { report: require("./lib/nis2-report") },
   gdpr:             { ropa: require("./lib/gdpr-ropa") },
   breach:           require("./lib/breach-deadline"),
-  ai:               { adverseDecision: require("./lib/ai-adverse-decision"), input: aiInput },
+  ai:               {
+    adverseDecision: require("./lib/ai-adverse-decision"),
+    input:           aiInput,
+    aiContentDetect: require("./lib/ai-content-detect"),
+    modelManifest:   require("./lib/ai-model-manifest"),
+  },
+  promisePool:      require("./lib/promise-pool"),
+  sdNotify:         require("./lib/sd-notify"),
+  safePath:         require("./lib/safe-path"),
+  bootGates:        require("./lib/boot-gates"),
+  // b.jose.jwe.experimental — see lib/jose-jwe-experimental.js for
+  // the codepoint-stability contract.
+  jose:             { jwe: { experimental: require("./lib/jose-jwe-experimental") } },
   queue:            queue,
   logStream:        logStream,
   redact:           redact,
