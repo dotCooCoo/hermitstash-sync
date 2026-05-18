@@ -573,8 +573,15 @@ async function generateTestCerts() {
 
 /**
  * Start the HermitStash server for testing.
+ *
+ * opts.extraEnv  — object whose keys overlay the default env passed to the
+ *                  server child process. Useful for tests that need to flip
+ *                  defaults like SETUP_COMPLETE to exercise first-run flows.
+ *                  Passing `null` clears the default (handy for SETUP_COMPLETE
+ *                  which is `'true'` in the harness defaults).
  */
-async function startServer() {
+async function startServer(opts) {
+  opts = opts || {};
   // Fail fast with an actionable message if the server source isn't
   // where we expected. The test suite spawns the real HermitStash
   // server out-of-process; it can't bootstrap without the source.
@@ -626,6 +633,13 @@ async function startServer() {
     // change the brute-force floor in any meaningful way.
     SYNC_ENROLL_MAX: '500',
   };
+
+  if (opts.extraEnv) {
+    for (var k in opts.extraEnv) {
+      if (opts.extraEnv[k] === null) delete env[k];
+      else env[k] = opts.extraEnv[k];
+    }
+  }
 
   if (process.env.S3_TEST_BUCKET && process.env.S3_TEST_ACCESS_KEY && process.env.S3_TEST_SECRET_KEY) {
     env.STORAGE_BACKEND = 's3';

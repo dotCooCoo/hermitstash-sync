@@ -179,6 +179,13 @@ describe('Stash Features', { timeout: 30000 }, () => {
     assert.equal(res.json.clientKey, 'test-key-pem', 'Should return client key');
     assert.equal(res.json.caCert, 'test-ca-pem', 'Should return CA cert');
     assert.equal(res.json.stashId, stash.stashId, 'Should return stash ID');
+    // bundleId resolved from stash.syncBundleId; shareId resolved from the
+    // bundle row. Both must be populated — the sync daemon writes its
+    // config.json from this response and needs shareId for the initial
+    // GET /b/:shareId seed pull (without shareId the daemon connects via
+    // WebSocket but never pulls existing files into the local mirror).
+    assert.equal(res.json.bundleId, bundle.bundleId, 'Should return resolved bundleId from stash.syncBundleId');
+    assert.equal(res.json.shareId, bundle.shareId, 'Should return shareId for initial-sync pull (GET /b/:shareId)');
   });
 
   it('enrollment code is single-use — second redemption fails', async () => {
