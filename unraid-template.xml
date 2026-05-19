@@ -33,4 +33,13 @@
 
     <!-- Logging -->
     <Config Name="Log Level" Target="HERMITSTASH_LOG_LEVEL" Default="info" Description="One of: debug, info, warn, error." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+    <!-- Tuning — overlays config.json. Leave blank to keep config.json's value (or daemon default). -->
+    <Config Name="Upload Concurrency" Target="HERMITSTASH_UPLOAD_CONCURRENCY" Default="" Description="Parallel uploads (1-16). Default 4. Higher = faster initial sync on many small files; lower = gentler on server + connection." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Upload Bytes/sec Cap" Target="HERMITSTASH_UPLOAD_BYTES_PER_SEC" Default="" Description="Bandwidth cap (token-bucket, shared across concurrent uploads). 0 / blank = unlimited. Example: 1048576 = 1 MiB/sec." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Download Bytes/sec Cap" Target="HERMITSTASH_DOWNLOAD_BYTES_PER_SEC" Default="" Description="Same as upload cap but for downloads. 0 / blank = unlimited." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Auto-update Channel" Target="HERMITSTASH_AUTO_UPDATE_CHANNEL" Default="" Description="'stable' (default; latest non-prerelease) or 'beta' (also picks up prereleases). Leave blank = stable." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Server SPKI Pin(s)" Target="HERMITSTASH_PINNED_SERVER_SPKI" Default="" Description="Comma-separated 'sha256/&lt;base64&gt;' pins for the server's TLS cert SubjectPublicKeyInfo. Empty = no pinning (default trust chain). See README — SPKI cert pinning section for how to compute." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Include Patterns" Target="HERMITSTASH_INCLUDE" Default="" Description="Comma-separated selective-sync patterns (e.g. 'work/**,photos/2026/**'). Blank = sync everything. Same grammar as ignore." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="Ignore Patterns" Target="HERMITSTASH_IGNORE" Default="" Description="Comma-separated ignore patterns layered on top of the built-in defaults (.git/**, node_modules/**, .DS_Store, etc.). Blank = built-in defaults only." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

@@ -203,6 +203,22 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
 }
 ```
 
+Every numeric / enum / array field is also exposed as an env var so container deployments can tune without editing `config.json` in a mounted volume:
+
+| Env var | Maps to | Notes |
+| --- | --- | --- |
+| `HERMITSTASH_UPLOAD_CONCURRENCY` | `uploadConcurrency` | Integer 1..16 |
+| `HERMITSTASH_UPLOAD_BYTES_PER_SEC` | `uploadBytesPerSec` | 0 = unlimited |
+| `HERMITSTASH_DOWNLOAD_BYTES_PER_SEC` | `downloadBytesPerSec` | 0 = unlimited |
+| `HERMITSTASH_AUTO_UPDATE` | `autoUpdate` | `true`/`false` (or `0`/`1`/`yes`/`no`/`on`/`off`) |
+| `HERMITSTASH_AUTO_UPDATE_CHANNEL` | `autoUpdateChannel` | `stable` or `beta` |
+| `HERMITSTASH_LOG_LEVEL` | `logLevel` | `debug`/`info`/`warn`/`error` |
+| `HERMITSTASH_PINNED_SERVER_SPKI` | `pinnedServerSpki` | Comma-separated `sha256/<base64>` pins |
+| `HERMITSTASH_INCLUDE` | `include` | Comma-separated patterns |
+| `HERMITSTASH_IGNORE` | `ignore` | Comma-separated patterns |
+
+Env vars overlay `config.json` (env wins). All values are validated at config-load — typos in the env (`HERMITSTASH_AUTO_UPDATE_CHANNEL=nightly`, malformed SPKI pin, non-integer concurrency) refuse to boot with a clear error, rather than silently falling back to defaults or crashing the matcher on first file change.
+
 ### Selective sync (subdir allowlist)
 
 By default the daemon syncs every file in `syncFolder` not caught by an ignore pattern. To restrict sync to specific subtrees, set `"include": [...]` in `config.json` or drop a `.hermitstash-include` file in the sync folder. Pattern grammar matches the ignore matcher: exact path, basename (no `/`), `*.ext`, or `dir/**` for recursive subtree inclusion.
