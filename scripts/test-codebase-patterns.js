@@ -338,6 +338,25 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('process-exit', matches);
   });
 
+  it('process.on(SIGTERM/SIGINT) + process.exit needs sea-sigterm-bug allow marker', () => {
+    // Multiline match: process.on('SIGTERM' | 'SIGINT', ...) within ~800 chars
+    // of a process.exit() call. Surfaces the Node SEA bug bisected across
+    // sync v0.8.15 → v0.8.20: process.exit(N) called from inside a SIGTERM
+    // handler in a SEA-packaged binary exits with signal-default code 143
+    // (= 128 + SIGTERM) instead of the requested N. The Dockerfile's
+    // `tini -e 143` remaps the bogus 143 to 0 for container deployments
+    // (Kubernetes preStop, docker stop, etc.) but operators running the
+    // binary directly under systemd or in foreground will see 143 on every
+    // clean shutdown. Any NEW SIGTERM handler that ends in process.exit
+    // must either (a) compose with the existing lib/daemon.js handleTerm
+    // path so the same tini remap covers it, or (b) carry an explicit
+    // `// allow:sea-sigterm-bug — <reason>` marker documenting the
+    // deployment scope where 143 is acceptable.
+    var matches = _scan(/process\.(?:on|once)\(['"]SIG(?:TERM|INT)['"][\s\S]{0,800}?process\.exit\s*\(/);
+    matches = _filterMarkers(matches, 'sea-sigterm-bug');
+    _assertClean('sea-sigterm-bug', matches);
+  });
+
   it('empty catch(_e) {} blocks have explicit silent-catch allow marker', () => {
     var matches = _scan(/catch\s*\(\s*_\w*\s*\)\s*\{\s*\}/);
     matches = _filterMarkers(matches, 'silent-catch');
