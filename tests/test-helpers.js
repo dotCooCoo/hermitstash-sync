@@ -514,16 +514,17 @@ async function waitForHealth(port, maxWaitMs = 30000, useTls = false) {
  *
  * caKeySealedMode: 'disabled' keeps the CA key as plaintext PEM on disk —
  * test-fixture only, the production CA is always sealed.
+ *
+ * Each call gets its OWN unique certs directory under the OS temp dir.
+ * A shared path would let a secondary startServer() (e.g. the fresh-install
+ * test spawning a second server) wipe + regenerate the CA, invalidating
+ * every existing client cert against the still-running primary server —
+ * which manifests as 403 on every subsequent WS upgrade because the new
+ * client cert no longer chains to the primary's still-loaded CA.
  */
 async function generateTestCerts() {
-  const certsDir = path.join(__dirname, 'certs');
+  const certsDir = createTempDir('test-certs');
   fs.mkdirSync(certsDir, { recursive: true });
-  // Wipe prior CA state — b.mtlsCa.initCA() short-circuits if ca.crt + ca.key
-  // already exist, so a leftover dir from an earlier test run would reuse
-  // stale certs and skip the new run's SAN / generation requirements.
-  for (const f of fs.readdirSync(certsDir)) {
-    try { fs.unlinkSync(path.join(certsDir, f)); } catch {}
-  }
 
   try {
     const ca = b.mtlsCa.create({
