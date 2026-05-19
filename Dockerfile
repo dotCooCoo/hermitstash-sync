@@ -124,5 +124,14 @@ VOLUME ["/config", "/data"]
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD hermitstash-sync status 2>&1 | grep -q "Status: RUNNING" || exit 1
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hermitstash-sync-entrypoint"]
+# `-e 143` remaps the SEA Node bug exit code to 0. Node 24 SEA binaries exit
+# with signal-default code 143 (128 + SIGTERM) when process.exit(0) is called
+# from inside a SIGTERM handler, even though the handler ran and the daemon
+# completed a graceful shutdown. v0.8.15 → v0.8.19 bisected this to a SEA-
+# specific quirk (plain `node:24-alpine` + tini honors process.exit(0)
+# correctly; the SEA-packaged Node does not). lib/daemon.js still runs the
+# real engine.stop + pidfile teardown — this just translates the OS-reported
+# exit code to match the shutdown reality so `docker stop` reports 0 to
+# orchestrators that gate on it.
+ENTRYPOINT ["/usr/bin/tini", "-e", "143", "--", "/usr/local/bin/hermitstash-sync-entrypoint"]
 CMD ["start"]
