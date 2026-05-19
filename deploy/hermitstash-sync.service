@@ -91,6 +91,12 @@ ExecStart=/usr/local/bin/hermitstash-sync start
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+# Whitelist 143 (128 + SIGTERM) as a clean exit. SEA-packaged Node has been
+# observed to surface the signal default on SIGTERM-driven graceful shutdown
+# even though all teardown phases (engine.stop, pidfile, log.close) complete
+# normally. Without this, `systemctl status` reports the unit as failed and
+# any `OnFailure=` chain fires on every normal stop.
+SuccessExitStatus=143 SIGTERM
 # TimeoutStartSec must comfortably exceed initial-sync wall time.
 # 120s covers a cold-start with a full bundle catch-up over a slow link.
 TimeoutStartSec=120
