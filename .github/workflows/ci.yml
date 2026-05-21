@@ -118,6 +118,55 @@ jobs:
           fi
           exit $EXIT_CODE
 
+      # ── Codebase-patterns (static-shape gates) ─────────────────
+      # 38 grep-style detectors covering bug classes surfaced in the
+      # upstream framework's release history plus the operator-facing
+      # doc gates (docs-leak-vocab, current-version-stamp,
+      # docs-secret-shape) that interface with the structured
+      # release-notes pipeline.
+      - name: Run codebase-patterns
+        if: always()
+        id: codebase_patterns
+        run: |
+          set +e
+          OUTPUT=$(node --test scripts/test-codebase-patterns.js 2>&1)
+          EXIT_CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "output<<CBP_EOF"
+            printf '%s\n' "$OUTPUT"
+            echo "CBP_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::codebase-patterns detector(s) tripped"
+          fi
+          exit $EXIT_CODE
+
+      # ── Changelog drift gate ───────────────────────────────────
+      # Refuses to pass if (a) the current VERSION's release-notes
+      # JSON is missing, or (b) CHANGELOG.md drifts from the JSON
+      # tree. The release workflow re-runs the same render at tag
+      # time; this gate surfaces drift in main / PR instead of late.
+      - name: Run changelog gate
+        if: always()
+        id: changelog_gate
+        run: |
+          set +e
+          OUTPUT=$(node scripts/check-changelog-extract.js 2>&1)
+          EXIT_CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "output<<CHG_EOF"
+            printf '%s\n' "$OUTPUT"
+            echo "CHG_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::changelog drift gate failed"
+          fi
+          exit $EXIT_CODE
+
       # ── Hadolint (Dockerfile) ──────────────────────────────────
       # Guarded: only runs when a Dockerfile is present. Will activate
       # automatically once a Dockerfile is added for containerized builds.
@@ -202,11 +251,15 @@ jobs:
         id: summary
         env:
           ESLINT_OUTPUT: ${{ steps.eslint.outputs.output }}
+          CBP_OUTPUT: ${{ steps.codebase_patterns.outputs.output }}
+          CHG_OUTPUT: ${{ steps.changelog_gate.outputs.output }}
           HADOLINT_OUTPUT: ${{ steps.hadolint_result.outputs.output }}
           HADOLINT_STATUS: ${{ steps.hadolint_result.outputs.status }}
           SHELLCHECK_OUTPUT: ${{ steps.shellcheck.outputs.output }}
         run: |
           ESLINT_OK=${{ steps.eslint.outcome == 'success' }}
+          CBP_OK=${{ steps.codebase_patterns.outcome == 'success' }}
+          CHG_OK=${{ steps.changelog_gate.outcome == 'success' }}
           SHELLCHECK_OK=${{ steps.shellcheck.outcome == 'success' }}
 
           PASS="✅"
@@ -214,6 +267,8 @@ jobs:
           SKIP="⏭️"
 
           ESLINT_ICON=$( [ "$ESLINT_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+          CBP_ICON=$( [ "$CBP_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
+          CHG_ICON=$( [ "$CHG_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
           SHELLCHECK_ICON=$( [ "$SHELLCHECK_OK" = "true" ] && echo "$PASS" || echo "$FAIL" )
 
           if [ "$HADOLINT_STATUS" = "skipped" ]; then
@@ -228,7 +283,7 @@ jobs:
           fi
 
           ALL_OK=true
-          [ "$ESLINT_OK" = "true" ] && [ "$HADOLINT_OK" = "true" ] && [ "$SHELLCHECK_OK" = "true" ] || ALL_OK=false
+          [ "$ESLINT_OK" = "true" ] && [ "$CBP_OK" = "true" ] && [ "$CHG_OK" = "true" ] && [ "$HADOLINT_OK" = "true" ] && [ "$SHELLCHECK_OK" = "true" ] || ALL_OK=false
 
           {
             echo "body<<SUMMARY_EOF"
@@ -239,6 +294,8 @@ jobs:
             echo "| Check | Status |"
             echo "|-------|--------|"
             echo "| ESLint (JS + security) | $ESLINT_ICON |"
+            echo "| Codebase-patterns (static-shape gates) | $CBP_ICON |"
+            echo "| Changelog drift gate | $CHG_ICON |"
             echo "| Hadolint (Dockerfile) | $HADOLINT_ICON |"
             echo "| ShellCheck (shell scripts) | $SHELLCHECK_ICON |"
 
@@ -248,6 +305,26 @@ jobs:
               echo ""
               echo '```'
               printf '%s\n' "$ESLINT_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$CBP_OK" != "true" ] && [ -n "$CBP_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>Codebase-patterns output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$CBP_OUTPUT"
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [ "$CHG_OK" != "true" ] && [ -n "$CHG_OUTPUT" ]; then
+              echo ""
+              echo "<details><summary>Changelog gate output</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$CHG_OUTPUT"
               echo '```'
               echo "</details>"
             fi
@@ -283,6 +360,8 @@ jobs:
           echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| ESLint | $ESLINT_ICON |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Codebase-patterns | $CBP_ICON |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Changelog gate | $CHG_ICON |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Hadolint | $HADOLINT_ICON |" >> "$GITHUB_STEP_SUMMARY"
           echo "| ShellCheck | $SHELLCHECK_ICON |" >> "$GITHUB_STEP_SUMMARY"
 

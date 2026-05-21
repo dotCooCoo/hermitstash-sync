@@ -31,10 +31,10 @@ Releases are automated end-to-end via GitHub Actions. The operator-side workflow
 
 3. **Regenerate the changelog.** Run `node scripts/generate-changelog-entry.js --rebuild` to rewrite `CHANGELOG.md` from the full `release-notes/` tree. The file is generated; do not hand-edit it.
 
-4. **Run the local gates.** Two checks gate every commit on the release path:
+4. **Run the local gates.** Two checks gate every commit on the release path. Both also run automatically in `ci.yml` on every push and PR to `main`, so a missed local run surfaces in the CI step summary rather than at tag time — but the local invocation is fast feedback:
 
-   - `node scripts/check-changelog-extract.js` — refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time, so any mismatch surfaces locally rather than in CI.
-   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
+   - `node scripts/check-changelog-extract.js` — refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time.
+   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite (38 detectors) includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
 
 5. **Update `README.md`** if anything user-visible changed — commands, requirements, attached artifacts, security claims.
 
