@@ -31,7 +31,10 @@ Releases are automated end-to-end via GitHub Actions. The operator-side workflow
 
 3. **Regenerate the changelog.** Run `node scripts/generate-changelog-entry.js --rebuild` to rewrite `CHANGELOG.md` from the full `release-notes/` tree. The file is generated; do not hand-edit it.
 
-4. **Run the local gate.** `node scripts/check-changelog-extract.js` refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time, so any mismatch surfaces locally rather than in CI.
+4. **Run the local gates.** Two checks gate every commit on the release path:
+
+   - `node scripts/check-changelog-extract.js` — refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time, so any mismatch surfaces locally rather than in CI.
+   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
 
 5. **Update `README.md`** if anything user-visible changed — commands, requirements, attached artifacts, security claims.
 
@@ -108,15 +111,28 @@ The signer in `scripts/sign-release-artifact.js` self-verifies every signature a
 2. Author release-notes/vX.Y.Z.json.
 3. node scripts/generate-changelog-entry.js --rebuild
 4. node scripts/check-changelog-extract.js
-5. Update README.md if anything user-visible changed.
-6. git commit && git push origin main
-7. git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
-8. Watch release.yml + docker-publish.yml; share both URLs.
+5. node --test scripts/test-codebase-patterns.js
+6. Update README.md if anything user-visible changed.
+7. git commit && git push origin main
+8. git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
+9. Watch release.yml + docker-publish.yml; share both URLs.
 ```
 
 ## Local release alternative
 
 `bash scripts/release.sh` runs the same build end-to-end locally and uploads to the GitHub release using `gh` CLI credentials. Loads API keys from `~/.hermitstash-sync/release.env`. The local path produces the same artifacts as the workflow except for the SLSA L3 attestation (which requires the workflow's OIDC token to sign via Sigstore-keyless) and the cosign bundles. Use the local path only as a backup when the workflow runner is unavailable.
+
+## Operator-facing doc gates
+
+`scripts/test-codebase-patterns.js` includes three detectors that scan the operator-facing doc set (`README.md`, `SECURITY.md`, `RELEASING.md`, `CHANGELOG.md`) for content that would either rot on the next release or signal a hygiene issue. The structured `release-notes/*.json` tree already runs through the validator's leak-vocabulary sweep at `--rebuild` / `--check` time; the gates below extend the same discipline to adjacent hand-written prose.
+
+| Detector                  | Scope                                                 | What it refuses                                                                                                                                                              |
+|---------------------------|-------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `docs-leak-vocab`         | README, SECURITY, RELEASING, CHANGELOG                | Internal-process numbering (phase / sweep / tier / batch / slice / pass + digit); AI-tooling vocab; conversation residue; tautological pass/green claims; references to the internal maintainer-config file.        |
+| `current-version-stamp`   | README, SECURITY, RELEASING (CHANGELOG excluded)      | The current `VERSION` from `lib/constants.js` baked literally into doc prose. Use `vX.Y.Z` placeholder for command examples; historical-boundary references (`v0.6.13`) are exempt because they describe fixed past state. |
+| `docs-secret-shape`       | README, SECURITY, RELEASING, CHANGELOG                | JWT compact serialisations (`eyJ…{20,}`) and Stripe live keys (`sk_live_…{20,}`) — fundamental secret shapes that CI gitleaks-style scans flag regardless of context.       |
+
+All three gates accept an inline `allow:<class>` marker on the offending line when the prose is genuinely intentional (e.g. an `allow:current-version-stamp` marker on a `SECURITY.md` line pinning a fingerprint to the live release).
 
 ## What is not in scope here
 

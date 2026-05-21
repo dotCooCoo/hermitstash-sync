@@ -820,4 +820,157 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('duplicate-regex', bad);
   });
 
+  // ---- Operator-facing doc gates ----
+  //
+  // The structured `release-notes/*.json` tree runs through the
+  // validator's leak-vocabulary sweep in `scripts/generate-changelog-entry.js`
+  // at `--rebuild` / `--check` time. The two detectors below extend the
+  // same discipline to the adjacent hand-written operator-facing docs
+  // (README, SECURITY, RELEASING, generated CHANGELOG) so freehand prose
+  // can't carry tokens the JSON validator would refuse.
+  //
+  // Both detectors scan a fixed set of repo-root doc files rather than
+  // walking `lib/`. The `_scan` / `_sourceFiles` helpers above are
+  // scoped to `bin/` + `lib/` and are not reused here.
+
+  const OPERATOR_FACING_DOCS = [
+    'README.md',
+    'SECURITY.md',
+    'RELEASING.md',
+    'CHANGELOG.md',
+  ];
+
+  function _readDocLines(rel) {
+    const abs = path.resolve(REPO_ROOT, rel);
+    try {
+      return fs.readFileSync(abs, 'utf8').split(/\r?\n/);
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  function _scanDocs(patterns, allowClass) {
+    const hits = [];
+    for (var di = 0; di < OPERATOR_FACING_DOCS.length; di++) {
+      var rel = OPERATOR_FACING_DOCS[di];
+      var lines = _readDocLines(rel);
+      if (!lines) continue;
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        var allowRe = new RegExp('allow:' + allowClass + '\\b'); // allow:dynamic-regex — internal allowClass token
+        if (allowRe.test(line)) continue;
+        for (var pi = 0; pi < patterns.length; pi++) {
+          if (patterns[pi].test(line)) {
+            hits.push({
+              file:    rel,
+              line:    li + 1,
+              content: line.trim().slice(0, 160),
+            });
+            break;
+          }
+        }
+      }
+    }
+    return hits;
+  }
+
+  it('no leak-vocabulary tokens in operator-facing docs (README / SECURITY / RELEASING / CHANGELOG)', () => {
+    // class: docs-leak-vocab
+    // Mirrors the regex set in scripts/generate-changelog-entry.js's
+    // `_leakPatterns()` so freehand prose in the adjacent docs holds
+    // the same operator-facing discipline that the structured release-
+    // notes JSON tree already enforces. Per the global CLAUDE.md
+    // preferences: phase/sweep/tier/batch/slice/pass numbering,
+    // AI-tooling vocab, conversation residue, and the recurring
+    // "all tests passing" / "ci green" tautologies are all forbidden
+    // in operator-facing surface.
+    var patterns = [
+      /\bphase\s+\d/i,
+      /\bsweep\s+\d/i,
+      /\btier[- ]?[abc]\b/i,
+      /\bbatch\s+\d/i,
+      /\bgroup\s+[a-h]\s+remainder\b/i,
+      /\bslice\s+\d/i,
+      /\bpass\s+\d/i,
+      /\baudit[- ]derived\b/i,
+      /\bpost[- ]audit\b/i,
+      /\b(?:anthropic|chatgpt|openai|copilot|claude|sonnet|opus|haiku|gemini|co[- ]authored[- ]by|llm[- ]generated|ai[- ]generated)\b/i,
+      /\bas\s+discussed\b/i,
+      /\bper\s+(?:your|the)\s+earlier\s+note\b/i,
+      /\boperator[- ]confirmed\b/i,
+      /\ball\s+tests\s+passing\b/i,
+      /\bci\s+green\b/i,
+      /\bclaude\.md\b/i,
+      /\bper\s+rule\s+§\d/i,
+      /\bper\s+project\s+rule\s+§/i,
+    ];
+    var hits = _scanDocs(patterns, 'docs-leak-vocab');
+    _assertClean('docs-leak-vocab', hits);
+  });
+
+  it('no current-VERSION stamp in operator-facing docs (README / SECURITY / RELEASING)', () => {
+    // class: current-version-stamp
+    // Mirrors the upstream blamejs detector deferred at
+    // `testNoStateStampsInPublicDocs` (codebase-patterns.test.js
+    // pattern 42). The current `VERSION` from `lib/constants.js`
+    // baked into operator-facing docs rots the moment the next
+    // release ships — readers see a download URL or fingerprint
+    // for a version that's no longer the latest. Operator-facing
+    // docs MUST use `vX.Y.Z` placeholder shape for command examples;
+    // historical-boundary references (`v0.6.13 and earlier signed
+    // ...`) describe a fixed past state and are exempt because they
+    // don't drift on a future release.
+    //
+    // `CHANGELOG.md` is excluded — that file legitimately carries
+    // every released version's literal number.
+    //
+    // Genuine current-version mentions (e.g. a fingerprint pinned to
+    // the latest signing key in `SECURITY.md`) carry an
+    // `allow:current-version-stamp` inline marker.
+    var currentVersion = require('../lib/constants').VERSION;
+    if (typeof currentVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(currentVersion)) {
+      assert.fail('lib/constants.js#VERSION is not strict semver — pattern requires the current version literal to scan for: ' + currentVersion);
+    }
+    var docsExceptChangelog = OPERATOR_FACING_DOCS.filter(function (d) { return d !== 'CHANGELOG.md'; });
+    var stamp = 'v' + currentVersion;
+    var hits = [];
+    for (var di = 0; di < docsExceptChangelog.length; di++) {
+      var rel = docsExceptChangelog[di];
+      var lines = _readDocLines(rel);
+      if (!lines) continue;
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        if (/allow:current-version-stamp\b/.test(line)) continue;
+        if (line.indexOf(stamp) !== -1) {
+          hits.push({
+            file:    rel,
+            line:    li + 1,
+            content: line.trim().slice(0, 160),
+          });
+        }
+      }
+    }
+    _assertClean('current-version-stamp', hits);
+  });
+
+  it('no fundamental-secret-shape tokens in operator-facing docs (JWT / Stripe sk_live)', () => {
+    // class: docs-secret-shape
+    // CI gitleaks-style scans flag two unambiguous secret-shaped
+    // tokens regardless of surrounding context: JWT compact
+    // serialisations (`eyJ...`) and Stripe live keys (`sk_live_...`).
+    // Operators pasting a real token into the README / SECURITY /
+    // RELEASING / CHANGELOG is a hard supply-chain incident — even
+    // an accidental one in a worked example becomes a published
+    // credential the moment the commit lands. This detector front-
+    // runs the eventual CI gitleaks gate. Legitimate worked examples
+    // (rare in this project) can be marked with an `allow:docs-secret-shape`
+    // inline comment on the same line.
+    var patterns = [
+      /\bsk_live_[A-Za-z0-9]{20,}/,
+      /\beyJ[A-Za-z0-9_-]{20,}/,
+    ];
+    var hits = _scanDocs(patterns, 'docs-secret-shape');
+    _assertClean('docs-secret-shape', hits);
+  });
+
 });
