@@ -38,8 +38,8 @@
       "heading": "Changed",
       "items": [
         {
-          "title": "Vendored blamejs refreshed to v0.11.30",
-          "body": "The pinned upstream version in `vendor/blamejs/` (and `vendor/MANIFEST.json`) advances from v0.11.2 to v0.11.30. The wire-layer surfaces the sync client consumes (`b.wsClient`, `b.httpClient`, `b.pqcAgent`, `b.safeJson`, `b.atomicFile`, `b.retry`, `b.appShutdown`, `b.middleware.apiEncrypt`, ML-KEM-1024 + XChaCha20-Poly1305 envelopes) are byte-identical between the two versions; the refresh picks up upstream additions and security fixes in adjacent modules."
+          "title": "Vendored blamejs refreshed to v0.11.32",
+          "body": "The pinned upstream version in `vendor/blamejs/` (and `vendor/MANIFEST.json`) advances from v0.11.2 to v0.11.32. The wire-layer surfaces the sync client consumes (`b.wsClient`, `b.httpClient`, `b.pqcAgent`, `b.safeJson`, `b.atomicFile`, `b.retry`, `b.appShutdown`, `b.middleware.apiEncrypt`, ML-KEM-1024 + XChaCha20-Poly1305 envelopes) are byte-identical between the two versions; the refresh picks up upstream additions and security fixes in adjacent modules."
         }
       ]
     }
