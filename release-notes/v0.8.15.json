@@ -1,0 +1,20 @@
+{
+  "version": "0.8.15",
+  "date": "2026-05-19",
+  "headline": "Per-instance test CA + deterministic SIGTERM container exit",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Test harness generates a per-instance CA",
+          "body": "The test suite previously reused a shared self-signed CA across runs, which made cert-rotation tests flaky against parallel runners. Each test instance now mints its own CA + server cert + client cert at startup, isolating runs from each other."
+        },
+        {
+          "title": "Container SIGTERM exit is deterministic",
+          "body": "Aligns the daemon's signal handling with the container init so that `docker stop`/`podman stop` reliably produces the same exit semantics each shutdown. Removes a flaky race that occasionally left the container reporting OOMKilled-style codes after a clean stop signal."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "version": "0.8.13",
+  "date": "2026-05-19",
+  "headline": "Periodic cert check, config validation, env overlay, watchdogs",
+  "summary": "Addresses a batch of findings against the daemon's long-running posture: certificate validity is checked on a schedule rather than only at startup, `config.json` is schema-validated before the daemon accepts it, environment variables can overlay individual config keys, and the sync + websocket loops are now externally watchdog-ed.",
+  "sections": [
+    {
+      "heading": "Added",
+      "items": [
+        {
+          "title": "Periodic certificate validity check",
+          "body": "`lib/cli.js` now runs the mTLS cert validity check on a recurring schedule against the operator clock, not only at process start. A cert that crosses the 60-day renewal threshold during a long-running daemon now triggers auto-renew without requiring a restart."
+        },
+        {
+          "title": "Schema validation of `config.json` at load time",
+          "body": "`lib/config.js` now refuses a config file whose shape, types, or value ranges don't match the documented schema. Operators get a precise error line + the field name that failed validation instead of an opaque runtime crash later."
+        },
+        {
+          "title": "Environment-variable overlay for individual config keys",
+          "body": "Selected `config.json` keys can now be overridden via `HERMITSTASH_*` environment variables, which is the conventional shape for containerized + systemd-unit deployments where editing the on-disk config isn't ergonomic. Documented in the README's configuration section."
+        },
+        {
+          "title": "Watchdog timers on the sync + websocket loops",
+          "body": "Both core loops now check in against a watchdog with a generous slack budget; missing a check-in logs a structured warning and forces a re-init of the affected loop. A wedged loop no longer silently stops making progress."
+        },
+        {
+          "title": "Unit tests for the new validators + overlays",
+          "body": "`tests/` gains coverage for the config schema validator, the env-overlay merge rules, and the cert-check scheduling behavior. Runs alongside the existing E2E + integration suite via `tests/run-all.js`."
+        }
+      ]
+    }
+  ]
+}

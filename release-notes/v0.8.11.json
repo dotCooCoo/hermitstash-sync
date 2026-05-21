@@ -1,0 +1,17 @@
+{
+  "version": "0.8.11",
+  "date": "2026-05-18",
+  "headline": "Opt-in SPKI certificate pinning",
+  "summary": "Adds a `pinnedServerSpki` config option that pins the server's SPKI hash on top of the existing PQC-mTLS posture. With pinning enabled, a CA compromise that issues a rogue cert for the configured server host is detected before the TLS handshake completes.",
+  "sections": [
+    {
+      "heading": "Added",
+      "items": [
+        {
+          "title": "`pinnedServerSpki` config option",
+          "body": "Operators can pin the SHA-256 of the server's SubjectPublicKeyInfo by setting `pinnedServerSpki` in `config.json`. On every outbound HTTPS / WebSocket connection the client computes the SPKI hash of the presented leaf cert and refuses the connection if it doesn't match the pin. Compatible with the PQC-mTLS handshake unchanged; the pin is checked after the regular CA validation passes. Set the value to the empty string or omit it to keep the existing CA-validation-only behavior."
+        }
+      ]
+    }
+  ]
+}

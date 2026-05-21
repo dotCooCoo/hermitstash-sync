@@ -1,0 +1,17 @@
+{
+  "version": "0.8.21",
+  "date": "2026-05-19",
+  "headline": "SIGTERM wall-clock cap + SEA-SIGTERM detector",
+  "summary": "Intermediate step in the SEA SIGTERM exit-code work resolved in v0.8.22.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "SIGTERM shutdown bounded by a wall-clock cap",
+          "body": "The daemon's SIGTERM teardown now hard-stops at a wall-clock budget so a hung phase can't pin the process forever. A SEA-SIGTERM detector annotates exit-code 143 traces for downstream supervisors. Final resolution under systemd lands in v0.8.22 (`SuccessExitStatus=143`)."
+        }
+      ]
+    }
+  ]
+}

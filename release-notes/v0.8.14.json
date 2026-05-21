@@ -1,0 +1,16 @@
+{
+  "version": "0.8.14",
+  "date": "2026-05-19",
+  "headline": "Vendor blamejs v0.10.14",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored blamejs refreshed to v0.10.14",
+          "body": "Re-clones `vendor/blamejs/` at v0.10.14 and bumps `vendor/MANIFEST.json` to match. Picks up upstream-side fixes in modules adjacent to the wire-layer surfaces this client consumes; the wrapper API is unchanged."
+        }
+      ]
+    }
+  ]
+}

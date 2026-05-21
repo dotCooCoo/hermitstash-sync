@@ -1,0 +1,20 @@
+{
+  "version": "0.8.12",
+  "date": "2026-05-18",
+  "headline": "Vendor blamejs v0.10.13 + drop locals now upstream",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored blamejs refreshed to v0.10.13",
+          "body": "Re-clones `vendor/blamejs/` at v0.10.13 and updates `vendor/MANIFEST.json`. Local copies of helpers that have since landed upstream are dropped in favor of the framework versions, reducing the divergence surface."
+        },
+        {
+          "title": "README documents SPKI pinning + Prometheus sidecar + historical-stats framing",
+          "body": "Adds operator-facing documentation for the v0.8.11 `pinnedServerSpki` config option, the v0.8.10 Prometheus sidecar exposition, and the framing of historical vs live stats reported by the `stats` CLI subcommand."
+        }
+      ]
+    }
+  ]
+}

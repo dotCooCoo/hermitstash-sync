@@ -1,0 +1,20 @@
+{
+  "version": "0.8.3",
+  "date": "2026-05-17",
+  "headline": "Selective sync + bandwidth limit",
+  "sections": [
+    {
+      "heading": "Added",
+      "items": [
+        {
+          "title": "Subdirectory allowlist for selective sync",
+          "body": "`config.json` now accepts an `includePaths` array of subdirectories relative to the sync root. When set, only files under the listed prefixes are watched, uploaded, and accepted from inbound websocket events. Paths outside the allowlist are ignored entirely. Combine with the existing `ignorePatterns` for fine-grained selection."
+        },
+        {
+          "title": "Outbound bandwidth limit (token-bucket)",
+          "body": "`config.json#bandwidthLimitKbps` caps the upload throughput at the configured kilobits per second via a token-bucket limiter on the upload path. Unset or `0` disables the limit and restores the previous full-bandwidth behavior. Download throttling is not implemented in this release."
+        }
+      ]
+    }
+  ]
+}

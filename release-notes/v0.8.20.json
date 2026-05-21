@@ -1,0 +1,16 @@
+{
+  "version": "0.8.20",
+  "date": "2026-05-19",
+  "headline": "Remap SEA Node SIGTERM exit code via `tini -e 143`",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Container entrypoint exits zero on clean SIGTERM",
+          "body": "The container image's `tini` init now passes `-e 143` so a SEA-Node SIGTERM (exit 143) is remapped to a clean zero at the container boundary. Diagnostic step toward the systemd-side resolution in v0.8.22."
+        }
+      ]
+    }
+  ]
+}

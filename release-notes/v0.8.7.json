@@ -1,0 +1,16 @@
+{
+  "version": "0.8.7",
+  "date": "2026-05-18",
+  "headline": "TLS CA bundle extends the system trust store",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Configured CA bundle no longer replaces the system trust store",
+          "body": "A configured `caBundle` previously overrode Node's built-in CA list entirely, which broke outbound TLS to anything outside the configured CA (notably the GitHub-release downloader used by the auto-updater). The bundle now extends `tls.rootCertificates` rather than replacing it. Operators who explicitly want the override-only behavior can opt in via the new `caBundleMode: 'replace'` config key."
+        }
+      ]
+    }
+  ]
+}

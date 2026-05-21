@@ -1,0 +1,17 @@
+{
+  "version": "0.8.17",
+  "date": "2026-05-19",
+  "headline": "Own SIGTERM/SIGINT handlers with explicit `process.exit`",
+  "summary": "Replaces the framework-default signal disposition with HermitStash-owned handlers that call `process.exit` after the daemon's shutdown phases complete. Surfaces a SEA-specific exit-code-143 quirk that the v0.8.18 through v0.8.22 series then resolves.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Deterministic shutdown via explicit `process.exit` post-teardown",
+          "body": "`lib/daemon.js` now installs its own `SIGTERM`/`SIGINT` handlers that run the `b.appShutdown` phases and then call `process.exit(0)` explicitly. Previously a stray timer or socket could keep the event loop alive after shutdown, leaving the process pinned. Operators on the SEA build see exit code 143 on clean shutdown — that quirk is addressed at the systemd-unit + container-init layer in v0.8.20 and v0.8.22."
+        }
+      ]
+    }
+  ]
+}

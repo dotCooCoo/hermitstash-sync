@@ -1,0 +1,25 @@
+{
+  "version": "0.8.16",
+  "date": "2026-05-19",
+  "headline": "Vendor blamejs v0.11.2 + synchronous SIGTERM exit",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored blamejs refreshed to v0.11.2",
+          "body": "Re-clones `vendor/blamejs/` at v0.11.2 and updates `vendor/MANIFEST.json`. Picks up upstream wire-layer hardening and adjacent-module security fixes; the wrapper surfaces consumed by this client are unchanged."
+        }
+      ]
+    },
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Sync engine teardown exits synchronously on SIGTERM",
+          "body": "Drops the `setImmediate` deferral on the sync engine's SIGTERM teardown path so the process can exit on the same tick once shutdown phases complete. The deferral was occasionally racing with a Node-internal close that would observe a still-alive engine and trap the process."
+        }
+      ]
+    }
+  ]
+}

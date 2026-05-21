@@ -1,0 +1,26 @@
+{
+  "version": "0.8.1",
+  "date": "2026-05-17",
+  "headline": "Vendor blamejs v0.10.6 + CycloneDX 1.6 SBOM on every release",
+  "summary": "First release that emits a CycloneDX 1.6 SBOM alongside the binaries and matches the vendored framework to blamejs v0.10.6. Operators on Dependency-Track, OWASP Dependency-Check, Snyk SBOM Monitor, or any CPE-2.3-aware scanner can now map CVE advisories directly against the components shipping inside the SEA binary.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored blamejs refreshed to v0.10.6",
+          "body": "Re-clones `vendor/blamejs/` at v0.10.6 and updates `vendor/MANIFEST.json`. Picks up the upstream framework's accumulated security fixes and additions since v0.9.54; the wire-layer wrapper surfaces consumed by this client (`b.wsClient`, `b.httpClient`, `b.pqcAgent`, `b.safeJson`, `b.atomicFile`, `b.retry`, `b.appShutdown`, `b.middleware.apiEncrypt`) are API-stable across the bump."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "CycloneDX 1.6 SBOM emitted on every release",
+          "body": "`scripts/build-sbom.js` now runs as part of the `release` job and emits `hermitstash-sync-vX.Y.Z.cdx.json` alongside the platform binaries. The SBOM enumerates the SEA binary's full vendored surface (blamejs + its transitive bundles: noble-ciphers, noble-post-quantum, simplewebauthn-server, common-passwords list, BIMI trust anchors, publicsuffix-list, peculiar-pki) with CPE 2.3 + purl identifiers and per-component SHA-256 hashes. The actions-run URL is recorded in `metadata.lifecycles[].externalReferences[]` for build-provenance back-reference."
+        }
+      ]
+    }
+  ]
+}

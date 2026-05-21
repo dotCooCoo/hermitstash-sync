@@ -1,0 +1,16 @@
+{
+  "version": "0.8.18",
+  "date": "2026-05-19",
+  "headline": "Instrument SIGTERM shutdown trace",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Structured trace emitted across the SIGTERM teardown path",
+          "body": "Adds per-phase log lines covering shutdown to surface where exit-code 143 originates under SEA. Diagnostic only; the user-visible resolution lands in v0.8.22."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": "0.8.0",
+  "date": "2026-05-16",
+  "headline": "Strip internal-rules narrative from operator-facing surface",
+  "summary": "Documentation-only minor-line opener. Removes residual references to internal contributor-rules files and tightens before/now narrative that had leaked into README, comments, error messages, and the systemd unit drop-ins. No code or wire-protocol changes; behavior is byte-identical to v0.7.17.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "README, inline comments, and error messages reworded to drop internal narrative",
+          "body": "Operator-facing prose across `README.md`, public-API JSDoc, CLI `--help` text, error messages thrown from public entry points, and the shipped `deploy/` units no longer references contributor-rules file paths or carries before/now framing that only makes sense with prior-conversation context. Each line now reads as a self-contained statement of what the surface is or does."
+        }
+      ]
+    }
+  ]
+}

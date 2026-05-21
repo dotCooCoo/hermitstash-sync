@@ -1,0 +1,16 @@
+{
+  "version": "0.8.8",
+  "date": "2026-05-18",
+  "headline": "Pick up `shareId` from `/sync/enroll` response",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Enrollment response's `shareId` is now persisted",
+          "body": "The `/sync/enroll` response carries the bundle's `shareId`, which the client previously discarded and re-derived later via an extra GET. The client now persists the `shareId` directly out of the enrollment response and the redundant lookup is gone. No on-wire change; reduces one round-trip per first-run enrollment."
+        }
+      ]
+    }
+  ]
+}
