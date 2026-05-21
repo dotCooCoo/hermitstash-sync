@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.11.32",
+      "version": "0.11.33",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.11.32",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.11.32:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.11.32",
+      "tag": "v0.11.33",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.11.33:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.11.33",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
