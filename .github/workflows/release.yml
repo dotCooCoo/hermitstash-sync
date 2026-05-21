@@ -339,6 +339,15 @@ jobs:
           done
           SBOM="artifacts/hermitstash-sync-v${VERSION}.cdx.json"
           VEX="artifacts/hermitstash-sync-v${VERSION}.vex.json"
+          # `subjects.txt` is a scratch manifest consumed by the
+          # provenance job's `base64-subjects` input. It lives at the
+          # workflow root (NOT inside `artifacts/`) so the publish
+          # job's `gh release create files: artifacts/*` glob does
+          # not attach it as a release asset — the SLSA attestation
+          # itself (`.intoto.jsonl`) carries the same information
+          # signed, so the plaintext copy on the release page is
+          # redundant. v0.8.24 shipped it by mistake; from v0.8.25
+          # forward the release page stays clean.
           {
             for bin in "${PLAIN_BINS[@]}"; do
               (cd artifacts && sha256sum "$(basename "$bin")")
@@ -347,10 +356,10 @@ jobs:
             if [ -f "$VEX" ]; then
               (cd artifacts && sha256sum "$(basename "$VEX")")
             fi
-          } > artifacts/subjects.txt
+          } > subjects.txt
           echo "[slsa-subjects] manifest:"
-          cat artifacts/subjects.txt
-          HASHES_B64=$(base64 -w0 < artifacts/subjects.txt)
+          cat subjects.txt
+          HASHES_B64=$(base64 -w0 < subjects.txt)
           echo "hashes=$HASHES_B64" >> "$GITHUB_OUTPUT"
 
       - name: Build GitHub-release-page markdown from release-notes JSON
