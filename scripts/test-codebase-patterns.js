@@ -706,4 +706,118 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     }
   });
 
+  it('no JSON.parse(JSON.stringify(...)) deep-clone (use structuredClone)', () => {
+    // class: handrolled-deep-clone
+    // The `JSON.parse(JSON.stringify(x))` idiom silently drops Date /
+    // Buffer / Map / Set / BigInt / RegExp / function / undefined.
+    // structuredClone is the modern answer (Node 17+).
+    var matches = _scan(/\bJSON\.parse\s*\(\s*JSON\.stringify\s*\(/);
+    matches = _filterMarkers(matches, 'handrolled-deep-clone');
+    _assertClean('handrolled-deep-clone', matches);
+  });
+
+  it('no for+setTimeout retry loops (route through b.retry.withRetry)', () => {
+    // class: handrolled-retry-loop
+    // `for (var attempt = 0; attempt < N; attempt++)` with a
+    // `setTimeout` inside is the retry-with-backoff idiom. The
+    // vendored `b.retry.withRetry` handles isPermanent classification,
+    // crypto-strength jitter, max-elapsed-time cap, and observability
+    // events. Any inline reinvention is a candidate for replacement.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var rel = _relPath(files[fi]);
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length - 1; li++) {
+        var m = /for\s*\(\s*(?:var|let|const)\s+(attempt|tries|retr\w*)\s*=/i.exec(lines[li]);
+        if (!m) continue;
+        var win = lines.slice(li, Math.min(li + 12, lines.length)).join('\n');
+        if (/\bsetTimeout\s*\(/.test(win)) {
+          bad.push({
+            file:    rel,
+            line:    li + 1,
+            content: lines[li].trim(),
+          });
+          break;
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'handrolled-retry-loop');
+    _assertClean('handrolled-retry-loop', bad);
+  });
+
+  it('no url.format(...) (use new URL() / safeUrl; CVE-2026-21712 IDN crash class)', () => {
+    // class: legacy-url-format
+    // Node legacy `url.format()` crashes on adversarial IDN input.
+    // The WHATWG URL constructor + b.safeUrl are the supported paths.
+    var matches = _scan(/\burl\.format\s*\(/);
+    matches = _filterMarkers(matches, 'legacy-url-format');
+    _assertClean('legacy-url-format', matches);
+  });
+
+  it('no dense wildcard runs (4+ consecutive `*` — wildcard-amplification class)', () => {
+    // class: dense-wildcard
+    // CVE-2026-4923 / CVE-2026-33671 / CVE-2026-26996 — multi-wildcard
+    // route / glob patterns compile to catastrophic-backtracking regex
+    // on engines that fold `*` into a regex alternation. Four+ runs of
+    // `*` outside comments is the smell. The detector regex is a bare
+    // run with no surrounding string-literal anchors so the matcher
+    // itself can't catastrophic-backtrack on long lines.
+    var matches = _scan(/\*{4,}/);
+    matches = _filterMarkers(matches, 'dense-wildcard');
+    _assertClean('dense-wildcard', matches);
+  });
+
+  it('regex literal seen in 3+ files → extract to a shared constant', () => {
+    // class: duplicate-regex
+    // Same regex literal in 3+ files is an extraction candidate (the
+    // canonical example is the email regex). The matcher requires a
+    // regex-context preceding token (`=`, `(`, `,`, `?`, `:`, `[`,
+    // `;`, `!`, `&&`, `||`, `return`, `throw`, arrow) so a `*/`
+    // comment closer or a `path/to/file` string can't trip it.
+    var files = _sourceFiles();
+    var seen = {};
+    var regexCtxRe = /(?:^|[=(,?:[;!&|]|\breturn\s|\bthrow\s|=>\s*)\s*\/((?:\\.|[^/\\\n])+)\/([gimsuy]*)(?=[\s,);.\]]|$)/g;
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+        var foundMatch;
+        regexCtxRe.lastIndex = 0;
+        while ((foundMatch = regexCtxRe.exec(line)) !== null) {
+          var src = foundMatch[1];
+          if (src.length < 6) continue;                                                 // allow:raw-byte-literal — min-source-length floor for triviality skip
+          if (!/[\\^$*+?{}()|[\]]/.test(src)) continue;
+          if (!seen[src]) seen[src] = [];
+          seen[src].push({ file: _relPath(files[fi]), line: li + 1 });
+        }
+      }
+    }
+    var bad = [];
+    Object.keys(seen).forEach(function (src) {
+      var occurrences = seen[src];
+      var distinctFiles = {};
+      occurrences.forEach(function (o) { distinctFiles[o.file] = true; });
+      if (Object.keys(distinctFiles).length >= 3) {
+        bad.push({
+          file:    occurrences[0].file,
+          line:    occurrences[0].line,
+          content: 'regex /' + src.slice(0, 60) + (src.length > 60 ? '…' : '') +
+                   '/ appears in ' + Object.keys(distinctFiles).length +
+                   ' files: ' + Object.keys(distinctFiles).slice(0, 4).join(', ') +
+                   (Object.keys(distinctFiles).length > 4 ? ', …' : ''),
+        });
+      }
+    });
+    bad = _filterMarkers(bad, 'duplicate-regex');
+    _assertClean('duplicate-regex', bad);
+  });
+
 });

@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.11.2",
+      "version": "0.11.30",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.11.2",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.11.2:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.11.2",
+      "tag": "v0.11.30",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.11.30:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.11.30",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -38,7 +38,7 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:817e8e5bfcc07fb3bd4471b85d57601e39ceccaf20518d1c5cacd37db88f8f17",
+        "index": "sha256:68d6cf8946dc93cfe34851007309a02c75fe6fc542f0b34e788bc5328ff03f74",
         "safe-json": "sha256:c0fe2d43b6968f434fd6d8b885fab1c198029a656cfa02ce48ca83e42b7327e5",
         "safe-url": "sha256:cec279c15d55c64aa326e0ac75869b09425118173d97435051287aa78df64c0a",
         "pqc-agent": "sha256:cfbe716988492832b535fc2f1907dc3b6b1fa35eed1bdc737a95215531d46e09",
@@ -50,7 +50,7 @@
         "atomic-file": "sha256:2e9e06c5d4ff1d15737085d5e01c15668ab008845cdc5dd5a521e7a7517debdd",
         "app-shutdown": "sha256:a60cf1d89d9dd6777b7cf10874619a7b1d12094a8eed5796a6c3726b9fa8ea26",
         "retry": "sha256:9b9d35a9eb109b1fcc181b0325c5bbebb048d3ef398f024069d5e03c311f4ec8",
-        "framework-error": "sha256:99d65a894414d60c1d27342e706b7244291c9a68c4580ee11904fc4eb37ac363",
+        "framework-error": "sha256:92b00125e53b0672bffb13e360466d05785d81595ecd6ee701b8ce7b0db2d881",
         "process-spawn": "sha256:543e8278225a397ee8f02c66b45ea6ffb4f2145bcb8a2d6e90df9ab6552500c1",
         "config-drift": "sha256:94609b873a75c82d21671ebb4c22b2bf4135bdae7b5a355600f68c4caddd02f3",
         "middleware-api-encrypt": "sha256:7b774944e022bc59c513eaece9f7f966dee330555bb6c0ae236cc6009e05c250",

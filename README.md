@@ -328,9 +328,19 @@ sha3sum -a 512 -c hermitstash-sync-vX.Y.Z-win-x64.exe.sha3-512
 # GPG signature (import the public key once, then verify)
 gpg --import gpg-public-key.asc
 gpg --verify hermitstash-sync-vX.Y.Z-win-x64.exe.asc hermitstash-sync-vX.Y.Z-win-x64.exe
+
+# SLSA L3 provenance (binary was built by this repo's release.yml)
+slsa-verifier verify-artifact hermitstash-sync-vX.Y.Z-win-x64.exe \
+  --provenance-path hermitstash-sync-vX.Y.Z.intoto.jsonl \
+  --source-uri github.com/dotCooCoo/hermitstash-sync \
+  --source-tag vX.Y.Z
+
+# Post-quantum signature (ML-DSA-65, FIPS 204 — optional, additive)
+# Compare the keys/release-pqc-pub.json fingerprint against SECURITY.md first.
+node -e "var b=require('./vendor/blamejs'),f=require('node:fs');var p=JSON.parse(f.readFileSync('keys/release-pqc-pub.json','utf8'));var pk=new Uint8Array(Buffer.from(p.publicKey,'base64url'));var bin=new Uint8Array(f.readFileSync(process.argv[1]));var s=new Uint8Array(f.readFileSync(process.argv[1]+'.mldsa.sig'));process.exit(b.pqcSoftware.ml_dsa_65.verify(s,bin,pk)?0:1);" hermitstash-sync-vX.Y.Z-win-x64.exe
 ```
 
-Both files are attached to every release. The GPG key fingerprint and the ECDSA auto-update pubkey are both baked into the binary itself, so once the first release is trusted, subsequent auto-updates verify against those keys without any further ceremony.
+Every release attaches the GPG `.asc`, the SLSA L3 `.intoto.jsonl`, the ML-DSA-65 `.mldsa.sig`, and a Sigstore-keyless cosign bundle over the CycloneDX SBOM (and VEX, when emitted). The GPG key fingerprint and the P-384 ECDSA auto-update pubkey are baked into the binary; the ML-DSA-65 release pubkey lives in-tree at `keys/release-pqc-pub.json` with its SHA3-512 fingerprint recorded in `SECURITY.md`. Once the first release is trusted, subsequent auto-updates verify against the embedded ECDSA pubkey via `node:crypto` without further ceremony.
 
 ## How sync works
 
@@ -395,6 +405,8 @@ The `status` command shows which state the daemon is in:
 - **Boot-time wall-clock gate** — `hermitstash-sync start` runs an SNTPv4 drift check (`b.ntpCheck.bootCheck`) against `pool.ntp.org` before opening the engine. The cert-renewal threshold and the auto-update probation window both depend on `Date.now()` being roughly correct; a laptop resuming from a long sleep, a container without an RTC, or a system whose NTP daemon died can drift far enough to mis-renew certs or false-clear probation. Default thresholds: warn at 5 min, fatal at 1 hr. Unreachable NTP is non-fatal so offline boots still work. Override with `HERMITSTASH_NTP_DISABLE=1` (skip) or `HERMITSTASH_NTP_STRICT=1` (refuse to boot if unreachable).
 - **CSAF 2.1 VEX disclosures on releases** — when transitive CVEs surface in the vendored runtime that don't reach a vulnerable code path here, an OASIS CSAF 2.1 VEX document (`hermitstash-sync-vX.Y.Z.vex.json`) is published alongside the binaries. CSAF-aware scanners (e.g. `trivy --vex`, `grype --vex`) can consume it to suppress alerts on declared `known_not_affected` findings with a justification. Generated via `b.vex` from the assessments committed at `vex/statements.json`.
 - **CycloneDX 1.6 SBOM on releases** — every release publishes `hermitstash-sync-vX.Y.Z.cdx.json` alongside the binaries. The SBOM enumerates the SEA's vendored surface (blamejs and its transitive noble-ciphers + noble-post-quantum bundles) with CPE 2.3 + purl identifiers and per-component SHA-256 hashes so CISA / NVD-driven scanners (Dependency-Track, OWASP Dependency-Check, Snyk SBOM Monitor) can CVE-match against the actual code shipping inside the binary, not just the empty `package.json` runtime-dep list.
+- **SLSA L3 provenance + Sigstore-keyless SBOM/VEX signatures** — every release attaches a `hermitstash-sync-vX.Y.Z.intoto.jsonl` SLSA L3 attestation (produced by `slsa-framework/slsa-github-generator` and signed via Sigstore-keyless) covering every platform binary plus the SBOM (and VEX when present). The SBOM and VEX additionally carry their own cosign sign-blob bundles (`*.cdx.json.sigstore` / `*.vex.json.sigstore`) anchored in the Sigstore transparency log. Verify the provenance with `slsa-verifier verify-artifact`; verify the SBOM/VEX with `cosign verify-blob --bundle <bundle>.sigstore --certificate-identity-regexp 'https://github.com/dotCooCoo/hermitstash-sync/' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'`.
+- **ML-DSA-65 release-signing sidecar (FIPS 204)** — every platform binary ships an additional `<binary>.mldsa.sig` raw post-quantum signature alongside the existing P-384 ECDSA `.sig` and armored GPG `.asc`. The pubkey lives in-tree at `keys/release-pqc-pub.json`; its SHA3-512 fingerprint is recorded in `SECURITY.md` for out-of-band verification. The daemon's auto-update path continues to verify against the embedded ECDSA pubkey via `node:crypto` (zero npm deps on the verify path); the ML-DSA-65 sidecar is additive for operators with a PQC-only verification posture.
 - **Zero npm dependencies** — entire codebase is auditable
 
 ## Logging

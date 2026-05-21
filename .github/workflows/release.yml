@@ -11,8 +11,11 @@ on:
         type: boolean
         default: true
 
+# Workflow-level is read-only; downstream jobs elevate as needed
+# (contents:write for gh release create, id-token:write for cosign
+# keyless + the SLSA reusable workflow's OIDC token).
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -41,10 +44,6 @@ jobs:
             ext: ''
           # macos-13 (Intel) disabled — runner queue times exceed 60 min.
           # Intel Mac users can run the ARM64 binary via Rosetta 2.
-          # - os: macos-13
-          #   platform: macos
-          #   arch: x64
-          #   ext: ''
 
     runs-on: ${{ matrix.os }}
 
@@ -72,6 +71,22 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "exe_name=hermitstash-sync-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag/version match gate
+        # Tag push must match `lib/constants.js#VERSION`. The build
+        # step embeds VERSION in the SEA; a mismatched tag would ship
+        # a binary that reports a different version than the tag it
+        # was downloaded from. Skip on dry-run / branch push.
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::lib/constants.js VERSION ($PKG_VERSION) does not match pushed tag (v$TAG_VERSION)"
+            exit 1
+          fi
+          echo "VERSION $PKG_VERSION matches pushed tag v$TAG_VERSION"
 
       - name: Build SEA binary
         run: node build/build-sea.js
@@ -124,11 +139,7 @@ jobs:
       #
       # Signature shape: ECDSA P-384, **SHA3-512** hash, DER encoding —
       # matches what `b.selfUpdate.standaloneVerifier` (and the in-binary
-      # b.selfUpdate.verify wired in v0.7.7+) checks against. Hard break
-      # from the v0.6.13...v0.7.6 format (ECDSA P-384 over SHA-384 inferred
-      # from the curve); existing v0.6.x and v0.7.0...v0.7.6 binaries cannot
-      # auto-update across this boundary and must reinstall via
-      # deploy/install.sh (Docker users: `docker pull`).
+      # b.selfUpdate.verify wired in v0.7.7+) checks against.
 
       - name: ECDSA sign binary for auto-update
         env:
@@ -168,10 +179,16 @@ jobs:
             build/${{ steps.version.outputs.exe_name }}.sha3-512.asc
           if-no-files-found: ignore
 
-  release:
+  prepare-release:
     needs: build
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write    # OIDC token for cosign sign-blob
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      hashes:  ${{ steps.subjects.outputs.hashes }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -181,143 +198,249 @@ jobs:
         with:
           node-version: '>=24.14.1'
 
-      - name: Download all artifacts
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Release-notes gate (release-notes/v$VERSION.json must exist + match CHANGELOG.md)
+        shell: bash
+        run: node scripts/check-changelog-extract.js
+
+      - name: Download all matrix artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: List artifacts
+      - name: List downloaded artifacts
         run: find artifacts -type f | sort
-
-      - name: Build CSAF 2.1 VEX document
-        shell: bash
-        run: |
-          # Emits artifacts/hermitstash-sync-vX.Y.Z.vex.json if vex/statements.json
-          # has any entries; otherwise logs + exits 0 with no output file.
-          node scripts/build-vex.js --out artifacts
-          if [ -f artifacts/hermitstash-sync-v$(node -e "console.log(require('./lib/constants').VERSION)").vex.json ]; then
-            echo "VEX document attached to release."
-          else
-            echo "No VEX statements pending — skipping VEX attachment."
-          fi
 
       - name: Build CycloneDX 1.6 SBOM
         shell: bash
         run: |
-          # Always emits artifacts/hermitstash-sync-vX.Y.Z.cdx.json describing
-          # the SEA's vendored surface (blamejs + transitive noble-* bundles)
-          # with CPE 2.3 + purl identifiers and per-component SHA-256 hashes.
           node scripts/build-sbom.js --out artifacts
-          ls -l artifacts/hermitstash-sync-v$(node -e "console.log(require('./lib/constants').VERSION)").cdx.json
+          ls -l artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}.cdx.json
 
-      - name: Build release notes
+      - name: Build CSAF 2.1 VEX document (when vex/statements.json has entries)
         shell: bash
         run: |
-          VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
-          TAG="v${VERSION}"
-          GPG_KEY_ID="${{ secrets.GPG_PRIVATE_KEY && 'yes' || '' }}"
-          REPO="${{ github.repository }}"
-          RUN_ID="${{ github.run_id }}"
+          node scripts/build-vex.js --out artifacts
+          if [ -f artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}.vex.json ]; then
+            echo "VEX document attached."
+          else
+            echo "No VEX statements pending — skipping VEX attachment."
+          fi
 
-          node -e "
-          var fs = require('fs');
-          var path = require('path');
-          var tag = '${TAG}';
-          var repo = '${REPO}';
-          var runId = '${RUN_ID}';
-          var hasGpg = '${GPG_KEY_ID}' !== '';
+      # ---- ML-DSA-65 PQC sidecar over each platform binary ----
+      # Independent of the in-binary auto-update ECDSA signature
+      # (which the daemon verifies via node:crypto). The .mldsa.sig
+      # is an additive sidecar for operators with a PQC-only
+      # verification posture; verify via scripts/verify-release.js
+      # --mldsa.
+      #
+      # Conditional on the operator having completed the one-time
+      # release-key setup (`node scripts/generate-release-signing-key.js`,
+      # commit `keys/release-pqc-pub.json`, set
+      # `RELEASE_PQC_SIGNING_KEY` secret). When either piece is
+      # missing the step logs a warning and the release still ships
+      # the binary + SHA-256 + SHA3-512 + GPG + ECDSA + SBOM + cosign
+      # bundle + SLSA L3 attestation; the .mldsa.sig sidecar lights
+      # up on the FIRST release after setup completes.
+      - name: ML-DSA-65 sign each platform binary
+        id: pqc-sig
+        env:
+          RELEASE_PQC_SIGNING_KEY: ${{ secrets.RELEASE_PQC_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_PQC_SIGNING_KEY:-}" ]; then
+            echo "::warning::RELEASE_PQC_SIGNING_KEY secret is empty — skipping the PQC sidecar."
+            echo "::warning::Operator: run 'node scripts/generate-release-signing-key.js' once, commit keys/release-pqc-pub.json, set the secret, then future releases pick up the sig automatically."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ ! -f keys/release-pqc-pub.json ]; then
+            echo "::warning::keys/release-pqc-pub.json missing — skipping the PQC sidecar."
+            echo "::warning::The secret is set but the matching public key is not committed; the signer self-verify would refuse the sig anyway."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          shopt -s nullglob
+          BINS=(artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}-*)
+          # Filter out sidecars (.sha256, .sha3-512, .sig, .asc, .mldsa.sig, etc.)
+          PLAIN_BINS=()
+          for f in "${BINS[@]}"; do
+            case "$f" in
+              *.sha256|*.sha3-512|*.sig|*.asc|*.mldsa.sig|*.sigstore|*.intoto.jsonl|*.cdx.json|*.vex.json) ;;
+              *) PLAIN_BINS+=("$f") ;;
+            esac
+          done
+          if [ ${#PLAIN_BINS[@]} -eq 0 ]; then
+            echo "::error::no platform binaries found to sign"
+            exit 1
+          fi
+          for bin in "${PLAIN_BINS[@]}"; do
+            node scripts/sign-release-artifact.js "$bin"
+          done
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
-          // Find all binaries
-          var artDir = 'artifacts';
-          var files = fs.readdirSync(artDir).filter(function(f) {
-            return f.startsWith('hermitstash-sync-') && !f.includes('.sha') && !f.includes('.asc');
-          }).sort();
+      # ---- Cosign sign-blob (Sigstore-keyless) of SBOM + VEX ----
+      # The workflow's OIDC token is exchanged with Sigstore Fulcio
+      # for a short-lived cert bound to the workflow identity, then
+      # cosign signs the SBOM/VEX bytes. Verifiers reach for the
+      # Rekor transparency-log entry. The .sigstore bundle file
+      # carries the signature + cert + log inclusion proof; no
+      # long-lived key material lives in this repo.
 
-          var platforms = {
-            'win-x64': 'Windows x64',
-            'linux-x64': 'Linux x64',
-            'linux-arm64': 'Linux ARM64 (Raspberry Pi, AWS Graviton)',
-            'macos-arm64': 'macOS Apple Silicon (M1/M2/M3/M4)',
-            'macos-x64': 'macOS Intel',
-          };
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-          var lines = [];
-          lines.push('## HermitStash Sync ' + tag);
-          lines.push('');
-          lines.push('### Downloads');
-          lines.push('');
-          lines.push('| Platform | Binary | Checksum | Signature |');
-          lines.push('|----------|--------|----------|-----------|');
+      - name: Cosign sign-blob SBOM + VEX
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SBOM="artifacts/hermitstash-sync-v${VERSION}.cdx.json"
+          VEX="artifacts/hermitstash-sync-v${VERSION}.vex.json"
+          if [ -f "$SBOM" ]; then
+            cosign sign-blob --yes --bundle "${SBOM}.sigstore" "$SBOM"
+            echo "[cosign] signed $SBOM"
+          fi
+          if [ -f "$VEX" ]; then
+            cosign sign-blob --yes --bundle "${VEX}.sigstore" "$VEX"
+            echo "[cosign] signed $VEX"
+          fi
 
-          files.forEach(function(f) {
-            var m = f.match(/-(win|linux|macos)-(x64|arm64)/);
-            var label = m ? (platforms[m[1]+'-'+m[2]] || m[1]+' '+m[2]) : f;
-            var sha = fs.existsSync(path.join(artDir, f+'.sha3-512')) ? '\`sha3-512\`' : '';
-            var sig = fs.existsSync(path.join(artDir, f+'.asc')) ? '\`gpg\`' : '';
-            lines.push('| ' + label + ' | \`' + f + '\` | ' + sha + ' | ' + sig + ' |');
-          });
+      # ---- Compute SLSA subjects ----
+      # SLSA "subjects" = the artifacts the attestation describes.
+      # Subjects span the platform binaries + SBOM + VEX (when
+      # present). The .sigstore bundles + .sha256/.sha3-512/.asc
+      # sidecars are NOT subjects — they're signatures/digests OVER
+      # the subjects.
+      - name: Compute SLSA subjects (base64-encoded sha256 manifest)
+        id: subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          shopt -s nullglob
+          BINS=(artifacts/hermitstash-sync-v${VERSION}-*)
+          # Drop sidecars from the subject list.
+          PLAIN_BINS=()
+          for f in "${BINS[@]}"; do
+            case "$f" in
+              *.sha256|*.sha3-512|*.sig|*.asc|*.mldsa.sig|*.sigstore|*.intoto.jsonl) ;;
+              *) PLAIN_BINS+=("$f") ;;
+            esac
+          done
+          SBOM="artifacts/hermitstash-sync-v${VERSION}.cdx.json"
+          VEX="artifacts/hermitstash-sync-v${VERSION}.vex.json"
+          {
+            for bin in "${PLAIN_BINS[@]}"; do
+              (cd artifacts && sha256sum "$(basename "$bin")")
+            done
+            (cd artifacts && sha256sum "$(basename "$SBOM")")
+            if [ -f "$VEX" ]; then
+              (cd artifacts && sha256sum "$(basename "$VEX")")
+            fi
+          } > artifacts/subjects.txt
+          echo "[slsa-subjects] manifest:"
+          cat artifacts/subjects.txt
+          HASHES_B64=$(base64 -w0 < artifacts/subjects.txt)
+          echo "hashes=$HASHES_B64" >> "$GITHUB_OUTPUT"
 
-          lines.push('');
-          lines.push('### Verify integrity');
-          lines.push('');
-          lines.push('\`\`\`bash');
-          lines.push('# Replace BINARY with the downloaded filename');
-          lines.push('sha256sum -c BINARY.sha256');
-          lines.push('sha3sum -c BINARY.sha3-512');
-          lines.push('\`\`\`');
+      - name: Build GitHub-release-page markdown from release-notes JSON
+        shell: bash
+        run: |
+          node scripts/generate-changelog-entry.js --release-page > release-notes.md
+          BYTES=$(wc -c < release-notes.md | tr -d ' ')
+          if [ "$BYTES" -lt 64 ]; then
+            echo "::error::generate-changelog-entry produced an unexpectedly small release-page markdown ($BYTES bytes)."
+            echo "::error::Inspect release-notes/v${{ steps.version.outputs.version }}.json — every section may have rendered empty."
+            exit 1
+          fi
+          echo "[release-notes] rendered $BYTES bytes for v${{ steps.version.outputs.version }}"
+          head -20 release-notes.md
 
-          if (hasGpg) {
-            lines.push('');
-            lines.push('### Verify GPG signature');
-            lines.push('');
-            lines.push('\`\`\`bash');
-            lines.push('gpg --verify BINARY.asc BINARY');
-            lines.push('\`\`\`');
-          }
+      - name: Upload release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: |
+            artifacts/**
+            release-notes.md
+          if-no-files-found: error
+          retention-days: 1
 
-          // CSAF 2.1 VEX document — only present when vex/statements.json has entries.
-          var vexFile = files.length > 0 ? null : null;
-          var vexCandidate = 'hermitstash-sync-' + tag + '.vex.json';
-          if (fs.existsSync(path.join(artDir, vexCandidate))) {
-            vexFile = vexCandidate;
-            lines.push('');
-            lines.push('### Vulnerability disclosure (VEX)');
-            lines.push('');
-            lines.push('\`' + vexFile + '\` is an OASIS CSAF 2.1 VEX document covering this release. ' +
-                       'It declares the affected/not-affected status of CVEs against the platform binaries ' +
-                       '(\`linux-x64\`, \`linux-arm64\`, \`win-x64\`, \`macos-arm64\`) and the container image. ' +
-                       'Scanners that consume CSAF can use it to suppress alerts on transitive CVEs that don\\'t reach a vulnerable code path here.');
-          }
+  # SLSA L3 provenance attestation across the platform binaries +
+  # SBOM + VEX. The reusable workflow produces a `.intoto.jsonl`
+  # signed via Sigstore-keyless. `upload-assets: false` so the file
+  # comes back as a workflow artifact for atomic attach in `publish`
+  # — the GH release does not exist yet at this point.
+  provenance:
+    needs: prepare-release
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      id-token: write    # OIDC token for Sigstore-keyless signing
+      contents: write    # SLSA caller example default; harmless with upload-assets:false
+      actions: read      # introspect this workflow run for the attestation
+    # IMPORTANT: Tag-pinned, NOT SHA-pinned. SLSA's internal builder-
+    # fetch step expects `BUILDER_REF` in `refs/tags/vX.Y.Z` form and
+    # refuses a 40-hex SHA. This is one of two intentional exceptions
+    # to this repo's "SHA-pin artifact-producing actions" posture
+    # (the other is the cosign-installer above, which is SHA-pinned;
+    # only this reusable workflow needs the tag form).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects:    "${{ needs.prepare-release.outputs.hashes }}"
+      upload-assets:      false
+      provenance-name:    "hermitstash-sync-v${{ needs.prepare-release.outputs.version }}.intoto.jsonl"
+      # SLSA's privacy detection sometimes reports public repos as
+      # private (it walks workflow permissions rather than repo
+      # visibility) and halts to avoid leaking the repo name in
+      # Sigstore's public transparency log. github.com/dotCooCoo/hermitstash-sync
+      # is public; the transparency-log entry is the desired
+      # behavior.
+      private-repository: true
+      # The SLSA workflow's `final` job ANDs every nested job's
+      # outcome — including `upload-assets`, which is skipped here.
+      # `continue-on-error: true` keeps the workflow reporting
+      # success on the skipped path; a real missing-attestation
+      # failure still surfaces at the `publish` job's download-
+      # artifact step.
+      continue-on-error: true
 
-          // CycloneDX 1.6 SBOM — always emitted; describes the SEA's vendored surface.
-          var sbomCandidate = 'hermitstash-sync-' + tag + '.cdx.json';
-          if (fs.existsSync(path.join(artDir, sbomCandidate))) {
-            lines.push('');
-            lines.push('### Software Bill of Materials (SBOM)');
-            lines.push('');
-            lines.push('\`' + sbomCandidate + '\` is a CycloneDX 1.6 SBOM enumerating the SEA binary\\'s vendored surface ' +
-                       '(blamejs and its transitive bundles) with CPE 2.3 + purl identifiers and per-component SHA-256 hashes. ' +
-                       'Dependency-Track, OWASP Dependency-Check, and Snyk SBOM Monitor consume the CPE field to map CVE advisories against the components actually shipping inside the binary.');
-          }
+  publish:
+    needs: [prepare-release, provenance]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # gh release create + asset attach
+    timeout-minutes: 15
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
 
-          lines.push('');
-          lines.push('### Requirements');
-          lines.push('');
-          lines.push('- HermitStash server v1.5.0+ with sync features enabled');
-          lines.push('- No Node.js installation needed (self-contained binary)');
-          lines.push('');
-          lines.push('### Build info');
-          lines.push('');
-          lines.push('- License: AGPL-3.0-or-later');
-          lines.push('- Node.js: ' + process.version);
-          lines.push('- OpenSSL: ' + process.versions.openssl);
-          lines.push('- TLS: SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768 (Level 5 preferred)');
-          lines.push('- Built by: GitHub Actions ([view workflow run](https://github.com/' + repo + '/actions/runs/' + runId + '))');
-          lines.push('- Platforms: ' + files.length + ' (' + files.map(function(f) { var m = f.match(/-(win|linux|macos)-(x64|arm64)/); return m ? m[1]+'/'+m[2] : '?'; }).join(', ') + ')');
-          fs.writeFileSync('release-notes.md', lines.join('\n') + '\n');
-          console.log('Release notes: ' + lines.length + ' lines, ' + files.length + ' binaries');
-          "
+      - name: Download SLSA provenance attestation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hermitstash-sync-v${{ needs.prepare-release.outputs.version }}.intoto.jsonl
+
+      - name: Move provenance into artifacts/
+        shell: bash
+        run: |
+          set -euo pipefail
+          INTOTO="hermitstash-sync-v${{ needs.prepare-release.outputs.version }}.intoto.jsonl"
+          if [ -f "$INTOTO" ]; then
+            mv "$INTOTO" artifacts/
+          fi
+          ls -l artifacts/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
