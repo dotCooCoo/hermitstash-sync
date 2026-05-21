@@ -1,0 +1,67 @@
+{
+  "minor": "0.1",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "date": "2026-04-12",
+      "headline": "Initial release of the HermitStash sync client",
+      "summary": "First public cut of the PQC-encrypted desktop file sync daemon for HermitStash. Twenty source files, around 2,600 lines, and zero npm runtime dependencies.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "WebSocket sync transport over post-quantum TLS",
+              "body": "Connects to the server's `/sync/ws` endpoint using a TLS 1.3 handshake negotiated against the `X25519MLKEM768` hybrid group, so the key exchange resists store-now-decrypt-later attacks."
+            },
+            {
+              "title": "SHA3-512 content hashing",
+              "body": "Local file checksums use SHA3-512 to match the server's `checksum` field byte-for-byte, enabling drift detection and deduplication without re-uploading unchanged files."
+            },
+            {
+              "title": "File upload and download via the HermitStash HTTP API",
+              "body": "Pushes new and changed files through the existing multipart upload route and pulls remote-only files through the streaming download route, reusing the server's existing auth and quota paths."
+            },
+            {
+              "title": "Local state database backed by `node:sqlite`",
+              "body": "Persists per-file metadata, sequence cursor, and pending operations in a SQLite database under the user's data directory so the daemon can resume cleanly across restarts."
+            },
+            {
+              "title": "Filesystem watcher with debounce and ignore globs",
+              "body": "Uses `fs.watch` with a coalescing debounce window and configurable ignore patterns so rapid editor save bursts collapse into a single sync event."
+            },
+            {
+              "title": "OS keychain storage for the API key",
+              "body": "Stores the API key in the platform keychain (macOS Keychain, Linux `secret-tool`, Windows Credential Manager) instead of a plaintext config file."
+            },
+            {
+              "title": "Daemon mode with PID file and signal handling",
+              "body": "Runs detached with a PID file for liveness checks and traps `SIGTERM`/`SIGHUP` for graceful shutdown and config reload."
+            },
+            {
+              "title": "Reconnect loop with exponential backoff",
+              "body": "On WebSocket drops the client backs off from 1 second up to a 5 minute ceiling, preventing reconnect storms against the server while staying responsive on transient blips."
+            },
+            {
+              "title": "Initial sync plus catch-up via `seq` cursor",
+              "body": "Bootstraps a new bundle by walking the full file list, then on every later connect replays missed changes from the last acknowledged sequence number forward."
+            },
+            {
+              "title": "Single-binary distribution via Node.js SEA",
+              "body": "Ships as a Node.js Single Executable Application so operators install one signed binary per platform with no separate runtime install required."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Requires HermitStash server v1.3.0 or newer",
+              "body": "The sync bundle type, `/sync/ws` endpoint, and `seq`-cursor catch-up flow this client depends on land in server v1.3.0; older servers will reject the WebSocket upgrade."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

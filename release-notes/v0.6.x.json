@@ -1,0 +1,498 @@
+{
+  "minor": "0.6",
+  "releases": [
+    {
+      "version": "0.6.24",
+      "date": "2026-05-10",
+      "headline": "Send `Accept-Language` and `Sec-Fetch-*` headers on outbound HTTP requests",
+      "summary": "API requests now identify themselves as legitimate programmatic callers so the server's bot-guard middleware does not 403 them as scrapers.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Bot-guard 403s on `GET /b/:shareId` and friends",
+              "body": "`lib/http-client.js` now emits `Accept-Language: en-US,en;q=0.9`, `Sec-Fetch-Mode: cors`, and `Sec-Fetch-Dest: empty` on every JSON request, multipart upload, and binary download. The headers accurately describe the call shape (programmatic XHR/fetch, not navigation) and clear the upstream bot-guard tightening that started rejecting content-negotiating endpoints."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.23",
+      "date": "2026-05-10",
+      "headline": "Use `b.crypto.generateToken` for multipart boundaries and temp-file suffixes",
+      "summary": "Repairs a latent `ReferenceError` on the upload and download paths introduced by an incorrect framework API name.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Multipart upload and binary download crash on first call",
+              "body": "`uploadFile()` and `downloadFile()` referenced `b.crypto.random(N)` which is not a published API. Switched both call sites to `b.crypto.generateToken(N)` (the documented helper returning hex-encoded random bytes). The bug stayed latent because earlier code paths short-circuited before either method was reached during prior smoke tests."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.22",
+      "date": "2026-05-10",
+      "headline": "Refresh vendored `blamejs` to v0.8.76",
+      "summary": "Pulls in seven upstream releases covering fuzz coverage, OSV-Scanner v2 compatibility, and CI hardening. No wire-format change.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped from v0.8.69 to v0.8.76",
+              "body": "`vendor/blamejs/` re-cloned and `vendor/MANIFEST.json` regenerated against the LF-normalized bytes. The refresh inherits the upstream fuzz harness + smoke-time fuzz-coverage gate, ClusterFuzzLite/OSS-Fuzz integration, `*.sh` line-ending fix, OSV-Scanner v2 `--fail-on-vuln` removal, and the `sbom.cdx.json` rename. The SEA bypass patch in `vendor/blamejs/lib/public-suffix.js` was re-applied after the refresh."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.21",
+      "date": "2026-05-10",
+      "headline": "Migrate state DB and checksum to `blamejs` primitives",
+      "summary": "Three behavior-preserving migrations consolidate hand-rolled SQLite, SHA3-512 hashing, and random-bytes generation onto the framework, picking up safer SQLite pragmas along the way.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "State database opens via `b.localDb.thin`",
+              "body": "`lib/state-db.js` delegates the open path to `b.localDb.thin`, which owns parent-directory creation, `PRAGMA integrity_check`, rename-corrupt-and-recreate recovery with bounded retry on the Windows handle-lock race, and the prepared-statement cache. Schema migration (`CREATE TABLE IF NOT EXISTS`) stays in the sync client. The standalone `integrityCheck()` export is removed — the framework throws on open if the database is corrupt, so the post-open answer was always `ok`."
+            },
+            {
+              "title": "Safer default SQLite pragmas",
+              "body": "Adopting `b.localDb.thin` adds `synchronous=NORMAL`, `busy_timeout=5000`, `secure_delete=ON`, `trusted_schema=OFF`, and `cell_size_check=ON` on top of the previously configured `journal_mode=WAL` + `foreign_keys=ON`. All five new pragmas are stricter than the prior defaults; no operator action needed."
+            },
+            {
+              "title": "Checksum hashing via `b.crypto`",
+              "body": "`lib/checksum.js` delegates single-file hashing to `b.crypto.hashFile` (plus hex-encoding the returned Buffer) and buffer hashing to `b.crypto.sha3Hash`. The bounded-cursor parallel hash helper stays in-tree — no framework equivalent yet. Net: 70 LoC down to 51, behavior identical."
+            },
+            {
+              "title": "`b.crypto.random` for HTTP client randomness",
+              "body": "`lib/http-client.js` swaps two `crypto.randomBytes` callers (the multipart boundary and the temp-download filename suffix) for `b.crypto.random`. Cosmetic alignment with the rest of the codebase; no observable change."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.20",
+      "date": "2026-05-10",
+      "headline": "Fix `_activeOps` increment crash on every upload",
+      "summary": "Removes a stale reference left over from the pre-`blamejs` inline-retry shape that crashed every upload before retry could run.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "`ReferenceError: attempt is not defined` on upload entry",
+              "body": "`_uploadFile` in `lib/sync-engine.js` referenced `attempt` outside the `b.retry.withRetry` callback that defines it, so every upload threw before reaching the retry. Drops the `attempt === 1` guard entirely — `_activeOps` is meant to count distinct uploads, not retry attempts, and the retry loop is already bounded inside `b.retry.withRetry`. Increment is now once on entry, once on exit."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.19",
+      "date": "2026-05-10",
+      "headline": "Surface `blamejs` foundation in the README",
+      "summary": "Adds an attribution block so the upstream security model is discoverable at a glance.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "README highlights the framework dependency",
+              "body": "A new `Built on blamejs` section appears directly after the project intro, listing every primitive this client delegates to (PQC agent, HTTP client, WS client, apiEncrypt envelope, daemon lifecycle, watcher, selfUpdate, `safeJson`/`safeUrl`/`atomicFile`/`retry`/`safeAsync`) and links to the upstream repo. Surfacing the dependency at the top makes the crypto + transport hardening attributable for operators following the upstream LTS calendar."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.18",
+      "date": "2026-05-10",
+      "headline": "Add a polling watcher mode for bind-mount filesystems",
+      "summary": "Bind mounts on Docker Desktop, NFS, SMB, and FUSE filesystems do not propagate kernel inotify events. A new polling backend keeps host-side writes visible inside the container.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "`HERMITSTASH_WATCHER_MODE=poll` selects the polling backend",
+              "body": "`lib/watcher.js` reads the new environment variable (default `fs`). Setting it to `poll` flips the underlying `b.watcher.create` into interval-snapshot mode and diffs the tree on a fixed cadence. Operators on real Linux/macOS/Windows kernels can stay on the inotify/FSEvents/RDCW fast path; operators on Docker Desktop bind mounts (gRPC-FUSE / VirtioFS), NFS / SMB, or other FUSE filesystems opt in."
+            },
+            {
+              "title": "Container entrypoint defaults to polling",
+              "body": "`docker/entrypoint.sh` now sets `HERMITSTASH_WATCHER_MODE=poll` inside the container by default. This fixes the `host -> server: file written on host appears in server bundle` regression in Docker Desktop / Podman Machine setups where `fs.watch` went silent because the bind mount's host does not share the kernel inotify space. Operators on a native-Linux Docker host with a real bind mount can override with `HERMITSTASH_WATCHER_MODE=fs` to reclaim the latency advantage."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped from v0.8.60 to v0.8.69",
+              "body": "Refresh pulls in `b.watcher`'s polling backend (added in v0.8.68) plus the test `waitUntil` helper in v0.8.69. The SEA bypass patch in `vendor/blamejs/lib/public-suffix.js` was re-applied after the refresh."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.17",
+      "date": "2026-05-09",
+      "headline": "Embed the Public Suffix List data file as a SEA asset",
+      "summary": "Fixes the release-workflow `Verify binary` step that broke when `blamejs` started eagerly loading the PSL at module init.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "PSL load no longer crashes SEA binaries at boot",
+              "body": "`blamejs` v0.8.53+ added an eager `fs.readFileSync` of `vendor/public-suffix-list.dat` at module init in `lib/public-suffix.js`. The from-source path works, but in SEA mode `__dirname` collapses to the bundle's output directory and the runtime lookup fails — every platform's `Verify binary` step in `release.yml` exited 70 with `EX_SOFTWARE` and no artifacts uploaded. The fix adds `public-suffix-list.dat` to `build/sea-config.json` so Node embeds the bytes in the executable, and patches the vendored `public-suffix.js` to detect SEA mode via `require('node:sea').isSea()` and read the asset via `getRawAsset()` instead of `fs.readFileSync`. The patched file is carried forward on each `blamejs` refresh until upstream adds SEA-aware loading."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.15",
+      "date": "2026-05-09",
+      "headline": "Align `scripts/verify-release.js` with the new signature format",
+      "summary": "The Docker build's verify stage used the old SHA3-512-digest signature shape that the previous patch retired, breaking the v0.6.14 image build.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "`verify-release.js` now verifies ECDSA over the binary bytes",
+              "body": "The Dockerfile's verify stage uses `scripts/verify-release.js` to sanity-check the freshly-published release binary before copying it into the runtime image. The previous patch changed the wire signature format in `lib/updater.js` and the release workflow but missed this verifier, so the v0.6.14 Docker build failed at verify. The script now mirrors `b.selfUpdate.verify`: ECDSA P-384 over the binary bytes (DER), no separate SHA3-512 step. The `.sha3-512` sidecar argument is retained for backward compatibility with existing `Dockerfile` + `install.sh` + `update.sh` callers but is informational only — the signature is the integrity gate."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.14",
+      "date": "2026-05-09",
+      "headline": "Migrate auto-update to `b.selfUpdate.{poll,verify,swap,rollback}`",
+      "summary": "The auto-update verifier moves to the framework's primitives. The release signature format changes shape — older binaries cannot auto-update across this boundary.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Auto-update flow delegated to `b.selfUpdate`",
+              "body": "`lib/updater.js` now calls `b.selfUpdate.poll`, `b.selfUpdate.verify`, `b.selfUpdate.swap`, and `b.selfUpdate.rollback`. The HermitStash-specific contract layered on top — `allowedHosts` (`api.github.com`, `github.com`, `objects.githubusercontent.com`) re-applied on every redirect hop, `allowInternal=false` in production, the `update-pending.json` probation marker, and the 60-second crash window — is unchanged."
+            },
+            {
+              "title": "Release signature shape changed",
+              "body": "Old format: ECDSA P-384 over `SHA3-512(binary)`, IEEE-P1363 raw `r||s`; daemon fetched a separate `.sha3-512` sidecar and re-checked the digest before verifying the signature. New format: ECDSA P-384 over the binary bytes, DER; daemon fetches the binary + `.sig`, runs `b.selfUpdate.verify`, which auto-detects the algorithm from the embedded pubkey PEM and reports the SHA3-512 of the asset for audit correlation. Equivalent cryptographic strength (P-384's 192-bit bottleneck on both sides), better balanced (SHA-384 matches the curve's security level where SHA-512 was overspec). The `.sha3-512` sidecar is still published for human `sha3sum -c` verification; the daemon no longer fetches it."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Existing v0.6.x binaries cannot auto-update across this release",
+              "body": "Daemons running v0.6.13 or earlier verify with `crypto.verify('sha512', digest, ..., dsaEncoding: 'ieee-p1363')` which rejects the new DER signature shape. Download the v0.6.14 (or later) binary manually once to bridge the gap; from then on, auto-update resumes normally. Source installers (`deploy/install.sh`, `deploy/update.sh`, the Dockerfile verify stage) need to be on this version or later as well."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.13",
+      "date": "2026-05-09",
+      "headline": "Drop the orphan `node:path` import from the migrated keychain",
+      "summary": "Lint cleanup after the keychain shim was rewritten in the previous patch.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Unused `node:path` import removed from `lib/keychain.js`",
+              "body": "Left behind when the file became a thin shim over `b.keychain`. Resolves the static-analysis no-unused-vars warning at the root rather than via a suppression."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.12",
+      "date": "2026-05-09",
+      "headline": "Migrate keychain, watcher, and daemon to `blamejs` primitives",
+      "summary": "Three modules become thin shims over the framework's hardened equivalents, preserving the historical fallback paths and command-line surface.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Keychain delegates to `b.keychain`",
+              "body": "`lib/keychain.js` is now an async shim over `b.keychain` (native OS credential store path) with the historical plaintext mode-0600 file fallback preserved for installs without an OS credential store. The native path inherits the framework's secret-passing-via-stdin pattern across platforms — macOS `security -w -`, Linux `secret-tool` stdin, and Windows CredentialManager via `[Console]::In.ReadToEnd()` — none of which expose the secret on argv."
+            },
+            {
+              "title": "Watcher delegates to `b.watcher.create`",
+              "body": "`lib/watcher.js` now wraps `b.watcher.create`, which owns the `fs.watch` setup, cross-platform event normalization, symlink-skip, and debounce. The HermitStash-specific pattern matcher stays in-process so the `DEFAULT_IGNORES` glob dialect does not change."
+            },
+            {
+              "title": "Daemon delegates to `b.daemon` + `b.appShutdown.pidLock`",
+              "body": "`lib/daemon.js` now wraps `b.daemon` for the detached-fork start and `SIGTERM`/`SIGKILL` stop, and `b.appShutdown.pidLock` for the foreground `O_EXCL` acquire. `cli.js` call sites for `saveSyncConfig` and `cmdStop` become async, with the awaits propagated up through `run()`."
+            },
+            {
+              "title": "Updater intentionally left on the existing verifier",
+              "body": "`lib/updater.js` is not migrated to `b.selfUpdate.verify` in this patch. That switch would change the release signature format from `ECDSA over SHA3-512(binary)` to `ECDSA over asset bytes` — a silent break that only surfaces when an existing binary fails to verify a future release. Worth doing in a deliberate release rotation, not a quiet refactor."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.11",
+      "date": "2026-05-09",
+      "headline": "Refresh vendored `blamejs` to v0.8.52",
+      "summary": "Pulls in the upstream CVE sweep and wiki/CI/smoke fixes; no wire-format change.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped from v0.8.43 to v0.8.52",
+              "body": "Inherits the upstream v0.8.44 CVE sweep and v0.8.49 through v0.8.52 wiki/CI/smoke fixes. No wire-format change between v0.8.43 and v0.8.52 — the breaking FixedInfo+AAD envelope shipped in v0.8.41, already behind both client and server's previous pin. New `b.*` primitives available on the consumed surface that the client may migrate to in follow-up work include `b.watcher`, `b.keychain`, `b.daemon`, and `b.selfUpdate`. Integrity hashes regenerated against the LF-normalized bytes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.10",
+      "date": "2026-05-08",
+      "headline": "Skip the vendor-integrity gate when running as a SEA",
+      "summary": "Repairs the post-build smoke test that broke for every release since v0.6.6 because SEA binaries do not have a `vendor/` sibling on disk.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "SEA binaries no longer crash with `vendor MANIFEST.json missing`",
+              "body": "The boot-time vendor-integrity gate added earlier in the v0.6.x line called `b.configDrift.verifyVendorIntegrity` against a relative `vendor/MANIFEST.json`. SEA binaries do not have a `vendor/` sibling — `__dirname` for an SEA points at the binary location, not a source tree — so the gate fired `vendor MANIFEST.json missing` and exited 70 before the daemon could start. `bin/hermitstash-sync.js` now calls `require('node:sea').isSea()` to detect SEA mode and skips the gate. SEA integrity is established at release time via the P-384 ECDSA signature over the SHA3-512 of the binary (verified by `lib/updater.js` before any auto-update swap), so the vendor-hash gate is redundant for SEAs. Source-tree boot (`node bin/hermitstash-sync.js`) keeps the gate active and refuses on tampering. A defensive `try/catch` around the `node:sea` require keeps a hypothetical future Node that removes the module from crashing the gate."
+            },
+            {
+              "title": "Orphan `log` import dropped from `lib/http-client.js`",
+              "body": "Left behind during the earlier conversion to the top-level `b.*` namespace. Resolves the `no-unused-vars` lint warning at the root."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.9",
+      "date": "2026-05-08",
+      "headline": "Raise the Node.js floor to 24.14.1 across every enforcement layer",
+      "summary": "Picks up the security backports between Node 24.4 and 24.14.1, including the OpenSSL 3.5.x point fixes that landed across that window.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Runtime floor raised to Node.js 24.14.1",
+              "body": "Updated in eight locations: `package.json` `engines.node`, the boot-time gate in `bin/hermitstash-sync.js` (now compares `major.minor.patch` rather than `major.minor` since the new floor splits 24.14.1 from 24.14.0), `Dockerfile` `NODE_VERSION`, the README in two places, and the CI / release / docker-publish workflows. SEA users carry their embedded Node and skip the runtime gate; only from-source installs on a stale Node trigger it, exiting 78 (`EX_CONFIG`) with the new message naming 24.14.1."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.8",
+      "date": "2026-05-08",
+      "headline": "Pin vendored `blamejs` to LF line endings so integrity hashes match across platforms",
+      "summary": "Two prior release cuts failed CI at the post-build vendor-integrity smoke step because Windows checkouts hashed CRLF bytes while Linux runners hashed LF.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Cross-platform vendor-integrity verification",
+              "body": "The SHA-256 hashes recorded in `vendor/MANIFEST.json` by `node scripts/vendor-hash.js` were computed against a local Windows checkout where `core.autocrlf=true` had converted `vendor/blamejs/*.js` from LF (git index) to CRLF (working tree). CI's Linux runner checked out the same files with LF intact, hashed the LF bytes, and `b.configDrift.verifyVendorIntegrity()` correctly refused to start (exit 70). The fix adds an explicit `.gitattributes` pinning `vendor/blamejs/**`, `scripts/*.js`, and `bin/*.js` to `text eol=lf`, renormalizes the working tree, and regenerates `vendor/MANIFEST.json` against the LF bytes. The integrity gate worked as designed; only the hash-input bytes were inconsistent."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.5",
+      "date": "2026-05-09",
+      "headline": "Strip secrets from forked children and add a boot-time PQC self-test",
+      "summary": "Two new defense-in-depth primitives from upstream wired in: env-scrubbing process spawn and a boot-time known-answer test for the PQC bundle.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Forked children no longer inherit credential-shaped env vars",
+              "body": "`lib/daemon.js` (foreground-to-detached-daemon fork) and `lib/updater.js` (auto-update relaunch) now spawn through `b.processSpawn.spawn`, which strips `DATABASE_URL`, `PG*`, `AWS_*`, `S3_*`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_PRIVATE_KEY`, and `*_PASSPHRASE` from the child's environment by default. Defense-in-depth: a stale shell-exported credential in the foreground process's environment no longer rides along into the detached daemon or the post-update relaunched binary. The updater's `opts.spawnFn` injection point for tests is unchanged."
+            },
+            {
+              "title": "Boot-time ML-KEM-1024 known-answer test",
+              "body": "`bin/hermitstash-sync.js` runs `b.pqcSoftware.runKnownAnswerTest()` before the daemon performs any real crypto. The test validates `ML-KEM-1024` keygen -> encapsulate -> decapsulate produces matching 32-byte shared secrets. A corrupted vendored noble-post-quantum bundle now fails at startup with exit 70 (`EX_SOFTWARE`) and an actionable message, instead of looping inside the first apiEncrypt envelope decapsulation with a confusing `session-unknown` symptom."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.4",
+      "date": "2026-05-08",
+      "headline": "Raise the Node.js floor to 24.4 with a boot-time gate",
+      "summary": "Vendored `blamejs` v0.8.43 requires Node 24.4. Every enforcement layer now refuses a stale runtime with a single actionable message instead of leaking a cryptic stack from deep in framework code.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Node.js floor raised to 24.4.0",
+              "body": "Updated in `package.json` `engines.node`, in the `ci.yml`, `release.yml`, and `docker-publish.yml` workflows (`>=24.4`), and in the README. The `Dockerfile` `NODE_VERSION` already exceeded the floor and was not changed."
+            },
+            {
+              "title": "Boot-time runtime gate in `bin/hermitstash-sync.js`",
+              "body": "A new startup IIFE exits 78 (`EX_CONFIG`) with an actionable upgrade message if `process.versions.node` is below 24.4. SEA users carry their embedded Node and skip this path; only from-source installs on stale Node trigger it. Test code paths that load `lib/` directly through the test helpers are unaffected."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.3",
+      "date": "2026-05-08",
+      "headline": "Switch every `lib/` `blamejs` import to the top-level `b.*` namespace",
+      "summary": "Aligns with `blamejs`'s documented import shape and avoids a footgun where reaching into `vendor/blamejs/lib/*.js` directly misses index-attached surfaces. Also refreshes the vendored copy for the wire-format flag day on the server.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Eight `lib/` files migrated to `const b = require('../vendor/blamejs')`",
+              "body": "`lib/cli.js`, `lib/config.js`, `lib/daemon.js`, `lib/http-client.js`, `lib/logger.js`, `lib/sync-engine.js`, `lib/updater.js`, and `lib/ws-client.js` now consume the framework through the top-level namespace (`b.safeJson.parse(...)`, `b.httpClient.encrypted(...)`, etc.). Loading `vendor/blamejs/lib/http-client.js` directly was missing `index.js`'s lazy attachment of `encrypted` from the apiEncrypt middleware — the new shape closes that footgun and matches every example in the upstream repo."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped from v0.8.40 to v0.8.43",
+              "body": "The server adopts the v0.8.41 `0xE1` -> `0xE2` envelope flag day in its matching release; the client follows in this patch. Pre-v0.8.43 client binaries can no longer talk to v1.9.19+ servers — the encrypted payload is rejected at the envelope-header check."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.2",
+      "date": "2026-05-07",
+      "headline": "Adopt structured `FrameworkError` with `statusCode`",
+      "summary": "HTTP errors arrive as typed objects with a direct `statusCode` property, replacing the previous string-parsing of the framework's `HTTP <N>: <body>` message tail.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Typed HTTP errors via `b.frameworkError.defineClass`",
+              "body": "`lib/http-client.js` defines a `HermitStashHttpError` class with `withStatusCode: true` and passes it as `errorClass` to `b.httpClient.request`. 4xx and 5xx responses now surface as that error with `err.statusCode` directly accessible — no more `_parseHttpStatusFromMessage` regex against a `HTTP <N>: <body>` message tail. `lib/cli.js#exchangeEnrollmentCode` uses a scoped `EnrollHttpError` class for the same effect. The previously exported `parseHttpStatusFromMessage` is removed (it was internal-only)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.1",
+      "date": "2026-05-07",
+      "headline": "Adopt `b.logStream` and `b.safeUrl`, drop the worker pool",
+      "summary": "Two drop-in framework adopters land, and the worker-pool hash path is retired after benchmarks showed no benefit over a bounded-concurrency main-thread streaming hash.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Logger delegates to `b.logStream`",
+              "body": "`lib/logger.js` is now a thin shim over `b.logStream` with the framework's local-file sink — size + age rotation, gzip-retained rotations capped at five files of 10 MiB each, and redaction-before-emit. Stdout coloring stays in-tree; the file output, rotation, and JSON line shape move to the framework. `close()` becomes async, and `cli.js` call sites await it."
+            },
+            {
+              "title": "Server URL validated at construction via `b.safeUrl.parse`",
+              "body": "`HttpClient` validates `config.server` with `b.safeUrl.parse({ allowedProtocols: ['http:', 'https:'] })` at construction time. Catches malformed URLs, disallowed schemes, and embedded `user:pass@` credentials before any request fires."
+            }
+          ]
+        },
+        {
+          "heading": "Removed",
+          "items": [
+            {
+              "title": "Worker-pool checksum path retired",
+              "body": "Deleted `lib/worker-pool.js` and `lib/workers/checksum-worker.js`. Benchmarks against 250 MiB single-file and 50 x 5 MiB SHA3-512 workloads showed worker threads added no measurable benefit over a main-thread streaming hash through `Promise.all` (632 ms vs 634 ms). `lib/checksum.js` is now a 70-line bounded-concurrency wrapper, removing roughly 250 lines from the daemon."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped from v0.8.4 to v0.8.40",
+              "body": "Refresh required to pick up `b.logStream` and `b.safeUrl`. `vendor/MANIFEST.json` `version` and `tag` updated to match."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.6.0",
+      "date": "2026-05-07",
+      "headline": "Drop the legacy ECIES envelope and route writes through the per-session apiEncrypt envelope",
+      "summary": "Encryption-grade write paths now use the framework's per-session ML-KEM-1024 + ECDH P-384 envelope against the server's published keypair. The previous hybrid-ECIES code path was unreachable in production and has been removed.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Bearer-authed sync clients bypass the legacy `_e/_t` envelope",
+              "body": "Server v1.9.15+ short-circuits the legacy envelope for Bearer-authed sync clients (`if (req.apiKey) return next()` in `middleware/api-encrypt.js`) so plain JSON over PQC TLS 1.3 + mTLS is the wire-protection layer for most routes."
+            },
+            {
+              "title": "Encryption-grade writes use the per-session apiEncrypt envelope",
+              "body": "`POST /drop/init`, `POST /drop/finalize/:bundleId`, and `POST /sync/rename` now route through `b.httpClient.encrypted` against the server's published keypair at `/.well-known/blamejs-pubkey`. `lib/http-client.js#_getEncClient()` lazy-initialises and caches the encrypted client and per-session counter; `_encryptedRequest()` is the single entry point. The previous hybrid-ECIES path (`_hybridDecrypt`, `_encryptPayload`, `_decryptPayload`, `initSession`) was unreachable in production — `sync-engine` never called `initSession`, every prior `_encryptedRequest` returned `null` for the decrypted body, and `deleteFile`/`renameFile` silently treated 200-with-undecryptable-body as success. That dead-end code has been removed."
+            },
+            {
+              "title": "Server-version floor raised to v1.9.15",
+              "body": "Earlier servers ship only the legacy envelope this client no longer speaks. Upgrade the server before this client. PQC TLS 1.3 + mTLS posture (`b.pqcAgent.create` plus the three-tier hybrid group list) and the WebSocket layer (already on `b.wsClient`) are unchanged. Multipart upload and binary download stay on raw `https.request` because `b.httpClient` builds bodies in memory — streaming primitives are queued as a follow-up framework ask."
+            }
+          ]
+        },
+        {
+          "heading": "Removed",
+          "items": [
+            {
+              "title": "Vendored `noble-post-quantum` + `xchacha20poly1305` imports",
+              "body": "The wire envelope now lives entirely in `blamejs`; `lib/http-client.js` drops both noble bundles. The framework's vendor tree still carries them transitively for upstream consumers."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Server must be on v1.9.15 or later before upgrading the client",
+              "body": "The client refuses to talk to older servers (their envelope shape is gone here). Upgrade the server first, then the client."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

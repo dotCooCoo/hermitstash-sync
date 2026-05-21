@@ -1,0 +1,106 @@
+{
+  "minor": "0.5",
+  "releases": [
+    {
+      "version": "0.5.3",
+      "date": "2026-05-06",
+      "headline": "Refresh vendored blamejs to v0.8.4",
+      "summary": "Picks up the upstream supply-chain scanner emission updates, OTLP transport hardening, and dev-mode isolation fixes shipped in blamejs v0.8.4.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` bumped to v0.8.4",
+              "body": "`vendor/blamejs/` re-cloned at v0.8.4 and `vendor/MANIFEST.json` updated to match. Inherits upstream audit emission for the new supply-chain gate detectors, OTLP transport hardening, and dev-mode isolation fixes. The CI vendor-freshness gate introduced in the previous tag caught the v0.8.3-to-v0.8.4 drift itself, which is what triggered this re-cut."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.5.1",
+      "date": "2026-05-06",
+      "headline": "Lint hygiene root-causes",
+      "summary": "Three small follow-ups to the wire-layer refactor, all fixed at the source rather than suppressed.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Dropped unused `node:https` import in `lib/updater.js`",
+              "body": "Leftover from the migration to `b.httpClient.request` for GitHub release downloads. No behavior change; resolves the static-analysis warning at the root."
+            },
+            {
+              "title": "Replaced `[\\s\\S]*` HTTP-error regex with a substring parser",
+              "body": "`lib/http-client.js` and `lib/cli.js` previously used `/^HTTP (\\d+)(?::\\s*([\\s\\S]*))?$/` to extract status + body from the framework's `HTTP_ERROR` message. Swapped for a new `parseHttpStatusFromMessage` helper exported from `http-client.js` and imported by `cli.js` — single source of truth, and the linter no longer has to reason about an unanchored `[\\s\\S]*` tail."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.5.0",
+      "date": "2026-05-06",
+      "headline": "Migrate the wire layer onto vendored `blamejs` primitives",
+      "summary": "The hand-rolled WebSocket, HTTP, TLS, JSON, file-write, retry, and shutdown surfaces are replaced with the vendored framework's hardened equivalents. The PQC TLS posture and zero-npm-dependency rule are preserved; the framework primitives bring in protections the hand-rolled code never had.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Hardened WebSocket client via `b.wsClient`",
+              "body": "`lib/ws-client.js` is now a thin wrapper around `b.wsClient.connect()` and inherits RFC 6455 hardening that the hand-rolled client lacked: decompression-bomb defence (`zlib.inflateRawSync` with `maxOutputLength` cap), UTF-8 fatal validation on text frames and close-reason, control-frame ≤125 bytes with `FIN=1`, RSV1-on-continuation reject, a permanent-error classifier that stops hammering on auth failures, and a TLS 1.3 floor pin. The HermitStash-specific `since`-aware reconnect loop and `bundleId` query-param dialling stay in the wrapper. Handshake GUID drops to the RFC 6455 §1.3 standard `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, matching the matching server update."
+            },
+            {
+              "title": "SSRF-guarded HTTP transport via `b.httpClient.request`",
+              "body": "Small JSON requests now run through `b.httpClient.request`, which adds DNS-pinned SSRF protection (closes the resolve-vs-connect TOCTOU against the configured server host), `AbortSignal` support, a split between idle and wall-clock timeouts, a permanent-vs-transient error classifier, and `safeUrl` scheme validation. Streaming multipart uploads and binary downloads stay on raw `https.request` (the framework builds multipart in memory) but ride the new agent for TLS posture."
+            },
+            {
+              "title": "PQC TLS agent via `b.pqcAgent.create()`",
+              "body": "`lib/pqc-agent.js` is a thin caller of `b.pqcAgent.create()` — every outbound TLS socket (mTLS HTTPS, WebSocket, GitHub-release download in the auto-updater) is now pinned to TLS 1.3 with the `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` curve list in a single chokepoint. Callers can no longer construct a non-PQC agent by accident."
+            },
+            {
+              "title": "Hardened JSON parsing via `b.safeJson.parse`",
+              "body": "Every untrusted JSON parse — server response bodies, the user-edited `config.json`, the enrollment response — runs through `b.safeJson.parse`, which caps depth, size, and rejects `__proto__` / `constructor.prototype` keys. A malformed or hostile payload now refuses cleanly instead of risking prototype pollution or runaway allocation."
+            },
+            {
+              "title": "Atomic config and certificate writes via `b.atomicFile.writeSync`",
+              "body": "`config.json` saves and the enrolled mTLS cert/key/CA trio now write via `b.atomicFile.writeSync`, which fsync's the parent directory after an atomic rename. A crash mid-write leaves the previous good copy intact instead of producing a torn file."
+            },
+            {
+              "title": "Crypto-grade retry backoff via `b.retry.withRetry`",
+              "body": "`lib/sync-engine.js` upload retry uses `b.retry.withRetry` for full-jitter exponential backoff. Jitter is sourced from `crypto.randomInt` (not `Math.random`), which removes the predictable-thundering-herd surface."
+            },
+            {
+              "title": "Phase-ordered daemon shutdown via `b.appShutdown`",
+              "body": "`SIGTERM` and `SIGINT` handling in `lib/daemon.js` runs through `b.appShutdown.create()`, which is phase-ordered and idempotent — a second signal during drain no longer kicks off a parallel teardown — and applies per-phase time budgets. `SIGHUP` keeps its own handler since it triggers resync, not shutdown."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored `blamejs` at v0.8.0",
+              "body": "First release that consumes the framework's wire-layer primitives. `vendor/blamejs/` checked in as a directory tree with the upstream tag pinned in `vendor/MANIFEST.json`. Zero new npm runtime packages — the framework itself is vendored, and the noble-* CJS bundles it depends on are nested under `vendor/blamejs/lib/vendor/`."
+            },
+            {
+              "title": "GitHub Actions pinning split by risk class",
+              "body": "Artifact-producing workflows (`release.yml`, `docker-publish.yml`) stay SHA-pinned with trailing `# vX.Y.Z` comments — a tag-republish attack against a transitive action there would land in a signed SEA binary or a signed container image on user machines. Read-only lint and smoke workflows (`ci.yml`, `docker-e2e.yml`) float to the action's default branch, since their blast radius is the CI run itself, not anything an operator pulls."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Auto-update GitHub-release downloads keep the SSRF gate on in production",
+              "body": "`lib/updater.js` calls `b.httpClient.request` with the SSRF guard enabled in production. The test path may inject an `httpsAgent` to bypass the guard for a local mock server, but a hijacked GitHub release index cannot pivot the download to an internal target on a real install."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,266 @@
+{
+  "minor": "0.4",
+  "releases": [
+    {
+      "version": "0.4.9",
+      "date": "2026-04-20",
+      "headline": "Internal cleanup pulls the PQC TLS surface behind a single chokepoint",
+      "summary": "Refactor-only release with no user-visible behaviour change. Roughly 90 lines of duplicated wiring removed across the HTTP client, sync engine, and CLI repair command; a latent crash in the WebSocket-triggered certificate reload is fixed along the way.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Single source of truth for PQC TLS options",
+              "body": "TLS option construction is consolidated into one `buildTlsOptions` helper so the PQC ciphersuite invariant (`SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768`) lives in exactly one place across the HTTP client, WebSocket client, and auto-updater."
+            },
+            {
+              "title": "Certificate renewal moved onto `HttpClient`",
+              "body": "`HttpClient.renewCert` is now the entry point for mTLS certificate rotation; the sync engine's startup ordering is adjusted so renewal flows through the HTTP client rather than reaching around it."
+            },
+            {
+              "title": "Shared helpers for request-body collection and process exit",
+              "body": "A `collectTextBody` helper replaces several copies of the same chunk-collecting loop, and a `die()` helper centralises the fatal-error exit path used by the CLI commands."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Crash when reloading mTLS certs from a `ca:rotation` WebSocket message",
+              "body": "The reload path previously reached into the HTTP client before its agent had been rebuilt; routing the renewal through `HttpClient.renewCert` removes the race and the daemon now applies a server-pushed CA rotation cleanly."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.8",
+      "date": "2026-04-20",
+      "headline": "Container image, deploy scripts, and Linux systemd lifecycle",
+      "summary": "First release that exercises the full publish chain end-to-end: signed SEA binary, multi-arch container image on GHCR with a cosign keyless signature, and a complete native-Linux install/update/uninstall path under `deploy/`.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Container image at `ghcr.io/dotcoocoo/hermitstash-sync`",
+              "body": "Multi-arch (linux/amd64, linux/arm64) image with tags `vX.Y.Z`, `X.Y`, `X`, and `latest`. The Dockerfile's verify stage re-checks the SHA3-512 digest and P-384 ECDSA signature of the SEA binary before copying it into the runtime stage."
+            },
+            {
+              "title": "cosign keyless signing and SLSA provenance on the published image",
+              "body": "The image digest is signed via GitHub OIDC and anchored in the Sigstore transparency log, with SLSA provenance and an SBOM attached as attestations so downstream pulls can verify the supply chain without long-lived keys."
+            },
+            {
+              "title": "Native-Linux installer, updater, and uninstaller under `deploy/`",
+              "body": "`deploy/install.sh` provisions a hardened `hermit` user with checked-in systemd units; `deploy/update.sh` plus a daily timer downloads and verifies new releases with rollback on health-check failure; `deploy/uninstall.sh` reverses the install and preserves data unless `--purge` is passed."
+            },
+            {
+              "title": "Reference configs for Unraid, Podman, and Kubernetes",
+              "body": "Ships `unraid-template.xml` (Community Apps), `deploy/podman.sh` (rootless and rootful with `io.containers.autoupdate=registry`), and `deploy/kubernetes.yml` (Deployment with `runAsNonRoot`, `readOnlyRootFilesystem`, and dropped capabilities) for operators not running plain Docker."
+            },
+            {
+              "title": "Headless `init` plus `CONFIG_DIR` override",
+              "body": "The enrollment flow can run non-interactively for containerised deployments, and the config directory can be relocated via the `CONFIG_DIR` environment variable so persistent volumes mount cleanly."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "In-binary self-replace disabled under systemd and in containers",
+              "body": "The hardened systemd unit and the Docker image both set `HERMITSTASH_AUTO_UPDATE=false` because the daemon cannot write to its own executable in those shapes. Updates flow through the external `update.sh` timer or `docker pull` instead."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Hardened systemd unit",
+              "body": "`deploy/hermitstash-sync.service` enables `NoNewPrivileges`, `ProtectSystem=strict`, capability drop, and a restricted syscall filter. `MemoryDenyWriteExecute` is intentionally off because the SEA binary maps its embedded JS bundle as executable at launch."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "CI lint workflow with ESLint, Hadolint, and ShellCheck",
+              "body": "The `ci.yml` workflow now lints JavaScript, the Dockerfile, and shell scripts on every push and pull request. Existing warnings were fixed by removing the underlying issue rather than by suppressing the lint."
+            },
+            {
+              "title": "Docker e2e smoke workflow",
+              "body": "`docker-e2e.yml` builds the image against the latest published release and validates OCI labels, the non-root user, declared volumes, environment defaults, and that the binary reaches the enrollment prompt — no live server required."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Pulling the container image",
+              "body": "Run `docker pull ghcr.io/dotcoocoo/hermitstash-sync:v0.4.8` (or `:latest`). The compose example in the repo shows the expected volume layout for `CONFIG_DIR` and the synced folder."
+            },
+            {
+              "title": "Installing on Linux without Docker",
+              "body": "Run `curl -fsSL https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/v0.4.8/deploy/install.sh | sudo bash`. Pass `HERMITSTASH_AUTO_UPDATE=yes` to also enable the daily update timer."
+            },
+            {
+              "title": "Authenticode signing on Windows",
+              "body": "The Windows `.exe` ships unsigned in this release; SmartScreen may prompt on first launch until reputation accumulates. Authenticity is established via the GPG `.asc` and SHA3-512 checksum pair."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.7",
+      "date": "2026-04-20",
+      "headline": "Signed auto-update and pinned GitHub Actions",
+      "summary": "Adds an in-daemon auto-update path that verifies a P-384 ECDSA signature over the SHA3-512 digest of each release binary before self-replacing. Artifact-producing workflows move to commit-SHA pins to block tag-republish attacks against the release supply chain.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Signed auto-update with P-384 ECDSA verification",
+              "body": "The daemon polls GitHub Releases every six hours, downloads the matching platform binary plus its `.sig` file, verifies the SHA3-512 digest and the IEEE-P1363 r||s signature against the public key embedded in `lib/constants.js`, and atomically swaps the executable. Verification uses only `node:crypto` — no GPG dependency."
+            },
+            {
+              "title": "Per-release `.sig` artifact alongside `.sha3-512` and `.asc`",
+              "body": "Every published binary now ships with a raw 96-byte P-384 ECDSA signature over its SHA3-512 digest. The existing `.asc` signatures remain for humans running `gpg --verify`."
+            },
+            {
+              "title": "Rollback marker and probation window",
+              "body": "After a self-replace, a marker file tracks a 60-second probation window. If the new binary fails to reach a healthy state, the previous copy is restored on next start and the failed version is recorded so the same release is not retried in a tight loop."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Artifact-producing GitHub Actions pinned by commit SHA",
+              "body": "`release.yml` and `docker-publish.yml` now reference every third-party action by its 40-character commit SHA with a trailing `# vX.Y.Z` comment, so a tag-republish against any transitive action cannot land a modified binary or image on user machines. Read-only lint and smoke workflows continue to float to the action's default branch."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Enabling auto-update on bare-binary installs",
+              "body": "Auto-update is on by default for the bare-binary install shape. To disable, set `HERMITSTASH_AUTO_UPDATE=false` in the daemon's environment or pass `--no-auto-update` on the command line. Systemd and container deployments have auto-update forcibly disabled because the daemon cannot write to its own executable in those shapes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.6",
+      "date": "2026-04-19",
+      "headline": "Handle server-pushed CA rotation over the sync WebSocket",
+      "summary": "Adds a `ca:rotation` WebSocket message handler so the daemon can swap its mTLS client certificate and trust anchor in place when the server rotates its CA, without requiring an operator-driven `repair` run.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "`ca:rotation` WebSocket message handler",
+              "body": "When the server emits a `ca:rotation` event the client fetches a freshly-signed certificate plus the new CA bundle, atomically replaces both on disk, and calls `reloadMtlsCerts` so the next outbound connection picks up the new identity without a daemon restart."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.5",
+      "date": "2026-04-19",
+      "headline": "Node.js 24 is now the declared runtime floor",
+      "summary": "Raises the `engines.node` floor from 22 to 24 so the declared runtime matches the version CI builds and the SEA binary embeds. Users of the prebuilt binary are unaffected; from-source installs on Node 22 or 23 will now see an engines warning.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "`engines.node` raised to `>=24`",
+              "body": "Node.js 24 ships the OpenSSL 3.5 PQC primitives (`X25519MLKEM768`, `SecP384r1MLKEM1024`) the client requires for its TLS posture. CI has been building against Node 24 for some time; this release aligns the declared floor with what is actually tested."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Upgrading from-source installs on Node 22 or 23",
+              "body": "Install Node.js 24 or newer before running `npm install -g`. The prebuilt SEA binary published with each release embeds Node 24 already and needs no separate runtime install."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.4",
+      "date": "2026-04-18",
+      "headline": "Fix WebSocket handshake GUID and add an mTLS repair command",
+      "summary": "Resolves a WebSocket upgrade failure caused by a non-standard handshake GUID. Also adds startup-time mTLS certificate auto-renewal and a `repair` CLI command for re-provisioning a broken client certificate without a full reinstall.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Automatic mTLS certificate renewal at startup",
+              "body": "The daemon now inspects the on-disk client certificate at boot and renews it through the server's enrollment endpoint when fewer than 60 days remain before expiry, so long-running installs do not silently drift into an expired-cert state."
+            },
+            {
+              "title": "`hermitstash-sync repair` command",
+              "body": "Re-runs the mTLS enrollment flow against the configured server using the stored API key, replacing the local certificate, key, and CA bundle atomically. Use this when a certificate is corrupted, the server's CA has rotated faster than the client noticed, or enrollment was interrupted mid-write."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "WebSocket upgrade failed against compliant server implementations",
+              "body": "The client previously sent a non-standard handshake GUID on the `Sec-WebSocket-Accept` computation; the value is now the RFC 6455 §1.3 standard `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` that the server expects."
+            },
+            {
+              "title": "`HttpClient.initSession` race during reconnect",
+              "body": "Re-entrant calls into the session-initialisation path during a tight reconnect loop could leave the client with a half-initialised agent. The session bootstrap is now serialised so concurrent dials share a single in-flight initialisation."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.4.3",
+      "date": "2026-04-18",
+      "headline": "Drop the macOS Intel native build (Rosetta 2 covers it)",
+      "summary": "Reduces the per-release build matrix from five platforms to four by removing the dedicated macOS x64 binary. Intel Macs continue to run the macOS ARM64 binary transparently via Rosetta 2, so no Intel-Mac install action is required beyond switching filenames.",
+      "sections": [
+        {
+          "heading": "Removed",
+          "items": [
+            {
+              "title": "`hermitstash-sync-vX.Y.Z-macos-x64` binary",
+              "body": "The dedicated macOS Intel build is no longer produced. Apple's Rosetta 2 translation layer runs the ARM64 binary on Intel hardware with no observable behavioural difference for this workload, so maintaining a second macOS binary added build time without giving operators anything they couldn't already get."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Intel Mac users",
+              "body": "Download `hermitstash-sync-v0.4.3-macos-arm64` instead of the previous `-macos-x64` filename. macOS will run it under Rosetta 2 automatically; you may be prompted once to install Rosetta if it is not already present."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,421 @@
+{
+  "minor": "0.7",
+  "releases": [
+    {
+      "version": "0.7.17",
+      "date": "2026-05-16",
+      "headline": "Test suite ships in the public repo",
+      "summary": "The end-to-end and integration test suite is now part of the public source tree, with per-file ignores keeping local secrets out of the repo.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "`tests/` directory tracked in the public repo",
+              "body": "Thirty-six test files plus helpers and a new `tests/README.md` are now part of the public source tree so contributors can run the suite without reconstructing it. `tests/.env`, `tests/autoupdate-signing.key`, and `tests/certs/` stay gitignored at file granularity."
+            },
+            {
+              "title": "`HERMITSTASH_SERVER_DIR` env override for the sibling server checkout",
+              "body": "Tests that boot the server in-process now resolve its source via `HERMITSTASH_SERVER_DIR`, defaulting to a sibling checkout of the public `dotCooCoo/hermitstash` repo. A clean clone of both repos side-by-side now runs the suite without any extra wiring."
+            },
+            {
+              "title": "`tests/README.md` covering local setup",
+              "body": "Documents server-source location, the three local-only files, runner env vars, the parallel-vs-sequential classification rules, and the codebase-patterns shim layout — enough for a new contributor to run the full suite from a clean checkout."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "`startServer()` fails fast with an actionable hint",
+              "body": "When the server source directory is missing, the helper now exits with a message that names `HERMITSTASH_SERVER_DIR` and links the public clone URL instead of crashing deep inside `spawn()` with an opaque `ENOENT`."
+            },
+            {
+              "title": "Auto-update test header rewritten for the post-v0.7.7 signing shape",
+              "body": "`tests/test-autoupdate.js` documentation now describes the SHA3-512 + `createSign('sha3-512')` + standalone-verifier path that has been live since v0.7.7, replacing the stale inferred-SHA-384 narrative that referred to the pre-v0.7.7 shape."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.16",
+      "date": "2026-05-15",
+      "headline": "Adopt upstream metrics typing and version-compare primitives",
+      "summary": "Two upstream primitives close the open gaps from v0.7.14: the Prometheus exporter now leans on `b.metrics.snapshot.render` with a field-type map, and version comparison delegates to `b.selfUpdate.compareTags`.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "`stats --prometheus` now uses upstream's typed renderer",
+              "body": "`lib/metrics.js` drops its hand-rolled Prometheus emitter in favour of `b.metrics.snapshot.render(snap, { format: 'prometheus', fieldTypes })` with a per-field counter/gauge map. The eight counter-shaped fields (uploads, downloads, retries, breaker opens, websocket reconnects, auth errors) emit `# TYPE … counter` and the gauges emit `# TYPE … gauge`, identical to the v0.7.14 output."
+            },
+            {
+              "title": "`compareVersions` delegates to `b.selfUpdate.compareTags`",
+              "body": "`lib/updater.js#compareVersions` collapses from an eight-line dot-split-and-compare loop to a one-line delegation. The upstream walker is variable-length, so `1.10.0` correctly sorts above `1.9.0` numerically — the prior three-component fixed loop would have ignored anything beyond the third segment."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendor refresh of `blamejs` to v0.9.47 surface",
+              "body": "Both delegations consume primitives that landed upstream after v0.7.14 was cut, removing the local workaround and the local version-compare implementation in one step."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.15",
+      "date": "2026-05-15",
+      "headline": "Vendor refresh `blamejs` to v0.9.54",
+      "summary": "Eight upstream releases since v0.7.13, all mail-server and at-rest-migration surface that does not apply to a sync client. Pure refresh with no code adoption.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.9.46 to v0.9.54",
+              "body": "Picks up the bundled `CHANGELOG`, `SECURITY.md` updates, and additional upstream test coverage. No client-relevant API surface changed across the eight intermediate releases — every new primitive is server-side (submission, IMAP4rev2, JMAP, POP3, DKIM bootstrap, send-guard hardening)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.14",
+      "date": "2026-05-15",
+      "headline": "`stats --prometheus` emits correct counter vs gauge types",
+      "summary": "The upstream snapshot renderer flattened every numeric field to `gauge` because the flat snapshot shape carried no type hint. Operator dashboards using `rate()` against counter-shaped fields returned nothing.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Counter-shaped metrics now expose as Prometheus counters",
+              "body": "`lib/metrics.js` declares a `FIELD_TYPES` map covering uploads ok/error, upload retries, breaker opens, downloads ok/error, websocket reconnects, and websocket auth errors as counters; `file_count`, `active_ops`, `last_seq`, and `uptimeSec` as gauges. The new local `renderPrometheus` walks the snapshot and emits the correct `# TYPE` line per field, so `rate(hermitstash_sync_uploads_ok[5m])` now works as expected."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.13",
+      "date": "2026-05-15",
+      "headline": "Vendor refresh `blamejs` to v0.9.46",
+      "summary": "Server-side release upstream; no client-relevant surface change.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped to v0.9.46",
+              "body": "Upstream adds an inbound SMTP listener (`b.mail.server.mx`) plus parser primitives that defend against SMTP-smuggling CVEs. None of this is in the sync client's consumption surface; the refresh keeps the freshness gate green."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.12",
+      "date": "2026-05-15",
+      "headline": "Watcher auto-detects bind-mounted source directories",
+      "summary": "The filesystem watcher now picks `poll` automatically when it sees a bind-mounted or non-inotify-capable source directory, removing the manual `HERMITSTASH_WATCHER_MODE=poll` step container operators had to take.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "`b.watcher.create({ mode: 'auto' })` as the new default",
+              "body": "The watcher inspects `/proc/self/mountinfo` and `/.dockerenv` at startup and falls back to polling when the source directory sits on `fuse`, `virtiofs`, `9p`, `nfs`, `cifs`, or `smbfs`, or when it is a bind mount. Container operators on Docker Desktop, Podman, or virtiofs hosts no longer need to set the watcher mode by hand."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "CLI help text reflects the new tri-state",
+              "body": "`HERMITSTASH_WATCHER_MODE` now documents `auto` (default), `fs`, and `poll`. Explicit `fs` and `poll` continue to force the choice for operators who already pinned a mode."
+            },
+            {
+              "title": "Remaining `https`/`http` require bindings in `lib/http-client.js` renamed",
+              "body": "Two leftover bare-name references inside the multipart upload and download paths were renamed to `nodeHttps` and `nodeHttp` for consistency with the rest of the file after the binding sweep at v0.7.8."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.9.18 to v0.9.45",
+              "body": "Twenty-seven upstream releases, mostly server-side surface (mail store, agent orchestrator, chunked scratch storage, tenant field sealing). Picks up `b.crypto.toBase64Url` / `fromBase64Url` helpers that consolidate nine inline ReDoS-prone base64url implementations upstream; the sync client inherits the hardening transitively."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.11",
+      "date": "2026-05-14",
+      "headline": "Vendor refresh `blamejs` to v0.9.18",
+      "summary": "Upstream hardening release; consumption patterns unchanged.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped to v0.9.18",
+              "body": "Closes eighteen pre-existing CodeQL findings upstream (filesystem-race TOCTOU, insecure-temp-file predictable paths, path injection, remote property injection), adds partial-write loops on `fs.writeSync` sites, and ships a hardening checklist in the upstream `SECURITY.md`. Consumed-file hashes refresh; no client-side API surface changed."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.10",
+      "date": "2026-05-14",
+      "headline": "Vendor refresh `blamejs` to v0.9.17 with two new lint rules",
+      "summary": "Adopts the upstream `node:`-prefix and internal-binding-prose detectors, fixing nine prose-leak sites that the v0.7.8 binding rename swept past.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Operator-facing prose no longer references internal binding names",
+              "body": "Comments and JSDoc in `lib/http-client.js`, `lib/updater.js`, and `lib/watcher.js` referred to internal aliases like `nodeFs` and `nodeCrypto` that were not part of the public Node API. The prose now uses the public names (`fs`, `path`, `crypto`, `https`) that operators recognise."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.9.15 to v0.9.17",
+              "body": "Both intermediate releases are upstream internal-hygiene work. The two new lint detectors land in `scripts/test-codebase-patterns.js`: every `require()` of a Node built-in must use the `node:` prefix (already true across the codebase), and internal binding names must not leak into operator-facing strings or comments."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.9",
+      "date": "2026-05-14",
+      "headline": "Daemon-side auto-update verifier accepts SHA3-512 signatures",
+      "summary": "Critical fix. The in-binary auto-update path on every v0.7.7 and v0.7.8 daemon silently rejected every signed release because the verifier inferred SHA-384 from the P-384 key while the releases themselves were signed with SHA3-512.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Auto-update polling no longer fails silently on v0.7.7+ binaries",
+              "body": "`lib/updater.js` now routes verification through the SHA3-512-pinned `standalone-verifier.js` instead of the upstream `b.selfUpdate.verify`, matching the signing shape that has been in effect since v0.7.7. Daemons that were stuck on their install version because of the silent verification failure will pick up future releases automatically once they are running this build."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Install-side verifier path was not affected",
+              "body": "The Dockerfile, `deploy/install.sh`, and `deploy/update.sh` paths route through the standalone verifier and were verifying correctly. Only the in-daemon auto-update self-replace was broken — operators who upgraded via image pull or systemd timer were unaffected."
+            }
+          ]
+        },
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Four new codebase-pattern detectors",
+              "body": "Imports four universally-applicable rules from upstream: `raw-hash-compare` (steers comparisons to `b.crypto.timingSafeEqual`), `buffer-from-no-encoding` (catches silent UTF-8 default on hex/base64), `dynamic-require` (catches bundler-opaque `require(variable)`), and `literal-nul-byte` (catches stray `0x00` source bytes)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.8",
+      "date": "2026-05-14",
+      "headline": "Align Node-builtin require bindings with the upstream canonical names",
+      "summary": "Upstream v0.9.15 introduced a canonical naming table for Node-builtin require bindings. The sync client adopts the same names so a search for `nodeFs.readFileSync` returns only intentional filesystem I/O.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Roughly seventy `require('node:...')` bindings renamed",
+              "body": "`fs` becomes `nodeFs`, `path` becomes `nodePath`, `crypto` becomes `nodeCrypto`, and similar renames across `os`, `net`, `http`, `https`, `readline`, and `fs/promises`. Local variables can no longer accidentally shadow framework aliases like `b.crypto`, and the lint rule now points at the exact rename target for any future drift."
+            },
+            {
+              "title": "`hashFilesParallel` delegates to the upstream primitive",
+              "body": "`lib/checksum.js` drops its local cursor-pool in favour of `b.crypto.hashFilesParallel` and reshapes the result row format for the existing call sites. Concurrency defaults now come from upstream (`min(8, paths.length)`)."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.9.13 to v0.9.15",
+              "body": "Brings in the canonical require-binding map plus the parallel hashing primitive. No wire-format change."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.7",
+      "date": "2026-05-13",
+      "headline": "Sign release binaries with explicit SHA3-512 (auto-update compatibility break)",
+      "summary": "The install-side standalone verifier hardcodes SHA3-512, but the release signer was calling `crypto.sign(null, ...)` which infers SHA-384 from a P-384 key. Every v0.7.6 signature was rejected by its own install pipeline. Both signers now explicitly use SHA3-512 — this changes the signing shape and breaks auto-update across the v0.7.7 boundary.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Release signing now matches the install-side verifier's hash algorithm",
+              "body": "`.github/workflows/release.yml` and `scripts/release.sh` now call `crypto.createSign('sha3-512')` with `dsaEncoding: 'der'` instead of relying on the key-curve hash inference, producing 103-byte DER signatures over a SHA3-512 digest that the standalone verifier accepts."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "One manual install required to bridge from v0.6.x or v0.7.0 through v0.7.6",
+              "body": "Existing daemons at v0.7.6 or earlier verify auto-update signatures by inferring SHA-384 from the P-384 key, so they will refuse the v0.7.7 signature as a fail-safe and stay on their install version. Reinstall once to cross the boundary: `docker pull ghcr.io/dotcoocoo/hermitstash-sync:0.7.7` for the container path, `deploy/install.sh` for systemd, or download the v0.7.7 release binary directly. After that, auto-update resumes within the v0.7.7-and-newer line."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.6",
+      "date": "2026-05-13",
+      "headline": "Adopt four new upstream primitives across retries, breakers, metrics, and verification",
+      "summary": "Four upstream primitives land in the matching call sites: the circuit-breaker factory call shape, a combined retry+breaker helper, a metrics-snapshot writer/reader/renderer, and a zero-dependency release-signature verifier vendored as a thin CLI shim.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Upload retry loop now composes through `b.retry.withBreaker`",
+              "body": "`_uploadFile` previously wrapped a retry loop inside the breaker as two separate calls, which meant a transient burst inside the retry budget could open the breaker spuriously. The new combined helper keeps the retry budget inside the breaker's accounting so the breaker only opens when retries themselves keep failing."
+            },
+            {
+              "title": "Circuit breaker constructed via the documented factory",
+              "body": "`sync-engine.js` switches from the positional-argument constructor back to `b.circuitBreaker.create({ name, ...opts })` now that the upstream factory accepts the documented opts-object call shape. The local workaround comment is removed."
+            },
+            {
+              "title": "Metrics snapshot writer, reader, and Prometheus renderer come from upstream",
+              "body": "`lib/metrics.js` and the `stats` command delegate atomic snapshot writes, shape validation on read, and the Prometheus 0.0.4 exposition to `b.metrics.snapshot`. The operator-facing grouped text output stays local."
+            },
+            {
+              "title": "Release-signature verifier is now a vendored zero-dep module",
+              "body": "`scripts/verify-release.js` becomes a thin CLI shim over `b.selfUpdate.standaloneVerifier`, vendored verbatim as `scripts/standalone-verifier.js`. The Dockerfile, `deploy/install.sh`, and `deploy/update.sh` now ship the verify trio (verifier, standalone module, pinned pubkey) with no `vendor/blamejs/` dependency in the verify path. Auto-detects P-384 IEEE-P1363, P-384 DER, Ed25519, and ML-DSA-87 signature shapes when the pubkey matches."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped to v0.9.13",
+              "body": "Surfaces the four new primitives and credits the upstream-side test coverage that exercises the call sites adopted in this release."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.5",
+      "date": "2026-05-13",
+      "headline": "Drop the local vendor-data static-dispatch patch",
+      "summary": "Upstream v0.9.12 lands the static-dispatch fix carried locally since v0.7.4 plus a new bundler-output gate that exercises the SEA path. The downstream patch is removed and the upstream version takes over.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "`vendor-data.js` now uses the upstream static-dispatch table",
+              "body": "The private downstream patch on `vendor-data.js` is dropped. Upstream's `_MODULES` table at the top of the file is the same shape as the local fix, and the new upstream CI gate runs `esbuild`, `esbuild --minify`, a bundle-bytes sentinel, and Node SEA on Linux — so regressions on this surface fail in the upstream pipeline going forward."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.9.8 to v0.9.12",
+              "body": "v0.9.9 contained the fix but lacked the end-to-end gate, v0.9.10 and v0.9.11 failed publish for unrelated workflow defects, v0.9.12 lands the fix plus the bundler-output gate."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.4",
+      "date": "2026-05-13",
+      "headline": "Restore vendor-data loading inside the SEA binary",
+      "summary": "Vendor refresh v0.9.7 to v0.9.8 swapped a static `require()` for a dynamic lookup that bundlers cannot trace. SEA builds failed boot-time PQC self-test because the three vendor-data modules never made it into the bundle.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "SEA binary no longer fails the PQC self-test at boot",
+              "body": "`vendor/blamejs/lib/vendor-data.js` was rewritten upstream to call `require(entry.module)` against a frozen lookup table, which `esbuild` cannot trace at bundle time, so the three vendor-data payloads never made it into the SEA blob. A local patch pins the three known targets into a static dispatch table at module-init so the bundler resolves them through standard static-require traces."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.2",
+      "date": "2026-05-13",
+      "headline": "Re-apply the SEA-asset patch on the vendored Public Suffix List loader",
+      "summary": "The v0.8.80 to v0.9.7 vendor refresh overwrote the downstream patch that routes the Public Suffix List load through `node:sea.getRawAsset` when the binary runs as an SEA. The patch is re-applied; SEA-built binaries boot again.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Public Suffix List load path resolves correctly inside the SEA binary",
+              "body": "Upstream's `fs.readFileSync(__dirname + '/vendor/public-suffix-list.dat')` resolves cleanly from source but collapses to a non-existent path next to the SEA executable, breaking the `Verify binary` step on every platform. The downstream patch from the v0.6.17 era is re-applied verbatim and will be carried forward on each future vendor refresh until upstream adds SEA-aware loading."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.7.0",
+      "date": "2026-05-11",
+      "headline": "Stable post-migration surface",
+      "summary": "Marks the completion of the multi-release transition that moved every meaningful `lib/*` module onto the corresponding `blamejs` primitive. The remaining intentional non-migrations are documented in the project notes.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Every meaningful `lib/*` module now consumes its `blamejs` counterpart",
+              "body": "Keychain, watcher, daemon, updater, state database, checksum, and HTTP-client primitives all run through the top-level `b.*` API namespace. The deliberate non-migrations (keychain plaintext fallback for headless installs, the pre-trust posture in `scripts/verify-release.js`, and the OpenSSL-based test PKI in `tests/test-helpers.js`) remain as documented exceptions."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "`vendor/blamejs` bumped v0.8.76 to v0.8.80",
+              "body": "Picks up the OAuth resource server, SCIM 2.0, and ACME completeness work plus the DB-backed config refresh primitive and a fix for an overlapping-tick race in that loader. Integrity hashes regenerated; SEA bypass patch re-applied on the vendored Public Suffix List loader."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
