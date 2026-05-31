@@ -157,6 +157,75 @@ function _assertClean(label, matches) {
   assert.equal(msg, null, msg || '');
 }
 
+// Every `// allow:<class>` marker in bin/ + lib/ must name a class that
+// some detector in this gate actually filters on. An unregistered class
+// is a typo (the marker silently does nothing — the detector it was
+// meant to silence still fires, or worse, a real violation hides behind
+// a misspelled marker that resolves to no detector). The orphan detector
+// below cross-checks every marker against this registry.
+//
+// Keys = every allowClass passed to `_filterMarkers(...)` in this file,
+// plus the marker classes the detectors below introduce. Detectors that
+// assert directly with no allow path (the require-binding and
+// internal-binding gates) carry no entry here, and the doc gates
+// (current-version-stamp / docs-leak-vocab / docs-secret-shape) scan the
+// repo-root docs via `_scanDocs`, not bin/ + lib/, so they are out of
+// this registry's scope.
+var VALID_ALLOW_CLASSES = {
+  'raw-byte-literal':           1,
+  'raw-time-literal':           1,
+  'console-direct':             1,
+  'unresolved-marker':          1,
+  'tier-terminology':           1,
+  'inline-require':             1,
+  'math-random-noncrypto':      1,
+  'raw-new-url':                1,
+  'bare-json-parse':            1,
+  'bare-canonicalize-walk':     1,
+  'regex-no-length-cap':        1,
+  'process-exit':               1,
+  'sea-sigterm-bug':            1,
+  'silent-catch':               1,
+  'dynamic-regex':              1,
+  'raw-process-env':            1,
+  'raw-timing-safe-equal':      1,
+  'parseint-no-radix':          1,
+  'timer-no-unref':             1,
+  'raw-randombytes-token':      1,
+  'handrolled-sleep':           1,
+  'raw-outbound-http':          1,
+  'number-env-coerce':          1,
+  'bare-node-builtin-require':  1,
+  'raw-hash-compare':           1,
+  'buffer-from-no-encoding':    1,
+  'dynamic-require':            1,
+  'handrolled-deep-clone':      1,
+  'handrolled-retry-loop':      1,
+  'legacy-url-format':          1,
+  'dense-wildcard':             1,
+  'duplicate-regex':            1,
+  // Classes the detectors added below introduce.
+  'handrolled-race-timeout':    1,
+  'manual-byte-compare':        1,
+  'handrolled-buffer-collect':  1,
+  'open-coded-lazy-require':    1,
+  'raw-headers-distinct':       1,
+  'vendor-deny':                1,
+  'internal-narrative-comment': 1,
+};
+
+// CVE-2026-25639 / 42033 / 42041 / 40175 — axios prototype-pollution.
+// CVE-2026-25922 / 23687 / 34840 — SAML XML signature wrapping (xml-crypto
+// class). This client carries zero npm runtime dependencies; the gate
+// refuses any require() against these packages so a careless edit or a
+// vendor refresh can't pull one in.
+var VENDOR_DENY_NAMES = [
+  { name: 'axios',      cve: 'CVE-2026-25639/42033/42041/40175 prototype-pollution' },
+  { name: 'xml-crypto', cve: 'CVE-2026-25922/23687/34840 SAML XML signature wrapping' },
+  { name: 'xml2js',     cve: 'SAML XML wrapping class — operator must use a documented opt-in path' },
+  { name: 'samlify',    cve: 'SAML signature-wrapping class — operator must use a documented opt-in path' },
+];
+
 describe('codebase-patterns', { timeout: 30000 }, () => {
 
   it('no raw byte-shaped literals (n >= 8 && n % 8 === 0; use b.constants.BYTES.*)', () => {
@@ -818,6 +887,275 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     });
     bad = _filterMarkers(bad, 'duplicate-regex');
     _assertClean('duplicate-regex', bad);
+  });
+
+  it('no Promise.race + setTimeout timeout (use b.safeAsync.withTimeout)', () => {
+    // class: handrolled-race-timeout
+    // `Promise.race([fn(), new Promise((r) => setTimeout(...))])` is the
+    // timeout-with-cancel idiom. b.safeAsync.withTimeout(fn, ms) handles
+    // abort + leaked-timer cleanup. Anchors on `Promise.race(` and scans
+    // FORWARD only — a `setTimeout` within the next 8 lines is the tell.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        if (!/\bPromise\.race\s*\(/.test(lines[li])) continue;
+        var window = lines.slice(li, Math.min(li + 8, lines.length)).join('\n');
+        if (/\bsetTimeout\s*\(/.test(window)) {
+          bad.push({
+            file:    _relPath(files[fi]),
+            line:    li + 1,
+            content: lines[li].trim(),
+          });
+          break;
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'handrolled-race-timeout');
+    _assertClean('handrolled-race-timeout', bad);
+  });
+
+  it('no manual byte-by-byte compare loop (use b.crypto.timingSafeEqual)', () => {
+    // class: manual-byte-compare
+    // Hand-rolled `for (var i = 0; i < a.length; i++) if (a[i] !== b[i])`
+    // is a constant-time-WRONG comparison. Anything comparing crypto
+    // material must use b.crypto.timingSafeEqual (length-tolerant +
+    // node:crypto under the hood).
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length - 2; li++) {
+        var loop = /for\s*\(\s*var\s+\w+\s*=\s*0\s*;\s*\w+\s*<\s*(\w+)\.length\s*;\s*\w+\+\+\s*\)/.exec(lines[li]);
+        if (!loop) continue;
+        var window = lines.slice(li, Math.min(li + 4, lines.length)).join('\n');
+        if (/\[\s*\w+\s*\]\s*!==?\s*\w+\s*\[\s*\w+\s*\]/.test(window)) {
+          bad.push({
+            file:    _relPath(files[fi]),
+            line:    li + 1,
+            content: lines[li].trim(),
+          });
+          break;
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'manual-byte-compare');
+    _assertClean('manual-byte-compare', bad);
+  });
+
+  it('no hand-rolled chunks-array buffer collect (use b.safeBuffer.boundedChunkCollector)', () => {
+    // class: handrolled-buffer-collect
+    // The `var chunks = []; …on("data", chunks.push); …on("end",
+    // Buffer.concat(chunks))` shape is what b.safeBuffer.boundedChunkCollector
+    // exists for (maxBytes cap + drop semantics). Inline reinvention skips
+    // the cap. Files with `chunks.pop()` are editable-buffer patterns
+    // (backspace-aware readers) and are exempt.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      if (!/Buffer\.concat\s*\(\s*\w*chunks?\b/.test(content)) continue;
+      if (!/var\s+\w*chunks?\s*=\s*\[\s*\]/.test(content)) continue;
+      if (/\bchunks?\s*\.\s*pop\s*\(/.test(content)) continue;
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        if (/^\s*\*/.test(lines[li])) continue;
+        if (/Buffer\.concat\s*\(\s*\w*chunks?\b/.test(lines[li])) {
+          bad.push({
+            file:    _relPath(files[fi]),
+            line:    li + 1,
+            content: lines[li].trim(),
+          });
+          break;
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'handrolled-buffer-collect');
+    _assertClean('handrolled-buffer-collect', bad);
+  });
+
+  it('no open-coded lazy-require pattern (use b.lazyRequire)', () => {
+    // class: open-coded-lazy-require
+    // The shape `var _x = null; function x() { if (!_x) _x = require("./y"); return _x; }`
+    // should use b.lazyRequire(function () { return require("./y"); }) so
+    // test-reset and cycle-break behaviour stay consistent. The rule
+    // matches the `var _x = null` shape only.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      if (!/\bvar\s+_\w+\s*=\s*null\s*;/.test(content)) continue;
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length - 2; li++) {
+        var m = /\bvar\s+(_\w+)\s*=\s*null\s*;/.exec(lines[li]);
+        if (!m) continue;
+        var name = m[1];
+        var window = lines.slice(li, Math.min(li + 6, lines.length)).join('\n');
+        var loadRe = new RegExp('if\\s*\\(\\s*!' + name + '\\s*\\)\\s*' + name + // allow:dynamic-regex — internal binding-name token
+                                '\\s*=\\s*require\\(');
+        if (loadRe.test(window)) {
+          bad.push({
+            file:    _relPath(files[fi]),
+            line:    li + 1,
+            content: lines[li].trim(),
+          });
+          break;
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'open-coded-lazy-require');
+    _assertClean('open-coded-lazy-require', bad);
+  });
+
+  it('req.headersDistinct routes through b.requestHelpers.safeHeadersDistinct (CVE-2026-21710)', () => {
+    // class: raw-headers-distinct
+    // CVE-2026-21710 — `req.headersDistinct` is a getter; reading it on a
+    // request whose header bag carries a `__proto__` key throws
+    // synchronously, before any handler-level try/catch can engage.
+    // b.requestHelpers.safeHeadersDistinct skips poison keys, returns a
+    // null-prototype object, and never throws.
+    var matches = _scan(/\.headersDistinct\b/);
+    matches = _filterMarkers(matches, 'raw-headers-distinct');
+    _assertClean('raw-headers-distinct', matches);
+  });
+
+  it('no require() of denied vendors (axios / xml-crypto / xml2js / samlify)', () => {
+    // class: vendor-deny
+    // Zero npm runtime dependencies is a hard project invariant. These
+    // packages carry prototype-pollution (axios) and SAML XML
+    // signature-wrapping (xml-crypto / xml2js / samlify) CVE classes; a
+    // require() against any of them is refused outright.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+        for (var di = 0; di < VENDOR_DENY_NAMES.length; di++) {
+          var d = VENDOR_DENY_NAMES[di];
+          var re = new RegExp('require\\(["\']' + d.name + '["\']\\)'); // allow:dynamic-regex — fixed vendor-deny name from the registry
+          if (re.test(line)) {
+            bad.push({
+              file:    _relPath(files[fi]),
+              line:    li + 1,
+              content: "require('" + d.name + "') — vendor-denied (" + d.cve + ')',
+            });
+          }
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'vendor-deny');
+    _assertClean('vendor-deny', bad);
+  });
+
+  it('every // allow:<class> marker names a registered detector class', () => {
+    // class: allow-class-orphan (no marker class of its own — the fix is
+    // either correct the typo or register the class in VALID_ALLOW_CLASSES)
+    // Cross-checks every per-line `// allow:<class>` marker in bin/ + lib/
+    // against the VALID_ALLOW_CLASSES registry. An unregistered class is a
+    // typo: the marker silences nothing, so a real violation could hide
+    // behind it. Only the `//` comment portion is inspected — markers are
+    // always comments. The `allow:` regex requires a literal colon, so the
+    // file-level `codebase-patterns:allow-file <class>` form (a space, no
+    // colon) never matches here.
+    var files = _sourceFiles();
+    var bad = [];
+    var re = /\ballow:([a-z][a-zA-Z0-9-]*)/g;
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var hashIdx = lines[li].indexOf('//');
+        if (hashIdx === -1) continue;
+        var comment = lines[li].slice(hashIdx);
+        var m;
+        re.lastIndex = 0;
+        while ((m = re.exec(comment)) !== null) {
+          var cls = m[1];
+          if (!Object.prototype.hasOwnProperty.call(VALID_ALLOW_CLASSES, cls)) {
+            bad.push({
+              file:    _relPath(files[fi]),
+              line:    li + 1,
+              content: "unregistered allow-class '" + cls + "' — names no detector " +
+                       '(fix the typo, or register it in VALID_ALLOW_CLASSES)',
+            });
+          }
+        }
+      }
+    }
+    _assertClean('allow-class-orphan', bad);
+  });
+
+  it('no internal-process narrative in operator-facing source comments', () => {
+    // class: internal-narrative-comment
+    // Operator-facing source comments must describe the code, not the
+    // internal authoring process. Internal slice / bug / plan IDs,
+    // code-review-process residue (Codex P-levels, PR numbers), and dated
+    // decision parentheticals mean nothing to an operator reading the
+    // shipped source. Operator-meaningful references (RFC / CVE / NIST /
+    // CWE, "since vX.Y.Z") are NOT matched.
+    var NARRATIVE = [
+      { re: /\b(?:SUBSTRATE|BUG|MAIL)-\d+\b/,                   what: 'internal slice/bug ID' },
+      { re: /\b(?:D-[MLH]\d+|AUTH-\d+|CRYPTO-\d+|SUPPLY-\d+)\b/, what: 'internal domain/slice ID' },
+      { re: /\bCodex\s+P\d/,                                    what: 'code-review-process reference (Codex P#)' },
+      { re: /\bF-[A-Z]{2,}-\d+\b/,                              what: 'internal feature/plan item ID' },
+      { re: /\bPR\s+#\d+\b/,                                    what: 'pull-request number (process residue)' },
+      { re: /\b[Aa]udit\s+\d{4}-\d{2}-\d{2}/,                   what: 'dated audit/decision residue' },
+      { re: /\bReported\s+\d{4}-\d{2}-\d{2}/,                   what: 'dated report residue' },
+      { re: /\bCore Rule\s+§\d/,                                what: 'internal rule-number citation' },
+      { re: /----\s*v\d+\.\d+\.\d+/,                            what: 'version stamp in a section-divider comment' },
+    ];
+    var files = _sourceFiles();
+    var bad = [];
+    var jsdocLineRe = /^\s*\*/;
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        var comment = null;
+        if (jsdocLineRe.test(line)) {
+          comment = line;
+        } else {
+          var idx = line.indexOf('//');
+          if (idx !== -1) comment = line.slice(idx);
+        }
+        if (comment === null) continue;
+        for (var p = 0; p < NARRATIVE.length; p++) {
+          var nm = comment.match(NARRATIVE[p].re);
+          if (nm) {
+            bad.push({
+              file:    _relPath(files[fi]),
+              line:    li + 1,
+              content: NARRATIVE[p].what + ': `' + nm[0] + '` in an operator-facing comment — ' +
+                       'describe the change, not the internal process',
+            });
+            break;
+          }
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'internal-narrative-comment');
+    _assertClean('internal-narrative-comment', bad);
   });
 
   // ---- Operator-facing doc gates ----
