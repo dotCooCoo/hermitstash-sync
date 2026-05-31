@@ -71,6 +71,7 @@ var gateContract = require("./gate-contract");
 var C = require("./constants");
 var numericBounds = require("./numeric-bounds");
 var guardFilename = require("./guard-filename");
+var archiveRead = lazyRequire(function () { return require("./archive-read"); });
 var { GuardArchiveError } = require("./framework-error");
 
 var observability = lazyRequire(function () { return require("./observability"); });
@@ -92,17 +93,17 @@ var ARCHIVE_EXTENSIONS = Object.freeze([
 // Magic-byte signatures keyed by format name. First N bytes uniquely
 // identify the format; we read up to 8 bytes for matching.
 var MAGIC_SIGNATURES = Object.freeze([
-  { format: "zip",   bytes: [0x50, 0x4B, 0x03, 0x04] },              // allow:raw-byte-literal — ZIP local file header magic per APPNOTE.TXT §4.3.7
-  { format: "zip",   bytes: [0x50, 0x4B, 0x05, 0x06] },              // allow:raw-byte-literal — ZIP empty-archive end-of-central-directory magic
-  { format: "zip",   bytes: [0x50, 0x4B, 0x07, 0x08] },              // allow:raw-byte-literal — ZIP spanned-archive marker
-  { format: "gzip",  bytes: [0x1F, 0x8B] },                          // allow:raw-byte-literal — gzip magic per RFC 1952 §2.3.1
-  { format: "bzip2", bytes: [0x42, 0x5A, 0x68] },                    // allow:raw-byte-literal — bzip2 "BZh" magic
-  { format: "xz",    bytes: [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00] },  // allow:raw-byte-literal — XZ magic per xz spec §2.1.1.1
-  { format: "7z",    bytes: [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] },  // allow:raw-byte-literal — 7-zip magic per 7z spec
-  { format: "rar4",  bytes: [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00] }, // allow:raw-byte-literal — RAR4 magic
-  { format: "rar5",  bytes: [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00] }, // allow:raw-byte-literal — RAR5 magic
-  { format: "lzma",  bytes: [0x5D, 0x00, 0x00] },                    // allow:raw-byte-literal — LZMA magic byte sequence (heuristic)
-  { format: "zstd",  bytes: [0x28, 0xB5, 0x2F, 0xFD] },              // allow:raw-byte-literal — Zstandard magic per RFC 8478 §3.1.1
+  { format: "zip",   bytes: [0x50, 0x4B, 0x03, 0x04] },              // ZIP local file header magic per APPNOTE.TXT §4.3.7
+  { format: "zip",   bytes: [0x50, 0x4B, 0x05, 0x06] },              // ZIP empty-archive end-of-central-directory magic
+  { format: "zip",   bytes: [0x50, 0x4B, 0x07, 0x08] },              // ZIP spanned-archive marker
+  { format: "gzip",  bytes: [0x1F, 0x8B] },                          // gzip magic per RFC 1952 §2.3.1
+  { format: "bzip2", bytes: [0x42, 0x5A, 0x68] },                    // bzip2 "BZh" magic
+  { format: "xz",    bytes: [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00] },  // XZ magic per xz spec §2.1.1.1
+  { format: "7z",    bytes: [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] },  // 7-zip magic per 7z spec
+  { format: "rar4",  bytes: [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00] }, // RAR4 magic
+  { format: "rar5",  bytes: [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00] }, // RAR5 magic
+  { format: "lzma",  bytes: [0x5D, 0x00, 0x00] },                    // LZMA magic byte sequence (heuristic)
+  { format: "zstd",  bytes: [0x28, 0xB5, 0x2F, 0xFD] },              // Zstandard magic per RFC 8478 §3.1.1
   // tar is identified by the "ustar" magic at byte offset 257 inside
   // the first 512-byte header; handled separately in inspectMagic().
 ]);
@@ -125,12 +126,12 @@ var PROFILES = Object.freeze({
     caseInsensitiveCollisionPolicy: "reject",
     sparseEntryPolicy:         "reject",
     filenameProfile:           "balanced",   // per-entry name validation profile
-    maxEntries:                100,           // allow:raw-byte-literal — entry count cap, not byte size
+    maxEntries:                100,           // entry count cap, not byte size
     maxTotalBytes:             C.BYTES.mib(100),
     maxEntryBytes:             C.BYTES.mib(50),
-    maxCompressionRatio:       100,           // allow:raw-byte-literal — ratio multiplier, not byte size
-    maxAggregateRatio:         200,           // allow:raw-byte-literal — aggregate-ratio multiplier, not byte size
-    maxNestedDepth:            0,             // allow:raw-byte-literal — recursion depth, not byte size
+    maxCompressionRatio:       100,           // ratio multiplier, not byte size
+    maxAggregateRatio:         200,           // aggregate-ratio multiplier, not byte size
+    maxNestedDepth:            0,             // recursion depth, not byte size
   },
   "balanced": {
     bidiPolicy:                "reject",
@@ -147,12 +148,12 @@ var PROFILES = Object.freeze({
     caseInsensitiveCollisionPolicy: "audit",
     sparseEntryPolicy:         "audit",
     filenameProfile:           "balanced",
-    maxEntries:                10000,         // allow:raw-byte-literal — entry count cap, not byte size
+    maxEntries:                10000,         // entry count cap, not byte size
     maxTotalBytes:             C.BYTES.gib(1),
     maxEntryBytes:             C.BYTES.mib(500),
-    maxCompressionRatio:       100,           // allow:raw-byte-literal — ratio multiplier, not byte size
-    maxAggregateRatio:         1000,          // allow:raw-byte-literal — aggregate-ratio multiplier, not byte size
-    maxNestedDepth:            2,             // allow:raw-byte-literal — recursion depth, not byte size
+    maxCompressionRatio:       100,           // ratio multiplier, not byte size
+    maxAggregateRatio:         1000,          // aggregate-ratio multiplier, not byte size
+    maxNestedDepth:            2,             // recursion depth, not byte size
   },
   "permissive": {
     bidiPolicy:                "audit",
@@ -169,12 +170,12 @@ var PROFILES = Object.freeze({
     caseInsensitiveCollisionPolicy: "audit",
     sparseEntryPolicy:         "audit",
     filenameProfile:           "permissive",
-    maxEntries:                100000,        // allow:raw-byte-literal — entry count cap, not byte size
+    maxEntries:                100000,        // entry count cap, not byte size
     maxTotalBytes:             C.BYTES.gib(10),
     maxEntryBytes:             C.BYTES.gib(2),
-    maxCompressionRatio:       1000,          // allow:raw-byte-literal — ratio multiplier, not byte size
-    maxAggregateRatio:         10000,         // allow:raw-byte-literal — aggregate-ratio multiplier, not byte size
-    maxNestedDepth:            4,             // allow:raw-byte-literal — recursion depth, not byte size
+    maxCompressionRatio:       1000,          // ratio multiplier, not byte size
+    maxAggregateRatio:         10000,         // aggregate-ratio multiplier, not byte size
+    maxNestedDepth:            4,             // recursion depth, not byte size
   },
 });
 
@@ -649,7 +650,7 @@ function _detectIssues(entries, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   traversalPolicy:                "reject"|"audit"|"allow",
  *   absolutePathPolicy:             "reject"|"audit"|"allow",
  *   symlinkPolicy:                  "reject"|"audit"|"allow",
@@ -722,7 +723,7 @@ function validateEntries(entries, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,
  *   ...:        any validateEntries opt
  *
@@ -868,7 +869,7 @@ module.exports = {
     kind:           "entries",
     contentType:    "application/zip",
     extension:      ".zip",
-    benignEntries:  [{ name: "README.txt", size: 1000, compressedSize: 500 }], // allow:raw-byte-literal — integration-fixture sample size, not byte config
+    benignEntries:  [{ name: "README.txt", size: 1000, compressedSize: 500 }], // integration-fixture sample size, not byte config
     // Hostile: zip-slip path traversal in entry name (CVE-2025-3445 class).
     hostileEntries: [{ name: "../etc/passwd", size: 100, compressedSize: 50 }],
   }),
@@ -898,4 +899,183 @@ module.exports = {
   ARCHIVE_EXTENSIONS:  ARCHIVE_EXTENSIONS,
   MAGIC_SIGNATURES:    MAGIC_SIGNATURES,
   GuardArchiveError:   GuardArchiveError,
+  inspect:             inspect,
+  zipBombPolicy:       zipBombPolicy,
+  entryTypePolicy:     entryTypePolicy,
+  tarEntryPolicy:      tarEntryPolicy,
 };
+
+// ---- extensions ---------------------------------------------------
+
+/**
+ * @primitive b.guardArchive.inspect
+ * @signature b.guardArchive.inspect(adapter, opts?)
+ * @since     0.12.7
+ * @status    stable
+ * @related   b.archive.read.zip, b.guardArchive.validateEntries
+ *
+ * Bridge primitive: runs `b.archive.read.zip(adapter).inspect()` to
+ * enumerate the entry list (no decompression), then hands the list to
+ * `validateEntries` for the full posture-aware gate. Returns
+ * `{ entries, issues, decisions }` so the caller decides whether to
+ * proceed.
+ *
+ * Operators using the lower-level read primitive directly call this
+ * to combine the metadata pass with the guard pass; `b.safeArchive.
+ * extract` does the same composition inline under the hood.
+ *
+ * @opts
+ *   profile:        "strict" | "balanced" | "permissive" | "hipaa" | ...,
+ *   format:         "zip" (v0.12.7 — tar v0.12.8, gz v0.12.9),
+ *   audit:          b.audit,
+ *
+ * @example
+ *   var adapter = b.archive.adapters.fs("/var/uploads/payload.zip");
+ *   var summary = await b.guardArchive.inspect(adapter, { profile: "strict" });
+ *   if (summary.issues.length > 0) refuse(summary.issues);
+ */
+async function inspect(adapter, opts) {
+  opts = opts || {};
+  var format = opts.format || "zip";
+  if (format !== "zip") {
+    throw new GuardArchiveError("archive/format-unsupported",
+      "guardArchive.inspect: format=" + JSON.stringify(format) +
+      " — v0.12.7 ships ZIP only (tar v0.12.8, gz v0.12.9)");
+  }
+  var reader = archiveRead().zip(adapter, { audit: opts.audit });
+  var rawEntries = await reader.inspect();
+  // Project the read-primitive's entry shape into validateEntries'
+  // expected `{ name, size, compressedSize, isSymlink, ... }` shape.
+  var guardEntries = rawEntries.map(function (e) {
+    return {
+      name:           e.name,
+      size:           e.size,
+      compressedSize: e.compressedSize,
+      isSymlink:      e.entryType === "symlink",
+      isHardlink:     false,
+      linkTarget:     null,
+      isDirectory:    e.entryType === "directory",
+      isEncrypted:    e.isEncrypted,
+      attrs:          { externalAttrs: e.externalAttrs },
+    };
+  });
+  var profile = opts.profile || "balanced";
+  var result = validateEntries(guardEntries, { profile: profile });
+  return {
+    entries:   rawEntries,
+    issues:    (result && result.issues) || [],
+    decisions: (result && result.decisions) || {},
+  };
+}
+
+/**
+ * @primitive b.guardArchive.zipBombPolicy
+ * @signature b.guardArchive.zipBombPolicy(opts)
+ * @since     0.12.7
+ * @status    stable
+ * @related   b.archive.read.zip, b.safeArchive.extract
+ *
+ * Policy-object builder for decompression-bomb caps. Operators
+ * declare the cap set once + reuse it across `b.archive.read.zip` /
+ * `b.safeArchive.extract` call sites. Defaults match the cap shape
+ * in `lib/archive-read.js` `DEFAULT_BOMB_POLICY`.
+ *
+ * @opts
+ *   maxEntries:                65535,
+ *   maxEntryDecompressedBytes: 128 * MiB,
+ *   maxTotalDecompressedBytes: 4 * GiB,
+ *   maxExpansionRatio:         100,
+ *
+ * @example
+ *   var policy = b.guardArchive.zipBombPolicy({
+ *     maxTotalDecompressedBytes: 256 * 1024 * 1024,
+ *     maxExpansionRatio: 50,
+ *   });
+ *   await b.safeArchive.extract({ source, destination, bombPolicy: policy });
+ */
+function zipBombPolicy(opts) {
+  opts = opts || {};
+  return Object.freeze({
+    maxEntries:                opts.maxEntries                || 65535,
+    maxEntryDecompressedBytes: opts.maxEntryDecompressedBytes || C.BYTES.mib(128),
+    maxTotalDecompressedBytes: opts.maxTotalDecompressedBytes || C.BYTES.gib(4),
+    maxExpansionRatio:         opts.maxExpansionRatio         || 100,
+  });
+}
+
+/**
+ * @primitive b.guardArchive.entryTypePolicy
+ * @signature b.guardArchive.entryTypePolicy(opts)
+ * @since     0.12.7
+ * @status    stable
+ * @related   b.archive.read.zip, b.safeArchive.extract
+ *
+ * Policy-object builder for entry-type allowlist. Defaults refuse
+ * every "interesting" entry type (symlink / hardlink / device / fifo
+ * / socket); operators opt in per-type and route through the
+ * additional realpath-on-target check in `b.guardFilename.
+ * verifyExtractionPath`.
+ *
+ * Symlinks + hardlinks under default settings are refused
+ * unconditionally — CVE-2025-11001 / 11002 / 26960 class.
+ *
+ * @opts
+ *   symlinks:   false,
+ *   hardlinks:  false,
+ *   devices:    false,
+ *   fifos:      false,
+ *   sockets:    false,
+ *
+ * @example
+ *   var policy = b.guardArchive.entryTypePolicy({ symlinks: true });
+ *   await b.safeArchive.extract({ source, destination, entryTypePolicy: policy });
+ */
+function entryTypePolicy(opts) {
+  opts = opts || {};
+  return Object.freeze({
+    symlinks:  opts.symlinks  === true,
+    hardlinks: opts.hardlinks === true,
+    devices:   opts.devices   === true,
+    fifos:     opts.fifos     === true,
+    sockets:   opts.sockets   === true,
+  });
+}
+
+/**
+ * @primitive b.guardArchive.tarEntryPolicy
+ * @signature b.guardArchive.tarEntryPolicy(opts)
+ * @since     0.12.8
+ * @status    stable
+ * @related   b.guardArchive.entryTypePolicy, b.archive.read.tar
+ *
+ * Tar-specific entry-type policy. Same shape as `entryTypePolicy`
+ * but explicitly named for tar's typeflag vocabulary (1=hardlink,
+ * 2=symlink, 3=char-device, 4=block-device, 6=FIFO, 7=contiguous-
+ * file) so call sites read clearly when the operator's intent is
+ * tar-specific. Defaults refuse every dangerous typeflag. Operators
+ * opting symlinks / hardlinks in get the link target routed through
+ * `b.guardFilename.verifyExtractionPath`'s realpath-on-target check
+ * (defends CVE-2026-23745 / 24842 node-tar path-resolution divergence
+ * class).
+ *
+ * @opts
+ *   symlinks:   false,
+ *   hardlinks:  false,
+ *   devices:    false,
+ *   fifos:      false,
+ *   sockets:    false,
+ *
+ * @example
+ *   var policy = b.guardArchive.tarEntryPolicy({ symlinks: true });
+ *   await b.safeArchive.extract({
+ *     source, destination, entryTypePolicy: policy,
+ *     allowDangerous: { symlinks: true },
+ *   });
+ */
+function tarEntryPolicy(opts) {
+  // Same shape as entryTypePolicy; aliased for tar-specific call-site
+  // readability. The implementation is intentionally identical — the
+  // policy-object shape is format-neutral, only the typeflag mapping
+  // in the reader differs.
+  return entryTypePolicy(opts);
+}

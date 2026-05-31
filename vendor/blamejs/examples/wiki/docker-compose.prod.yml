@@ -26,7 +26,7 @@
 #
 #   # optional — defaults shown
 #   WIKI_ADMIN_EMAIL=admin@blamejs.com
-#   WIKI_PORT=8080
+#   WIKI_PORT=3008
 #   LOG_LEVEL=info
 #   BLAMEJS_DEPRECATIONS=warn
 #
@@ -45,21 +45,49 @@ services:
     # Pull the published image instead of building from source. Pin to
     # a specific version in production so a forgotten `docker compose
     # pull` doesn't quietly upgrade.
-    image: ghcr.io/blamejs/blamejs-wiki:0.3.24
+    image: ghcr.io/blamejs/blamejs-wiki:0.11.45
     build: !reset null
     container_name: blamejs-wiki
-    # Don't expose 8080 on the host — only Caddy talks to it on the
+    # Don't expose 3008 on the host — only Caddy talks to it on the
     # internal network.
     ports: !override []
     expose:
-      - "8080"
+      - "3008"
+    # Encrypted-at-rest mode (WIKI_DB_AT_REST=encrypted) keeps the live
+    # SQLite working copy in a tmpfs (BLAMEJS_TMPDIR=/dev/shm below);
+    # plaintext only ever touches RAM. Docker's default /dev/shm is just
+    # 64 MiB, which the DB outgrows over time (append-only audit chain,
+    # sessions) — and a tmpfs overflow truncates the working copy mid-
+    # write, surfacing as "database disk image is malformed" on the next
+    # boot. Give it real headroom.
+    shm_size: '512m'
+    # Persist the encrypted-at-rest copy (db.enc) + sealed keys so they
+    # survive `docker rm`, host reboot, and image redeploys, and give a
+    # restore point. Without a volume, /data lives in the container's
+    # writable layer and is destroyed on every recreate — a corrupt boot
+    # then has nothing to roll back to.
+    volumes:
+      - wiki-data:/data
+    # Stop grace must exceed the app's 30s shutdown budget (graceMs) plus
+    # the forced-exit watchdog margin, so a `docker stop` / rolling redeploy
+    # lets the DB re-encrypt phase finish before SIGKILL — otherwise the
+    # final flush is lost and the next boot rolls back to the prior db.enc
+    # snapshot. (Inherited from the base compose; restated here because the
+    # data-loss risk is highest in encrypted mode.)
+    stop_grace_period: 40s
+    # NOTE for PaaS platforms (Coolify, Dokku, CapRover, …) that
+    # regenerate this compose file on deploy: set the above via the platform
+    # UI instead of hand-editing here — a "Persistent Storage" mount for
+    # /data, a custom docker run option `--shm-size 512m`, and a stop grace
+    # period of at least 40s. Edits to this file are otherwise overwritten
+    # on the next deploy.
     # Full operator-facing environment surface. Every value is
     # overridable from the .env file; defaults match the framework's
     # built-in defaults so an operator who just wants the basics can
     # leave most blank.
     environment:
       # ---- Wiki app ----
-      WIKI_PORT:            ${WIKI_PORT:-8080}
+      WIKI_PORT:            ${WIKI_PORT:-3008}
       WIKI_DATA_DIR:        ${WIKI_DATA_DIR:-/data}
       WIKI_ADMIN_EMAIL:     ${WIKI_ADMIN_EMAIL:-admin@blamejs.com}
       WIKI_ADMIN_PASSWORD:  ${WIKI_ADMIN_PASSWORD:?WIKI_ADMIN_PASSWORD must be set in .env for production}
@@ -214,10 +242,19 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data        # ACME state — DO NOT delete in prod
       - caddy-config:/config
+    # Pass WIKI_PORT through so the Caddyfile's `wiki:{$WIKI_PORT:3008}`
+    # upstream tracks whatever the wiki service is actually listening
+    # on. An operator carrying WIKI_PORT=8080 from a pre-v0.11.40
+    # deploy gets a matching upstream — without this, the wiki would
+    # listen on 8080 but Caddy would forward to 3008, surfacing as
+    # 502s on the public site.
+    environment:
+      WIKI_PORT: ${WIKI_PORT:-3008}
     depends_on:
       wiki:
         condition: service_healthy
 
 volumes:
+  wiki-data:        # encrypted-at-rest DB (db.enc) + sealed keys — persistent, survives recreate/redeploy
   caddy-data:
   caddy-config:

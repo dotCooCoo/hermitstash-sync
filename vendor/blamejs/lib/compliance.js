@@ -72,7 +72,10 @@ var KNOWN_POSTURES = Object.freeze([
   "dora",        // EU Digital Operational Resilience Act
   "nis2",        // EU Network and Information Security Directive 2 (added 2026)
   "cra",         // EU Cyber Resilience Act (added 2026)
-  "ai-act",      // EU AI Act (added 2026)
+  "ai-act",      // EU AI Act (added 2026 — legacy short name)
+  "eu-ai-act",   // EU AI Act (canonical name; v0.12.26 added with Art. 50 cascade)
+  "ca-ab-853",   // California AB-853 model-generated content watermarking (effective 2026; v0.12.26)
+  "cac-genai-label", // China CAC GenAI Service Measures synthetic-content labelling (v0.12.26)
   // ---- Latin America / APAC ----
   "lgpd-br",     // Brazil Lei Geral de Proteção de Dados (added 2026)
   "pipl-cn",     // China Personal Information Protection Law (added 2026)
@@ -90,26 +93,26 @@ var KNOWN_POSTURES = Object.freeze([
   "tcpa-10dlc",      // TCPA 10DLC carrier-shaped consent + FCC 1:1 disclosure
   "fda-21cfr11",     // FDA 21 CFR Part 11 — audit-trail + electronic signatures (general-purpose subset)
   "fda-annex-11",    // EU GMP Annex 11 — computerized systems (Part-11 equivalent)
-  "sec-1.05",        // SEC Cybersecurity Disclosure Item 1.05 — material-incident 8-K filing                                  // allow:raw-byte-literal — regulatory identifier, not bytes
+  "sec-1.05",        // SEC Cybersecurity Disclosure Item 1.05 — material-incident 8-K filing                                  // regulatory identifier, not bytes
   // ---- US state student-data privacy (F5.1 posture group) ----
   "ny-2-d",          // NY Education Law §2-d
   "il-soppa",        // Illinois Student Online Personal Protection Act
   "ca-sopipa",       // California Student Online Personal Information Protection Act
   "ct-pa-5-2",       // Connecticut Public Act 5-2
-  "tx-hb-4504",      // Texas HB 4504                                                                                            // allow:raw-byte-literal — statute identifier, not bytes
-  "va-sb-1376",      // Virginia SB 1376                                                                                         // allow:raw-byte-literal — statute identifier, not bytes
+  "tx-hb-4504",      // Texas HB 4504                                                                                            // statute identifier, not bytes
+  "va-sb-1376",      // Virginia SB 1376                                                                                         // statute identifier, not bytes
   // ---- EU government / cloud-region ----
   "staterramp",      // StateRAMP / TX-RAMP / AZ-RAMP / GovRAMP family (FedRAMP-Moderate cross-walks)
   "irap",            // Australia IRAP / Essential Eight / ISM
   "bsi-c5",          // Germany BSI C5
   "ens-es",          // Spain Esquema Nacional de Seguridad
   "uk-g-cloud",      // UK G-Cloud
-  // ---- v0.8.70 expansion — 2026 effective deadlines ----
+  // ---- 2026 effective deadlines ----
   "modpa",           // Maryland Online Data Privacy Act (effective 2025-10-01) — strict data-min
   "nydfs-500",       // NYDFS 23 NYCRR 500 Amendment 2 — financial cybersecurity (multi-factor + asset inventory + governance)
   "hipaa-2026",      // HHS HIPAA Security Rule 2026-Q4 final — extends hipaa with mandatory MFA + asset inventory + 72h restoration testing
   "quebec-25",       // Quebec Law 25 final phase (effective 2026-09-22) — DPIA + automated-decision opt-out
-  // ---- v0.8.77 expansion — US state consumer-privacy postures ----
+  // ---- US state consumer-privacy postures ----
   // Each posture carries per-state cure-period, profiling opt-out
   // and minor-consent metadata via b.dsr.stateRules(state). The
   // generic DSR primitive (b.dsr.submit) covers ~80% of the surface;
@@ -136,7 +139,7 @@ var KNOWN_POSTURES = Object.freeze([
   "ct-sb3",          // Connecticut SB 3 Consumer Health Data
   "tx-cubi",         // Texas Capture or Use of Biometric Identifier
   "fl-fdbr",         // Florida Digital Bill of Rights (SB 262, effective 2024-07-01) — narrow scope ($1B+ revenue threshold)
-  // ---- v0.8.81 expansion — AI-governance postures ----
+  // ---- AI-governance postures ----
   // State + sectoral AI regulations crystallizing through 2026. Each
   // posture is a flag that operators pin alongside their base
   // privacy/sectoral posture; the floors enforce audit-chain signing
@@ -146,28 +149,28 @@ var KNOWN_POSTURES = Object.freeze([
   "il-hb3773",       // Illinois HB 3773 — IHRA AI amendment (effective 2026-01-01)
   "tx-traiga",       // Texas Responsible AI Governance Act HB 149 (effective 2026-01-01)
   "ut-aipa",         // Utah AI Disclosure Act (UAIPA + 2025 amendments; sunset 2027-07-01)
-  "nyc-ll144",       // NYC Local Law 144 — Automated Employment Decision Tools (in force)                                    // allow:raw-byte-literal — regulatory identifier, not bytes
+  "nyc-ll144",       // NYC Local Law 144 — Automated Employment Decision Tools (in force)                                    // regulatory identifier, not bytes
   "ca-tfaia",        // California SB 53 — Transparency in Frontier AI Act (effective 2026-01-01)
   "kr-ai-basic",     // South Korea AI Basic Act (effective 2026-01-22)
   "cn-ai-label",     // China Measures for Labelling of AI-Generated Content (effective 2025-09-01)
-  // ---- v0.8.81 expansion — AI management cross-walks ----
+  // ---- AI management cross-walks ----
   "iso-42001",       // ISO/IEC 42001:2023 — AI Management System
   "iso-23894",       // ISO/IEC 23894:2023 — AI Risk Management Guidance
-  // ---- v0.8.81 expansion — content-credentials posture flags ----
-  "ca-sb942",        // California SB-942 (Cal. Bus. & Prof. Code §22757) gen-AI disclosure (effective 2026-08-02)             // allow:raw-byte-literal — regulatory identifier + date, not bytes
-  "ca-ab853",        // California AB-853 platform-side gen-AI detection (effective 2026-08-02)                                // allow:raw-byte-literal — regulatory identifier + date, not bytes
-  // ---- v0.8.81 expansion — substrate-to-posture cleanup ----
+  // ---- content-credentials posture flags ----
+  "ca-sb942",        // California SB-942 (Cal. Bus. & Prof. Code §22757) gen-AI disclosure (effective 2026-08-02)             // regulatory identifier + date, not bytes
+  "ca-ab853",        // California AB-853 platform-side gen-AI detection (effective 2026-08-02)                                // regulatory identifier + date, not bytes
+  // ---- substrate-to-posture cleanup ----
   "eaa",             // EU Accessibility Act / Directive (EU) 2019/882 (effective 2025-06-28)
   "wcag-2-2",        // W3C Web Content Accessibility Guidelines 2.2 (Oct 2023 Recommendation)
   "eu-data-act",     // EU Data Act / Regulation (EU) 2023/2854 (effective 2025-09-12)
   "hitech",          // Health Information Technology for Economic and Clinical Health Act (2009)
   "ferpa",           // Family Educational Rights and Privacy Act (20 U.S.C. §1232g)
   "dpdp",            // India Digital Personal Data Protection Act 2023 (rules-pending; cascade tier exists)
-  // ---- v0.8.82 expansion — privacy 2026 sweep ----
+  // ---- privacy 2026 sweep ----
   // US federal child / financial privacy
   "coppa",           // Children's Online Privacy Protection Act (15 U.S.C. §6501)
   "coppa-2025",      // COPPA 2025 Amendment (FTC final 2025-04-22; effective 2026-06-23 — biometric expansion + knowing-collection disclosure)
-  "glba-safeguards", // GLBA Safeguards Rule 2024 Amendment (16 CFR Part 314 — effective 2024-05-13)                            // allow:raw-byte-literal — CFR title number, not bytes
+  "glba-safeguards", // GLBA Safeguards Rule 2024 Amendment (16 CFR Part 314 — effective 2024-05-13)                            // CFR title number, not bytes
   // UK
   "uk-duaa",         // UK Data (Use and Access) Act 2025 (Royal Assent 2025-06-19; replaces DPDI Bill)
   // Latin America
@@ -196,11 +199,11 @@ var KNOWN_POSTURES = Object.freeze([
   "nist-pf-1.1",     // NIST Privacy Framework 1.1 (final 2025-04-14)
   // EU non-personal-data + adjacent
   "dsa",             // EU Digital Services Act (Regulation 2022/2065; fully applicable 2024-02-17)
-  "dga",             // EU Data Governance Act (Regulation 2022/868; applicable 2023-09-24)                                     // allow:raw-byte-literal — calendar day, not bytes
+  "dga",             // EU Data Governance Act (Regulation 2022/868; applicable 2023-09-24)                                     // calendar day, not bytes
   "eu-cer",          // EU Critical Entities Resilience Directive (2022/2557; transposition 2024-10-17)
   "eu-cyber-sol",    // EU Cyber Solidarity Act (Regulation 2025/38; effective 2025-02-04)
   "eidas-2",         // eIDAS 2 / EUDI Wallet (Regulation 2024/1183; rollout 2026-2027)
-  // ---- v0.8.86 expansion — sectoral + cybersecurity directives ----
+  // ---- sectoral + cybersecurity directives ----
   "cmmc-2.0",        // US DoD Cybersecurity Maturity Model Certification 2.0 (effective 2025-Q1)
   "cjis-v6",         // FBI Criminal Justice Information Services Security Policy v6.0 (Dec 2024)
   "iso-27001-2022",  // ISO/IEC 27001:2022 — Information Security Management System
@@ -208,10 +211,10 @@ var KNOWN_POSTURES = Object.freeze([
   "iso-27017",       // ISO/IEC 27017 — Cloud-services security controls
   "iso-27018",       // ISO/IEC 27018 — PII protection in public-cloud processors
   "iso-27701",       // ISO/IEC 27701 — Privacy Information Management System
-  "nist-800-66-r2",  // NIST SP 800-66 Rev 2 — HIPAA Security Rule implementation guidance                                       // allow:raw-byte-literal — NIST publication number, not bytes
+  "nist-800-66-r2",  // NIST SP 800-66 Rev 2 — HIPAA Security Rule implementation guidance                                       // NIST publication number, not bytes
   "ehds",            // EU European Health Data Space (Regulation 2025/327; phased 2027-2029)
   "circia",          // US Cyber Incident Reporting for Critical Infrastructure Act (final rule pending)
-  // ---- v0.9.6 expansion — exceptd framework-control-gap closure ----
+  // ---- exceptd framework-control-gap closure ----
   // Postures added to recognise every framework cited in the
   // exceptd 2026-05-11 framework-control-gaps catalog. Each posture
   // either (a) maps to a framework the operator must audit against,
@@ -221,16 +224,16 @@ var KNOWN_POSTURES = Object.freeze([
   // the named regime's evidence expectations.
   "nist-800-53",                 // NIST SP 800-53 Rev 5 — full Moderate / High baseline
   "nist-ai-rmf-1.0",             // NIST AI Risk Management Framework 1.0
-  "iso-42001-2023",              // ISO/IEC 42001:2023 — AI management system (alias for v0.8.81 iso-42001 entry, kept for posture-vocabulary stability)                                              // allow:raw-byte-literal — standard publication year, not bytes
+  "iso-42001-2023",              // ISO/IEC 42001:2023 — AI management system (alias for v0.8.81 iso-42001 entry, kept for posture-vocabulary stability)                                              // standard publication year, not bytes
   "iso-23894-2023",              // ISO/IEC 23894:2023 — AI risk management guidance (alias)
   "owasp-llm-top-10-2025",       // OWASP Top 10 for LLM Applications 2025
   "owasp-asvs-v5.0",             // OWASP Application Security Verification Standard v5.0
-  "nist-800-218-ssdf",           // NIST SP 800-218 Secure Software Development Framework v1.1                                                                                                            // allow:raw-byte-literal — NIST pub number, not bytes
-  "nist-800-82-r3",              // NIST SP 800-82 Rev 3 — OT security guide                                                       // allow:raw-byte-literal — NIST pub number, not bytes
+  "nist-800-218-ssdf",           // NIST SP 800-218 Secure Software Development Framework v1.1                                                                                                            // NIST pub number, not bytes
+  "nist-800-82-r3",              // NIST SP 800-82 Rev 3 — OT security guide                                                       // NIST pub number, not bytes
   "nist-800-63b-rev4",           // NIST SP 800-63B Rev 4 — Digital Identity (AAL/IAL/FAL)
   "iec-62443-3-3",               // IEC 62443-3-3 — IACS system security
   "fedramp-rev5-moderate",       // FedRAMP Rev 5 Moderate baseline
-  "hipaa-security-rule",         // HIPAA Security Rule 45 CFR §164.312 (technical safeguards)                                     // allow:raw-byte-literal — CFR section, not bytes
+  "hipaa-security-rule",         // HIPAA Security Rule 45 CFR §164.312 (technical safeguards)                                     // CFR section, not bytes
   "hitrust-csf-v11.4",           // HITRUST CSF v11.4
   "nerc-cip-007-6",              // NERC CIP-007-6 — BES Cyber System Security Management
   "psd2-rts-sca",                // EU PSD2 RTS on Strong Customer Authentication (Commission Delegated Regulation 2018/389)
@@ -241,22 +244,43 @@ var KNOWN_POSTURES = Object.freeze([
   "spdx-v3.0",                   // SPDX v3.0 SBOM — framework ships sbom.spdx.json (v0.9.6+)
   "owasp-wstg-v5",               // OWASP Web Security Testing Guide v5
   "ptes",                        // Penetration Testing Execution Standard
-  "nist-800-115",                // NIST SP 800-115 Technical Guide to Information Security Testing                               // allow:raw-byte-literal — NIST pub number, not bytes
+  "nist-800-115",                // NIST SP 800-115 Technical Guide to Information Security Testing                               // NIST pub number, not bytes
   "cwe-top-25-2024",             // CWE Top 25 Most Dangerous Software Weaknesses (2024)
   "cis-controls-v8",             // CIS Controls v8
-  "cmmc-2.0-level-2",            // CMMC 2.0 Level 2 (Advanced) — 110 NIST 800-171 Rev 2 controls                                                                                                          // allow:raw-byte-literal — NIST pub number / level, not bytes
-  // ---- v0.9.57 — granular CMMC level distinction ----
+  "cmmc-2.0-level-2",            // CMMC 2.0 Level 2 (Advanced) — 110 NIST 800-171 Rev 2 controls                                                                                                          // NIST pub number / level, not bytes
+  // ---- granular CMMC level distinction ----
   // CMMC 2.0 maturity levels carry distinct control-mapping
   // expectations: Level 1 = 15 controls (FAR 52.204-21), Level 2 =
   // 110 controls (NIST 800-171 Rev 2), Level 3 = additional NIST
   // 800-172 enhanced controls. The umbrella "cmmc-2.0" posture
   // remains for back-compat with existing operators; the explicit
   // L1/L2/L3 postures are the recommended pin for new deployments.
-  "cmmc-2.0-level-1",            // CMMC 2.0 Level 1 (Foundational) — 15 FAR controls; FCI-only data        // allow:raw-byte-literal — regulatory identifier, not bytes
-  "cmmc-2.0-level-3",            // CMMC 2.0 Level 3 (Expert) — NIST 800-172 enhanced controls atop L2       // allow:raw-byte-literal — regulatory identifier, not bytes
+  "cmmc-2.0-level-1",            // CMMC 2.0 Level 1 (Foundational) — 15 FAR controls; FCI-only data        // regulatory identifier, not bytes
+  "cmmc-2.0-level-3",            // CMMC 2.0 Level 3 (Expert) — NIST 800-172 enhanced controls atop L2       // regulatory identifier, not bytes
+  // ---- promote POSTURE_DEFAULTS-only entries into the
+  // canonical KNOWN_POSTURES surface so operators can actually
+  // `b.compliance.set(...)` them. Each entry had cascade
+  // configuration wired but couldn't be pinned because set()'s
+  // KNOWN_POSTURES check refused unknown strings.
+  "42-cfr-part-2",               // 42 CFR Part 2 — Confidentiality of Substance Use Disorder Patient Records (HHS final rule 2024-02-08)                                                                                  // CFR section identifier, not bytes
+  "hti-1",                       // ONC HTI-1 — Health IT certification + algorithm transparency (45 CFR Part 170; effective 2024-12-31)
+  "uscdi-v4",                    // USCDI v4 — US Core Data for Interoperability v4 (ONC; 2024-01)                                          // version identifier, not bytes
+  "irs-1075",                    // IRS Publication 1075 — Tax Information Security Guidelines (Rev. 11-2023)                              // publication number, not bytes
+  "nist-800-172-r3",             // NIST SP 800-172 Rev 3 — Enhanced Security Requirements for CUI                                          // publication number, not bytes
+  "tlp-2.0",                     // FIRST Traffic Light Protocol 2.0 — information-sharing classifications (TLP:CLEAR / GREEN / AMBER / AMBER+STRICT / RED)
+  "soci-au",                     // Australia Security of Critical Infrastructure Act (SOCI 2018) + 2022 amendments
+  "ffiec-cat-2",                 // FFIEC Cybersecurity Assessment Tool 2.0 (federal financial institution exam)                            // tool version, not bytes
+  "cri-profile-v2.0",            // Cyber Risk Institute Profile v2.0 — financial-services framework mapping (NIST CSF cross-walk)         // version identifier, not bytes
+  "m-22-09",                     // OMB M-22-09 — Federal Zero Trust Architecture Strategy
+  "m-22-18",                     // OMB M-22-18 — Enhancing Software Supply Chain Security (SSDF attestation)
+  "nist-800-53-r5-privacy",      // NIST SP 800-53 Rev 5 — Privacy Control Family overlay                                                   // publication number, not bytes
+  "nist-ai-600-1-genai",         // NIST AI 600-1 — Generative AI Profile (companion to AI RMF 1.0)                                          // publication number, not bytes
+  "nist-csf-2.0",                // NIST Cybersecurity Framework 2.0 (Feb 2024)                                                              // framework version, not bytes
+  "sb-53",                       // California SB-53 — Transparency in Frontier AI Act (effective 2025-09-29)                                // statute identifier, not bytes
+  "nyc-ll144-2024",              // NYC Local Law 144 — Automated Employment Decision Tool bias audits (2024 enforcement update)             // statute identifier, not bytes
 ]);
 
-// SUPPLY-34 — Artifact standards (SBOM / VEX format families) are NOT
+// Artifact standards (SBOM / VEX format families) are NOT
 // regulatory regimes. Pinning a posture like `cyclonedx-v1.6` to
 // cascade audit + TLS floors conflates the act of EMITTING a SBOM
 // format with the regulatory floor an operator needs. Operators who
@@ -361,7 +385,7 @@ function set(posture) {
   STATE.setAt   = Date.now();
   _emitAudit("compliance.posture.set", { posture: posture });
 
-  // SUPPLY-34 — emit a `format_as_regime` audit warning when an
+  // Emit a `format_as_regime` audit warning when an
   // operator pins an artifact-standard format (cyclonedx-v1.6 /
   // spdx-v3.0 / vex-csaf-2.1) as the regulatory posture. These names
   // remain in KNOWN_POSTURES for back-compat but pinning them as the
@@ -376,7 +400,7 @@ function set(posture) {
       "warning");
   }
 
-  // SUPPLY-21 — emit `fips_conflict` audit warning when posture is
+  // Emit `fips_conflict` audit warning when posture is
   // FedRAMP / CMMC L3 AND the framework's PQC-first crypto defaults
   // are active without an explicit fipsMode opt-in. Operators see
   // this in the audit chain and either (a) document the deviation
@@ -393,7 +417,7 @@ function set(posture) {
       "warning");
   }
 
-  // F-POSTURE-1 — cascade the posture into every primitive that owns a
+  // Cascade the posture into every primitive that owns a
   // posture-conditioned default. Each primitive exposes an
   // `applyPosture(name)` that merges the POSTURE_DEFAULTS entry for the
   // posture into its own state and emits
@@ -405,7 +429,7 @@ function set(posture) {
   // skipped rows surface in the audit chain so a forensic review can
   // reconstruct the boot order.
   _applyPostureCascade(posture);
-  // F-AUD-5 — TZ awareness. Auditors expect timestamps in UTC.
+  // TZ awareness. Auditors expect timestamps in UTC.
   // process.env.TZ controls Node's local-time conversion for any
   // operator code that uses non-UTC formatters; under regulated
   // postures (hipaa / pci-dss / sox / gdpr / soc2) emit a boot
@@ -423,7 +447,7 @@ function set(posture) {
   }
 }
 
-// _applyPostureCascade — F-POSTURE-1. Walks every primitive that
+// _applyPostureCascade — walks every primitive that
 // participates in posture-conditioned defaults and asks it to merge
 // the named posture into its state. Each step is best-effort at the
 // audit-emission level (a primitive that isn't loaded yet emits
@@ -626,6 +650,24 @@ var REGIME_MAP = Object.freeze({
     jurisdiction: "EU",
     domain:     "ai-governance",
   },
+  "eu-ai-act": {
+    name:       "Artificial Intelligence Act",
+    citation:   "Regulation (EU) 2024/1689",
+    jurisdiction: "EU",
+    domain:     "ai-governance",
+  },
+  "ca-ab-853": {
+    name:       "Model-Generated Content Disclosure Act",
+    citation:   "California AB-853 (effective 2026)",
+    jurisdiction: "US-CA",
+    domain:     "ai-governance",
+  },
+  "cac-genai-label": {
+    name:       "Generative AI Service Measures (synthetic-content labelling)",
+    citation:   "China CAC Order; effective 2023-08, 2024 labelling amendment",
+    jurisdiction: "CN",
+    domain:     "ai-governance",
+  },
   "lgpd-br": {
     name:       "Lei Geral de Proteção de Dados",
     citation:   "Lei nº 13.709/2018",
@@ -715,7 +757,7 @@ var REGIME_MAP = Object.freeze({
   "ct-sb3":    { name: "Connecticut SB 3 Consumer Health Data",        citation: "Conn. P.A. 23-56 (effective 2023-07-01)", jurisdiction: "US-CT", domain: "health" },
   "tx-cubi":   { name: "Texas Capture or Use of Biometric Identifier", citation: "Tex. Bus. & Com. Code §503.001 (effective 2009-09-01)", jurisdiction: "US-TX", domain: "biometric" },
   "fl-fdbr":   { name: "Florida Digital Bill of Rights",              citation: "Fla. Stat. §501.701 et seq. SB 262 (effective 2024-07-01)", jurisdiction: "US-FL", domain: "privacy" },
-  // ---- v0.8.81 — AI governance ----
+  // ---- AI governance ----
   "co-ai":       { name: "Colorado AI Act",                            citation: "C.R.S. §6-1-1701 et seq. SB24-205 (postponed to 2026-06-30; enforcement stayed)", jurisdiction: "US-CO", domain: "ai-governance" },
   "il-hb3773":   { name: "Illinois HB 3773 — AI in Employment",        citation: "775 ILCS 5 IHRA AI amendment (effective 2026-01-01)", jurisdiction: "US-IL", domain: "ai-governance" },
   "tx-traiga":   { name: "Texas Responsible AI Governance Act",        citation: "Tex. Bus. & Com. Code Ch. 552 HB 149 (effective 2026-01-01)", jurisdiction: "US-TX", domain: "ai-governance" },
@@ -724,20 +766,20 @@ var REGIME_MAP = Object.freeze({
   "ca-tfaia":    { name: "California Transparency in Frontier AI Act",  citation: "Cal. Bus. & Prof. Code §22757.10 et seq. SB 53 (effective 2026-01-01)", jurisdiction: "US-CA", domain: "ai-governance" },
   "kr-ai-basic": { name: "South Korea AI Basic Act",                    citation: "Framework Act on Development of AI (effective 2026-01-22)", jurisdiction: "KR", domain: "ai-governance" },
   "cn-ai-label": { name: "China — Measures for Labelling AI-Generated Content", citation: "CAC + MIIT + Ministry of Public Security + NRTA Order (effective 2025-09-01)", jurisdiction: "CN", domain: "ai-governance" },
-  // ---- v0.8.81 — AI management cross-walks ----
+  // ---- AI management cross-walks ----
   "iso-42001":   { name: "ISO/IEC 42001 — AI Management System",        citation: "ISO/IEC 42001:2023", jurisdiction: "international", domain: "ai-governance" },
   "iso-23894":   { name: "ISO/IEC 23894 — AI Risk Management",          citation: "ISO/IEC 23894:2023", jurisdiction: "international", domain: "ai-governance" },
-  // ---- v0.8.81 — content-credentials posture flags ----
+  // ---- content-credentials posture flags ----
   "ca-sb942":    { name: "California Gen-AI Provenance Disclosure",     citation: "Cal. Bus. & Prof. Code §22757 SB-942 (effective 2026-08-02)", jurisdiction: "US-CA", domain: "content-credentials" },
   "ca-ab853":    { name: "California Platform Gen-AI Detection",        citation: "Cal. Bus. & Prof. Code §22757 AB-853 (effective 2026-08-02)", jurisdiction: "US-CA", domain: "content-credentials" },
-  // ---- v0.8.81 — substrate-to-posture cleanup ----
+  // ---- substrate-to-posture cleanup ----
   "eaa":         { name: "EU Accessibility Act",                        citation: "Directive (EU) 2019/882 (effective 2025-06-28)", jurisdiction: "EU", domain: "accessibility" },
   "wcag-2-2":    { name: "W3C Web Content Accessibility Guidelines 2.2", citation: "W3C Recommendation (Oct 2023)", jurisdiction: "international", domain: "accessibility" },
   "eu-data-act": { name: "EU Data Act",                                 citation: "Regulation (EU) 2023/2854 (effective 2025-09-12)", jurisdiction: "EU", domain: "data-sharing" },
   "hitech":      { name: "Health Information Technology for Economic and Clinical Health Act", citation: "Pub. L. 111-5, Title XIII, Subtitle D (2009)", jurisdiction: "US", domain: "health" },
   "ferpa":       { name: "Family Educational Rights and Privacy Act",   citation: "20 U.S.C. §1232g; 34 CFR Part 99", jurisdiction: "US", domain: "student-records" },
   "dpdp":        { name: "Digital Personal Data Protection Act 2023",   citation: "Act 22 of 2023 (India; rules pending)", jurisdiction: "IN", domain: "privacy" },
-  // ---- v0.8.82 — privacy 2026 sweep ----
+  // ---- privacy 2026 sweep ----
   // US federal
   "coppa":           { name: "Children's Online Privacy Protection Act",         citation: "15 U.S.C. §§6501-6506; 16 CFR Part 312 (effective 2000-04-21)", jurisdiction: "US", domain: "child-privacy" },
   "coppa-2025":      { name: "COPPA 2025 Amendment",                              citation: "FTC final rule (2025-04-22; effective 2026-06-23) — biometric expansion + knowing-collection-13-and-under disclosure", jurisdiction: "US", domain: "child-privacy" },
@@ -773,7 +815,7 @@ var REGIME_MAP = Object.freeze({
   "eu-cer":          { name: "EU Critical Entities Resilience Directive",        citation: "Directive (EU) 2022/2557 (transposition 2024-10-17)", jurisdiction: "EU", domain: "cybersecurity" },
   "eu-cyber-sol":    { name: "EU Cyber Solidarity Act",                          citation: "Regulation (EU) 2025/38 (effective 2025-02-04)", jurisdiction: "EU", domain: "cybersecurity" },
   "eidas-2":         { name: "eIDAS 2 / EUDI Wallet",                            citation: "Regulation (EU) 2024/1183 (rollout 2026-2027)", jurisdiction: "EU", domain: "identity" },
-  // ---- v0.8.86 — sectoral + cybersecurity directives ----
+  // ---- sectoral + cybersecurity directives ----
   "cmmc-2.0":        { name: "Cybersecurity Maturity Model Certification 2.0",   citation: "32 CFR Part 170 (DFARS rule effective 2025-Q1)", jurisdiction: "US", domain: "cybersecurity" },
   "cjis-v6":         { name: "FBI CJIS Security Policy v6.0",                    citation: "CJIS Security Policy v6.0 (effective 2024-12)", jurisdiction: "US", domain: "law-enforcement" },
   "iso-27001-2022":  { name: "ISO/IEC 27001:2022 Information Security Management System", citation: "ISO/IEC 27001:2022", jurisdiction: "international", domain: "cybersecurity" },
@@ -784,6 +826,79 @@ var REGIME_MAP = Object.freeze({
   "nist-800-66-r2":  { name: "NIST SP 800-66 Rev 2 — HIPAA Security Rule Guidance", citation: "NIST SP 800-66 Rev 2 (Feb 2024)", jurisdiction: "US", domain: "health" },
   "ehds":            { name: "European Health Data Space",                        citation: "Regulation (EU) 2025/327 (phased 2027-2029)", jurisdiction: "EU", domain: "health" },
   "circia":          { name: "Cyber Incident Reporting for Critical Infrastructure Act", citation: "6 U.S.C. §681 et seq. (final rule pending)", jurisdiction: "US", domain: "cybersecurity" },
+  // ---- REGIME_MAP backfill for KNOWN_POSTURES without
+  // describe() coverage. Each entry resolves `b.compliance.describe
+  // (posture)` → { name, citation, jurisdiction, domain } so admin
+  // UI / generated audit reports rendering "running under <name>
+  // (<citation>)" stops getting null.
+  // ---- POSTURE_DEFAULTS-orphan postures promoted into KNOWN_POSTURES ----
+  "42-cfr-part-2":   { name: "Confidentiality of Substance Use Disorder Patient Records", citation: "42 CFR Part 2 (HHS final rule effective 2024-02-08)", jurisdiction: "US", domain: "health" },
+  "hti-1":           { name: "ONC HTI-1 Final Rule — Health IT Certification + Algorithm Transparency", citation: "45 CFR Part 170 / 89 FR 1192 (effective 2024-12-31)", jurisdiction: "US", domain: "health" },
+  "uscdi-v4":        { name: "US Core Data for Interoperability v4",            citation: "ONC USCDI v4 (Jan 2024)",                          jurisdiction: "US", domain: "health" },
+  "irs-1075":        { name: "IRS Publication 1075 — Tax Information Security Guidelines", citation: "IRS Pub 1075 (Rev. 11-2023)",        jurisdiction: "US", domain: "tax" },
+  "nist-800-172-r3": { name: "NIST SP 800-172 Rev 3 — Enhanced CUI Security Requirements", citation: "NIST SP 800-172 Rev 3",                jurisdiction: "US", domain: "cybersecurity" },
+  "tlp-2.0":         { name: "FIRST Traffic Light Protocol 2.0",                citation: "FIRST TLP v2.0 (Aug 2022)",                       jurisdiction: "international", domain: "information-sharing" },
+  "soci-au":         { name: "Australia Security of Critical Infrastructure Act", citation: "SOCI 2018 + 2022 amendments",                   jurisdiction: "AU", domain: "critical-infrastructure" },
+  "ffiec-cat-2":     { name: "FFIEC Cybersecurity Assessment Tool 2.0",          citation: "FFIEC CAT v2.0",                                  jurisdiction: "US", domain: "financial" },
+  "cri-profile-v2.0":{ name: "Cyber Risk Institute Profile v2.0",                citation: "CRI Profile v2.0 (financial-services NIST CSF cross-walk)", jurisdiction: "US", domain: "financial" },
+  "m-22-09":         { name: "OMB M-22-09 — Federal Zero Trust Architecture Strategy", citation: "OMB Memorandum M-22-09 (2022-01-26)",     jurisdiction: "US", domain: "cybersecurity" },
+  "m-22-18":         { name: "OMB M-22-18 — Software Supply Chain Security",    citation: "OMB Memorandum M-22-18 (2022-09-14)",             jurisdiction: "US", domain: "supply-chain" },
+  "nist-800-53-r5-privacy": { name: "NIST SP 800-53 Rev 5 — Privacy Control Family", citation: "NIST SP 800-53 Rev 5 (Privacy overlay)",     jurisdiction: "US", domain: "privacy" },
+  "nist-ai-600-1-genai":    { name: "NIST AI 600-1 — Generative AI Profile",    citation: "NIST AI 600-1 (Jul 2024) — companion to AI RMF 1.0", jurisdiction: "US", domain: "ai" },
+  "nist-csf-2.0":    { name: "NIST Cybersecurity Framework 2.0",                citation: "NIST CSF 2.0 (Feb 2024)",                         jurisdiction: "US", domain: "cybersecurity" },
+  "sb-53":           { name: "California SB-53 — Transparency in Frontier AI Act", citation: "Cal. Health & Safety Code §22757 et seq. (effective 2025-09-29)", jurisdiction: "US-CA", domain: "ai" },
+  "nyc-ll144-2024":  { name: "NYC Local Law 144 — Automated Employment Decision Tool Bias Audits", citation: "NYC Local Law 144 of 2021 + 2024 DCWP enforcement update", jurisdiction: "US-NY", domain: "ai" },
+  // ---- Pre-existing KNOWN_POSTURES that lacked REGIME_MAP records ----
+  "sox-404":         { name: "Sarbanes-Oxley §404 — Internal Controls over Financial Reporting", citation: "15 U.S.C. §7262",               jurisdiction: "US", domain: "financial-reporting" },
+  "soc2-cc1.3":      { name: "SOC 2 Trust Services Criterion CC1.3 — Segregation of Duties", citation: "AICPA Trust Services Criteria CC1.3", jurisdiction: "US", domain: "audit-attestation" },
+  "fapi-2.0":        { name: "Financial-grade API 2.0 Final",                   citation: "OpenID Foundation FAPI 2.0 Final (Feb 2025)",     jurisdiction: "international", domain: "financial" },
+  "cfpb-1033":       { name: "CFPB §1033 — Personal Financial Data Rights",     citation: "12 CFR Part 1033 (Final Rule 2024-10-22; tiered effective dates from 2026-04-01)", jurisdiction: "US", domain: "financial" },
+  "iab-tcf-v2.3":    { name: "IAB Transparency & Consent Framework v2.3",       citation: "IAB Europe TCF v2.3 (Sep 2024)",                  jurisdiction: "EU", domain: "advertising" },
+  "iab-mspa":        { name: "IAB Multi-State Privacy Agreement",               citation: "IAB Tech Lab MSPA + Global Privacy Platform",     jurisdiction: "US", domain: "privacy" },
+  "tcpa-10dlc":      { name: "TCPA 10DLC Messaging Compliance",                 citation: "47 U.S.C. §227 + CTIA 10DLC + FCC 1:1 disclosure rule", jurisdiction: "US", domain: "telecommunications" },
+  "fda-21cfr11":     { name: "FDA 21 CFR Part 11 — Electronic Records / Signatures", citation: "21 CFR Part 11",                          jurisdiction: "US", domain: "life-sciences" },
+  "fda-annex-11":    { name: "EU GMP Annex 11 — Computerized Systems",          citation: "EudraLex Vol. 4 Annex 11",                        jurisdiction: "EU", domain: "life-sciences" },
+  "sec-1.05":        { name: "SEC Cybersecurity Risk Management — Item 1.05 Form 8-K", citation: "17 CFR §229.106 + Item 1.05 (effective 2023-12-18)", jurisdiction: "US", domain: "financial-reporting" },
+  "ny-2-d":          { name: "NY Education Law §2-d — Student Privacy",         citation: "N.Y. Educ. Law §2-d",                             jurisdiction: "US-NY", domain: "education" },
+  "il-soppa":        { name: "Illinois Student Online Personal Protection Act", citation: "105 ILCS 85",                                     jurisdiction: "US-IL", domain: "education" },
+  "ca-sopipa":       { name: "California Student Online Personal Information Protection Act", citation: "Cal. Bus. & Prof. Code §22584",   jurisdiction: "US-CA", domain: "education" },
+  "ct-pa-5-2":       { name: "Connecticut Public Act 5-2 — Student Data Privacy", citation: "Conn. Public Act No. 16-189",                  jurisdiction: "US-CT", domain: "education" },
+  "tx-hb-4504":      { name: "Texas HB 4504 — Student Data Privacy",            citation: "Tex. Educ. Code §32.151",                          jurisdiction: "US-TX", domain: "education" },
+  "va-sb-1376":      { name: "Virginia SB 1376 — Student Data Privacy",         citation: "Va. Code §22.1-289.01",                            jurisdiction: "US-VA", domain: "education" },
+  "staterramp":      { name: "StateRAMP / TX-RAMP / AZ-RAMP / GovRAMP Family",  citation: "StateRAMP Program (FedRAMP-Moderate cross-walk)",  jurisdiction: "US", domain: "cybersecurity" },
+  "irap":            { name: "Australia Information Security Registered Assessors Program / Essential Eight / ISM", citation: "ASD IRAP + ISM",                      jurisdiction: "AU", domain: "cybersecurity" },
+  "bsi-c5":          { name: "Germany BSI C5 — Cloud Computing Compliance Catalogue", citation: "BSI Cloud Computing Compliance Criteria Catalogue (C5:2020)", jurisdiction: "DE", domain: "cybersecurity" },
+  "ens-es":          { name: "Spain Esquema Nacional de Seguridad",             citation: "Real Decreto 311/2022",                            jurisdiction: "ES", domain: "cybersecurity" },
+  "uk-g-cloud":      { name: "UK G-Cloud Framework",                            citation: "UK Crown Commercial Service G-Cloud 14",          jurisdiction: "UK", domain: "cybersecurity" },
+  // ---- REGIME_MAP backfill (cybersecurity / AI / supply-chain frameworks) ----
+  "nist-800-53":              { name: "NIST SP 800-53 Rev 5 — Security & Privacy Controls", citation: "NIST SP 800-53 Rev 5",                jurisdiction: "US", domain: "cybersecurity" },
+  "nist-ai-rmf-1.0":          { name: "NIST AI Risk Management Framework 1.0",  citation: "NIST AI 100-1 (Jan 2023)",                        jurisdiction: "US", domain: "ai" },
+  "iso-42001-2023":           { name: "ISO/IEC 42001:2023 — AI Management System", citation: "ISO/IEC 42001:2023",                          jurisdiction: "international", domain: "ai" },
+  "iso-23894-2023":           { name: "ISO/IEC 23894:2023 — AI Risk Management",  citation: "ISO/IEC 23894:2023",                            jurisdiction: "international", domain: "ai" },
+  "owasp-llm-top-10-2025":    { name: "OWASP Top 10 for LLM Applications 2025",  citation: "OWASP LLM Top 10 v2025",                          jurisdiction: "international", domain: "ai" },
+  "owasp-asvs-v5.0":          { name: "OWASP Application Security Verification Standard v5.0", citation: "OWASP ASVS v5.0",                   jurisdiction: "international", domain: "cybersecurity" },
+  "nist-800-218-ssdf":        { name: "NIST SP 800-218 — Secure Software Development Framework", citation: "NIST SP 800-218 v1.1",          jurisdiction: "US", domain: "supply-chain" },
+  "nist-800-82-r3":           { name: "NIST SP 800-82 Rev 3 — OT Security Guide", citation: "NIST SP 800-82 Rev 3",                          jurisdiction: "US", domain: "operational-technology" },
+  "nist-800-63b-rev4":        { name: "NIST SP 800-63B Rev 4 — Digital Identity Authentication", citation: "NIST SP 800-63B Rev 4",         jurisdiction: "US", domain: "identity" },
+  "iec-62443-3-3":            { name: "IEC 62443-3-3 — IACS System Security",     citation: "IEC 62443-3-3:2013",                              jurisdiction: "international", domain: "operational-technology" },
+  "fedramp-rev5-moderate":    { name: "FedRAMP Rev 5 Moderate Baseline",          citation: "GSA FedRAMP Rev 5 (Moderate baseline)",         jurisdiction: "US", domain: "cybersecurity" },
+  "hipaa-security-rule":      { name: "HIPAA Security Rule — Technical Safeguards", citation: "45 CFR §164.312",                            jurisdiction: "US", domain: "health" },
+  "hitrust-csf-v11.4":        { name: "HITRUST Common Security Framework v11.4",  citation: "HITRUST CSF v11.4",                              jurisdiction: "US", domain: "health" },
+  "nerc-cip-007-6":           { name: "NERC CIP-007-6 — BES Cyber System Security Management", citation: "NERC CIP-007-6",                  jurisdiction: "US", domain: "energy" },
+  "psd2-rts-sca":             { name: "EU PSD2 RTS on Strong Customer Authentication", citation: "Commission Delegated Regulation 2018/389",  jurisdiction: "EU", domain: "financial" },
+  "swift-cscf-v2026":         { name: "SWIFT Customer Security Controls Framework v2026", citation: "SWIFT CSCF v2026",                       jurisdiction: "international", domain: "financial" },
+  "slsa-v1.0-build-l3":       { name: "SLSA v1.0 Build Track Level 3",            citation: "SLSA Specification v1.0",                       jurisdiction: "international", domain: "supply-chain" },
+  "vex-csaf-2.1":             { name: "OASIS CSAF 2.1 — VEX",                     citation: "OASIS CSAF 2.1",                                  jurisdiction: "international", domain: "supply-chain" },
+  "cyclonedx-v1.6":           { name: "CycloneDX v1.6 SBOM",                      citation: "OWASP CycloneDX v1.6",                            jurisdiction: "international", domain: "supply-chain" },
+  "spdx-v3.0":                { name: "SPDX v3.0 SBOM",                            citation: "Linux Foundation SPDX v3.0",                     jurisdiction: "international", domain: "supply-chain" },
+  "owasp-wstg-v5":            { name: "OWASP Web Security Testing Guide v5",      citation: "OWASP WSTG v5",                                   jurisdiction: "international", domain: "cybersecurity" },
+  "ptes":                     { name: "Penetration Testing Execution Standard",   citation: "PTES (community standard)",                       jurisdiction: "international", domain: "cybersecurity" },
+  "nist-800-115":             { name: "NIST SP 800-115 — Technical Guide to Information Security Testing", citation: "NIST SP 800-115",     jurisdiction: "US", domain: "cybersecurity" },
+  "cwe-top-25-2024":          { name: "CWE Top 25 Most Dangerous Software Weaknesses (2024)", citation: "MITRE CWE Top 25 (2024)",          jurisdiction: "international", domain: "cybersecurity" },
+  "cis-controls-v8":          { name: "CIS Controls v8",                          citation: "Center for Internet Security CIS Controls v8",    jurisdiction: "international", domain: "cybersecurity" },
+  "cmmc-2.0-level-2":         { name: "CMMC 2.0 Level 2 — Advanced",              citation: "32 CFR Part 170 + NIST SP 800-171 Rev 2",        jurisdiction: "US", domain: "cybersecurity" },
+  "cmmc-2.0-level-1":         { name: "CMMC 2.0 Level 1 — Foundational",          citation: "32 CFR Part 170 + FAR 52.204-21",                jurisdiction: "US", domain: "cybersecurity" },
+  "cmmc-2.0-level-3":         { name: "CMMC 2.0 Level 3 — Expert",                citation: "32 CFR Part 170 + NIST SP 800-172 enhanced",     jurisdiction: "US", domain: "cybersecurity" },
 });
 
 /**
@@ -821,11 +936,11 @@ function describe(posture) {
 // floors.
 //
 // Keys per posture:
-//   backupEncryptionRequired  — backup.create refuses encrypt:false (F-BUDR-4)
+//   backupEncryptionRequired  — backup.create refuses encrypt:false
 //   auditChainSignedRequired  — audit emissions MUST be ML-DSA-87 chain-signed
 //   tlsMinVersion             — minimum TLS version (string e.g. "TLSv1.3")
 //   sessionAbsoluteTimeoutMs  — hard session expiry ceiling
-//   requireVacuumAfterErase   — F-RTBF-2: cryptoField.eraseRow must call
+//   requireVacuumAfterErase   — cryptoField.eraseRow must call
 //                               b.db.vacuumAfterErase({ mode: "full" })
 //                               so freed B-tree index pages don't linger
 //                               with sealed-column ciphertext readable
@@ -850,7 +965,7 @@ var POSTURE_DEFAULTS = Object.freeze({
     requireVacuumAfterErase:  false,
   }),
   "gdpr": Object.freeze({
-    backupEncryptionRequired: false,           // GDPR Art. 32 says "appropriate" — not mandatory floor // allow:protocol-constant — regulatory article number in prose
+    backupEncryptionRequired: false,           // GDPR Art. 32 says "appropriate" — not mandatory floor
     auditChainSignedRequired: true,
     tlsMinVersion:            "TLSv1.3",
     // GDPR Art. 17 — "right to erasure" includes residual indexes; B-tree
@@ -1061,9 +1176,9 @@ var POSTURE_DEFAULTS = Object.freeze({
   "nist-800-66-r2":  Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
   "ehds":            Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
   "circia":          Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
-  // ---- v0.9.6 — exceptd framework-control-gap closure cascade ----
+  // ---- exceptd framework-control-gap closure cascade ----
   "nist-800-53":             Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
-  // SUPPLY-18 — NIST AI-RMF MANAGE.4.3 / ISO 23894 §6.5 / ISO 42001
+  // NIST AI-RMF MANAGE.4.3 / ISO 23894 §6.5 / ISO 42001
   // §A.6 require encrypted backups for AI system state (model
   // weights, training data, prompt logs all contain regulated
   // payload). All AI-domain postures now enforce backupEncryption.
@@ -1071,7 +1186,7 @@ var POSTURE_DEFAULTS = Object.freeze({
   "iso-42001-2023":          Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
   "iso-23894-2023":          Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
   "owasp-llm-top-10-2025":   Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
-  // SUPPLY-19 — OWASP ASVS v5.0 §8.3.4 (sensitive-data deletion)
+  // OWASP ASVS v5.0 §8.3.4 (sensitive-data deletion)
   // requires post-delete storage reclamation. Set requireVacuumAfterErase
   // so operators pinning ASVS v5.0 inherit the proper floor.
   "owasp-asvs-v5.0":         Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
@@ -1079,7 +1194,7 @@ var POSTURE_DEFAULTS = Object.freeze({
   "nist-800-82-r3":          Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
   "nist-800-63b-rev4":       Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
   "iec-62443-3-3":           Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
-  // SUPPLY-21 — FedRAMP Rev 5 Moderate baseline references FIPS 140-3
+  // FedRAMP Rev 5 Moderate baseline references FIPS 140-3
   // validated cryptography for protect-against-disclosure controls
   // (SC-13, SC-28). The framework's PQC-first defaults (ML-KEM-1024,
   // XChaCha20-Poly1305, SHA3-512) are NOT FIPS-140-3 validated as of
@@ -1115,7 +1230,7 @@ var POSTURE_DEFAULTS = Object.freeze({
   "nist-800-115":            Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
   "cwe-top-25-2024":         Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
   "cis-controls-v8":         Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
-  // SUPPLY-20 — CMMC 2.0 levels differ in control mapping:
+  // CMMC 2.0 levels differ in control mapping:
   //   L1 (Foundational, 15 FAR controls, FCI data only) — encrypted
   //       backups NOT mandated; audit-chain encouraged.
   //   L2 (Advanced, 110 NIST 800-171 Rev 2 controls, CUI data) —
@@ -1127,7 +1242,7 @@ var POSTURE_DEFAULTS = Object.freeze({
   "cmmc-2.0-level-1":        Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
   "cmmc-2.0-level-2":        Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
   "cmmc-2.0-level-3":        Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true, fipsMode: false }),
-  // ---- v0.10.16 — sectoral catch-up ----
+  // ---- sectoral catch-up ----
   // 42 CFR Part 2 — Substance Use Disorder records confidentiality
   // (HHS final rule 2024-04-16 aligns Part 2 with HIPAA but retains
   // a stricter consent floor; encrypted backups + signed audit chain
@@ -1200,6 +1315,32 @@ var POSTURE_DEFAULTS = Object.freeze({
   // present as "nyc-ll144"); 2024 amendment adds annual re-audit
   // signing.
   "nyc-ll144-2024":          Object.freeze({ backupEncryptionRequired: false, auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: false }),
+  // Regulation (EU) 2024/1689 (EU AI Act) — Art. 50 transparency
+  // obligations enter force 2026-08-02 (v0.12.12 disclosure
+  // primitives). High-risk system providers must audit-chain
+  // every model-training + deployment event (Art. 12 logging) +
+  // sign the chain (Art. 15 cybersecurity / accuracy /
+  // robustness). Vacuum-after-erase covers Art. 50(4) synthetic-
+  // content provenance — when a model-generated image is
+  // erased from a system's storage, the residual EXIF / metadata
+  // entries pointing at the model must be cleared too.
+  "eu-ai-act":               Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
+  // The legacy `ai-act` short
+  // name carries the SAME cascade as `eu-ai-act` so deployments
+  // pinned to the legacy alias get the new encryption / audit /
+  // TLS / vacuum floors instead of falling through to null. The
+  // back-compat KNOWN_POSTURES entry exists; the POSTURE_DEFAULTS
+  // row was missing.
+  "ai-act":                  Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
+  // California AB-853 (effective 2026) — model-generated content
+  // watermarking + provenance. Same encryption + audit posture
+  // as eu-ai-act (these regimes line up); requireVacuumAfterErase
+  // tracks the erase-of-watermarked-content invariant.
+  "ca-ab-853":               Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
+  // China CAC Generative AI Service Measures (effective 2023-08;
+  // 2024 mandatory-labelling amendment). Synthetic-content
+  // labelling per Art. 12 + algorithm filing per Art. 4.
+  "cac-genai-label":         Object.freeze({ backupEncryptionRequired: true,  auditChainSignedRequired: true, tlsMinVersion: "TLSv1.3", requireVacuumAfterErase: true  }),
 });
 
 /**
@@ -1266,14 +1407,11 @@ function postureDefault(posture, key) {
  *
  * @example
  *   b.compliance.posturesByDomain("privacy");
- *   // → ["ccpa", "gdpr", "lgpd-br", "pipl-cn", "appi-jp",
- *   //    "pdpa-sg", "pipeda-ca", "uk-gdpr"]
+ *   // → ["ccpa", "gdpr", "lgpd-br", ...] — every posture whose
+ *   //    domain is "privacy" (the full set grows as regimes are added)
  *
  *   b.compliance.posturesByDomain("health");
- *   // → ["hipaa", "wmhmda"]
- *
- *   b.compliance.posturesByDomain("payment");
- *   // → ["pci-dss"]
+ *   // → ["hipaa", "wmhmda", ...] — every "health"-domain posture
  *
  *   b.compliance.posturesByDomain("not-a-domain");
  *   // → []
@@ -1309,13 +1447,14 @@ function posturesByDomain(domain) {
  *
  * @example
  *   b.compliance.posturesByJurisdiction("EU");
- *   // → ["gdpr", "dora", "nis2", "cra", "ai-act"]
+ *   // → ["gdpr", "dora", "nis2", ...] — every EU-jurisdiction posture
+ *   //    (the full set grows as regimes are added)
  *
  *   b.compliance.posturesByJurisdiction("US");
- *   // → ["hipaa", "soc2", "sox"]
+ *   // → ["hipaa", "soc2", "sox", ...] — every US-jurisdiction posture
  *
  *   b.compliance.posturesByJurisdiction("US-CA");
- *   // → ["ccpa"]
+ *   // → ["ccpa", ...] — every US-CA (California) posture
  *
  *   b.compliance.posturesByJurisdiction("XX");
  *   // → []
@@ -1387,7 +1526,7 @@ function list() {
  * Return the set of SBOM / VEX artifact standards the framework can
  * emit. These are FORMAT FAMILIES, not regulatory regimes — pinning
  * one of these names as the deployment's compliance posture conflates
- * "format I emit" with "regulatory floor I meet" (SUPPLY-34). Pin
+ * "format I emit" with "regulatory floor I meet". Pin
  * the regulatory regime (FedRAMP / SSDF / HIPAA / etc.) via
  * `b.compliance.set()` and surface the emitted artifact standards via
  * this read-only catalog.

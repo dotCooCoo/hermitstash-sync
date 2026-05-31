@@ -84,8 +84,9 @@
  *     generating a DSN (the existing `b.mail.bounce` primitive does
  *     this); this guard parses INBOUND DSNs and gates the parse
  *     surface bounds, not the bounce-generation policy.
- *   - **DSN header-injection class** (CVE-2026-32178 .NET
- *     System.Net.Mail at outbound; the inbound parse path here)
+ *   - **DSN header-injection class** (CVE-2026-32178 — .NET CWE-138
+ *     special-element / header-injection spoofing, the System.Net.Mail
+ *     vector per MSRC, at outbound; the inbound parse path here)
  *     — refuses CR/LF/NUL/C0 in header lines.
  *   - **CSAF / iSchedule prose tampering** — operator inspecting
  *     the prose part for the original recipient runs into the
@@ -106,9 +107,9 @@ var GuardDsnError = defineClass("GuardDsnError", { alwaysPermanent: true });
 var DEFAULT_PROFILE = "strict";
 
 var PROFILES = Object.freeze({
-  strict:     { maxBytes: C.BYTES.kib(256), maxRecipients: 256, maxHeaderLine: 998 },                    // allow:raw-byte-literal — RFC 5322 §2.1.1 header line cap; RFC 3464 recipient count
-  balanced:   { maxBytes: C.BYTES.mib(1),   maxRecipients: 1024, maxHeaderLine: 998 },                   // allow:raw-byte-literal — RFC 5322 §2.1.1 line cap; mailing-list blast bounces
-  permissive: { maxBytes: C.BYTES.mib(4),   maxRecipients: 4096, maxHeaderLine: 998 },                   // allow:raw-byte-literal — RFC 5322 §2.1.1 line cap; large-blast bounce class
+  strict:     { maxBytes: C.BYTES.kib(256), maxRecipients: 256, maxHeaderLine: 998 },                    // RFC 5322 §2.1.1 header line cap; RFC 3464 recipient count
+  balanced:   { maxBytes: C.BYTES.mib(1),   maxRecipients: 1024, maxHeaderLine: 998 },                   // RFC 5322 §2.1.1 line cap; mailing-list blast bounces
+  permissive: { maxBytes: C.BYTES.mib(4),   maxRecipients: 4096, maxHeaderLine: 998 },                   // RFC 5322 §2.1.1 line cap; large-blast bounce class
 });
 
 var COMPLIANCE_POSTURES = Object.freeze({
@@ -333,7 +334,7 @@ function _checkControlChars(line) {
   // split (e.g. backslash + literal sequence).
   for (var i = 0; i < line.length; i += 1) {
     var c = line.charCodeAt(i);
-    if (c === 0x00 || c === 0x7f || (c < 0x20 && c !== 0x09)) {                                          // allow:raw-byte-literal — RFC 5322 control char + TAB allow
+    if (c === 0x00 || c === 0x7f || (c < 0x20 && c !== 0x09)) {                                          // RFC 5322 control char + TAB allow
       throw new GuardDsnError("guard-dsn/control-char",
         "parse: control char 0x" + c.toString(16) + " in field line refused (header-injection defense)");
     }

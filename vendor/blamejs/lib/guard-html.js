@@ -105,7 +105,7 @@ var observability = lazyRequire(function () { return require("./observability");
 void observability;
 
 var _err = GuardHtmlError.factory;
-var HEX_RADIX = 16;                                                 // allow:raw-byte-literal — base-16 radix, not byte size
+var HEX_RADIX = 16;                                                 // base-16 radix, not byte size
 
 // ---- Codepoint catalog (shared via lib/codepoint-class) ----
 
@@ -242,8 +242,8 @@ var PROFILES = Object.freeze({
     mxssHintPolicy:     "reject",
     maxBytes:           C.BYTES.mib(2),
     maxAttrValueBytes:  C.BYTES.kib(8),
-    maxTagDepth:        128,                                          // allow:raw-byte-literal — tag-nesting depth count, not bytes
-    maxAttrsPerTag:     64,                                           // allow:raw-byte-literal — attribute count per tag, not bytes
+    maxTagDepth:        128,                                          // tag-nesting depth count, not bytes
+    maxAttrsPerTag:     64,                                           // attribute count per tag, not bytes
   },
   "balanced": {
     allowedTags:        BALANCED_ALLOWED_TAGS,
@@ -264,8 +264,8 @@ var PROFILES = Object.freeze({
     mxssHintPolicy:     "audit",
     maxBytes:           C.BYTES.mib(8),
     maxAttrValueBytes:  C.BYTES.kib(32),
-    maxTagDepth:        256,                                          // allow:raw-byte-literal — tag-nesting depth count, not bytes
-    maxAttrsPerTag:     128,                                          // allow:raw-byte-literal — attribute count per tag, not bytes
+    maxTagDepth:        256,                                          // tag-nesting depth count, not bytes
+    maxAttrsPerTag:     128,                                          // attribute count per tag, not bytes
   },
   "permissive": {
     allowedTags:        PERMISSIVE_ALLOWED_TAGS,
@@ -286,8 +286,8 @@ var PROFILES = Object.freeze({
     mxssHintPolicy:     "audit",
     maxBytes:           C.BYTES.mib(32),
     maxAttrValueBytes:  C.BYTES.kib(64),
-    maxTagDepth:        512,                                          // allow:raw-byte-literal — tag-nesting depth count, not bytes
-    maxAttrsPerTag:     256,                                          // allow:raw-byte-literal — attribute count per tag, not bytes
+    maxTagDepth:        512,                                          // tag-nesting depth count, not bytes
+    maxAttrsPerTag:     256,                                          // attribute count per tag, not bytes
   },
 });
 
@@ -1030,7 +1030,7 @@ function sanitize(input, opts) {
  * Returns a guard descriptor that plugs into the framework's
  * content-safety wiring (`b.fileUpload.contentSafety` /
  * `b.staticServe.contentSafety` / `b.guardAll`). The descriptor's
- * `inspect(ctx)` resolves to one of four actions: `serve` (no
+ * `check(ctx)` resolves to one of four actions: `serve` (no
  * issues), `audit-only` (low-severity issues observed), `sanitize`
  * (sanitized buffer attached when no policy is "reject"), or
  * `refuse` (critical issue with at least one reject-policy active).
@@ -1057,7 +1057,7 @@ function sanitize(input, opts) {
  *
  *   // Refuse on tag-budget exceeded — strict profile rejects <script>.
  *   var hostileBuf = Buffer.from("<p>hi</p><script>alert(1)</script>", "utf8");
- *   var rv = await g.inspect({ bytes: hostileBuf, contentType: "text/html" });
+ *   var rv = await g.check({ bytes: hostileBuf, contentType: "text/html" });
  *   rv.ok;       // → false
  *   rv.action;   // → "refuse"
  */

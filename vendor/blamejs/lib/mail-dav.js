@@ -112,8 +112,9 @@
  *   ## CVE defense composition
  *
  *   - `b.safeIcal` rejects RRULE COUNT > 10000 / BYxxx list > 24 →
- *     defends CVE-2024-39687 (ical4j RRULE recursion / Outlook
- *     calendar bomb) on the PUT path.
+ *     defends the ical4j RRULE-recursion / recurrence-expansion DoS
+ *     class (unbounded RRULE expansion exhausts CPU/memory) on the
+ *     PUT path.
  *   - `b.xmlC14n.parse` rejects DOCTYPE / ENTITY in the
  *     PROPFIND / REPORT body → defends XXE / billion-laughs on the
  *     query path.
@@ -125,7 +126,7 @@
  *   mount under their HTTP router. Composes b.safeIcal / b.safeVcard
  *   for PUT-body validation, b.xmlC14n.parse for PROPFIND / REPORT
  *   bodies. Per-principal URL isolation; operator-supplied storage
- *   backend. Defends CVE-2024-39687 at the PUT boundary.
+ *   backend. Defends the RRULE-recursion expansion-DoS class at the PUT boundary.
  */
 
 var lazyRequire = require("./lazy-require");
@@ -243,7 +244,7 @@ function create(opts) {
     var qIdx = reqUrl.indexOf("?");
     var path = qIdx >= 0 ? reqUrl.slice(0, qIdx) : reqUrl;
     // Refuse path traversal / null bytes before decoding.
-    if (path.indexOf("\0") >= 0 ||                                                                       // allow:raw-byte-literal — NUL byte refusal
+    if (path.indexOf("\0") >= 0 ||                                                                       // NUL byte refusal
         /(?:^|\/)\.\.(?:\/|$)/.test(path) ||
         /%2e%2e/i.test(path) ||
         /%00/i.test(path)) {
@@ -749,7 +750,7 @@ function create(opts) {
       return _refuseStatus(res, 400, "PUT requires a component path");
     }
     var bodyBuf = await _readBodyBytes(req);
-    // Validate iCal body via safeIcal — defends CVE-2024-39687 at the
+    // Validate iCal body via safeIcal — defends the RRULE-recursion expansion-DoS class at the
     // ingest boundary.
     try {
       safeIcal.parse(bodyBuf, {

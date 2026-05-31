@@ -14,14 +14,21 @@ services:
     build:
       context: ../..
       dockerfile: examples/wiki/Dockerfile
-    image: blamejs-wiki:0.3.8
+    image: blamejs-wiki:0.11.45
     container_name: blamejs-wiki
     restart: unless-stopped
+    # Graceful-shutdown budget. The app's shutdown orchestrator runs its
+    # phases within a 30s grace (graceMs) — drain in-flight, close the HTTP
+    # server, then the DB phase that WAL-checkpoints and (in encrypted mode)
+    # re-encrypts to db.enc. Docker's default 10s stop grace SIGKILLs before
+    # the DB phase gets to run, losing the final flush. Allow more than
+    # graceMs plus the forced-exit watchdog margin.
+    stop_grace_period: 40s
     ports:
-      - "8080:8080"
+      - "3008:3008"
     environment:
       WIKI_DATA_DIR: /data
-      WIKI_PORT: "8080"
+      WIKI_PORT: "3008"
       WIKI_ADMIN_EMAIL: ${WIKI_ADMIN_EMAIL:-admin@blamejs.com}
       WIKI_ADMIN_PASSWORD: ${WIKI_ADMIN_PASSWORD:-}
       WIKI_WEBHOOK_URL: ${WIKI_WEBHOOK_URL:-}
@@ -156,7 +163,7 @@ services:
     volumes:
       - wiki-data:/data
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3008/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       start_period: 20s

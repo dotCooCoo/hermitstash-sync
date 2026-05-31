@@ -67,9 +67,10 @@ var ALL_DIRECTIVES = [
   "default-src", "script-src", "script-src-elem", "script-src-attr",
   "style-src", "style-src-elem", "style-src-attr",
   "img-src", "media-src", "font-src", "connect-src", "object-src",
-  "frame-src", "child-src", "worker-src", "manifest-src", "prefetch-src",
+  "frame-src", "child-src", "worker-src", "fenced-frame-src",
+  "manifest-src", "prefetch-src",
   "form-action", "frame-ancestors", "navigate-to", "base-uri", "sandbox",
-  "report-to", "report-uri",
+  "webrtc", "report-to", "report-uri",
   "require-trusted-types-for", "trusted-types",
   "upgrade-insecure-requests", "block-all-mixed-content",
 ];
@@ -221,8 +222,8 @@ function build(directives, opts) {
  *     b.csp.build({ "script-src": ["'self'", "'nonce-" + req.cspNonce + "'"] }));
  */
 function nonce(byteLen) {
-  var n = typeof byteLen === "number" ? byteLen : 32;                                              // allow:raw-byte-literal — 256-bit nonce default
-  if (!isFinite(n) || n < 16 || n > 64) {                                                          // allow:raw-byte-literal — CSP3 §6.2.x nonce bounds
+  var n = typeof byteLen === "number" ? byteLen : 32;                                              // 256-bit nonce default
+  if (!isFinite(n) || n < 16 || n > 64) {                                                          // CSP3 §6.2.x nonce bounds
     throw new CspError("csp/bad-nonce-len",
       "csp.nonce: byteLen must be 16-64 (CSP3 §6.2 recommends ≥16 bytes)");
   }

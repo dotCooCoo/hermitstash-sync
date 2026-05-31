@@ -62,6 +62,9 @@ var audit       = lazyRequire(function () { return require("./audit"); });
 // loaded because safe-buffer.js itself imports b.crypto for
 // hex-compare helpers (circular).
 var safeBuffer  = lazyRequire(function () { return require("./safe-buffer"); });
+// pqc-software requires this module (b.crypto) — lazy-load to break the
+// cycle. Only the power-on self-test needs it here.
+var pqcSoftware = lazyRequire(function () { return require("./pqc-software"); });
 
 // Streaming-hash algorithm allowlist. Mirrors the framework's PQC-
 // first crypto policy: SHA3 / SHAKE family is the default surface;
@@ -165,7 +168,7 @@ function hashFile(filePath, algorithm) {
 // `algorithms` entry. Used by hashFilesParallel below; not exported
 // directly because the common case is the parallel-many shape.
 //
-// CRYPTO-5 hardening (v0.9.58):
+// Hardening (v0.9.58):
 //   - lstat-then-stat so symlinks are detected before open; refused
 //     unless opts.followSymlinks === true (default false — a symlink-
 //     in-input-list attack lets a write-restricted caller hash files
@@ -266,9 +269,8 @@ function _hashFileMulti(filePath, algorithms, opts) {
  * SBOM regeneration / vendor-data integrity sweeps / release-asset
  * bundling — situations where N files each need both SHA-256 (legacy
  * compat) and SHA-3-512 (PQC-first) digests and rolling a worker
- * pool by hand has cost a downstream consumer (`hermitstash-sync`
- * 2026-05-13) the same two-loop, capture-N-promises, settle-Q boilerplate
- * every release.
+ * pool by hand means the same two-loop, capture-N-promises, settle-Q
+ * boilerplate every release.
  *
  * @opts
  *   algorithms?:     string[], // default ["sha256", "sha3-512"]; any node:crypto-known digest
@@ -316,9 +318,9 @@ function hashFilesParallel(filePaths, opts) {
   }
   var concurrency = opts.concurrency !== undefined
     ? opts.concurrency
-    : Math.min(8, Math.max(1, filePaths.length));                                                  // allow:raw-byte-literal — worker fan-out cap, not bytes
+    : Math.min(8, Math.max(1, filePaths.length));                                                  // worker fan-out cap, not bytes
   if (typeof concurrency !== "number" || !isFinite(concurrency) ||
-      concurrency < 1 || concurrency > 256 ||                                                       // allow:raw-byte-literal — concurrency upper cap
+      concurrency < 1 || concurrency > 256 ||                                                       // concurrency upper cap
       Math.floor(concurrency) !== concurrency) {
     return Promise.reject(new TypeError(
       "crypto.hashFilesParallel: opts.concurrency must be an integer in [1, 256], got " + concurrency
@@ -330,7 +332,7 @@ function hashFilesParallel(filePaths, opts) {
       "crypto.hashFilesParallel: opts.onProgress must be a function when supplied"
     ));
   }
-  // CRYPTO-5 — DoS cap. Default 1 GiB per file; operators with larger
+  // DoS cap. Default 1 GiB per file; operators with larger
   // legitimate hashing workloads (firmware images, vendor packs)
   // override per-call.
   var maxBytesPerFile = opts.maxBytesPerFile !== undefined
@@ -387,9 +389,16 @@ function random(byteLength) {
   // when callers requested more. SHAKE256 is also already the
   // framework's KDF / browser-side derivation primitive, so the same
   // hash family does double duty.
-  return nodeCrypto.createHash("shake256", { outputLength: n })
-    .update(nodeCrypto.randomBytes(n))
+  //
+  // Node's SHAKE256 XOF is non-uniform at outputLength 1 (the byte
+  // values 0x00 and 0xff never occur and the low bit skews to ~0.54);
+  // outputLength >= 2 is uniform. Draw at least 2 bytes and slice so a
+  // 1-byte request still returns a uniform byte.
+  var drawN = n < 2 ? 2 : n;
+  var out = nodeCrypto.createHash("shake256", { outputLength: drawN })
+    .update(nodeCrypto.randomBytes(drawN))
     .digest();
+  return drawN === n ? out : out.subarray(0, n);
 }
 
 /**
@@ -779,10 +788,12 @@ function toBase64Url(buf) {
  *
  * Strict mode (default) refuses non-canonical input — chars outside
  * the RFC 4648 §5 alphabet, length-mod-4-of-1, mixed `+/` from
- * standard base64, trailing garbage. Defends a CVE-2022-0235-class
- * footgun where Node's permissive decoder silently tolerated
- * tampered JWT signatures. Operators with a documented lossy legacy
- * payload opt out per call via `{ strict: false }`.
+ * standard base64, trailing garbage. Defends the CWE-347 /
+ * CWE-1286 signature-canonicalization footgun where a permissive
+ * base64url decoder silently tolerates a tampered JWS / JWT signature
+ * (non-canonical bytes decoding to the same buffer). Operators with a
+ * documented lossy legacy payload opt out per call via
+ * `{ strict: false }`.
  *
  * @opts
  *   strict: boolean   // default: true — refuse non-canonical input
@@ -807,7 +818,8 @@ function fromBase64Url(s, opts) {
   // OAuth `state` round-tripping) MUST reject non-canonical / malformed
   // input. The Node base64url decoder silently tolerates trailing
   // garbage, mixed `+/` from standard base64, missing padding errors,
-  // and length-mod-4 shapes — CVE-2022-0235-class footgun. Strict mode
+  // and length-mod-4 shapes — the CWE-347 / CWE-1286 signature-
+  // canonicalization footgun. Strict mode
   // (the default) refuses anything outside the RFC 4648 §5 alphabet +
   // length rules. Operators with a known-lossy legacy payload pass
   // `{ strict: false }` to opt out per call.
@@ -817,7 +829,7 @@ function fromBase64Url(s, opts) {
     // `/=+$/` CodeQL flags, where `=+` can backtrack on long input
     // ending in many `=`. Walking from end is O(n) worst-case.
     var trimEnd = s.length;
-    while (trimEnd > 0 && s.charCodeAt(trimEnd - 1) === 0x3D) trimEnd -= 1;          // allow:raw-byte-literal — '=' codepoint
+    while (trimEnd > 0 && s.charCodeAt(trimEnd - 1) === 0x3D) trimEnd -= 1;          // '=' codepoint
     var unpadded = s.slice(0, trimEnd);
     if (!_BASE64URL_STRICT_RE.test(s)) {
       throw new TypeError(
@@ -825,7 +837,7 @@ function fromBase64Url(s, opts) {
         "base64url alphabet (A-Z a-z 0-9 - _ =) — pass {strict:false} to allow non-canonical input"
       );
     }
-    if (unpadded.length % 4 === 1) {                                                                 // allow:raw-byte-literal — base64 group length, not bytes
+    if (unpadded.length % 4 === 1) {                                                                 // base64 group length, not bytes
       throw new TypeError(
         "crypto.fromBase64Url: input length %% 4 === 1 is not a valid base64url encoding " +
         "(every conforming encoder produces 0 / 2 / 3 remainder; got " + unpadded.length + " chars)"
@@ -1181,7 +1193,7 @@ function encryptMlkemOnly(plaintext, publicKeyPem) {
  */
 function decrypt(ciphertext, privateKeys, opts) {
   var packed = Buffer.from(ciphertext, "base64");
-  if (packed[0] === 0xE1) {                                                       // allow:raw-byte-literal — legacy envelope magic
+  if (packed[0] === 0xE1) {                                                       // legacy envelope magic
     if (!opts || !opts.allowLegacy) {
       throw new Error("Invalid envelope: legacy 0xE1 format predates the FixedInfo " +
         "KDF binding (NIST SP 800-56C r2 §4.1) — re-seal data under the current envelope, " +
@@ -1189,7 +1201,7 @@ function decrypt(ciphertext, privateKeys, opts) {
     }
     // Audit-emit every legacy decrypt so the migration window is
     // visible. Emit success ONLY on actual decrypt success; emit
-    // failure on throw. Codex P2 PR #74 — pre-fix the audit fired
+    // failure on throw. Before this fix, the audit fired
     // before decryptEnvelope() ran, so corrupted 0xE1 blobs / wrong
     // private keys / unsupported KEMs got logged as successful legacy
     // decrypts when the call actually threw, inflating real success
@@ -1290,7 +1302,7 @@ function decryptEnvelope(packed, privateKeys, internalOpts) {
   // Re-derive the 4-byte envelope-header AAD from the bytes we just
   // dispatched on. A tampered header (algorithm-substitution attack)
   // surfaces here as a Poly1305 tag verification failure.
-  var headerAad = packed.subarray(0, 4);                                          // allow:raw-byte-literal — envelope-header byte slice
+  var headerAad = packed.subarray(0, 4);                                          // envelope-header byte slice
   var plainBuf = Buffer.from(
     xchacha20poly1305(symmetricKey, nonce, headerAad).decrypt(packed.subarray(pos))
   );
@@ -1866,8 +1878,124 @@ var SUPPORTED_KEM_ALGORITHMS = Object.freeze([
 //   var fixtures = require("blamejs/lib/_test/crypto-fixtures");
 //   var blob = fixtures.mintLegacyEnvelope0xE1(plaintext, recipient);
 
+// ---- FIPS 140-3-style power-on self-test ----
+//
+// Known-answer tests (KATs) for the deterministic primitives — the
+// hash / XOF digests are NIST FIPS 202 published vectors, so this
+// confirms the framework's hashing matches the standard, not merely
+// itself. The PQC algorithms have no seed-injection API (node generates
+// the keypair randomness internally), so they get FIPS 140-3 §10.3
+// pairwise-consistency + negative tests (a fresh keypair must
+// sign->verify / encaps->decaps consistently, and a tampered signature
+// must be rejected) rather than a fixed-seed KAT.
+var KAT_SHA3_512_ABC = "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0";
+var KAT_SHA3_256_ABC = "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532";
+var KAT_SHAKE256_ABC_32 = "483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739";
+
+/**
+ * @primitive b.crypto.selfTest
+ * @signature b.crypto.selfTest(opts?)
+ * @since     0.12.43
+ * @status    stable
+ * @compliance soc2, hipaa, pci-dss
+ * @related   b.crypto.sha3Hash, b.crypto.encrypt
+ *
+ * Run a power-on self-test over the framework's cryptographic
+ * primitives — the integrity check FIPS 140-3 requires of a validated
+ * module. The hash / XOF checks are known-answer tests against NIST FIPS
+ * 202 vectors (SHA3-256 / SHA3-512 / SHAKE256); the AEAD check
+ * round-trips XChaCha20-Poly1305 and confirms a tampered ciphertext is
+ * rejected; the post-quantum checks run a pairwise-consistency +
+ * negative test for ML-KEM-1024, ML-DSA-87, and SLH-DSA-SHAKE-256f.
+ * Returns a structured report and, by default, throws on any failure so
+ * a broken crypto stack fails closed at boot rather than silently
+ * producing bad output.
+ *
+ * @opts
+ *   {
+ *     throwOnFailure?: boolean,  // default true — throw if any check fails
+ *   }
+ *
+ * @example
+ *   var report = b.crypto.selfTest();
+ *   // -> { ok: true, results: [ { name, ok }, ... ], failures: [], ranAt }
+ */
+function selfTest(opts) {
+  opts = opts || {};
+  var results = [];
+  function record(name, fn) {
+    try { fn(); results.push({ name: name, ok: true }); }
+    catch (e) { results.push({ name: name, ok: false, detail: (e && e.message) || String(e) }); }
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+  record("SHA3-512 KAT (FIPS 202)", function () {
+    assert(sha3Hash("abc") === KAT_SHA3_512_ABC, "SHA3-512(\"abc\") does not match the FIPS 202 vector");
+  });
+  record("SHA3-256 KAT (FIPS 202)", function () {
+    assert(hash("abc", "sha3-256").toString("hex") === KAT_SHA3_256_ABC, "SHA3-256(\"abc\") does not match the FIPS 202 vector");
+  });
+  record("SHAKE256 KAT (FIPS 202)", function () {
+    assert(hash("abc", "shake256", C.BYTES.bytes(32)).toString("hex") === KAT_SHAKE256_ABC_32, "SHAKE256(\"abc\") does not match the FIPS 202 vector");
+  });
+  record("HMAC-SHA3-512 determinism", function () {
+    var k = Buffer.from("self-test-hmac-key", "utf8");
+    assert(timingSafeEqual(hmacSha3(k, "abc"), hmacSha3(k, "abc")), "HMAC-SHA3-512 is not deterministic");
+    assert(!timingSafeEqual(hmacSha3(k, "abc"), hmacSha3(k, "abd")), "HMAC-SHA3-512 collided on distinct inputs");
+  });
+  record("XChaCha20-Poly1305 round-trip + tamper-detect", function () {
+    var key = generateBytes(C.BYTES.bytes(32));
+    var pt = Buffer.from("blamejs crypto self-test plaintext", "utf8");
+    var packed = encryptPacked(pt, key);
+    assert(decryptPacked(packed, key).equals(pt), "AEAD round-trip did not recover the plaintext");
+    var bad = Buffer.from(packed); bad[bad.length - 1] ^= 0xff;
+    var rejected = false;
+    try { decryptPacked(bad, key); } catch (_e) { rejected = true; }
+    assert(rejected, "AEAD accepted a tampered ciphertext");
+  });
+
+  // Post-quantum pairwise-consistency + negative tests. PQC is an
+  // optional vendored dependency — a load failure surfaces as a failed
+  // check rather than a silent skip.
+  var pqc = pqcSoftware();
+  record("ML-KEM-1024 encaps/decaps pairwise consistency", function () {
+    var kp = pqc.ml_kem_1024.keygen();
+    var enc = pqc.ml_kem_1024.encapsulate(kp.publicKey);
+    var ss = pqc.ml_kem_1024.decapsulate(enc.cipherText, kp.secretKey);
+    assert(timingSafeEqual(Buffer.from(ss), Buffer.from(enc.sharedSecret)), "ML-KEM-1024 decapsulated secret does not match");
+  });
+  record("ML-DSA-87 sign/verify + negative", function () {
+    var kp = pqc.ml_dsa_87.keygen();
+    var msg = Buffer.from("blamejs ML-DSA self-test", "utf8");
+    var sig = pqc.ml_dsa_87.sign(msg, kp.secretKey);
+    assert(pqc.ml_dsa_87.verify(sig, msg, kp.publicKey), "ML-DSA-87 rejected a valid signature");
+    var bad = Buffer.from(sig); bad[0] ^= 0xff;
+    assert(!pqc.ml_dsa_87.verify(bad, msg, kp.publicKey), "ML-DSA-87 accepted a tampered signature");
+  });
+  record("SLH-DSA-SHAKE-256f sign/verify + negative", function () {
+    var kp = pqc.slh_dsa_shake_256f.keygen();
+    var msg = Buffer.from("blamejs SLH-DSA self-test", "utf8");
+    var sig = pqc.slh_dsa_shake_256f.sign(msg, kp.secretKey);
+    assert(pqc.slh_dsa_shake_256f.verify(sig, msg, kp.publicKey), "SLH-DSA-SHAKE-256f rejected a valid signature");
+    var bad = Buffer.from(sig); bad[0] ^= 0xff;
+    assert(!pqc.slh_dsa_shake_256f.verify(bad, msg, kp.publicKey), "SLH-DSA-SHAKE-256f accepted a tampered signature");
+  });
+
+  var failures = results.filter(function (r) { return !r.ok; });
+  var report = { ok: failures.length === 0, results: results, failures: failures, ranAt: new Date().toISOString() };
+  if (failures.length && opts.throwOnFailure !== false) {
+    var err = new Error("crypto.selfTest: " + failures.length + " self-test(s) failed: " +
+      failures.map(function (f) { return f.name; }).join("; "));
+    err.code = "crypto/self-test-failed";
+    err.report = report;
+    throw err;
+  }
+  return report;
+}
+
 module.exports = {
   sri:                          sri,
+  selfTest:                     selfTest,
   // Hashing
   sha3Hash:                    sha3Hash,
   hmacSha3:                    hmacSha3,

@@ -118,11 +118,11 @@ var PROFILES = Object.freeze({
     nullBytePolicy:         "reject",
     zeroWidthPolicy:        "reject",
     maxBytes:               C.BYTES.mib(2),
-    maxDepth:               64,                                                  // allow:raw-byte-literal — recursion depth, not byte size
-    maxElements:            8192,                                                // allow:raw-byte-literal — element count cap, not byte size
-    maxAttrsPerElement:     64,                                                  // allow:raw-byte-literal — attr count, not byte size
+    maxDepth:               64,                                                  // recursion depth, not byte size
+    maxElements:            8192,                                                // element count cap, not byte size
+    maxAttrsPerElement:     64,                                                  // attr count, not byte size
     maxAttrValueBytes:      C.BYTES.kib(8),
-    maxNumericCharRefs:     1024,                                                // allow:raw-byte-literal — NCR fan-out cap (CVE-2026-26278)
+    maxNumericCharRefs:     1024,                                                // NCR fan-out cap (CVE-2026-26278)
   },
   "balanced": {
     doctypePolicy:          "reject",                // DOCTYPE is XXE vector regardless
@@ -138,11 +138,11 @@ var PROFILES = Object.freeze({
     nullBytePolicy:         "strip",
     zeroWidthPolicy:        "strip",
     maxBytes:               C.BYTES.mib(8),
-    maxDepth:               256,                                                 // allow:raw-byte-literal — recursion depth, not byte size
-    maxElements:            65536,                                               // allow:raw-byte-literal — element count cap, not byte size
-    maxAttrsPerElement:     128,                                                 // allow:raw-byte-literal — attr count, not byte size
+    maxDepth:               256,                                                 // recursion depth, not byte size
+    maxElements:            65536,                                               // element count cap, not byte size
+    maxAttrsPerElement:     128,                                                 // attr count, not byte size
     maxAttrValueBytes:      C.BYTES.kib(32),
-    maxNumericCharRefs:     16384,                                               // allow:raw-byte-literal — NCR fan-out cap (CVE-2026-26278)
+    maxNumericCharRefs:     16384,                                               // NCR fan-out cap (CVE-2026-26278)
   },
   "permissive": {
     doctypePolicy:          "reject",                // billion-laughs class always
@@ -158,11 +158,11 @@ var PROFILES = Object.freeze({
     nullBytePolicy:         "reject",
     zeroWidthPolicy:        "strip",
     maxBytes:               C.BYTES.mib(64),
-    maxDepth:               1024,                                                // allow:raw-byte-literal — recursion depth, not byte size
-    maxElements:            262144,                                              // allow:raw-byte-literal — element count cap, not byte size
-    maxAttrsPerElement:     256,                                                 // allow:raw-byte-literal — attr count, not byte size
+    maxDepth:               1024,                                                // recursion depth, not byte size
+    maxElements:            262144,                                              // element count cap, not byte size
+    maxAttrsPerElement:     256,                                                 // attr count, not byte size
     maxAttrValueBytes:      C.BYTES.kib(64),
-    maxNumericCharRefs:     262144,                                              // allow:raw-byte-literal — NCR fan-out cap (CVE-2026-26278)
+    maxNumericCharRefs:     262144,                                              // NCR fan-out cap (CVE-2026-26278)
   },
 });
 
@@ -303,7 +303,7 @@ function _detectIssues(input, opts) {
   // get the NCR cap disabled with them. The `maxNumericCharRefs` opt
   // is validated by `numericBounds.requireAllPositiveFiniteIntIfPresent`
   // at the public-surface boundary above.
-  var ncrCap = opts.maxNumericCharRefs;                                          // allow:numeric-opt-no-bounds-check — validated at public boundary
+  var ncrCap = opts.maxNumericCharRefs;
   if (ncrCap !== undefined && ncrCap !== null) {
     var ncrMatches = input.match(NUMERIC_CHAR_REF_RE);                           // allow:regex-no-length-cap — input bounded by maxBytes above
     var ncrCount = ncrMatches === null ? 0 : ncrMatches.length;
@@ -371,7 +371,7 @@ function _detectIssues(input, opts) {
  *
  * Inspect `input` (string of XML source) for the full guard-xml
  * threat catalog without invoking a parser. Returns
- * `{ ok, issues, severities }` where `issues` enumerates every
+ * `{ ok, issues }` where `issues` enumerates every
  * DOCTYPE declaration, `<!ENTITY>` definition (including parameter
  * entities), SYSTEM/PUBLIC external-entity reference, XInclude
  * directive, xsi:schemaLocation hint, processing instruction (after
@@ -388,7 +388,7 @@ function _detectIssues(input, opts) {
  *
  * @opts
  *   profile:               "strict"|"balanced"|"permissive",
- *   compliance:            "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   doctypePolicy:         "reject"|"audit"|"allow",
  *   entityPolicy:          "reject"|"audit"|"allow",
  *   externalEntityPolicy:  "reject"|"audit"|"allow",
@@ -455,7 +455,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:      "reject"|"strip"|"audit"|"allow",
  *   controlPolicy:   "reject"|"strip"|"allow",
  *   nullBytePolicy:  "reject"|"strip"|"allow",
@@ -514,7 +514,7 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,    // gate identity for audit / observability
  *
  * @example

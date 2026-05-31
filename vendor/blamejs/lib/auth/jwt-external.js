@@ -28,8 +28,8 @@
  *
  * Defenses against the well-known JWT pitfalls:
  *
- *   - alg confusion (CVE-2024-54150 / CVE-2025-30144 / CVE-2026-22817
- *     Hono class) — `algorithms` is REQUIRED with no default; `none`,
+ *   - alg confusion (CVE-2024-54150 / CVE-2026-22817 Hono class) —
+ *     `algorithms` is REQUIRED with no default; `none`,
  *     `HS256` cannot be accepted unless the operator explicitly listed
  *     them, and even then the verifier refuses HS* algs in
  *     verifyExternal because HMAC + a public-key JWKS is the canonical
@@ -75,9 +75,9 @@ var MAX_TOKEN_BYTES       = C.BYTES.kib(16);
 var REFUSED_ALGS = ["HS256", "HS384", "HS512", "none"];
 
 // PSS salt lengths per RFC 7518 §3.5.
-var PSS_SALT_SHA256 = 32;                                                        // allow:raw-byte-literal — RFC 7518 SHA-256 salt length
-var PSS_SALT_SHA384 = 48;                                                        // allow:raw-byte-literal — RFC 7518 SHA-384 salt length
-var PSS_SALT_SHA512 = 64;                                                        // allow:raw-byte-literal — RFC 7518 SHA-512 salt length
+var PSS_SALT_SHA256 = 32;                                                        // RFC 7518 SHA-256 salt length
+var PSS_SALT_SHA384 = 48;                                                        // RFC 7518 SHA-384 salt length
+var PSS_SALT_SHA512 = 64;                                                        // RFC 7518 SHA-512 salt length
 
 var SUPPORTED_CLASSICAL_ALGS = [
   "RS256", "RS384", "RS512",
@@ -105,7 +105,7 @@ function _b64urlDecode(s) {
     throw new AuthError("auth-jwt-external/bad-base64", "expected base64url string");
   }
   var padded = s.replace(/-/g, "+").replace(/_/g, "/");
-  while (padded.length % 4) padded += "=";                                       // allow:raw-byte-literal — base64 quartet padding
+  while (padded.length % 4) padded += "=";                                       // base64 quartet padding
   return Buffer.from(padded, "base64");
 }
 
@@ -175,8 +175,8 @@ function _assertAlgKtyMatch(alg, jwk) {
   else if   (alg === "ML-DSA-65" || alg === "ML-DSA-87") { expectedKty = "AKP"; }
   else {
     // Unknown alg — caller's alg allowlist should have rejected first;
-    // refuse here defensively (CVE-2026-23993 class — unknown-alg paths
-    // that skip downstream verification).
+    // refuse here defensively (CWE-347 alg-confusion class — unknown-alg
+    // paths that skip downstream verification; cf. CVE-2026-22817).
     throw new AuthError("auth-jwt-external/unsupported-alg",
       "_assertAlgKtyMatch: alg '" + alg + "' has no defined key-type binding");
   }
@@ -241,7 +241,7 @@ async function _fetchJwks(uri, cacheMs) {
       maxBytes:      MAX_JWKS_BYTES,
       timeoutMs:     C.TIME.seconds(10),
     });
-    if (res.statusCode < 200 || res.statusCode >= 300) {                         // allow:raw-byte-literal — HTTP 2xx range
+    if (res.statusCode < 200 || res.statusCode >= 300) {                         // HTTP 2xx range
       throw new AuthError("auth-jwt-external/jwks-fetch-failed",
         "JWKS endpoint " + uri + " returned " + res.statusCode);
     }
@@ -271,7 +271,7 @@ function _selectKey(keys, header, vopts) {
     throw new AuthError("auth-jwt-external/no-matching-kid",
       "no JWKS key matches header.kid='" + header.kid + "'");
   }
-  // Refuse kid-less tokens by default (audit 2026-05-11). JWKS
+  // Refuse kid-less tokens by default. JWKS
   // rotation creates a window where the rotated-out key is still
   // cached but the rotated-in key is already published; an
   // attacker shipping a kid-less token gets the lone-key path
@@ -301,7 +301,7 @@ async function verifyExternal(token, opts) {
     "audience", "issuer", "subject", "clockSkewMs",
     // v0.9.4 — opt-out for the kid-less-token JWKS-of-one refusal
     // (default refuses; non-conforming IdPs that emit kid-less tokens
-    // set this true). Audit 2026-05-11.
+    // set this true).
     "allowKidlessJwks",
   ], "auth.jwt.verifyExternal");
 
@@ -336,7 +336,7 @@ async function verifyExternal(token, opts) {
 
   // Decode header + payload.
   var parts = token.split(".");
-  // CVE-2026-29000 / CVE-2026-23993 / CVE-2026-22817 / CVE-2026-34950 —
+  // CVE-2026-29000 / CVE-2026-22817 / CVE-2026-34950 —
   // JWE-bypass + alg-confusion. A 5-segment compact serialization is a
   // JWE (RFC 7516); accepting it on a JWS verifier is the canonical
   // confused-deputy shape. verifyExternal is JWS-only; refuse JWE
@@ -350,7 +350,7 @@ async function verifyExternal(token, opts) {
     }); } catch (_e) { /* audit best-effort */ }
     throw new AuthError("auth-jwt-external/jwe-refused",
       "5-segment JWE token refused — verifyExternal only handles JWS " +
-      "(JWE bypass class — CVE-2026-29000 / CVE-2026-23993 / CVE-2026-22817 / CVE-2026-34950)");
+      "(JWE bypass class — CVE-2026-29000 / CVE-2026-22817 / CVE-2026-34950)");
   }
   if (parts.length !== 3) {
     throw new AuthError("auth-jwt-external/malformed-jwt",
@@ -371,8 +371,9 @@ async function verifyExternal(token, opts) {
     throw new AuthError("auth-jwt-external/unknown-crit",
       "token declares 'crit' header — verifyExternal does not support critical extensions");
   }
-  // CVE-2026-23993 — refuse alg values outside the accepted list BEFORE
-  // any key lookup. The early refusal closes the class where an
+  // Alg-allowlist gate (CWE-347 improper-sig-verification / CWE-757
+  // algorithm-downgrade) — refuse alg values outside the accepted list
+  // BEFORE any key lookup. The early refusal closes the class where an
   // unknown / unsupported alg slips through to a downstream code path
   // that interprets it permissively. The per-listed algorithm check
   // above in the opts-validation loop refuses the OPERATOR'S allowlist
@@ -381,11 +382,11 @@ async function verifyExternal(token, opts) {
   if (opts.algorithms.indexOf(header.alg) === -1) {
     throw new AuthError("auth-jwt-external/alg-not-allowed",
       "token alg='" + header.alg + "' not in allowed list [" + opts.algorithms.join(", ") +
-      "] (CVE-2026-23993 — refused before key lookup)");
+      "] (alg-allowlist gate — refused before key lookup)");
   }
   if (SUPPORTED_CLASSICAL_ALGS.indexOf(header.alg) === -1) {
     throw new AuthError("auth-jwt-external/unsupported-alg",
-      "token alg='" + header.alg + "' is not in the verifier's supported set (CVE-2026-23993)");
+      "token alg='" + header.alg + "' is not in the verifier's supported set (alg-allowlist gate)");
   }
 
   // Resolve key.
@@ -480,7 +481,10 @@ async function verifyExternal(token, opts) {
     // weak iss validation. Constant-time compare defeats prefix-timing
     // narrowing; emit a DISTINCT audit event (separate from sig-verify-
     // fail) so detection signals lights up on the cross-realm shape
-    // independently of generic verification failures.
+    // independently of generic verification failures. The `typeof ... !==
+    // "string"` guard also rejects an array-valued iss (CVE-2025-30144,
+    // fast-jwt — an iss array `["attacker", "valid"]` passed an any-match
+    // check); only a single string iss is accepted.
     if (typeof payload.iss !== "string" ||
         !_issuerMatches(payload.iss, opts.issuer)) {
       try { audit().safeEmit({

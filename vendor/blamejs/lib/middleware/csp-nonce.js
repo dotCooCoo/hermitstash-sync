@@ -8,7 +8,7 @@
  * browser refuses to execute them. This middleware closes the gap:
  *
  *   1. Generate a fresh random nonce per request (base64, default
- *      16 bytes / 22 chars).
+ *      16 bytes / 24 chars).
  *   2. Attach it to `req.cspNonce` (handler-readable) AND
  *      `res.locals.cspNonce` (template-data-readable — render.js
  *      auto-merges res.locals into template data).
@@ -233,7 +233,7 @@ function _injectNonce(cspHeader, nonce, directives, strictDynamic) {
  * Per-request CSP nonce + render integration. Constructed via
  * `b.middleware.cspNonce(opts)`; the resulting middleware has the
  * `(req, res, next)` shape shown above. Generates a fresh
- * random nonce (16 bytes / 22 chars base64 by default), attaches it
+ * random nonce (16 bytes / 24 chars base64 by default), attaches it
  * to `req.cspNonce` and `res.locals.cspNonce` (auto-merged into
  * template data), and patches the existing Content-Security-Policy
  * header to append `'nonce-XYZ'` to the configured directives
@@ -333,6 +333,10 @@ function create(opts) {
   }
 
   function cspNonce(req, res, next) {
+    // Idempotent: if an earlier cspNonce middleware already set a nonce on
+    // this request, keep it — re-generating would desync the header nonce
+    // from the one templates already rendered against.
+    if (req[property] !== undefined) return next();
     // Generate the nonce. Cheap (16 bytes from getrandom → SHAKE256 →
     // base64 encode); do it always for consistency unless `always:
     // false` was set explicitly.

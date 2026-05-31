@@ -91,7 +91,7 @@ void observability;
 
 var _err = GuardOauthError.factory;
 
-var SCOPE_TOKEN_RE = /^[\x21\x23-\x5b\x5d-\x7e]+$/;                              // allow:raw-byte-literal — RFC 6749 §3.3 scope-token charset
+var SCOPE_TOKEN_RE = /^[\x21\x23-\x5b\x5d-\x7e]+$/;                              // RFC 6749 §3.3 scope-token charset
 var DEFAULT_RESPONSE_TYPES = Object.freeze(["code"]);
 
 // ---- Profile presets ----
@@ -352,7 +352,7 @@ function _detectIssues(flow, opts) {
  * @related    b.guardOauth.sanitize, b.guardOauth.gate
  *
  * Apply the full guard-oauth threat catalog to a flow bundle.
- * Returns `{ ok, issues, refusal? }` per
+ * Returns `{ ok, issues }` per
  * `gateContract.aggregateIssues`. Detected classes include
  * `pkce-missing`, `pkce-method` (e.g. plain under require-s256),
  * `state-missing`, `redirect-uri-not-allowed`,
@@ -365,7 +365,7 @@ function _detectIssues(flow, opts) {
  *
  * @opts
  *   profile:                 "strict"|"balanced"|"permissive",
- *   compliance:              "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   pkcePolicy:              "require-s256"|"require-any"|"audit"|"allow",
  *   statePolicy:             "require"|"audit"|"allow",
  *   redirectUriPolicy:       "require-exact-allowlist"|"audit"|"allow",
@@ -427,7 +427,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:        every guardOauth.validate opt is honored,
  *
  * @example
@@ -475,7 +475,7 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,            // gate label for audit trails
  *   ...:        every guardOauth.validate opt is honored,
  *
@@ -484,7 +484,7 @@ function sanitize(input, opts) {
  *     profile: "strict",
  *     allowedRedirectUris: ["https://app.example.com/callback"],
  *   });
- *   var rv = await oauthGate.run({
+ *   var rv = await oauthGate.check({
  *     oauthFlow: {
  *       response_type: "code",
  *       redirect_uri:  "https://attacker.example/callback",
@@ -612,7 +612,7 @@ module.exports = {
       redirect_uri:  "https://app.example.com/callback",
       state:         "csrf-rand-1",
       scope:         "openid profile",
-      code_challenge: "abc123def456ghi789jkl012mno345pqr678",                   // allow:raw-byte-literal — base64url-shaped fixture
+      code_challenge: "abc123def456ghi789jkl012mno345pqr678",                   // base64url-shaped fixture
       code_challenge_method: "S256",
     }), "utf8"),
     hostileBytes:      Buffer.from(JSON.stringify({
@@ -626,7 +626,7 @@ module.exports = {
       redirect_uri:  "https://app.example.com/callback",
       state:         "csrf-rand-1",
       scope:         "openid profile",
-      code_challenge: "abc123def456ghi789jkl012mno345pqr678",                   // allow:raw-byte-literal — base64url-shaped fixture
+      code_challenge: "abc123def456ghi789jkl012mno345pqr678",                   // base64url-shaped fixture
       code_challenge_method: "S256",
     },
     hostileOauthFlow: {

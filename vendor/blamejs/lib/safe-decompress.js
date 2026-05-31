@@ -37,8 +37,9 @@
  *     - Any algorithm not in the allowlist (including operator-typo'd).
  *
  *   Refusal posture:
- *     - `safe-decompress/output-too-large`     — bomb-by-absolute-size
- *       (zlib's own `maxOutputLength` already refuses before alloc)
+ *     - `safe-decompress/decompress-failed`    — bomb-by-absolute-size
+ *       (zlib's own `maxOutputLength` refuses before alloc; the throw is
+ *       caught and surfaced under this code)
  *     - `safe-decompress/ratio-exceeded`       — expansion > `maxRatio`
  *       (zlib accepted the bytes; our post-decompress ratio check
  *       refuses, freeing the bytes immediately)
@@ -54,10 +55,12 @@
  *   bytes ever cross the audit boundary on the bomb-class path.
  *
  *   Threat model:
- *     - **CVE-2025-0725** (libcurl + zlib decompression amplification)
- *       — bounded output + ratio cap defeat the amplification.
- *     - **CVE-2024-zlib** class (decompression-bomb research, gzip /
- *       deflate / brotli variants) — bounded output prevents OOM.
+ *     - **Decompression bomb** (CWE-409 — improper handling of highly
+ *       compressed data; the classic 42.zip nested-bomb expands to
+ *       petabytes from kilobytes) across gzip / deflate / brotli —
+ *       the bounded-output cap + expansion-ratio cap refuse before the
+ *       allocation, so no decompressed bytes are ever materialized past
+ *       the cap.
  *     - **Efail-class** (CVE-2017-17688 / 17689) — operators decrypting
  *       MIME parts compose `b.safeDecompress` on the inner deflate
  *       streams; the bounded-output posture defeats the unbounded-
@@ -73,8 +76,8 @@
  *   - [RFC 1951](https://www.rfc-editor.org/rfc/rfc1951) deflate
  *   - [RFC 1952](https://www.rfc-editor.org/rfc/rfc1952) gzip
  *   - [RFC 7932](https://www.rfc-editor.org/rfc/rfc7932) brotli
- *   - [CVE-2025-0725](https://nvd.nist.gov/vuln/detail/CVE-2025-0725)
- *   - [CVE-2024-zlib](https://nvd.nist.gov/) decompression-bomb class
+ *   - [CWE-409](https://cwe.mitre.org/data/definitions/409.html) improper
+ *     handling of highly compressed data (decompression bomb)
  */
 
 var zlib = require("node:zlib");
@@ -102,7 +105,7 @@ var _algorithms = {
 // classic bomb shapes (1000:1) while leaving headroom for legitimate
 // text / JSON / XML payloads (which compress 20-50:1 commonly). Per
 // RFC 8460 §5.2 community guidance for TLS-RPT report decompression.
-var DEFAULT_MAX_RATIO = 50;                                                          // allow:raw-byte-literal — RFC 8460 §5.2 community guidance / allow:raw-time-literal — RFC number not seconds
+var DEFAULT_MAX_RATIO = 50;
 
 // Default input cap when operator omits opts.maxCompressedBytes —
 // 4 MiB matches the TLS-RPT receive surface and is a reasonable

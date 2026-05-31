@@ -77,7 +77,7 @@ var PROFILES = Object.freeze({
     maxPolicy:         "reject",
     urnPolicy:         "reject",
     bracedPolicy:      "reject",
-    allowedVersions:   [1, 2, 3, 4, 5, 6, 7, 8],                                 // allow:raw-byte-literal — UUID version digits
+    allowedVersions:   [1, 2, 3, 4, 5, 6, 7, 8],                                 // UUID version digits
     maxBytes:          C.BYTES.bytes(64),
     maxRuntimeMs:      C.TIME.seconds(2),
   },
@@ -93,7 +93,7 @@ var PROFILES = Object.freeze({
     maxPolicy:         "audit",
     urnPolicy:         "audit",
     bracedPolicy:      "audit",
-    allowedVersions:   [1, 2, 3, 4, 5, 6, 7, 8],                                 // allow:raw-byte-literal — UUID version digits
+    allowedVersions:   [1, 2, 3, 4, 5, 6, 7, 8],                                 // UUID version digits
     maxBytes:          C.BYTES.bytes(64),
     maxRuntimeMs:      C.TIME.seconds(2),
   },
@@ -155,8 +155,8 @@ function _classifyForm(input) {
 function _toCanonicalHex(input, form) {
   // Strips dashes / braces / urn prefix, returns 32-char lowercase hex.
   var s = input.toLowerCase();
-  if (form === "urn")     s = s.slice("urn:uuid:".length);                       // allow:raw-byte-literal — string-length offset
-  if (form === "braced")  s = s.slice(1, -1);                                    // allow:raw-byte-literal — string-length offset
+  if (form === "urn")     s = s.slice("urn:uuid:".length);                       // string-length offset
+  if (form === "braced")  s = s.slice(1, -1);                                    // string-length offset
   return s.replace(/-/g, "");
 }
 
@@ -253,8 +253,8 @@ function _detectIssues(input, opts) {
   // Version + variant inspection (skip for nil / max — those bypass the
   // version-bits check by definition).
   if (hex !== NIL_HEX && hex !== MAX_HEX) {
-    var versionDigit = parseInt(hex.charAt(12), 16);                             // allow:raw-byte-literal — hex digit position 12
-    var variantNibble = parseInt(hex.charAt(16), 16);                            // allow:raw-byte-literal — hex digit position 16
+    var versionDigit = parseInt(hex.charAt(12), 16);                             // hex digit position 12
+    var variantNibble = parseInt(hex.charAt(16), 16);                            // hex digit position 16
 
     if (opts.versionPolicy !== "allow") {
       var allowed = opts.allowedVersions;
@@ -274,13 +274,13 @@ function _detectIssues(input, opts) {
     if (opts.variantPolicy !== "allow") {
       // RFC 4122 / 9562 variant: high two bits of the variant nibble are
       // 10xx (i.e. nibble in 8/9/a/b).
-      var isRfcVariant = (variantNibble & 0xC) === 0x8;                          // allow:raw-byte-literal — variant-bit mask
+      var isRfcVariant = (variantNibble & 0xC) === 0x8;                          // variant-bit mask
       if (!isRfcVariant) {
         issues.push({
           kind: "variant-non-rfc",
           severity: opts.variantPolicy === "reject-non-rfc" ? "high" : "warn",
           ruleId: "uuid.variant-non-rfc",
-          snippet: "uuid variant nibble `" + hex.charAt(16) + "` is not " +    // allow:raw-byte-literal — hex digit position 16
+          snippet: "uuid variant nibble `" + hex.charAt(16) + "` is not " +    // hex digit position 16
                    "the RFC 4122 / 9562 variant (10xx — nibble 8-b)",
         });
       }
@@ -307,7 +307,7 @@ function _detectIssues(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:             "reject"|"strip"|"audit"|"allow",
  *   controlPolicy:          "reject"|"strip"|"allow",
  *   nullBytePolicy:         "reject"|"strip"|"allow",
@@ -361,7 +361,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:                    same shape as b.guardUuid.validate opts,
  *
  * @example
@@ -393,9 +393,9 @@ function sanitize(input, opts) {
   var form = _classifyForm(input);
   if (!form) return input;
   var hex = _toCanonicalHex(input, form);
-  return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +                        // allow:raw-byte-literal — UUID hex slice positions
-         hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" +                     // allow:raw-byte-literal — UUID hex slice positions
-         hex.slice(20);                                                          // allow:raw-byte-literal — UUID hex slice positions
+  return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +                        // UUID hex slice positions
+         hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" +                     // UUID hex slice positions
+         hex.slice(20);                                                          // UUID hex slice positions
 }
 
 /**
@@ -406,7 +406,7 @@ function sanitize(input, opts) {
  * @compliance hipaa, pci-dss, gdpr, soc2
  * @related    b.guardUuid.validate, b.guardUuid.sanitize, b.guardAll.gate
  *
- * Build an async gate `(ctx) -> { ok, action, issues }` consumable
+ * Build a guard gate whose async `check(ctx)` returns `{ ok, action, issues }`, consumable
  * by `b.guardAll`, ID validators, and any host that handles
  * UUID-shaped tokens. The gate reads `ctx.identifier` (or
  * `ctx.uuid`), runs `validate`, and maps severity to action: zero
@@ -416,15 +416,15 @@ function sanitize(input, opts) {
  * @opts
  *   name:                   string,    // gate label for audit / observability
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:                    same shape as b.guardUuid.validate opts,
  *
  * @example
  *   var g = b.guardUuid.gate({ profile: "strict" });
- *   var rv = await g({ identifier: "550e8400-e29b-41d4-a716-446655440000" });
+ *   var rv = await g.check({ identifier: "550e8400-e29b-41d4-a716-446655440000" });
  *   rv.action;                                         // → "serve"
  *
- *   var bad = await g({ identifier: "{550e8400-e29b-41d4-a716-446655440000}" });
+ *   var bad = await g.check({ identifier: "{550e8400-e29b-41d4-a716-446655440000}" });
  *   bad.action;                                        // → "refuse"
  */
 function gate(opts) {

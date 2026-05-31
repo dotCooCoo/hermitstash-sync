@@ -23,7 +23,7 @@
  *     - RFC 5321 §2.3.8 — line termination MUST be CRLF
  *     - RFC 5321 §4.5.2 — dot-stuffing on the SMTP body
  *     - RFC 5321 §4.1.1.4 — DATA command terminates with `<CRLF>.<CRLF>`
- *     - CVE-2023-51764 / -51765 / -51766 / 2024-32178 — SMTP
+ *     - CVE-2023-51764 / -51765 / -51766 — SMTP
  *       smuggling (parsers that accept bare-LF dot-terminators).
  *       The guard primitive `b.guardSmtpCommand.detectBodySmuggling`
  *       owns smuggling detection; the safe-* terminator scanner
@@ -61,7 +61,7 @@ var SafeSmtpError = defineClass("SafeSmtpError", { alwaysPermanent: true });
  * @example
  *   var body = Buffer.from("Hello world.\r\n.\r\n");
  *   b.safeSmtp.findDotTerminator(body);
- *   // → 13  (index of \r in \r\n.\r\n)
+ *   // → 12  (index of \r in the terminating \r\n.\r\n)
  *
  *   b.safeSmtp.findDotTerminator(Buffer.from("incomplete body"));
  *   // → -1
@@ -71,7 +71,7 @@ function findDotTerminator(buf) {
     throw new SafeSmtpError("safe-smtp/bad-input",
       "findDotTerminator: input must be a Buffer");
   }
-  for (var i = 0; i <= buf.length - 5; i += 1) {                                                     // allow:raw-byte-literal — 5-byte CRLF.CRLF terminator length
+  for (var i = 0; i <= buf.length - 5; i += 1) {                                                     // 5-byte CRLF.CRLF terminator length
     if (buf[i] === 0x0d && buf[i + 1] === 0x0a &&
         buf[i + 2] === 0x2e &&
         buf[i + 3] === 0x0d && buf[i + 4] === 0x0a) {

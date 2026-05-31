@@ -279,15 +279,107 @@ function _report(label, matches) {
 // Adding a marker at a violation line allowlists that one specific
 // occurrence; the reason follows the marker on the same comment line.
 
+// Every `// allow:<class>` suppression marker must name a REGISTERED detector
+// allow-class. A typo'd or stale class (e.g. the historical `setinterval-unref`
+// when the real check is `timer-no-unref`, or `protocol-constant` which names
+// no detector at all) suppresses NOTHING — the detector it claims to silence
+// does not exist — so the underlying violation it was meant to explain ships
+// unflagged. When you add a detector with a new allow-class, register it here.
+var VALID_ALLOW_CLASSES = {
+  "ai-disclosure-on-request-without-requested-gate": 1,
+  "archive-gz-without-safedecompress": 1,
+  "archive-wrap-partial-recipient": 1,
+  "backup-adapter-storage-without-posture-check": 1,
+  "bare-canonicalize-walk": 1,
+  "bare-error-throw": 1,
+  "bare-json-parse": 1,
+  "bare-split-on-quoted-header": 1,
+  "console-direct": 1,
+  "deny-path-hardcoded-response": 1,
+  "duplicate-regex": 1,
+  "dynamic-regex": 1,
+  "dynamic-require": 1,
+  "from-base64url-untrapped": 1,
+  "fs-path-from-operator-identifier-without-traversal-refusal": 1,
+  "gitleaks-entropy": 1,
+  "handrolled-buffer-collect": 1,
+  "handrolled-debounce": 1,
+  "hostname-compare-trailing-dot": 1,
+  "inline-numeric-bounds-cascade": 1,
+  "inline-require": 1,
+  "inline-require-non-empty-string-validation": 1,
+  "internal-binding-in-prose": 1,
+  "internal-narrative-comment": 1,
+  "list-without-pagination": 1,
+  "math-random-noncrypto": 1,
+  "no-number-money-arithmetic": 1,
+  "numeric-opt-Infinity": 1,
+  "primitive-unreachable": 1,
+  "process-exit": 1,
+  "raw-byte-literal": 1,
+  "raw-hash-compare": 1,
+  "raw-new-url": 1,
+  "raw-outbound-http": 1,
+  "raw-process-env": 1,
+  "raw-randombytes-token": 1,
+  "raw-time-literal": 1,
+  "raw-timing-safe-equal": 1,
+  "regex-no-length-cap": 1,
+  "seal-without-aad": 1,
+  "silent-catch": 1,
+  "slsa-framework-action-not-sha-pinned": 1,
+  "timer-no-unref": 1,
+  "wildcard-suffix-match-without-single-label-check": 1,
+};
+
+function testNoOrphanAllowClass() {
+  // scanScope: lib + test (every shipped + test source).
+  var files = _libFiles().concat(_testFiles());
+  var bad = [];
+  var re = /\ballow:([a-z][a-zA-Z0-9-]*)/g;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    // Skip THIS file: it holds the marker machinery + the registry itself,
+    // where `allow:` appears in regexes and the VALID_ALLOW_CLASSES keys.
+    if (rel === "test/layer-0-primitives/codebase-patterns.test.js") continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      // Only inspect the `//` line-comment portion — markers are always
+      // comments, never string literals.
+      var hashIdx = lines[li].indexOf("//");
+      if (hashIdx === -1) continue;
+      var comment = lines[li].slice(hashIdx);
+      var m;
+      re.lastIndex = 0;
+      while ((m = re.exec(comment)) !== null) {
+        var cls = m[1];
+        if (!Object.prototype.hasOwnProperty.call(VALID_ALLOW_CLASSES, cls)) {
+          bad.push({
+            file:    rel,
+            line:    li + 1,
+            content: "unregistered allow-class '" + cls + "' — names no detector " +
+                     "(fix the typo, or register it in VALID_ALLOW_CLASSES)",
+          });
+        }
+      }
+    }
+  }
+  _report("every // allow:<class> marker names a registered detector class", bad);
+}
+
 function testNoRawByteLiterals() {
   // class: raw-byte-literal
-  // Systemic detection: any integer literal `n >= 8 && n % 8 === 0` is
-  // a byte-shape candidate (8-bit alignment is the universal byte unit).
-  // Use C.BYTES.kib / mib / gib (n) so the framework's byte math has a
-  // single source of truth.
-  // Strings, regex literals, and hex constants are excluded. HTTP
-  // status comparisons, year literals (which can also be multiples of
-  // 8), and lines already routed through C.BYTES.* are skipped.
+  // Byte-SCALE arithmetic — `n * 1024` (KiB), `* 1024 * 1024` (MiB),
+  // `* 1024 * 1024 * 1024` (GiB) — must route through C.BYTES.kib / mib /
+  // gib(n) so the framework's byte math has a single source of truth.
+  // That 1024-scale is exactly what the C.BYTES helpers replace; a bare
+  // multiple-of-8 in any other context (an HTTP status, a radix, a count,
+  // a length, an opcode, an octet, a field width …) is NOT a byte size and
+  // is deliberately NOT flagged. Strings, regex, hex, and C.BYTES-wrapped
+  // lines are excluded.
   var files = _libFiles();
   var bad = [];
   for (var fi = 0; fi < files.length; fi++) {
@@ -312,6 +404,11 @@ function testNoRawByteLiterals() {
       // byte literal (`C.BYTES.mib(64)`, `C.TIME.seconds(8)`) and the
       // wrapping primitive is the single source of truth.
       if (/\bC\.(BYTES|TIME)\.\w+\(/.test(stripped)) continue;
+      // NARROWED: only 1024-scale byte arithmetic is a real byte size that
+      // C.BYTES.kib / mib / gib replaces. Skip every line that is not
+      // byte-scale `* 1024` math — a bare multiple-of-8 elsewhere is not a
+      // byte literal and no longer needs a marker.
+      if (!/\*\s*1024\b/.test(stripped)) continue;
       // Skip lines whose left-hand side explicitly names a non-byte
       // unit. Match the unit token at any position in a SCREAMING_SNAKE
       // identifier (start, middle, or end). Examples:
@@ -362,14 +459,10 @@ function testNoRawByteLiterals() {
         // those are protocol constants, decoded to integers in the
         // PQC_GROUPS table and elsewhere. (0x11EC = 4588 not multiple
         // of 8, 0x11ED = 4589 not multiple of 8 — none trip anyway.)
-        // Skip commonly-decimal protocol constants where
-        // multiple-of-8 is coincidence:
-        //   - 256, 64, 32, 16 — bit-widths (which ARE byte-aligned;
-        //     fundamental fix routes them through C.BYTES.bit-arithmetic
-        //     or names them as protocol constants).
-        // No skip — flag every multiple of 8 strictly. The fundamental
-        // fix path is to use C.BYTES helpers or rename + comment as a
-        // protocol constant where 8-multiple is coincidence.
+        // After the `* 1024` gate above, this multiple-of-8 scan only
+        // runs on byte-scale arithmetic lines, so a multiple-of-8
+        // operand here is genuine byte math — the fix path is to route
+        // it through the C.BYTES helpers.
         hit = true;
         break;
       }
@@ -383,8 +476,8 @@ function testNoRawByteLiterals() {
     }
   }
   bad = _filterMarkers(bad, "raw-byte-literal");
-  _report("no raw byte-shaped literals (n >= 8 && n % 8 === 0; use " +
-          "C.BYTES.kib / mib / gib or name as protocol constant)",
+  _report("no raw byte-scale literals (1024-scale `* 1024` arithmetic; " +
+          "use C.BYTES.kib / mib / gib)",
     bad);
 }
 
@@ -508,6 +601,78 @@ function testNoUnresolvedMarkers() {
   matches = _filterMarkers(matches, "unresolved-marker");
   _report("no TODO / FIXME / HACK / XXX markers in lib/",
     matches);
+}
+
+// ---- Pattern: overdue defers (promised landing version already shipped) ----
+//
+// A comment/string that promises a feature "lands in vX" / "deferred to vX" /
+// "not supported in vX" is fine while vX is in the future. Once the package
+// version reaches vX, that promise is OVERDUE: either the feature shipped (and
+// the comment is stale and should be corrected) or it never shipped (a real
+// gap to close or an explicit defer-with-condition to record here). This gate
+// surfaces the iabTcf-class "advertised-but-missing / stale-landing" shape on
+// every release rather than letting promised-landing comments rot silently.
+//
+// STALE_DEFER_ALLOWLIST entries are acknowledged overdue mentions: each is
+// either a deliberate defer-with-condition (no operator demand + escape hatch)
+// or an item on the gap backlog being worked down. The key is the file; the
+// value is a list of distinctive content substrings to permit. Remove an entry
+// when the comment is corrected or the gap is closed — that is the backlog.
+var STALE_DEFER_ALLOWLIST = {
+  // Deliberate defer-with-condition: needs an envelope-semantics decision
+  // (per-tenant KEM keypair vs symmetric); explicit escape hatch is passing
+  // { publicKey, ecPublicKey } directly. Tracked for design, not overdue work.
+  "lib/archive-wrap.js": [
+    // quote-free phrases (source has escaped \" so avoid quote chars here)
+    "deferred to v0.12.11",
+    "lands in v0.12.11",
+  ],
+  // Deliberate: Sieve extension refused per RFC 5228 §3.2 — script-declared
+  // capability gating, defer-with-condition (operator demand).
+  "lib/safe-sieve.js": ["not implemented in v0.9.55 — script refused"],
+  // Conditional on a future vendoring decision (no bundled EXIF/IPTC reader);
+  // operator-feeds-metadata escape hatch. Defer-with-condition.
+  "lib/ai-content-detect.js": ["IPTC PhotoMetadata reader lands in v0.10.9"],
+  // GAP BACKLOG (being worked down — these are real overdue items):
+  //   archive-read ZIP64 read (promised v0.12.8) — building. (The
+  //   fromTrustedStream defer was reworded to a version-free "not
+  //   implemented / re-opens when needed" in v0.13.15, so it no longer
+  //   needs an allowlist entry.)
+  "lib/archive-read.js": [
+    "not supported in v0.12.7. Will land",
+    "switch to tar — lands v0.12.8",
+    "carries ZIP64 sentinel sizes (not supported in v0.12.7)",
+  ],
+  "lib/safe-archive.js": [
+    "tar lands v0.12.8, gz v0.12.9",
+    "fromTrustedStream` is deferred to v0.12.8",
+  ],
+};
+
+function testNoStaleDefers() {
+  var path = require("node:path");
+  var pkgVersion = require(path.resolve(__dirname, "..", "..", "package.json")).version.split(".").map(Number);
+  function cmp(a, b) { for (var i = 0; i < 3; i += 1) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0); } return 0; }
+  // Promised-landing phrasings only ("X lands in vN" / "deferred to vN" / "not
+  // supported in vN"). NOT "deferred FROM vN" (that is an origin, not a deadline).
+  // Accept 2-part (vN.N) AND 3-part (vN.N.N) promised-landing versions —
+  // a 2-part "v0.10" promise slipped past the old 3-part-only pattern.
+  var PROMISE = /(?:deferred to|lands(?: in)?|will land(?: in)?|not supported in)\s+v?(\d+\.\d+(?:\.\d+)?)/i;
+  var matches = _scan(PROMISE, { skipComments: false });
+  var overdue = [];
+  matches.forEach(function (m) {
+    var mm = m.content.match(PROMISE);
+    if (!mm) return;
+    // Only a STRICTLY-FUTURE promise is exempt. A promise for the current
+    // version is due in the release being cut now — if the feature isn't here,
+    // the comment is overdue and must be fixed in this release, not a later one.
+    if (cmp(mm[1].split(".").map(Number), pkgVersion) > 0) return;
+    var allow = STALE_DEFER_ALLOWLIST[m.file] || [];
+    if (allow.some(function (sub) { return m.content.indexOf(sub) !== -1; })) return;
+    overdue.push({ file: m.file, line: m.line, content: "overdue defer (promised v" + mm[1] + ", now v" + pkgVersion.join(".") + "): " + m.content.slice(0, 100) });
+  });
+  _report("no overdue defers in lib/ (promised-landing version already shipped — close the gap, fix the stale comment, or record it in STALE_DEFER_ALLOWLIST)",
+    overdue);
 }
 
 // ---- Pattern: literal NUL bytes (0x00) in source files ----
@@ -875,6 +1040,213 @@ function testNoInternalBindingNameInProse() {
   _report("internal binding names (`nodeFs` / `nodePath` / `bCrypto` / " +
           "`retryHelper` / ...) must not appear in operator-facing " +
           "prose — JSDoc comments, error messages, audit metadata",
+    bad);
+}
+
+// ---- Pattern: require-block `=` column alignment ----
+//
+// class: require-block-misaligned
+//
+// Within a contiguous top-of-file run of `var <name> = require(...)` /
+// `var { ... } = require(...)` lines, the `=` signs share a column WHEN
+// the block is written in the aligned style. Two styles ship in lib/
+// and BOTH are legitimate:
+//
+//   compact (single space — never flagged):
+//     var C = require("./constants");
+//     var audit = require("./audit");
+//
+//   aligned (padded to a shared column):
+//     var lazyRequire = require("./lazy-require");
+//     var C           = require("./constants");
+//
+// The detector fires only on a sub-block that DECLARES alignment intent
+// (at least one require line carries 2+ spaces before its `=`) and only
+// on a line that COULD reach the block's shared column but doesn't.
+//
+// The shared column is the MODAL `=` column — the column the majority
+// of the block's require lines actually use. A line is a violation when
+// its `=` is off the modal column AND its left-hand side is short enough
+// to reach it: `lhsLen + 1 <= modalCol`. A `var { LongDestructure } =`
+// or a long plain name whose LHS is as wide as (or wider than) the modal
+// column can only ever get a single space — it physically can't align,
+// so that overshoot is house style, not drift, and is EXEMPT. (This is
+// the classic `var guardAgentRegistry = ...` / `var { defineClass } = ...`
+// shape: unfittable, correctly ignored. The target is the fittable line
+// that drifts one column anyway — the stray extra space, or the short
+// `var C =` that didn't get padded to the column.)
+//
+// Sub-blocks align INDEPENDENTLY. A blank line OR an interior `//` /
+// `/* */` comment divider between require lines splits the run: a tier
+// of node: builtins or a lazyRequire tier separated from the relative-
+// require tier by an explanatory comment is its own group, checked on
+// its own column. Only the leading top-of-file require region is
+// inspected — array/object element order, later constant blocks, and
+// every non-require `=` are out of scope.
+//
+// REQUIRE_ALIGN_ALLOWLIST below is the migration backlog: files that
+// align today but carry a fittable drifted line. As each is reflowed to
+// a uniform column (or to compact single-space), drop its entry.
+var REQUIRE_ALIGN_ALLOWLIST = [
+  "lib/ai-pref.js",
+  "lib/archive.js",
+  "lib/auth/oid4vci.js",
+  "lib/cdn-cache-control.js",
+  "lib/compliance-ai-act-logging.js",
+  "lib/compliance-ai-act.js",
+  "lib/db-file-lifecycle.js",
+  "lib/flag-providers.js",
+  "lib/http-client-cookie-jar.js",
+  "lib/http-client.js",
+  "lib/local-db-thin.js",
+  "lib/log-stream-syslog.js",
+  "lib/mail-require-tls.js",
+  "lib/mail-scan.js",
+  "lib/mail-server-imap.js",
+  "lib/mail-server-mx.js",
+  "lib/mail-server-submission.js",
+  "lib/mail-srs.js",
+  "lib/metrics.js",
+  "lib/middleware/body-parser.js",
+  "lib/middleware/tus-upload.js",
+  "lib/pqc-agent.js",
+  "lib/public-suffix.js",
+  "lib/queue.js",
+  "lib/router.js",
+  "lib/scheduler.js",
+  "lib/session-device-binding.js",
+  "lib/test-harness.js",
+  "lib/websocket.js",
+];
+
+// A top-of-file require-assignment line. Plain identifier OR a `{ ... }`
+// destructure on the left; require / lazyRequire on the right.
+var _REQUIRE_ALIGN_LINE = /^\s*var\s+(?:\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*(?:require|lazyRequire)\s*\(/;
+
+// For a require-assignment line: lhsLen (length of the LHS up to and
+// including its last non-space token char), col (the `=` column = lhsLen
+// + the padding spaces), and pad (the padding-space count). Returns null
+// for any line that is not a require-assignment.
+function _requireEqInfo(line) {
+  var m = line.match(/^(.*?[^\s=!<>+\-*/%&|^])(\s*)=\s*(?:require|lazyRequire)\s*\(/);
+  if (!m) return null;
+  return { lhsLen: m[1].length, col: m[1].length + m[2].length, pad: m[2].length };
+}
+
+// The modal `=` column of a sub-block: the column the most require lines
+// land on. Ties break to the wider column (the deliberately-padded one,
+// not a short outlier), so a block of two aligned lines plus a stray
+// short `var C =` resolves to the aligned column.
+function _requireModalColumn(infos) {
+  var counts = {};
+  var best   = null;
+  var bestN  = -1;
+  for (var i = 0; i < infos.length; i++) {
+    var c = infos[i].info.col;
+    counts[c] = (counts[c] || 0) + 1;
+    if (counts[c] > bestN || (counts[c] === bestN && c > best)) {
+      bestN = counts[c];
+      best  = c;
+    }
+  }
+  return best;
+}
+
+function testRequireBlockAlignment() {
+  // class: require-block-misaligned
+  var files = _libFiles();
+  var bad = [];
+
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    if (REQUIRE_ALIGN_ALLOWLIST.indexOf(rel) !== -1) continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var lines = content.split(/\r?\n/);
+
+    // Locate the first leading require line. Skip the shebang,
+    // "use strict", and the top docblock / comments + blanks. Bail the
+    // moment real code appears before any require (no leading region).
+    var firstReq = -1;
+    for (var j = 0; j < lines.length; j++) {
+      if (_REQUIRE_ALIGN_LINE.test(lines[j])) { firstReq = j; break; }
+      var t = lines[j].trim();
+      if (t === "") continue;
+      if (/^("use strict"|'use strict');?$/.test(t)) continue;
+      if (/^#!/.test(t)) continue;
+      if (/^\/\//.test(t)) continue;
+      if (/^\/\*/.test(t) || /^\*/.test(t) || /\*\//.test(t)) continue;
+      break;
+    }
+    if (firstReq === -1) continue;
+
+    // Collect the contiguous leading require region: require lines,
+    // blank lines (sub-block separators), and interior comment lines
+    // (also sub-block separators). Stop at the first real-code line
+    // that is not a require.
+    var region = [];
+    var inBlockComment = false;
+    for (var k = firstReq; k < lines.length; k++) {
+      var line = lines[k];
+      var tt = line.trim();
+      if (inBlockComment) {
+        region.push({ n: k + 1, line: line, kind: "comment" });
+        if (/\*\//.test(tt)) inBlockComment = false;
+        continue;
+      }
+      if (_REQUIRE_ALIGN_LINE.test(line)) { region.push({ n: k + 1, line: line, kind: "req" }); continue; }
+      if (tt === "") { region.push({ n: k + 1, line: line, kind: "blank" }); continue; }
+      if (/^\/\//.test(tt)) { region.push({ n: k + 1, line: line, kind: "comment" }); continue; }
+      if (/^\/\*/.test(tt)) {
+        region.push({ n: k + 1, line: line, kind: "comment" });
+        if (!/\*\//.test(tt)) inBlockComment = true;
+        continue;
+      }
+      break;
+    }
+
+    // Split the region into sub-blocks separated by a blank line OR a
+    // comment divider; each aligns independently. For every sub-block of
+    // >=3 require lines that shows alignment intent (some line padded
+    // with 2+ spaces before `=`), flag every line whose `=` is off the
+    // modal column yet whose LHS is short enough to reach it.
+    var sub = [];
+    var flush = function () {
+      var infos = [];
+      for (var s = 0; s < sub.length; s++) {
+        if (sub[s].kind !== "req") continue;
+        var info = _requireEqInfo(sub[s].line);
+        if (info) infos.push({ entry: sub[s], info: info });
+      }
+      sub = [];
+      if (infos.length < 3) return;
+      var anyPadded = infos.some(function (e) { return e.info.pad >= 2; });
+      if (!anyPadded) return;                      // compact single-space style — not aligned, not flagged
+      var modalCol = _requireModalColumn(infos);
+      for (var z = 0; z < infos.length; z++) {
+        var e = infos[z];
+        if (e.info.col === modalCol) continue;     // already on the column — fine
+        if (e.info.lhsLen + 1 > modalCol) continue; // LHS too wide to reach the column — house-style overshoot, exempt
+        bad.push({
+          file:    rel,
+          line:    e.entry.n,
+          content: e.entry.line.trim() +
+                   "  — `=` off the require-block column (align every `=` in this " +
+                   "sub-block to one column, or reflow the group to compact single-space)",
+        });
+      }
+    };
+    for (var r = 0; r < region.length; r++) {
+      if (region[r].kind === "blank" || region[r].kind === "comment") { flush(); continue; }
+      sub.push(region[r]);
+    }
+    flush();
+  }
+
+  _report("top-of-file require blocks keep their `=` signs column-aligned " +
+          "(per blank-or-comment-separated sub-block; compact single-space " +
+          "blocks and unfittable-LHS lines exempt)",
     bad);
 }
 
@@ -1934,15 +2306,16 @@ async function testNoDuplicateCodeBlocks() {
   //   SHINGLE_SIZES — token-window sizes scanned. Smaller catches
   //     finer-grain idiom (3-call chains); larger catches whole
   //     function bodies. Multi-pass produces both.
-  //   MIN_DISTINCT_FILES — threshold for cross-file repetition. 3+
-  //     means "appears in at least 3 files" (drift candidate).
+  //   MIN_DISTINCT_FILES — min files for a shingle to enter the
+  //     advisory inventory (2+). The hard-fail gate is the separate
+  //     STRONG_MIN_FILES = 3 (a shape in 3+ files fails the build).
   //   MIN_DISTINCT_TOKENS — skip shingles whose tokens are mostly
   //     punctuation / repeated closer chars.
   //   MAX_REPORTED_PER_LENGTH — cap to keep the report scannable;
   //     biggest-N hits are surfaced first because they represent the
   //     largest primitive opportunities.
   var SHINGLE_SIZES = [60, 50, 40, 30, 22, 16, 12, 8];
-  var MIN_DISTINCT_FILES = 2;          // ≥ 3 files share the shape
+  var MIN_DISTINCT_FILES = 2;          // 2+ files → advisory inventory (STRONG_MIN_FILES = 3 hard-fails)
   var MIN_DISTINCT_TOKENS = 5;
   var _MAX_REPORTED_PER_LENGTH = 5000;
 
@@ -2186,6 +2559,273 @@ async function testNoDuplicateCodeBlocks() {
       reason: "Generic JS array helper / lambda shape — Object.keys(...).map(fn) + similar functional idioms appearing in any code that walks a column-or-key list.",
     },
     {
+      files: ["lib/guard-filename.js:verifyExtractionPath", "lib/hal.js:resource", "lib/vault-aad.js:_canonicalize"],
+      reason: "v0.13.13 — coincidental token shingle of the generic split-then-walk-segments idiom (`x.split(sep); for (...) { var seg = ...; if (...) throw/continue }`). guard-filename verifyExtractionPath walks path components refusing per-segment Windows-extraction hazards (reserved names / NTFS-ADS / trailing-dot); hal.js:resource builds a HAL resource by walking link/embedded keys; vault-aad.js:_canonicalize canonicalizes AAD key-value segments. Three unrelated domains (path safety / hypermedia link assembly / crypto AAD canonicalization) — no shared behaviour to extract; the only commonality is the universal split-and-loop control-flow shape.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/middleware/host-allowlist.js:create",
+        "lib/middleware/require-auth.js:create",
+        "lib/middleware/require-content-type.js:create",
+        "lib/middleware/require-methods.js:create",
+      ],
+      reason: "v0.14.6 — the shared shingle is the uniform deny-path denyResponse() call-site shape. The deny-response WRITER is already extracted to lib/middleware/deny-response.js; what repeats here is each create()'s ctx object literal ({ onDeny, problem, status, info, problemCode, problemTitle, problemDetail, contentType, body }). Each middleware passes a DIFFERENT status (405 / 415 / 421 / 401), problemCode, title, default body and headers — the literal IS the per-middleware configuration the consumer-facing onDeny / problemDetails convention drives. Consolidating further would mean a config table strictly less readable than the inline ctx, and the per-middleware values are exactly the divergence the dup detector can't see.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-read.js:_emitAudit",
+        "lib/archive-tar-read.js:_emitAudit",
+        "lib/archive.js:_emitAudit",
+        "lib/http-client.js:_emitAudit",
+      ],
+      reason: "v0.12.7 + v0.12.8 — Per-module `_emitAudit(opts, action, outcome, metadata)` shape repeats across primitives that drop-silently emit to opts.audit.safeEmit if present. Each module's audit events carry a primitive-specific `action:` namespace (archive.read.*, archive.zip.*, archive.read.tar.*, http-client.*) + per-primitive metadata fields; consolidating would lose the namespace + force every consumer to import the same audit helper. Four-file repetition is the expected shape per `feedback_audit_safeEmit_per_module_emitAudit_shape`. archive-tar.js (write) does NOT carry _emitAudit — the read side lives in sibling archive-tar-read.js so the @primitive validator can pair both `b.archive.tar` (write) and `b.archive.read.tar` (read) cleanly.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-read.js:_assertGuardMetadata",
+        "lib/archive-tar-read.js:_assertGuardMetadata",
+        "lib/auth/ciba.js:_registerInitialInterval",
+        "lib/auth/oauth.js:exchangeToken",
+        "lib/auth/oauth.js:pollDeviceCode",
+        "lib/auth/oid4vci.js:createCredentialOffer",
+        "lib/auth/oid4vci.js:exchangePreAuthorizedCode",
+        "lib/restore-rollback.js:swap",
+      ],
+      reason: "v0.13.8 — the shared shingle is the framework's emit-audit-then-throw-typed-error idiom (validate/poll/guard → emit a namespaced audit row → throw a primitive-specific FrameworkError), not behaviour. archive-read/archive-tar-read `_assertGuardMetadata` run the b.guardArchive metadata cascade and throw ArchiveReadError/TarError (factored so disk `extract` + in-memory `extractEntries` share one refusal path); ciba/oauth/oid4vci are OAuth/OIDC device-code + credential-offer polling/exchange; restore-rollback.swap is the backup restore swap. Each body is domain-divergent (different inputs, error classes, audit namespaces); consolidating would couple unrelated subsystems to one helper.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-quota.js:_emitAudit",
+        "lib/ai-capability.js:_emitAudit",
+        "lib/ai-dp.js:_emitAudit",
+        "lib/cert.js:_emitAudit",
+        "lib/mail-send-deliver.js:_auditEmit",
+      ],
+      reason: "v0.12.27 + v0.12.28 + v0.12.29 — per-module drop-silent audit-emit helper (`try { audit().safeEmit({ action, outcome, metadata }); } catch (_e) {}`). Same family as the archive / http-client _emitAudit cluster (feedback_audit_safeEmit_per_module_emitAudit_shape): ai-quota.js emits ai/quota-applied + ai/quota-exceeded, ai-capability.js emits ai/capability-routed + ai/capability-no-candidate, ai-dp.js emits dp/budget-consumed + dp/budget-exhausted, cert.js emits certificate-lifecycle events, mail-send-deliver.js emits delivery events. Each carries a primitive-specific `action:` namespace + metadata fields; consolidating would force a shared audit import and lose the per-primitive namespace operators grep for in audit logs.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-quota.js:_validateStore",
+        "lib/middleware/tus-upload.js:create",
+        "lib/pagination.js:cursor",
+        "lib/pagination.js:offset",
+      ],
+      reason: "v0.12.27 — defensive typeof-guard validation prelude (`if (!x || typeof x !== \"object\" || typeof x.fn !== \"function\") throw new <Error>(...)`). ai-quota._validateStore asserts the optional cross-node counter store exposes reserve / add / get / reset; tus-upload.create validates the resumable-upload opts shape; pagination.cursor / pagination.offset validate paging opts. Each throws a primitive-specific typed error (AiQuotaError / TusUploadError / PaginationError); the shingle is the typeof-guard cascade shape, not behaviour.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-capability.js:create",
+        "lib/ai-dp.js:budget",
+        "lib/cert.js:create",
+        "lib/mail-send-deliver.js:create",
+        "lib/auth/sd-jwt-vc-holder.js:create",
+      ],
+      reason: "v0.12.28 + v0.12.29 — factory-primitive opts-validation prelude (`validateOpts.requireObject + validateOpts(allowedKeys) + per-field typed-error throws + closure-captured return`). ai-capability.create validates a model-descriptor registry + builds a router closure; ai-dp.budget validates a per-scope ε/δ budget + builds an accountant closure; cert.create / mail-send-deliver.create / sd-jwt-vc-holder.create each validate a distinct spec's opts (X.509 cert issuance / RFC 5321 SMTP send / SD-JWT-VC holder store). Each throws a primitive-specific typed error (AiCapabilityError / AiDpError / CertError / MailSendError / SdJwtVcError); the shingle is the create()-factory validation idiom, not behaviour. Same family as the v0.10.16 factory-primitive validateOpts cluster.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-dp.js:mechanism",
+        "lib/dora.js:_validateReportInput",
+        "lib/config.js:loadDbBacked",
+        "lib/guard-snapshot-envelope.js:validate",
+      ],
+      reason: "v0.12.29 — input-shape validation prelude (`validateOpts(allowedKeys) + chained typeof / range guards + typed-error throw`). ai-dp.mechanism validates a DP mechanism descriptor (type / sensitivity / epsilon / delta / bound); dora._validateReportInput validates a DORA Art. 17 incident report; config.loadDbBacked validates DB-backed config opts; guard-snapshot-envelope.validate validates a sealed snapshot envelope. Each enforces a distinct spec's field set with a primitive-specific typed error; the shingle is the validateOpts-then-guard idiom, not behaviour.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/cose.js:verify",
+        "lib/cose.js:macVerify0",
+        "lib/auth/sd-jwt-vc-issuer.js:create",
+        "lib/break-glass.js:_validatePolicySet",
+        "lib/calendar.js:validate",
+        "lib/db.js:declareRequireDualControl",
+        "lib/dsr.js:create",
+        "lib/fedcm.js:wellKnown",
+        "lib/middleware/assetlinks.js:create",
+        "lib/network-heartbeat.js:start",
+      ],
+      reason: "v0.12.33 — opts / structure validation prelude (`validateOpts(allowedKeys) + chained required-field + typeof guards + typed-error throw`). cose.verify validates a COSE_Sign1 opts blob + decoded structure (RFC 9052); the peers each validate a distinct spec's shape (SD-JWT-VC issuer opts / break-glass policy set / JSCalendar object / DDL dual-control declaration / DSR request / FedCM well-known manifest / Android Asset Links / heartbeat config). Each throws a primitive-specific typed error; the shingle is the validateOpts-then-guard idiom, not behaviour. Same family as the v0.12.29 input-shape-validation cluster.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/json-path.js:_Parser",
+        "lib/parsers/safe-ini.js:_unquote",
+        "lib/template.js:_tokenizeExpr",
+      ],
+      reason: "v0.12.61 — recursive-descent / cursor-based tokenizers over DIFFERENT grammars: json-path._Parser walks the RFC 9535 JSONPath ABNF, safe-ini._unquote unwraps an INI quoted value, template._tokenizeExpr tokenizes a template expression. The shared shingle is the `index cursor + peek/advance + per-char dispatch` parser idiom; each consumes a distinct grammar with its own token set, so there is no shared parse behaviour to extract.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/link-header.js:_splitLinks",
+        "lib/safe-ical.js:_splitUnquoted",
+        "lib/safe-vcard.js:_splitUnquoted",
+      ],
+      reason: "v0.12.57 — format-specific delimiter splitters that track DIFFERENT enclosing state than the generic structuredFields.splitTopLevel: link-header._splitLinks tracks RFC 8288 `<uri-reference>` angle brackets AND quoted strings (a comma inside a URI must not split); safe-ical._splitUnquoted / safe-vcard._splitUnquoted track RFC 5545 / 6350 DQUOTE state with their own escaping. The shared shingle is the `for-loop + inQuote/escape state-machine + slice on the delimiter` idiom; the per-format enclosing rules (angle brackets vs none) are exactly why each can't call the shared splitter.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/mdoc.js:verifyIssuerSigned",
+        "lib/network-dnssec.js:verifyRrset",
+        "lib/tsa.js:verifyToken",
+        "lib/vc.js:verify",
+      ],
+      reason: "v0.12.40 — signature-verify entry preamble shared by four credential / token / DNS verifiers: `validateOpts(allowedKeys) + mandatory algorithms-allowlist check + opts.at valid-Date guard + publicKey/keyResolver presence check`, then divergent domain logic. tsa.verifyToken verifies an RFC 3161 timestamp token (CMS SignedData + message-imprint + EKU); vc.verify verifies a W3C VC-JOSE-COSE credential (JWS/COSE + VCDM structural + validity window); mdoc.verifyIssuerSigned verifies an ISO 18013-5 mdoc (COSE_Sign1 IssuerAuth + MSO valueDigests matching); network-dnssec.verifyRrset verifies a DNSSEC RRSIG (RFC 4034 canonical RRset + RRSIG-prefix reconstruction). Each consumes a different wire format, returns a different shape, and throws a primitive-specific typed error — the shingle is the validate-then-guard preamble, not behaviour. Same family as the v0.12.33 cose.verify cluster.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/cose.js:_coseKeyBytes",
+        "lib/cose.js:_bstr",
+        "lib/mdoc.js:_bytes",
+        "lib/network-dnssec.js:_bytes",
+        "lib/network-dane.js:_bytes",
+        "lib/privacy-pass.js:_bytes",
+        "lib/content-digest.js:_bodyBytes",
+        "lib/tsa.js:_bytes",
+        "lib/eat.js:_toBuf",
+        "lib/worm.js:_toBytes",
+      ],
+      reason: "v0.12.48 / v0.12.51 / v0.12.52 / v0.12.53 / v0.13.x — Buffer-coercion guard (`if (Buffer.isBuffer(x)) return x; if (x instanceof Uint8Array) return Buffer.from(x); ...`) repeats across byte-string-consuming primitives. The throw-on-unknown variants (cose / mdoc / dnssec / dane / tsa) each raise a MODULE-LOCAL typed error code naming the local argument; the JSON-fallback variants (eat._toBuf serializing a CBOR/EAT claims payload, worm._toBytes serializing a record to hash) instead JSON.stringify a non-bytes value. The duplicated prefix is the symptom; the cause is that JS can't throw a caller-namespaced ErrorClass (or choose the domain's serialization) without the local closure. Same documented exception as the v0.12.7 require-non-empty-string cluster — the per-domain error code / serialization is the divergence the dup detector can't see.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/cose.js:importKey",
+        "lib/cose.js:exportKey",
+        "lib/did.js:_jwkToKey",
+        "lib/network-dnssec.js:_jwkKey",
+      ],
+      reason: "v0.13.20 — EC/OKP JWK-coordinate handling (`kty` + `crv` switch over P-256/P-384/P-521 + Ed25519, base64url x/y, `createPublicKey({ format: 'jwk' })`) is coincidentally similar across three unrelated wire formats: cose.importKey/exportKey map a COSE_Key (RFC 9052 §7 — INTEGER crv ids -1/-2/-3 and labels) to/from a KeyObject; did._jwkToKey resolves a W3C DID verification method's JWK; network-dnssec._jwkKey reconstructs a DNSKEY's public key. The curve identifiers, the surrounding map shape, and the direction (import builds a key from a map, export emits a map from a key) all differ per spec — extracting a shared helper would couple three independent standards on a syntactic accident. The shingle is the JWK-coordinate idiom, not behaviour; same documented exception as the v0.12.40 signature-verify-preamble cluster.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/dual-control.js:create",
+        "lib/mdoc.js:verifyIssuerSigned",
+        "lib/tsa.js:verifyToken",
+      ],
+      reason: "v0.12.40 — validateOpts-then-guard prelude shared between a create-style validator (dual-control.create builds a two-person-rule grant after validating its opts) and the timestamp / mdoc verifiers. The common shingle is the `validateOpts(allowedKeys) + chained guard + typed-error` idiom; the bodies diverge entirely (dual-control persists a control record; tsa/mdoc verify cryptographic structures). Same validate-then-guard family as the v0.12.29 / v0.12.33 clusters.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/cert.js:create",
+        "lib/mail-send-deliver.js:deliver",
+        "lib/vc.js:present",
+      ],
+      reason: "v0.12.42 — validateOpts-then-guard prelude shared by three builder-style functions: cert.create mints a certificate, mail-send-deliver.deliver sends a message, vc.present builds + signs a Verifiable Presentation. The common shingle is the `validateOpts(allowedKeys) + required-field / non-empty-array guards + typed-error throw` idiom; the bodies diverge entirely (X.509 minting / SMTP delivery / VC-JOSE-COSE presentation envelope). Same validate-then-guard family as the v0.12.29 / v0.12.33 / v0.12.40 clusters.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/eat.js:verify",
+        "lib/auth/jar.js:parse",
+        "lib/auth/status-list.js:fromJwt",
+      ],
+      reason: "v0.12.35 — token-verify delegation prelude: each validates an opts blob, delegates the signature/structure verification to a lower primitive, then applies its own post-checks + builds a typed result. eat.verify delegates to b.cwt.verify then enforces nonce / dbgstat / profile (RFC 9711); jar.parse delegates to b.auth.jwt.verifyExternal then enforces iss / client_id / anti-nesting (RFC 9101); status-list.fromJwt delegates to a JWS verify then reads the status-list bits. The shingle is the validate→delegate→post-check shape; each enforces a distinct spec's claims.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-adapters.js:fs",
+        "lib/archive-adapters.js:http",
+        "lib/network-smtp-policy.js:mtaStsFetch",
+        "lib/parsers/safe-env.js:readVar",
+      ],
+      reason: "v0.12.7 — `if (typeof <opt> !== \"string\" || <opt>.length === 0) throw new <Error>(...)` shape repeats across primitives validating REQUIRED string opts. validateOpts.requireNonEmptyString covers most call sites; the four flagged here are inline because they each carry a primitive-specific error CODE (adapter/bad-arg, smtp-policy/bad-arg, safe-env/bad-arg) that the helper's caller-error-class shape doesn't compose cleanly across — each primitive's typed-error class is module-local + the message string names the local opt. The duplicated shape is the symptom, not the cause; the cause is that JS doesn't have a way to throw an instance of caller-namespaced ErrorClass without the local closure.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-read.js:extract",
+        "lib/archive-tar-read.js:extract",
+        "lib/auth/ciba.js:pollToken",
+        "lib/auth/oid4vci.js:exchangePreAuthorizedCode",
+        "lib/auth/oid4vci.js:issueCredential",
+      ],
+      reason: "v0.12.7 + v0.12.8 — `try { ... await ... } catch (e) { /* per-step cleanup */ throw e; }` shape repeats across primitives doing multi-step async work with per-step rollback. archive-read.extract + archive-tar.extract both clean up partial-extract files; ciba.pollToken cleans up rate-limit + retry state; oid4vci.exchange/issueCredential clean up partial credential-state. Each catch body is primitive-specific (the cleanup it does is the primitive's responsibility) — extraction would require a generic transaction-style helper which is itself a v1.0+ surface decision. Five-file repetition with primitive-specific cleanup bodies stays as the documented exception.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-tar-read.js:_classifyTypeflag",
+        "lib/archive-tar-read.js:inspect",
+        "lib/auth/ciba.js:_registerInitialInterval",
+        "lib/auth/oauth.js:exchangeToken",
+        "lib/auth/oauth.js:pollDeviceCode",
+        "lib/auth/oid4vci.js:createCredentialOffer",
+        "lib/auth/oid4vci.js:exchangePreAuthorizedCode",
+        "lib/restore-rollback.js:swap",
+      ],
+      reason: "v0.12.8 — Compact branching helpers (`if (x === A) return ...; if (x === B) return ...;` switch-style) repeat across primitives that map operator-supplied enum values to internal labels. archive-tar-read._classifyTypeflag maps single-char tar typeflags (0/1/2/3/4/5/6/7/x/g) to entry-type labels (file/symlink/hardlink/device/fifo/directory/etc.); archive-tar-read.inspect dispatches on the same typeflag set per-entry — distinct vocabulary from oauth.exchangeToken / oid4vci.createCredentialOffer / etc. which dispatch on grant_type / credential_format / step. The match is shape (chain of if-equals-return), not semantic. Extraction would require a generic enum-dispatch helper for trivially-different enums — that's an obscured abstraction. Each call site's enum + label set is primitive-specific.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/archive-read.js:_normalizeEntryTypePolicy",
+        "lib/archive-tar-read.js:_normalizeEntryTypePolicy",
+        "lib/archive.js:writeTo",
+      ],
+      reason: "v0.12.8 — `_normalizeEntryTypePolicy` shape is genuinely duplicated between archive-read.js + archive-tar-read.js — both copy DEFAULT_ENTRY_TYPE_POLICY and merge with operator opts. Could extract to a shared lib/_archive-policy.js helper in a future patch; for v0.12.8 keeping the duplication so the format-specific entry-type vocabulary (zip's external-attrs vs tar's typeflag) stays close to the reader that uses it. archive.js:writeTo is the unrelated third file in the dup cluster — its toBuffer + writeFileSync shape happens to share the 50-token shingle by coincidence (writeTo is the legacy ZIP write-to-path helper, not policy-related).",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-disclosure.js:chatbot",
+        "lib/backup/index.js:bundleAdapterStorage",
+        "lib/importmap-integrity.js:build",
+        "lib/metrics.js:shadowRegistry",
+      ],
+      reason: "v0.12.11/v0.12.12 — opts-validation cascade shape (chained `if (typeof opts.X !== \"...\") throw ...`) reaches 50-token duplication across primitives that each carry distinct semantic vocabulary. bundleAdapterStorage validates cryptoStrategy / recipient / passphrase / posture; importmap-integrity.build validates SRI hash list / nonce policy; metrics.shadowRegistry validates collector config; ai-disclosure.chatbot validates session / placement / jurisdiction per EU AI Act Art. 50(1). Extracting would require a generic options-cascade helper that loses per-primitive error codes operators grep for in audit logs.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/ai-disclosure.js:chatbot",
+        "lib/auth/sd-jwt-vc-holder.js:store",
+        "lib/compliance-sanctions.js:screen",
+        "lib/dora.js:_validateReportInput",
+        "lib/fda-21cfr11.js:_validateSignatureInput",
+        "lib/guard-envelope.js:check",
+        "lib/guard-list-unsubscribe.js:validate",
+        "lib/guard-mail-query.js:validateActor",
+        "lib/guard-mail-reply.js:validate",
+        "lib/guard-saga-config.js:validate",
+        "lib/guard-trace-context.js:validate",
+        "lib/incident-report.js:open",
+        "lib/mail-greylist.js:check",
+        "lib/mail-helo.js:evaluate",
+      ],
+      reason: "v0.12.12 — `if (!opts || typeof opts !== \"object\") throw Error(...) ; if (typeof opts.X !== \"string\") throw Error(...)` argument-shape preamble is the framework's standard primitive boundary check. Every guard family member + every compliance / mail / auth primitive that takes an opts object shares this shingle. Extracting would require a generic argShape helper, but the throw-on-bad-shape carries primitive-specific Error subclasses (AiDisclosureError, GuardEnvelopeError, etc.) that operators grep for. Family is wide and stays inline by design.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/agent-idempotency.js:_checkArgs",
+        "lib/agent-tenant.js:_sealField",
+        "lib/atomic-file.js:copyDirRecursive",
+        "lib/ddl-change-control.js:approve",
+        "lib/ddl-change-control.js:reject",
+        "lib/deprecate.js:alias",
+        "lib/guard-filename.js:verifyExtractionPath",
+        "lib/jose-jwe-experimental.js:decrypt",
+        "lib/mail-deploy.js:_validateTlsRptReport",
+        "lib/totp.js:uri",
+      ],
+      reason: "v0.12.7 — Generic string-argument validation shape: `if (typeof X !== \"string\" || X.length === 0) throw new <ErrorClass>(<code>, ...)` repeats across primitives validating REQUIRED non-empty string opts. Each call site emits a primitive-specific typed error class (BackupError, GuardFilenameError, IdempotencyError, AgentTenantError, AtomicFileError, DdlError, DeprecateError, JoseError, MailDeployError, TotpError) so extracting to a shared helper would lose the per-primitive error namespace. validateOpts.requireNonEmptyString covers most call sites where the caller's typed-error class composes with the helper's caller-error-class shape; the 9 file paths here are inline because each one's typed error has a primitive-local code namespace + message string the helper can't compose cleanly. Same shape as the v0.10.16 client-hints/csp/sandbox family-subset reason (inline for per-primitive typed errors). 5/9/3-file subsets at smaller token windows are the same family — one entry covers all of them.",
+    },
+    {
       mode:  "family-subset",
       files: [
         "lib/client-hints.js:acceptList",
@@ -2203,6 +2843,7 @@ async function testNoDuplicateCodeBlocks() {
         "lib/auth/oid4vp.js:_validateDcql",
         "lib/auth/sd-jwt-vc-issuer.js:create",
         "lib/auth/step-up.js:parseAuthorizationDetails",
+        "lib/calendar.js:validate",
         "lib/fedcm.js:accountsResponse",
         "lib/fedcm.js:wellKnown",
         "lib/guard-saga-config.js:validate",
@@ -2213,7 +2854,7 @@ async function testNoDuplicateCodeBlocks() {
         "lib/dsr.js:create",
         "lib/middleware/assetlinks.js:create",
       ],
-      reason: "v0.10.16 — opts-object structural validation pattern: each primitive walks an operator-supplied opts/config object, asserts required-key presence with primitive-typed errors, and emits spec-named refusal codes. FedCM endpoints (W3C 2024), DCQL queries (OID4VP), AuthorizationDetails (RFC 9396), Assetlinks (Android), DualControl declarations, break-glass policy sets, DSR rights, sd-jwt-vc issuer — each enforces a distinct spec's required-field list. The repeating shingle is the boilerplate guard shape; consolidating couples unrelated spec namespaces.",
+      reason: "v0.10.16 — opts-object structural validation pattern: each primitive walks an operator-supplied opts/config object, asserts required-key presence with primitive-typed errors, and emits spec-named refusal codes. FedCM endpoints (W3C 2024), DCQL queries (OID4VP), AuthorizationDetails (RFC 9396), Assetlinks (Android), DualControl declarations, break-glass policy sets, DSR rights, sd-jwt-vc issuer, JSCalendar Event/Task/Note/Group (RFC 8984) — each enforces a distinct spec's required-field list. The repeating shingle is the boilerplate guard shape; consolidating couples unrelated spec namespaces.",
     },
     {
       mode:  "family-subset",
@@ -2228,6 +2869,15 @@ async function testNoDuplicateCodeBlocks() {
         "lib/vault-aad.js:_canonicalize",
       ],
       reason: "v0.10.16 — tree-walker / link-collection helpers: each primitive walks an arbitrary nested structure (HAL _links normalization across string|object|array, JMAP back-reference resolution, ACME profile enumeration, template variable substitution, AuthResults header emission, mail-query AST walk, vault-AAD canonicalization). The shared shape is the `if (typeof x === 'string')` / `else if (Array.isArray(x))` / `else for-in object` dispatch; the bodies do entirely different semantic work per spec (RFC 4287 HAL / RFC 8620 JMAP / RFC 8555 ACME / Mustache-ish / RFC 8601 AuthResults).",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/content-digest.js:<top>",
+        "lib/network-dane.js:<top>",
+        "lib/tsa.js:<top>",
+      ],
+      reason: "v0.12.53 — identical framework require preamble + module-local typed-error declaration (`var nodeCrypto = require(\"node:crypto\"); var bCrypto = require(\"./crypto\"); var validateOpts = require(\"./validate-opts\"); var { defineClass } = require(\"./framework-error\"); var XError = defineClass(\"XError\", { alwaysPermanent: true });`). This is the standard top-of-file boilerplate for a crypto-touching primitive that throws a namespaced error; the only divergence is the error class name. Top-of-file requires are the project convention (rule §3), so the shared shape is unavoidable boilerplate, not extractable behaviour.",
     },
     {
       mode:  "family-subset",
@@ -2284,9 +2934,29 @@ async function testNoDuplicateCodeBlocks() {
       files: [
         "lib/a2a.js:_validateCardShape",
         "lib/calendar.js:validate",
+        "lib/fedcm.js:wellKnown",
         "lib/middleware/assetlinks.js:create",
       ],
-      reason: "v0.11.31 — opts-object shape validator pattern. Each primitive accepts a structured document (W3C A2A signed agent-card / JSCalendar Event-or-Task / Android Asset Links manifest), walks the per-spec required keys, and throws a domain-typed error. The shared shingle is the per-field `typeof !== \"string\" || length === 0 || ...test(...)` chain; the per-spec vocabulary diverges entirely.",
+      reason: "v0.11.31 — opts-object shape validator pattern. Each primitive accepts a structured document (W3C A2A signed agent-card / JSCalendar Event/Task/Note/Group / Android Asset Links manifest / FedCM well-known manifest), walks the per-spec required keys, and throws a domain-typed error. The shared shingle is the per-field `typeof !== \"string\" || length === 0 || ...test(...)` chain; the per-spec vocabulary diverges entirely.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/importmap-integrity.js:build",
+        "lib/mail-server-jmap.js:emailSubmissionSetHandler",
+        "lib/middleware/security-headers.js:create",
+      ],
+      reason: "v0.11.38 — opts-object prelude that walks an operator-supplied map and validates each entry against a per-spec shape. Importmap-Integrity (W3C draft) walks `opts.modules`, JMAP EmailSubmission/set (RFC 8621 §7.5) walks `args.create`, security-headers walks `opts.headers`. Each entry's shape check is spec-distinct (SRI module shape vs JMAP EmailSubmission shape with envelope.mailFrom + envelope.rcptTo + identityId + emailId vs HTTP header-value sanitisation); only the `Object.keys + for-i loop + per-entry typeof guard` shell shingles.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/guard-mail-move.js:validate",
+        "lib/guard-posture-chain.js:validate",
+        "lib/mail-auth.js:arcEvaluate",
+        "lib/mail-server-jmap.js:emailSubmissionSetHandler",
+      ],
+      reason: "v0.11.38 — per-spec validation walker pattern. Each primitive iterates an operator-supplied collection (IMAP MOVE intent / posture-set hop chain / ARC chain hops / JMAP EmailSubmission create/update/destroy maps) and emits a typed refusal per entry. RFC 9051 IMAP MOVE state-machine vs RFC 9.5 posture-chain ordering vs RFC 8617 ARC chain re-evaluation vs RFC 8621 §7.5 EmailSubmission shape — the shingle is the iterator + per-element error-shape construction; the body validations enforce four unrelated spec vocabularies.",
     },
     {
       mode:  "family-subset",
@@ -2524,7 +3194,6 @@ async function testNoDuplicateCodeBlocks() {
       files: [
         "lib/guard-email.js:_detectAddressIssues",
         "lib/middleware/scim-server.js:_parseQuery",
-        "lib/self-update.js:_splitSemver",
       ],
       reason: "Three unrelated string-parser primitives that incidentally share a 50-token charCodeAt-driven scan shingle. _detectAddressIssues walks RFC 5322 addr-spec bytes; _parseQuery walks SCIM filter tokens (RFC 7644 §3.4.2.2); _splitSemver walks SemVer 2.0.0 §2 version-core + pre-release + build identifiers. Each owns a domain-specific error class. Consolidation would couple RFC 5322 / RFC 7644 / SemVer parsing into one primitive none of them want.",
     },
@@ -2613,7 +3282,6 @@ async function testNoDuplicateCodeBlocks() {
         "lib/mail-dkim.js:bootstrap",
         "lib/mail-dkim.js:dualSigner",
         "lib/mail-mdn.js:_generateBoundary",
-        "lib/mail-mdn.js:_validateOpts",
         "lib/mail-mdn.js:build",
         "lib/self-update.js:poll",
         "lib/watcher.js:_detectAutoMode",
@@ -2941,7 +3609,6 @@ async function testNoDuplicateCodeBlocks() {
         // the RFC 8620 / RFC 8621 wire-protocol shape.
         "lib/guard-jmap.js:<top>",
         "lib/guard-jmap.js:validate",
-        "lib/guard-jmap.js:_resolveProfile",
         "lib/guard-jmap.js:compliancePosture",
       ],
       reason: "Guard-family scaffolding required by `b.gateContract` — every guard ships PROFILES (strict/balanced/permissive) + COMPLIANCE_POSTURES (hipaa/pci-dss/gdpr/soc2) + _resolveProfile dispatcher + a top-level @module JSDoc block. Each member's profile body / posture vocab / validate() body is domain-distinct; the surrounding skeleton is the family contract. Consolidation would erase the per-guard validation rules and break the `b.guardAll` registration pattern.",
@@ -3083,7 +3750,6 @@ async function testNoDuplicateCodeBlocks() {
         "lib/agent-tenant.js:_checkDestroyPreconditions",
         "lib/agent-idempotency.js:_put",
         "lib/auth/dpop.js:verify",
-        "lib/auth/dpop.js:_canonicalJwk",
         "lib/auth/sd-jwt-vc-holder.js:store",
         "lib/backup/index.js:scheduleTest",
         "lib/break-glass.js:_validatePolicySet",
@@ -3164,7 +3830,6 @@ async function testNoDuplicateCodeBlocks() {
       // jwk canonicalization). Distinct error classes.
       mode:  "family-subset",
       files: [
-        "lib/auth/dpop.js:_canonicalJwk",
         "lib/auth/dpop.js:verify",
         "lib/auth/sd-jwt-vc-holder.js:store",
         "lib/compliance-sanctions.js:screen",
@@ -3258,16 +3923,6 @@ async function testNoDuplicateCodeBlocks() {
         "lib/request-helpers.js:parseQualityList",
       ],
       reason: "Comma-separated header value parser walking pieces and splitting on `=` per piece. Each enforces a different grammar (RFC 9213 directive list, RFC 9111 Cache-Control directives, Sec-CH-UA brand-member params, RFC 7240/tus.io upload metadata, RFC 9110 quality-list / Accept-* header). Consolidating would couple unrelated header families.",
-    },
-    {
-      mode: "family-subset",
-      files: [
-        "lib/cdn-cache-control.js:_splitTopLevelCommas",
-        "lib/client-hints.js:_splitTopLevelSemis",
-        "lib/http-client-cache.js:_splitTopLevelCommas",
-        "lib/http-message-signature.js:_splitTopLevelSemis",
-      ],
-      reason: "Quote-aware top-level structured-fields splitter — walks a string respecting RFC 8941 §3.3.3 quoted-string state with backslash-escape so `,` (cdn-cache-control / http-client-cache) or `;` (client-hints brand-member params / http-message-signature Signature-Input params) inside quoted-string values doesn't split mid-value. Same shape replicated across four parsers because they each split on a different delimiter for a different RFC; consolidation candidate via a shared `b.structuredFields.splitTopLevel(s, sep)` helper but the per-file copy is intentional pending the extraction (operator-grep finds the splitter inside the file that uses it).",
     },
     {
       mode: "family-subset",
@@ -3661,7 +4316,6 @@ async function testNoDuplicateCodeBlocks() {
     {
       mode:  "family-subset",
       files: [
-        "lib/auth/dpop.js:_canonicalJwk",
         "lib/compliance-sanctions.js:_emitAudit",
         "lib/compliance-sanctions.js:_emitMetric",
         "lib/compliance-sanctions.js:create",
@@ -3935,7 +4589,7 @@ async function testNoDuplicateCodeBlocks() {
         "lib/auth/fido-mds3.js:_b64urlDecode",
         "lib/auth/fido-mds3.js:_parseJws",
         "lib/auth/fido-mds3.js:_verifyJws",
-        "lib/auth/fido-mds3.js:_verifyJwsSignature",
+        "lib/auth/fido-mds3.js:_verifyJws",
         "lib/auth/fido-mds3.js:_verifyParamsForAlg",
         "lib/auth/fido-mds3.js:fetch",
         "lib/auth/fido-mds3.js:verifyAuthenticator",
@@ -4152,7 +4806,7 @@ async function testNoDuplicateCodeBlocks() {
       files: [
         "lib/guard-list-id.js:_refuse",
         "lib/guard-list-unsubscribe.js:_verdict",
-        "lib/guard-smtp-command.js:_validateAuth",
+        "lib/guard-smtp-command.js:_parseAuthCommandSyntax",
         "lib/safe-dns.js:_decodeOpt",
       ],
       reason: "Three independently-domain'd helpers (List-Unsubscribe verdict assembly / SMTP AUTH mech validation / DNS OPT pseudo-RR decode) share local-var declaration + return-shape token sequence. Bodies are domain-distinct (different field names, different error checks). Consolidation would couple unrelated parsers.",
@@ -4561,7 +5215,6 @@ async function testNoDuplicateCodeBlocks() {
     },
     {
       files: [
-        "lib/auth/dpop.js:_canonicalJwk",
         "lib/auth/sd-jwt-vc-holder.js:store",
         "lib/compliance-sanctions.js:screen",
         "lib/dora.js:_validateReportInput",
@@ -4871,6 +5524,21 @@ async function testNoDuplicateCodeBlocks() {
         "lib/self-update.js:_validatePollOpts",
       ],
       reason: "self-update.poll-opts extension of the four-way factory-prelude cluster (sanctions-fetcher / DSR / outbox / self-update) that shares applyDefaults + validateOpts cascade. Four different domains, four different error classes (ComplianceSanctionsFetcherError / DsrError / OutboxError / SelfUpdateError).",
+    },
+    {
+      // [fp:09ad583326fb] v0.12.6 — OTLP protobuf encoder addition extended
+      // the otlp-exporter.js create() prelude into the same factory-prelude
+      // cluster dsr + span-http-server already shared. Three different
+      // domains (GDPR Art. 17 data-subject request, HTTP server-span auto-
+      // wiring, OTLP trace exporter) with three distinct error classes
+      // (DsrError / SpanHttpError / OtlpExporterError); the shingle is the
+      // validateOpts(opts, [...key-list...], "<primitive>.create") boilerplate.
+      files: [
+        "lib/dsr.js:create",
+        "lib/middleware/span-http-server.js:create",
+        "lib/observability-otlp-exporter.js:create",
+      ],
+      reason: "v0.12.6 — OTLP protobuf encoder addition pulled observability-otlp-exporter.js:create into the same validateOpts + applyDefaults prelude cluster dsr + span-http-server already shared. Three different domains (GDPR Art. 17 data-subject request workflow / HTTP server-span auto-wiring / OTLP trace exporter) with three distinct error classes (DsrError / SpanHttpError / OtlpExporterError); the shingle is the per-primitive validateOpts(opts, [...key-list...], '<primitive>.create') call.",
     },
     {
       // [fp:b73d9d193b7b]
@@ -5260,7 +5928,7 @@ function testNoDeniedVendors() {
 
 // ---- Pattern 42: state-stamps in user-facing docs (smoke test the wiki) ----
 
-function testNoStateStampsInPublicDocs() {
+function testStateStampScanningDeferred() {
   // feedback_no_state_stamps_in_docs.md — version numbers / test counts
   // in README / SECURITY / CONTRIBUTING etc. rot the moment the next
   // release ships. We can't easily grep these via the lib walker, but
@@ -5294,6 +5962,24 @@ function testNoStateStampsInPublicDocs() {
 //   4. The catalog scans whole-file content (multiline regex) so
 //      patterns split across lines still match.
 var KNOWN_ANTIPATTERNS = [
+  {
+    // A hard quota / rate / budget ceiling must be enforced with an
+    // atomic conditional reserve — the limit test and the charge are
+    // one indivisible operation ("add only if current + amount fits").
+    // Charge-then-refund (an unconditional `incrBy` followed by a
+    // compensating `decrBy` on overflow) transiently inflates a shared
+    // counter: under cross-node concurrency a smaller call that should
+    // fit can be falsely denied while an over-budget call's charge is
+    // still pending its refund. The textual tell of that broken shape
+    // is a counter store that exposes / requires a `decrBy` refund op.
+    // b.ai.quota originally shipped the refund shape and was reworked
+    // to `store.reserve` (Codex P1 on PR #178, v0.12.27).
+    id: "limit-store-charge-then-refund",
+    primitive: "atomic conditional reserve (limit test + charge as one operation) for hard quota / rate / budget enforcement — see lib/ai-quota.js store.reserve; never charge-then-refund (incrBy + a compensating decrBy)",
+    regex: /\bdecrBy\b/,
+    allowlist: [],
+    reason: "Hard quota / rate / budget ceilings must be enforced with an atomic conditional reserve (the limit test and the charge are one indivisible operation), never charge-then-refund (an unconditional increment plus a compensating `decrBy`). The refund shape transiently over-counts a shared counter and falsely denies concurrent calls that should fit (Codex P1 on PR #178, v0.12.27 — b.ai.quota originally shipped this shape and was reworked to store.reserve). A future store that genuinely needs a decrement for a non-ceiling gauge metric allowlists with a structural reason explaining why no limit decision reads the counter mid-refund.",
+  },
   {
     // Node 26 ships `Map.prototype.getOrInsertComputed(key, factory)`
     // (TC39 stage-4, lands in V8 13.x). It replaces the two-step
@@ -5355,7 +6041,10 @@ var KNOWN_ANTIPATTERNS = [
       "lib/observability-otlp-exporter.js",    // byResource grouping (Map<resKey, bucket>) — object-literal factory
       "lib/otel-export.js",                    // counters / observations (2 sites) — object-literal factory
       "lib/pubsub.js",                         // exactSubs (Map<channel, Set<sub>>) — Set factory
+      "lib/backup/index.js",                   // bundleAdapterStorage.listBundles: byBundle (Map<bundleId, stats>) — object-literal factory
     ],
+    // Strong-dup allowlists added with v0.12.7 archive substrate
+    // — see KNOWN_CLUSTERS additions below for structural reasons.
     reason: "Node 26 ships Map.prototype.getOrInsertComputed(key, factory) — a single-lookup get-or-insert that replaces the two-step `var v = m.get(k); if (!v) { v = factory(); m.set(k, v); }` pattern. The sweep is deferred to the Node 26 floor-bump (eligible Oct 2026); engines.node is `>=24` today. Allowlist above is the survey ground truth from memory/specs/node-26-map-getorinsert-migration.md. New code post-this-patch trips the detector — either wait for the floor bump, or add the call site to BOTH the allowlist AND the migration spec in the same patch. When the floor moves, the bump commit walks the allowlist, rewrites each call site, drops the allowlist + flips the detector to enforce.",
   },
   {
@@ -5404,7 +6093,7 @@ var KNOWN_ANTIPATTERNS = [
   {
     // v0.10.15 — `zlib.gunzipSync` / `zlib.createGunzip` /
     // `zlib.brotliDecompress` without an output-size cap is the
-    // CVE-2025-0725 / CVE-2024-zlib decompression-amplification
+    // CVE-2025-0725 / CWE-409 decompression-amplification
     // class. Attackers craft a kilobyte of compressed input that
     // explodes to gigabytes of output, exhausting memory before the
     // request handler sees the bytes. The defense is either the
@@ -5447,7 +6136,313 @@ var KNOWN_ANTIPATTERNS = [
     requires: /\bmaxOutputLength\b/,
     skipCommentLines: true,
     allowlist: [],
-    reason: "CVE-2025-0725 (libcurl + zlib decompression amplification) + CVE-2024-zlib bomb class. Every gunzip / brotli decompress on operator-supplied bytes MUST bound the output. Use `zlib.gunzipSync(buf, { maxOutputLength: <C.BYTES.* constant> })` so the operator sees the cap at config time; refusal becomes a typed error before the bomb reaches memory.",
+    reason: "CVE-2025-0725 (libcurl + zlib decompression amplification) + CWE-409 (uncontrolled-resource decompression bomb) class. Every gunzip / brotli decompress on operator-supplied bytes MUST bound the output. Use `zlib.gunzipSync(buf, { maxOutputLength: <C.BYTES.* constant> })` so the operator sees the cap at config time; refusal becomes a typed error before the bomb reaches memory.",
+  },
+  {
+    // Citation hygiene — a CVE identifier is always
+    // CVE-<4-digit-year>-<sequence>, where the sequence is purely
+    // numeric (CVE numbering spec). Two malformed shapes ship past
+    // review: a non-numeric sequence (`CVE-2024-zlib` — a library
+    // name dropped in as a placeholder), and a real id with a
+    // hyphen-attached word (`CVE-2024-39687-class` — reads as if
+    // `-class` is part of the id). The first is a fabricated
+    // reference; the second is a parse hazard for any tool that
+    // extracts CVE tokens. The annotation convention is a SPACE
+    // before the descriptor (`CVE-2024-39687 class`), which leaves
+    // the id token well-formed. This detector refuses both shapes:
+    // a letter immediately after the year separator, OR a
+    // hyphen-then-letter after the numeric sequence. It cannot
+    // verify that a well-formed id is real or correctly attributed —
+    // that stays a reviewer responsibility — but it makes the
+    // structurally-invalid class impossible to ship. Real CVE
+    // ranges (`CVE-2023-51764 / -51765`) and id-then-space-descriptor
+    // forms pass unchanged.
+    id: "malformed-cve-identifier",
+    primitive: "cite a real CVE as CVE-<year>-<digits> (all-numeric sequence) then a SPACE before any descriptor — never a non-numeric sequence or a hyphen-attached word",
+    regex: /CVE-[0-9]{4}-(?:[0-9]*[A-Za-z]|[0-9]+-[A-Za-z])/,
+    allowlist: [],
+    reason: "A CVE identifier's sequence number is always numeric and the token ends at the sequence (CVE-<year>-<digits>). A non-numeric sequence (CVE-2024-zlib) is a fabricated placeholder; a hyphen-attached word (CVE-2024-39687-class) makes the id un-parseable. Cite a verifiable CVE followed by a space before any class/descriptor word, or name the weakness class (CWE / RFC).",
+  },
+
+  {
+    // Codex P1 on v0.13.12 PR #234 — the MX listener's command pump was
+    // made async (gates do DNS / store lookups), and the plaintext
+    // socket.on("data") path was routed through a per-connection
+    // serialization chain (`_feedChunk`). But the post-STARTTLS TLSSocket
+    // fed `_ingestBytes` directly from a sync onData callback that ignored
+    // the returned promise — so on the upgraded socket (where the default
+    // strict/balanced profiles actually run the gates) async gate awaits
+    // could overlap later TLS chunks and gate rejections went unhandled
+    // instead of producing the 421 path. The invariant: the async command
+    // pump (`_ingestBytes`) is fed ONLY through `_feedChunk` (the
+    // `return _ingestBytes(...)` form), so every transport — plaintext and
+    // TLS — shares the one serialized chain. A bare `_ingestBytes(` call
+    // anywhere else is a second, un-serialized feed path. The lookbehind
+    // exempts the function definition (`function _ingestBytes`) and the
+    // single legitimate caller (`return _ingestBytes`); `_ingestBytes` is
+    // unique to lib/mail-server-mx.js so this is effectively file-scoped.
+    id: "mx-ingest-bytes-bypasses-feed-pump",
+    primitive: "feed the MX command pump only via _feedChunk (`return _ingestBytes(...)`); never call _ingestBytes directly from a sync callback — it drops the async pump's promise and breaks command serialization + the 421 error path",
+    regex: /(?<!function )(?<!return )\b_ingestBytes\s*\(/,
+    allowlist: [
+      // The submission listener has its OWN _ingestBytes, and it is
+      // SYNCHRONOUS — its only async work (SASL AUTH) is handled via
+      // internal .then() chains inside the command handler, and RFC 4954
+      // §4 forbids clients pipelining commands across AUTH until the
+      // response is received, so a sync pump is spec-acceptable there.
+      // There is no async-promise to drop, so the bare `_ingestBytes(`
+      // call is safe. This invariant guards the MX listener's async pump
+      // specifically; if the submission pump is ever made async, route it
+      // through a _feedChunk equivalent and drop this allowlist entry.
+      "lib/mail-server-submission.js",
+    ],
+    reason: "Codex P1 on PR #234: the async MX command pump must be fed through the single per-connection serialization chain (_feedChunk → `return _ingestBytes`). A bare `_ingestBytes(` call from a sync callback (the original post-STARTTLS onData) ignores the returned promise, letting async HELO/RBL/greylist gate awaits overlap later chunks and turning gate rejections into unhandled rejections instead of the 421 path. Route every transport (plaintext + TLS) through _feedChunk.",
+  },
+
+  {
+    // Codex P1 on v0.12.6 PR #157 — `_anyValueToProto`'s negative-int
+    // path emitted `pb.embeddedMessage(N, pb._writeVarint(v >>> 0))`
+    // which (a) wraps a varint payload in wire-type 2 (length-delimited)
+    // instead of wire-type 0 (varint, which int64 mandates per the
+    // proto3 spec), AND (b) truncates negatives via `v >>> 0` losing
+    // both sign and magnitude beyond 32 bits. Collectors reject the
+    // whole batch when they decode a wire-type mismatch on a known
+    // scalar field, so a single negative AnyValue poisons the export.
+    //
+    // The right shape is `pb.int64(field, value)` (10-byte two's-
+    // complement varint for negatives via BigInt) or `pb.sint64` (ZigZag
+    // when small negatives dominate). The detector flags the
+    // `embeddedMessage(N, ..._writeVarint...)` shape that mixes
+    // wire types — wrapping a raw varint in a length-delimited message
+    // is almost always a bug. Operators legitimately wrapping
+    // `_writeVarint` bytes inside `embeddedMessage` for a packed-repeated
+    // field MUST allowlist with a written reason.
+    id: "protobuf-embeddedmessage-wrapping-varint",
+    primitive: "Use `pb.uint64` / `pb.int64` / `pb.sint64` / `pb.uint32` for scalar varint fields; `embeddedMessage` is for nested message bodies, not raw varints. Mixing wire types causes collectors to reject the whole payload.",
+    regex: /pb\.embeddedMessage\s*\([^)]*pb\._writeVarint/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "Codex P1 on v0.12.6 PR #157 — `_anyValueToProto` negative-int path wrapped a varint payload in `embeddedMessage` (wire-type 2) instead of using `int64` (wire-type 0 varint). The wire-type mismatch poisons the whole OTLP batch; the `v >>> 0` truncation also dropped sign + high bits. Fixed by adding `pb.int64` + `pb.sint64` to the encoder + routing the negative-int branch through `pb.int64`. Detector locks the shape: `embeddedMessage(N, _writeVarint(...))` cannot recur.",
+  },
+
+  {
+    // Codex P1 on v0.12.7 PR #158 — archive-read.extract's rollback
+    // cleanup deleted PRE-EXISTING destination files when a later
+    // entry failed. The renameSync(tmpPath, resolvedPath) silently
+    // overwrote operator files at the destination, then on abort the
+    // catch-block rmSync wiped them out — permanent data loss
+    // disguised as atomic rollback. Fix: refuse to write when the
+    // destination path already exists; force operators to extract
+    // into a fresh / empty subtree.
+    //
+    // Detector scope: any lib/archive*.js or lib/safe-archive.js file
+    // that calls renameSync into a path it ALSO tracks for cleanup
+    // MUST refuse overwrite up-front. Codify as a file-scoped invariant:
+    // archive-read.js must contain "destination-exists" refusal code.
+    id: "archive-extract-overwrite-without-refusal",
+    primitive: "extract loops in lib/archive-read.js MUST refuse to write to a destination path that already exists — atomic rollback via tmp-rename + tracked-path cleanup is only safe when every tracked path was newly created. Pre-existing files at the destination + catch-block rmSync = data loss.",
+    // File-scoped: only fires on archive-read.js / safe-archive.js
+    // shape. The pattern is renameSync of a tmpPath onto resolvedPath
+    // (the canonical destination variable) — atomic-file.js's
+    // operator-file rename is a different shape (operator already
+    // owns the destination context); http-client.js's atomic-tmp
+    // rename writes operator-supplied paths under operator-supplied
+    // tmp dirs, also a different concern.
+    regex: /written\.push\s*\(\s*\{[^}]*path:\s*resolvedPath/,
+    requires: /destination-exists/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "Codex P1 on v0.12.7 PR #158 — archive-read.extract used renameSync to atomically place each decompressed entry at its canonical destination + tracked written[].path for catch-block cleanup. When the destination directory was non-empty, the rename silently overwrote operator files; on extract abort, the cleanup deleted them. Fix: refuse upfront if destination path exists, force operators to use a fresh / empty subtree. Detector locks the shape: any extract code that tracks resolvedPath for catch-block cleanup MUST carry a `destination-exists` refusal in the same file.",
+  },
+
+  {
+    // Codex P1 on v0.12.13 PR #164 — listKeys against a paginated
+    // object-store backend dropped every key past the first page
+    // because the call sent only one client.list() and ignored
+    // the `truncated` / `continuationToken` contract. Detector
+    // locks the shape: any lib/ call to `client.list(...)` paired
+    // with `truncated` consumption MUST also walk the
+    // continuationToken loop, OR the call site must carry an
+    // `allow:list-without-pagination` marker explaining why
+    // single-page is sufficient (typically: the caller already
+    // bounds the prefix or already passes a maxResults that's
+    // known to be larger than the universe).
+    id: "object-store-list-without-pagination",
+    primitive: "object-store list calls in lib/ MUST walk truncated / continuationToken pages — single-shot list silently truncates at the backend's page cap (1000 by default). The runtime symptom is silent data loss in listBundles / deleteBundle. Either follow the pagination loop or carry the `allow:list-without-pagination` marker with the bound reason.",
+    regex: /\bclient\.list\s*\(/,
+    requires: /continuationToken|truncated|allow:list-without-pagination/,
+    skipCommentLines: true,
+    allowlist: [
+      // backup/index.js IS the runtime pagination site (walks the
+      // loop with the runaway-cap defence). Allowlisted because
+      // the inline `client.list` calls there are inside the
+      // walker itself; the detector would false-positive on the
+      // call inside the do-while.
+      "lib/backup/index.js",
+    ],
+    reason: "Codex P1 on v0.12.13 PR #164 — objectStoreAdapter.listKeys called client.list once and never followed the truncated/continuationToken pagination contract. The fix walks the loop with a PAGINATION_CAP safety net. Detector locks the shape so a future caller of client.list can't silently drop pagination.",
+  },
+
+  {
+    // Codex P1A on v0.12.12 PR #163 — "on-request" placement
+    // semantics collapsed into "always" when shouldEmit didn't
+    // gate on an explicit `opts.requested` signal. Detector locks
+    // the contract: any compliance-disclosure primitive in
+    // lib/ai-disclosure.js with a placement-mode dispatch MUST
+    // gate the "on-request" branch on an explicit opt rather than
+    // unconditionally returning true. The pattern is narrow
+    // (file-scoped to ai-disclosure.js) because the bug shape was
+    // specific to the Art. 50 placement enum.
+    id: "ai-disclosure-on-request-without-requested-gate",
+    primitive: "in lib/ai-disclosure.js, placement === \"on-request\" branches must gate on an explicit opt (e.g. opts.requested === true) so the disclosure doesn't fire on every call. Without the gate, on-request collapses into always-on semantics and the operator's three placement modes become two.",
+    regex: /placement\s*===\s*["']on-request["']/,
+    requires: /requested|allow:ai-disclosure-on-request-without-requested-gate/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "Codex P1A on v0.12.12 PR #163 — ai-disclosure.chatbot's on-request placement returned shouldEmit=true unconditionally, breaking the three-mode placement contract. Detector locks the static shape so a future placement primitive in ai-disclosure.js can't regress.",
+  },
+
+  // Codex P1 on v0.12.11 PR #162 — surfaced the NaN/Infinity bypass
+  // through `typeof X === "number" ? X : default` gating. The
+  // pattern exists widely in the codebase (~29 call sites at the
+  // time the finding was filed) — most are framework-controlled
+  // (numeric byte-slot reads from Buffers, enum-tag checks) where
+  // NaN-vs-number is moot. Adding a static detector here would
+  // cause widespread false positives without surfacing the actual
+  // operator-opt-controlled bug pattern. The runtime gate in
+  // lib/backup/index.js + lib/archive-wrap.js IS the fix; a
+  // future patch can sweep the 29 sites if any are found to be
+  // operator-opt controlled. See feedback_typeof_number_nan_bypass
+  // (write this as a memory if it recurs).
+
+  {
+    // Codex P2 on v0.12.10 PR #161 — partial recipient objects
+    // ({ publicKey } alone) silently triggered b.crypto.encrypt's
+    // ML-KEM-only fallback, degrading archive-wrap's documented
+    // hybrid contract (ML-KEM-1024 + P-384 ECDH). Detector locks
+    // the shape: any caller that constructs a recipient with
+    // `publicKey:` MUST also carry `ecPublicKey:` in the same
+    // object literal OR carry an `allow:archive-wrap-partial-recipient`
+    // marker explaining why KEM-only is intentional (typically:
+    // the operator explicitly opted into b.crypto.encryptMlkemOnly).
+    id: "archive-wrap-recipient-missing-ec-half",
+    primitive: "static-key recipients for b.archive.wrap / bundleAdapterStorage `recipient:` opt MUST carry BOTH publicKey (ML-KEM-1024 PEM) AND ecPublicKey (P-384 ECDH PEM). Partial recipients trip b.crypto.encrypt's ML-KEM-only fallback which silently degrades the hybrid defense-in-depth contract this surface promises.",
+    // File-scoped: ANY recipient: { publicKey: ... } object literal
+    // in lib/ MUST also include ecPublicKey in the same object.
+    // Fires only when ` publicKey: ` appears inside a `recipient: {`
+    // bracket; the codebase patterns walker is line-based so this
+    // is approximate but catches the obvious smell.
+    regex: /recipient:\s*\{\s*[^}]*publicKey:/,
+    requires: /ecPublicKey|allow:archive-wrap-partial-recipient/,
+    skipCommentLines: true,
+    allowlist: [
+      // archive-wrap.js IS the runtime-refusal site for partial
+      // recipients (throws archive-wrap/hybrid-required); it
+      // references partial-recipient shapes in error messages.
+      "lib/archive-wrap.js",
+    ],
+    reason: "Codex P2 on v0.12.10 PR #161 — archive-wrap's recipient contract is hybrid PQC by design. Partial recipient objects degrade to KEM-only with only a one-shot audit. Detector locks the static-side gate so library code composing wrap/unwrap can't silently drop the ECDH leg.",
+  },
+
+  {
+    // v0.12.10 — when bundleAdapterStorage carries a posture that
+    // mandates encryption-at-rest (HIPAA / PCI-DSS / similar), the
+    // same call-site MUST propagate cryptoStrategy: "recipient"
+    // (or refuse upstream) — the storage adapter alone cannot
+    // satisfy the regulatory contract. The library-internal refusal
+    // at `backup/posture-requires-encryption` is the runtime gate;
+    // this detector locks the shape at the static-analysis layer
+    // so any future caller that drops cryptoStrategy from a
+    // posture-bearing call surfaces during codebase-patterns.
+    id: "backup-adapter-storage-without-posture-check",
+    primitive: "any bundleAdapterStorage({ ... posture: ... }) call site that names a posture from the HIPAA / PCI-DSS / etc. set MUST also pass cryptoStrategy. The library-side refusal exists; the detector exists so the contract can't drift silently when a primitive composes bundleAdapterStorage indirectly.",
+    regex: /bundleAdapterStorage\s*\([^)]*posture:/,
+    requires: /cryptoStrategy|allow:backup-adapter-storage-without-posture-check/,
+    skipCommentLines: true,
+    allowlist: [
+      // backup/index.js IS the primitive — the runtime refusal lives
+      // there. Self-allowed so the detector doesn't flag the
+      // refusal-emitting code itself.
+      "lib/backup/index.js",
+    ],
+    reason: "v0.12.10 — Flavor 1 recipient wrap lands as bundleAdapterStorage's cryptoStrategy: \"recipient\". HIPAA + PCI-DSS postures refuse cryptoStrategy: \"none\" at runtime; this detector adds the static-side gate so a primitive composing bundleAdapterStorage with a posture opt can't accidentally drop the cryptoStrategy propagation. Future Flavor 2 (per-entry, v0.12.11) extends the same contract.",
+  },
+
+  {
+    // Codex P1 + P2 on v0.12.9 PR #160 — backup readBundle's
+    // tar.gz restore path inherited archive.read.gz defaults (1 GiB
+    // output / 100× ratio), which made the SAME primitive write
+    // bundles it couldn't read back. The detector enforces the
+    // write/read contract for self-authored gzip payloads: any
+    // lib/ call to `archive.read.gz(...)` from a context that has
+    // its own size budget (paired with a `maxBundleBytes` /
+    // `maxOutputBytes` / `maxPayloadBytes` opt) MUST propagate
+    // that budget to read.gz via `maxDecompressedBytes` AND
+    // disable the ratio cap (`maxExpansionRatio: 0`) — bombs in
+    // self-authored payloads are already prevented at write time.
+    id: "archive-read-gz-without-self-authored-budget",
+    primitive: "callers of archive.read.gz from a context that gates its own writes on a size cap (maxBundleBytes / similar) must pass maxDecompressedBytes + maxExpansionRatio:0 so the write/read contract is symmetric. Bomb defenses live at the upstream cap; the gz layer just decompresses.",
+    // File-scoped: only fires on backup/index.js shapes for now.
+    // archive.read.gz called with no opts is fine in operator code
+    // (adversarial-input case); the antipattern is when the caller
+    // also writes payloads under its own size cap.
+    regex: /archive(?:Lazy\(\))?\.read\.gz\s*\([^)]*\)\s*[^,{]/,
+    requires: /maxDecompressedBytes/,
+    skipCommentLines: true,
+    allowlist: [
+      // archive-gz.js IS the read.gz primitive itself.
+      "lib/archive-gz.js",
+    ],
+    reason: "Codex P1/P2 on v0.12.9 PR #160 — backup readBundle's tar.gz restore inherited the 100× ratio + 1 GiB output defaults, breaking restore for zero-filled DB dumps + ~1-8 GiB bundles that writeBundle accepts. Fix: every archive.read.gz call from a primitive with its own size budget propagates that budget. Detector locks the symmetry.",
+  },
+
+  {
+    // v0.12.9 — Direct node:zlib gunzip calls in lib/ must compose
+    // b.safeDecompress (1 GiB output / 100× ratio default caps) so a
+    // hostile gzip stream can't OOM or expand-bomb the host. Mirrors
+    // the v0.11.5 must-compose pattern. lib/archive-gz.js IS the
+    // canonical gunzip site (it wires safeDecompress in directly);
+    // every other lib/ call to zlib.gunzipSync / zlib.createGunzip
+    // must either route through b.safeDecompress OR carry a marker
+    // explaining why it's safe to bypass (e.g. the caller already
+    // applied `maxOutputLength` AND the input is operator-controlled).
+    id: "archive-gz-without-safedecompress",
+    primitive: "every lib/ call to zlib.gunzipSync / zlib.createGunzip / gunzip MUST either go through lib/archive-gz.js (which composes b.safeDecompress) OR carry an `allow:archive-gz-without-safedecompress` marker with the reason the bomb gate is bypassed (typically: `maxOutputLength` is already enforced + the input is operator-trusted).",
+    regex: /zlib\.(?:gunzipSync|createGunzip)\b/,
+    requires: /safeDecompress|maxOutputLength|allow:archive-gz-without-safedecompress/,
+    skipCommentLines: true,
+    allowlist: [
+      // archive-gz.js is the canonical gunzip site — it directly
+      // imports safeDecompress and routes every call through it.
+      // Listed here so the detector doesn't false-positive against
+      // its own enforcement file.
+      "lib/archive-gz.js",
+    ],
+    reason: "v0.12.9 — b.archive.read.gz is the framework's gzip read primitive and composes b.safeDecompress for every gunzip. Direct lib/ zlib.gunzipSync / zlib.createGunzip calls must either route through b.archive.read.gz, compose b.safeDecompress inline, OR carry an explicit `maxOutputLength` cap with the bypass marker. The detector locks the contract so v0.13+ primitives that handle a gzip-wrapped payload can't quietly drop the bomb cap.",
+  },
+
+  {
+    // Codex P1 on v0.12.8 PR #159 — archive-tar-read.js's walker
+    // advanced `pos` by the declared padded block size without
+    // checking that those bytes existed in the buffer. A truncated
+    // archive (header says 11 bytes, buffer holds 8) silently
+    // produced an entry whose extract() sliced the 8-byte prefix
+    // and wrote it as if it were the complete file. Fix: refuse
+    // upfront with a `truncated-entry` typed error when
+    // `bodyStart + paddedSize > bytes.length`. Same shape applies
+    // to the pax-extended-header path (its `bodyEnd` advance was
+    // the same uncapped arithmetic).
+    id: "archive-tar-walker-without-truncation-check",
+    primitive: "tar walkers in lib/archive-tar-read.js MUST verify that the declared block size fits within the remaining buffer before advancing `pos` — a header that claims more bytes than the buffer holds is a truncated archive, not a valid entry. The refusal carries `truncated-entry` code so operators can distinguish wire-format-bad input from policy-bad input.",
+    // File-scoped: only fires on archive-tar-read.js. The walker
+    // advances pos by paddedSize (Math.ceil(hdr.size / BLOCK_SIZE)
+    // * BLOCK_SIZE) — any code that adds paddedSize to pos without
+    // a preceding bounds check is the smell.
+    regex: /pos\s*\+=\s*paddedSize/,
+    requires: /truncated-entry/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "Codex P1 on v0.12.8 PR #159 — archive-tar-read.js's tar walker recorded each entry and advanced pos by paddedSize without verifying the declared bytes existed in the buffer. A truncated archive silently produced a partial-content entry on extract — exact reproducer in the Codex thread: declared 11-byte file backed by 8 bytes of buffer produced an 8-byte output. Fix: refuse upfront with `archive-tar/truncated-entry` typed error. Detector locks the shape: any code path that advances pos by paddedSize in archive-tar-read.js MUST carry a `truncated-entry` refusal in the same file.",
   },
 
   {
@@ -5727,8 +6722,74 @@ var KNOWN_ANTIPATTERNS = [
       // jwtExternal._assertAlgKtyMatch BEFORE createPublicKey on
       // the browser-supplied DBSC binding JWK.
       "lib/dbsc.js",
+      // did.js — _jwkToKey allowlists the JWK's kty/crv (OKP/Ed25519 or
+      // EC/P-256/P-384/secp256k1) and refuses any other type BEFORE
+      // createPublicKey, which is the DID-context equivalent of the
+      // alg/kty cross-check: a DID document carries verification keys,
+      // not a verification alg (the consuming verifier — b.vc / b.mdoc —
+      // supplies the alg allowlist), so there is no `alg` to pass to
+      // _assertAlgKtyMatch; the kty/crv allowlist is the confusion guard.
+      "lib/did.js",
+      // cose.js — importKey maps a COSE_Key to a KeyObject after
+      // allowlisting kty (OKP/EC2) + crv (Ed25519 / P-256 / P-384 /
+      // P-521 — the curves b.cose.verify has an algorithm for); the JWK
+      // is constructed from the COSE_Key, not
+      // attacker-chosen alg-vs-kty, and b.cose.verify supplies the alg
+      // allowlist separately. Same kty/crv-allowlist confusion guard as
+      // did.js — there is no verification `alg` carried in a COSE_Key.
+      "lib/cose.js",
+      // network-dnssec.js — _dnskeyToKey constructs the JWK ITSELF from
+      // the DNSSEC algorithm number (8/13/14/15, validated against the
+      // ALGORITHMS table) — kty/crv are derived from that number, never
+      // read from an attacker-supplied JWK. verifyRrset also refuses an
+      // RRSIG whose algorithm disagrees with the DNSKEY's before the key
+      // is built, so the alg→kty/crv binding is fixed at the source. The
+      // confused-deputy (alg-vs-kty) shape cannot arise — there is no
+      // externally-chosen kty to confuse.
+      "lib/network-dnssec.js",
     ],
-    reason: "CVE-2026-22817 — every JWT verifier that resolves a JWK BY ATTACKER-CONTROLLED HEADER (kid / x5t) must cross-check the declared alg against the JWK's kty (and crv for EC) BEFORE handing the key to node:crypto.verify. Imports that skip the check are exactly the confused-deputy shape (RS256→HS256 family). The shared helper `jwtExternal._assertAlgKtyMatch(alg, jwk)` is the single point of enforcement; new code routes through it. Allowlist entries are sign-side / pinned-cert paths where the JWK is not attacker-supplied.",
+    reason: "CVE-2026-22817 — every JWT verifier that resolves a JWK BY ATTACKER-CONTROLLED HEADER (kid / x5t) must cross-check the declared alg against the JWK's kty (and crv for EC) BEFORE handing the key to node:crypto.verify. Imports that skip the check are exactly the confused-deputy shape (RS256→HS256 family). The shared helper `jwtExternal._assertAlgKtyMatch(alg, jwk)` is the single point of enforcement; new code routes through it. Allowlist entries are sign-side / pinned-cert paths where the JWK is not attacker-supplied, or (did.js) where a kty/crv allowlist stands in for alg/kty because the format carries no verification alg.",
+  },
+  {
+    // DNSSEC denial-of-existence: a wildcard at the closest encloser in
+    // an NXDOMAIN (Name Error) proof must be proven NON-EXISTENT
+    // (covered). Accepting a MATCHING wildcard owner as proof lets a
+    // forged NXDOMAIN suppress data that wildcard expansion should have
+    // synthesised (RFC 4035 §5.4, RFC 5155 §8.4). The bug shape is a
+    // boolean gate that treats "covered OR matched" as acceptable:
+    // `!findCover(x) && !findMatch(x)`. The fix requires cover alone.
+    id: "nsec-wildcard-cover-or-match-accepted",
+    primitive: "wildcard non-existence in an NXDOMAIN proof requires findCover() alone — never `!findCover(x) && !findMatch(x)`",
+    regex: /!\s*findCover\s*\([^)]*\)\s*&&\s*!\s*findMatch\s*\(/,
+    allowlist: [],
+    reason: "DNSSEC NXDOMAIN over-acceptance — for a Name Error proof the source-of-synthesis wildcard must be COVERED (proven absent). A matching wildcard owner means the wildcard exists and the query should have been answered by expansion, so a response claiming NXDOMAIN is forged. The `!findCover(x) && !findMatch(x)` gate accepts a matching wildcard as proof and must never appear; the correct gate is `!findCover(x)`. Detection is precise: only the cover-OR-match denial gate matches. Wildcard-NODATA (which legitimately needs a MATCHING wildcard with the type absent) uses `findMatch(...)` standalone with a type-bitmap check, not this gate, so it does not match.",
+  },
+  {
+    // DNSSEC key selection: 16-bit key tags collide (RFC 4034 App B), so
+    // selecting a SINGLE DNSKEY by tag and verifying only against it
+    // yields a false `bad-signature` when a colliding non-signing key
+    // appears first in the RRset. A verifier must try EVERY key whose
+    // tag (and algorithm) match (RFC 4035 §5.3.1) — `_keysByTag` +
+    // `_verifyRrsetWithAnyKey`, never a `_findKeyByTag`-style single pick.
+    id: "dnssec-single-key-by-tag",
+    primitive: "_keysByTag(...) + try-every-candidate — never a single-result _findKeyByTag for signature verification",
+    regex: /_findKeyByTag\s*\(/,
+    allowlist: [],
+    reason: "DNSSEC key-tag collision false-negative — a 16-bit DNSKEY tag is not unique within an RRset (RFC 4034 Appendix B explicitly permits collisions). Picking the first key with a matching tag and verifying only against it rejects an otherwise-valid chain when a colliding non-signing key sorts earlier. RFC 4035 §5.3.1 requires trying every key whose tag and algorithm match until one validates; the framework does this via `_keysByTag` + `_verifyRrsetWithAnyKey`. The single-result `_findKeyByTag` helper must not be (re)introduced for signature key selection.",
+  },
+  {
+    // Wire-enum validation against a lookup table must use an integer +
+    // own-property check, never `key in TABLE` or `TABLE[key] !==
+    // undefined`: `in` / member access walk the prototype chain, so an
+    // attacker-supplied `"__proto__"` (or a string `"1"` that coerces on
+    // lookup but then fails strict-=== comparisons) slips past. The
+    // dane TLSA usage / selector / matching-type enums are validated via
+    // `_enumField` (typeof number + Number.isInteger + hasOwnProperty).
+    id: "dane-enum-unsafe-membership",
+    primitive: "_enumField(v, TABLE, ...) — integer + Object.prototype.hasOwnProperty, never `v in TABLE` / `TABLE[v] === undefined`",
+    regex: /\b(?:in\s+(?:USAGES|SELECTORS|MATCHING)\b|(?:USAGES|SELECTORS|MATCHING)\s*\[[^\]]+\]\s*===?\s*undefined)/,
+    allowlist: [],
+    reason: "Prototype-key / string-coercion bypass — validating an untrusted wire enum with `key in TABLE` or `TABLE[key] !== undefined` accepts inherited keys such as `__proto__` (and string keys like `\"1\"` that coerce on lookup but break later strict-=== branches). The DANE TLSA enums (certificate usage / selector / matching type) must be validated with a numeric + integer + own-property test (`_enumField`). The unsafe membership forms must not appear for these tables.",
   },
   {
     // CVE-2026-23552 — cross-realm JWT acceptance via non-CT iss
@@ -5748,9 +6809,10 @@ var KNOWN_ANTIPATTERNS = [
     reason: "CVE-2026-23552 — JWT iss comparisons against attacker-controlled payload values leak prefix-timing via `!==`. Every JWT verifier in the framework (oauth.verifyIdToken / jwt-external.verifyExternal / oauth.parseFrontchannelLogoutRequest / sd-jwt-vc.verify) routes through jwtExternal._issuerMatches for constant-time comparison. Detection is precise: `payload.iss !== ...` / `claims.iss !== ...` / `token.iss !== ...` is the JWT-verify-side shape. Non-JWT iss checks (e.g. discovery-document self-consistency where iss came from the same TLS-fetched body) are not in scope and don't match the regex.",
   },
   {
-    // CVE-2026-23993 — accepting unknown JOSE alg values via a
-    // `switch (alg) { default: ... }` permissive default-branch is
-    // the canonical shape. Verifiers MUST throw in the default
+    // Alg-allowlist gate (CWE-347 improper-sig-verification /
+    // CWE-757 algorithm-downgrade) — accepting unknown JOSE alg
+    // values via a `switch (alg) { default: ... }` permissive
+    // default-branch is the canonical shape. Verifiers MUST throw in the default
     // branch (no fall-through to a permissive "any signature"
     // path). The detector catches `switch (...alg)` (case-
     // insensitive) where the default branch returns/falls through
@@ -5766,7 +6828,7 @@ var KNOWN_ANTIPATTERNS = [
       // branch, so it doesn't match. Other auth files use
       // explicit if-cascades that throw, also not matched.
     ],
-    reason: "CVE-2026-23993 — JWT verifiers that accept unknown alg values via a permissive switch-default branch are the canonical bypass class. Every alg-dispatch primitive in the framework throws in the default branch (`throw new AuthError('.../unsupported-alg', ...)`) so an unrecognized alg can never reach a signature-verify call. The detector specifically flags `switch (alg)` (or `switch (header.alg)` / `switch (sigAlgo)`) whose default-branch returns / breaks rather than throwing. New alg-dispatch code throws in the default — no exceptions.",
+    reason: "Alg-allowlist gate (CWE-347 / CWE-757) — JWT verifiers that accept unknown alg values via a permissive switch-default branch are the canonical bypass class. Every alg-dispatch primitive in the framework throws in the default branch (`throw new AuthError('.../unsupported-alg', ...)`) so an unrecognized alg can never reach a signature-verify call. The detector specifically flags `switch (alg)` (or `switch (header.alg)` / `switch (sigAlgo)`) whose default-branch returns / breaks rather than throwing. New alg-dispatch code throws in the default — no exceptions.",
   },
   {
     id: "inline-codepoint-class-table",
@@ -6102,8 +7164,17 @@ var KNOWN_ANTIPATTERNS = [
       // shared runSql; re-routing through runInTransaction would change
       // semantics (passing module.exports vs database). Keep as-is.
       "lib/db.js",
+      // clusterStorage.transaction(fn) is the cluster-aware ASYNC
+      // transaction primitive (v0.13.38). dbSchema.runInTransaction is
+      // synchronous (BEGIN -> fn() -> COMMIT) and cannot wrap the async fn
+      // the atomic-RMW callers (cache, dual-control) need. The cluster path
+      // delegates to externalDb.transaction; the single-node path issues
+      // BEGIN/COMMIT/ROLLBACK around an awaited fn with shared-connection
+      // serialization (no other statement may interleave). Same legitimate-
+      // primitive justification as db.js.
+      "lib/cluster-storage.js",
     ],
-    reason: "Extracted to dbSchema.runInTransaction. Replaces the inline BEGIN / COMMIT / ROLLBACK try/catch boilerplate in migrations / seeders / db-schema. Handles both raw better-sqlite3 and b.db framework wrapper handles via runSqlOnHandle.",
+    reason: "Extracted to dbSchema.runInTransaction. Replaces the inline BEGIN / COMMIT / ROLLBACK try/catch boilerplate in migrations / seeders / db-schema. Handles both raw better-sqlite3 and b.db framework wrapper handles via runSqlOnHandle. db.js + cluster-storage.js are allowlisted transaction primitives (sync public + async cluster-aware) that can't route through the sync helper.",
   },
   {
     id: "inline-numeric-bounds-cascade",
@@ -6656,6 +7727,36 @@ var KNOWN_ANTIPATTERNS = [
   },
 
   {
+    // Sibling to test-promise-settimeout-sleep, for the timer the
+    // setTimeout regex misses: a COUNTED DRAIN-LOOP that reassigns a
+    // promise to its own `.then()` over and over to "flush N
+    // microtasks/ticks" before asserting — the `_waitMicrotasks(n)`
+    // helper shape (`var p = Promise.resolve(); for (...) p = p.then(
+    // () => new Promise(r => setImmediate(r)));`). Like the fixed
+    // setTimeout sleep it guesses a budget; under SMOKE_PARALLEL=64
+    // contention the awaited async work (a cluster-backend DB take,
+    // a scheduler tick-claim) hasn't resolved within the tick count,
+    // so the next assertion reads stale state. This was the recurring
+    // rate-limit-cluster "4th blocked with 429" flake and the
+    // scheduler-exactly-once tick-claim race. A single `await new
+    // Promise(r => setImmediate(r))` event-loop yield is legitimate
+    // and is NOT matched — only the self-reassigning `<x> = <x>.then(`
+    // drain idiom paired with a timer is. Poll the observable
+    // condition with helpers.waitUntil instead.
+    id: "test-microtask-drain-loop-sleep",
+    primitive: "helpers.waitUntil(predicate, { timeoutMs, label }) — poll the observable condition; never drain a fixed count of microtasks/ticks by reassigning a promise to its own .then() in a loop",
+    scanScope: "test",
+    regex: /\b(\w+)\s*=\s*\1\.then\([\s\S]{0,80}?set(?:Immediate|Timeout)\s*\(/,
+    skipCommentLines: true,
+    allowlist: [
+      // The catalog itself carries this pattern as a regex literal +
+      // in this entry's own prose/reason describing the antipattern.
+      "test/layer-0-primitives/codebase-patterns.test.js",
+    ],
+    reason: "A for-loop that reassigns a promise to its own `.then(() => new Promise(r => setImmediate(r)))` to drain a fixed number of microtask ticks is the same fixed-budget anti-pattern as a setTimeout sleep, just timed in event-loop turns instead of milliseconds — and it flakes the same way: when the async work under test hasn't resolved within the tick count (cluster DB take, scheduler tick-claim) the following assertion reads stale state. Poll the observable condition with helpers.waitUntil(predicate, { timeoutMs, label }); a lone `await new Promise(r => setImmediate(r))` yield is fine and isn't matched.",
+  },
+
+  {
     // v0.10.13 PR #102 macOS hang — stream-throttle.test.js used
     // `setTimeout`-based rate enforcement plus `node:stream.pipeline`
     // and hung the macOS GitHub Actions runner for >2h on two
@@ -7036,6 +8137,112 @@ var KNOWN_ANTIPATTERNS = [
     reason: "Codex P1 on v0.11.4 PR #109 — b.audit.useStore({ record }) inlined await on operator-supplied callback. A stalled network call neither resolves nor rejects ⇒ b.audit.record() never returns, emit/safeEmit drains stall behind it; hot-path observability emission is supposed to be drop-silent on hangs. Defense: wrap every external-callback await in safeAsync.withTimeout. Detector catches future operator-supplied async hooks on the same shape (_externalStore / _userStore / _externalSink / _externalCb / _externalCallback / _externalHook).",
   },
 
+  {
+    // v0.14.7 — physically deleting audit-chain rows is a
+    // single-operator-can-erase-evidence risk. `auditTools.purge`
+    // (and the low-level `db.purgeAuditChain` it composes) MUST
+    // consult a dual-control gate — two distinct authorizers — before
+    // the destructive delete runs, so one compromised credential can't
+    // silently truncate the tamper-evident chain. The gate primitive
+    // is `db._checkDualControlGate(table)` (resolved at runtime); the
+    // purge path threads it via `_resolveDualControlGate(opts)` and
+    // refuses with `dual-control-required` when no grant is present.
+    //
+    // Detector: any lib/ call to `purgeAuditChain(` MUST appear in a
+    // file that also names the gate (`_checkDualControlGate` /
+    // `_resolveDualControlGate` / `dualControlGrant`). A new caller
+    // that physically deletes chain rows without routing through the
+    // gate trips here.
+    id: "audit-purge-without-dual-control-gate",
+    primitive: "auditTools.purge({ dualControlGrant }) / db.purgeAuditChain — physical audit-chain deletion MUST consult the dual-control gate (_checkDualControlGate / _resolveDualControlGate); one operator must not be able to erase the tamper-evident chain alone",
+    regex: /\bpurgeAuditChain\s*\(/,
+    requires: /_checkDualControlGate|_resolveDualControlGate|dualControlGrant/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "v0.14.7 — audit-chain purge is irreversible and tamper-evidence-destroying. The discipline: the chain may only be truncated under a two-authorizer dual-control grant. db.js defines the gate (_checkDualControlGate) and audit-tools.js purge() resolves+enforces it (_resolveDualControlGate) before calling db().purgeAuditChain — the only live call site, which satisfies the companion check (db.js's own purgeAuditChain references are its definition + JSDoc, not call sites, so it never matches). A future file that calls purgeAuditChain without naming the gate would let a single operator delete evidence — exactly the shape this blocks.",
+  },
+
+  {
+    // v0.14.7 — raw-SQL fragments passed to `whereRaw` / the
+    // WhereBuilder `.raw(sql, params)` escape hatch must parameterize
+    // values via the `params` array, NOT interpolate or concatenate
+    // them into the SQL string. `_assertRawNoStringLiteral` refuses an
+    // embedded `'...'` literal at runtime (unless the caller opts in
+    // with `allowLiterals`), but the static discipline is stronger:
+    // lib/ must never BUILD the raw SQL by `${...}` template
+    // interpolation or `"..." + value` string concatenation — that is
+    // the injection shape the bound-params API exists to prevent.
+    //
+    // Detector fires on a whereRaw/.raw call whose first argument is a
+    // template literal containing `${` or a string-concat expression.
+    // A no-arg `bodyParser.raw()` (different `.raw`) does not match —
+    // the regex requires an interpolated/concatenated string argument.
+    id: "whereraw-interpolated-or-concatenated-sql",
+    primitive: "whereRaw(sql, params) / qb.raw(sql, params) — pass values through the bound `params` array; never `${...}`-interpolate or `+`-concatenate them into the SQL string (that is the injection shape the params API prevents)",
+    regex: /(?:whereRaw|\.raw)\s*\(\s*(?:`[^`]*\$\{|["'][^"']*["']\s*\+|[A-Za-z_$][\w$]*\s*\+\s*["'`])/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "v0.14.7 — b.db whereRaw / WhereBuilder.raw accept an operator SQL fragment plus a bound-params array. Concatenating or template-interpolating a value into the fragment defeats the placeholder binding and reintroduces SQL injection. lib/ has zero such call sites today; the detector keeps it that way (the runtime _assertRawNoStringLiteral gate is the operator-facing backstop, this is the framework-internal one). No-argument `.raw()` mountings (e.g. bodyParser.raw()) don't match — an interpolated/concatenated string argument is required.",
+  },
+
+  {
+    // v0.14.7 — equality-lookup ("derived") hashes for sealed columns
+    // must be computed through cryptoField._computeDerivedHash, which
+    // honours the per-table / per-column mode policy (salted-sha3 by
+    // default, hmac-shake256 opt-in keyed off vault.getDerivedHashMacKey).
+    // Hand-rolling `sha3Hash(vault.getDerivedHashSalt() + ns + value)`
+    // at a new site bypasses the keyed-MAC option AND the mode policy,
+    // and risks a static-salt regression if the salt source is changed
+    // for one caller but not the canonical helper.
+    //
+    // Detector: hand-rolled `sha3Hash(<salt-hex> + ns + value)` outside
+    // crypto-field.js (the canonical helper). Two shapes are caught:
+    //   (a) inline — `getDerivedHashSalt().toString("hex") + ...`
+    //   (b) split across lines — a variable bound to the salt's hex is
+    //       concatenated into a `sha3Hash(...)`:
+    //         var salt = getDerivedHashSalt();
+    //         var h    = salt.toString("hex");
+    //         sha3Hash(h + ns + v);
+    // Shape (b) evaded the original inline-only regex (the salt's
+    // `.toString("hex")` is followed by `;`, not `+`, and the `+` lives
+    // on the downstream sha3Hash argument). The helper itself is
+    // allowlisted. NOTE: a `getDerivedHashSalt().toString("hex")` fed
+    // into `kdf(...)` (e.g. idempotency-key's fingerprint HMAC seed) is
+    // NOT this bug and does not match — neither shape names `sha3Hash`.
+    id: "derived-hash-handrolled-outside-crypto-field",
+    primitive: "cryptoField derived/lookup hashes — compute via _computeDerivedHash / b.cryptoField.computeNamespacedHash (honours salted-sha3 vs hmac-shake256 mode + vault.getDerivedHashMacKey); do not hand-roll sha3Hash(getDerivedHashSalt() + ns + value) at call sites",
+    regex: /getDerivedHashSalt\s*\(\s*\)\s*\.toString\s*\(\s*["']hex["']\s*\)\s*\+|var\s+(\w+)\s*=\s*[\w.]*getDerivedHashSalt\s*\(\s*\)\s*;[\s\S]{0,200}?\b(\w+)\s*=\s*\1\s*\.toString\s*\(\s*["']hex["']\s*\)\s*;[\s\S]{0,200}?sha3Hash\s*\(\s*\2\s*\+/,
+    skipCommentLines: true,
+    allowlist: [
+      // The canonical helper — _computeDerivedHash branches on mode here.
+      "lib/crypto-field.js",
+    ],
+    reason: "v0.14.7 — derived-hash equality lookups gained a keyed mode (hmac-shake256 off vault.getDerivedHashMacKey) alongside the salted-sha3 default. The mode decision lives in cryptoField._computeDerivedHash (wrapped by the public computeNamespacedHash for pseudo-field indexes such as the mail-store FTS tokens). A site that hand-derives the hash with getDerivedHashSalt() — inline OR split across local variables feeding sha3Hash — bypasses the keyed option and the per-column mode policy; only the canonical helper (crypto-field.js) may name the salt directly.",
+  },
+
+  {
+    // v0.14.7 — a `db.auth.failed` audit row must record WHICH
+    // relation the rejected credential attempted to reach
+    // (`attemptedTable`), so an operator triaging a credential-abuse
+    // event can scope blast radius without correlating to the raw SQL
+    // log. external-db extracts the target relation defensively
+    // (_extractTargetRelation) and stamps both resource.attemptedTable
+    // and the audit metadata. Emitting the auth-failure audit without
+    // it loses the forensic signal.
+    //
+    // Detector: an `action: "db.auth.failed"` audit emit MUST appear in
+    // a file that also names `attemptedTable`. The metric emitter
+    // (_emitMetric("db.auth.failed", ...)) uses a positional shape, not
+    // `action:`, so it doesn't match.
+    id: "db-auth-failed-audit-without-attempted-relation",
+    primitive: "db.auth.failed audit — stamp the attempted relation (attemptedTable, via _extractTargetRelation) on credential-rejection audit rows so blast radius is triageable without the raw SQL log",
+    regex: /action\s*:\s*["']db\.auth\.failed["']/,
+    requires: /attemptedTable/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "v0.14.7 — external-db credential-rejection audits (SQLSTATE 28000 / 28P01 / 42501) now carry attemptedTable, the relation the rejected identity tried to touch, extracted defensively from the SQL. The detector requires any file emitting an action:'db.auth.failed' audit to also name attemptedTable so a future emitter can't drop the forensic field.",
+  },
+
 ];
 
 // @example placeholder detection lives in
@@ -7357,7 +8564,10 @@ function testHostnameCompareTrailingDotNormalize() {
     catch (_e) { continue; }
     if (!reservedHostLiteralRe.test(content)) continue;
     var hasStrip = /\.charAt\([^)]*length\s*-\s*1\)\s*===\s*"\."/.test(content) ||
-                   /while[\s\S]{0,80}length\s*>\s*0[\s\S]{0,80}charAt[\s\S]{0,80}===\s*"\."/.test(content);
+                   /while[\s\S]{0,80}length\s*>\s*0[\s\S]{0,80}charAt[\s\S]{0,80}===\s*"\."/.test(content) ||
+                   // end-anchored regex strip of one-or-more trailing dots:
+                   // .replace(/\.$/, ...) / .replace(/\.+$/, ...) / .replace(/\.*$/, ...)
+                   /\.replace\(\s*\/\\\.[+*]?\$\//.test(content);
     if (hasStrip) continue;
     var m = content.match(reservedHostLiteralRe);
     var lineNum = content.slice(0, m.index).split("\n").length;
@@ -8888,6 +10098,398 @@ function testCalendarUtcRoundtrip() {
     bad);
 }
 
+// v0.12.1 compliance posture coverage — every POSTURE_DEFAULTS key
+// MUST be in KNOWN_POSTURES (else `b.compliance.set(posture)` refuses
+// despite cascade config being wired) AND every KNOWN_POSTURES entry
+// MUST have a REGIME_MAP record (else `b.compliance.describe(posture)`
+// returns null and admin UI / audit reports render empty). The v0.12.1
+// backfill closed 65 missing entries across both axes; this detector
+// catches future drift the same shape.
+function testCompliancePostureCoverage() {
+  var bad = [];
+  var content;
+  try { content = fs.readFileSync("lib/compliance.js", "utf8"); }
+  catch (_e) { return; }
+  var lines = content.split(/\r?\n/);
+  var inKnown = false, inDefaults = false, inRegime = false;
+  var known = Object.create(null);
+  var defaults = Object.create(null);
+  var regime = Object.create(null);
+  var knownLineOf = Object.create(null);
+  var defaultsLineOf = Object.create(null);
+  for (var i = 0; i < lines.length; i += 1) {
+    var ln = lines[i];
+    if (/^var KNOWN_POSTURES/.test(ln))   { inKnown = true; continue; }
+    if (/^var POSTURE_DEFAULTS/.test(ln)) { inDefaults = true; continue; }
+    if (/^var REGIME_MAP/.test(ln))       { inRegime = true; continue; }
+    if (/^\]\);|^\}\);/.test(ln))         { inKnown = inDefaults = inRegime = false; continue; }
+    var m = ln.match(/^\s*"([^"]+)"/);
+    if (!m) continue;
+    if (inKnown)    { known[m[1]] = true; knownLineOf[m[1]] = i + 1; }
+    if (inDefaults) { defaults[m[1]] = true; defaultsLineOf[m[1]] = i + 1; }
+    if (inRegime)   { regime[m[1]] = true; }
+  }
+  Object.keys(defaults).forEach(function (p) {
+    if (!known[p]) {
+      bad.push({ file: "lib/compliance.js", line: defaultsLineOf[p],
+        content: "POSTURE_DEFAULTS[\"" + p + "\"] has no KNOWN_POSTURES entry — " +
+                 "b.compliance.set(\"" + p + "\") will refuse even though cascade config is wired" });
+    }
+  });
+  Object.keys(known).forEach(function (p) {
+    if (!regime[p]) {
+      bad.push({ file: "lib/compliance.js", line: knownLineOf[p],
+        content: "KNOWN_POSTURES[\"" + p + "\"] has no REGIME_MAP record — " +
+                 "b.compliance.describe(\"" + p + "\") returns null + admin UI renders empty" });
+    }
+  });
+  bad = _filterMarkers(bad, "compliance-posture-coverage-drift");
+  _report("b.compliance posture catalog coverage — KNOWN_POSTURES ⊇ POSTURE_DEFAULTS, REGIME_MAP ⊇ KNOWN_POSTURES " +
+          "(v0.12.1 — prevent broken b.compliance.set() / null describe() drift)",
+    bad);
+}
+
+// v0.11.44 wiki-port drift — the v0.11.40 port swap (8080 → 3008)
+// missed .github/workflows/release-container.yml's post-publish smoke
+// step. The wiki container builds for v0.11.40 / .42 / .43 all failed
+// because the smoke curled localhost:8080 against a listener on 3008,
+// so no image landed in GHCR for three patch releases. Detector
+// catches any future port collision between examples/wiki and the
+// container-build smoke workflow: if WIKI_PORT is set to X in
+// examples/wiki/Dockerfile, the workflow's `-p host:container` map +
+// curl host MUST also reference X.
+function testWikiPortAgreesAcrossArtifacts() {
+  var bad = [];
+  var dockerfile;
+  try { dockerfile = fs.readFileSync("examples/wiki/Dockerfile", "utf8"); }
+  catch (_e) { return; }
+  // Extract WIKI_PORT default from `ENV ... WIKI_PORT=<n>`.
+  var dfMatch = /WIKI_PORT\s*=\s*(\d+)/.exec(dockerfile);
+  if (!dfMatch) return;
+  var wikiPort = dfMatch[1];
+  var workflowPath = ".github/workflows/release-container.yml";
+  var workflow;
+  try { workflow = fs.readFileSync(workflowPath, "utf8"); }
+  catch (_e) { return; }
+  // The smoke step has `-p X:X` + `curl http://localhost:X/healthz`.
+  // Both X's must equal the Dockerfile's WIKI_PORT.
+  var workflowLines = workflow.split(/\r?\n/);
+  for (var wli = 0; wli < workflowLines.length; wli += 1) {
+    var line = workflowLines[wli];
+    var portMap = /-p\s+(\d+):(\d+)/.exec(line);
+    if (portMap && (portMap[1] !== wikiPort || portMap[2] !== wikiPort)) {
+      bad.push({ file: workflowPath, line: wli + 1,
+        content: "release-container.yml smoke `-p " + portMap[1] + ":" + portMap[2] +
+                 "` doesn't match examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+    }
+    var curlMatch = /localhost:(\d+)\/healthz/.exec(line);
+    if (curlMatch && curlMatch[1] !== wikiPort) {
+      bad.push({ file: workflowPath, line: wli + 1,
+        content: "release-container.yml smoke curls localhost:" + curlMatch[1] +
+                 " but examples/wiki/Dockerfile WIKI_PORT=" + wikiPort });
+    }
+  }
+  bad = _filterMarkers(bad, "wiki-port-cross-artifact-drift");
+  _report("wiki port agrees across examples/wiki/Dockerfile + release-container.yml smoke step " +
+          "(v0.11.44 — prevent re-emergence of the v0.11.40 missed-port-bump silent-deploy failure)",
+    bad);
+}
+
+// v1 — error codes are the operator-grep contract and must be
+// `namespace/kebab-case`. The first string argument to `new XError(...)`
+// and `XError.factory(...)` IS the code (defineClass constructor signature
+// is (code, message, ...)). Two anti-patterns this locks out, both swept
+// for v1: a bare UPPER_SNAKE code with no namespace (`"BAD_JSON"`), and a
+// camelCase namespace segment (`"aiDp/..."`). Codes built through a
+// `var _err = XError.factory` alias in not-yet-swept modules use the bare
+// `_err("X")` call shape (no literal `.factory(` / `new XError(` at the
+// site), so they are not matched here — they land in the v1.0 namespaced-
+// error sweep. Node-native codes (ETIMEDOUT / ENOENT / ABORT) are set by
+// assignment, not constructed via these literals, so they are untouched.
+function testErrorCodesNamespacedKebab() {
+  // Native error constructors (TypeError, RangeError, ...) take the MESSAGE
+  // first, not a code — only framework defineClass errors are (code, msg).
+  var NATIVE = { Error: 1, TypeError: 1, RangeError: 1, SyntaxError: 1,
+    ReferenceError: 1, EvalError: 1, URIError: 1, AggregateError: 1, InternalError: 1 };
+  var bad = [];
+  var files = _libFiles();
+  var re = /(?:new\s+(\w+Error)\(|(\w+)\.factory\()\s*"([^"]+)"/g;
+  for (var fi = 0; fi < files.length; fi += 1) {
+    var rel = _relPath(files[fi]);
+    if (rel === "lib/framework-error.js") continue;   // the definition site
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li += 1) {
+      var line = lines[li];
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;   // skip comment lines
+      var m;
+      re.lastIndex = 0;
+      while ((m = re.exec(line)) !== null) {
+        var ctor = m[1];                  // class name for the `new XError(` form
+        if (ctor && NATIVE[ctor]) continue;   // native error — first arg is the message
+        var code = m[3];
+        var slash = code.indexOf("/");
+        if (/^[A-Z][A-Z0-9_]*$/.test(code)) {
+          bad.push({ file: rel, line: li + 1,
+            content: "error code \"" + code + "\" is bare UPPER_SNAKE — use namespace/kebab-case (e.g. \"" +
+              rel.replace(/^lib\//, "").replace(/\.js$/, "") + "/" + code.toLowerCase().replace(/_/g, "-") + "\")" });
+        } else if (slash > 0 && /[a-z0-9][A-Z]/.test(code.slice(0, slash))) {
+          bad.push({ file: rel, line: li + 1,
+            content: "error code \"" + code + "\" has a camelCase namespace segment — use a kebab-case namespace" });
+        }
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "error-code-namespace-kebab");
+  _report("error codes are namespace/kebab-case (v1 — no bare UPPER_SNAKE or camelCase-namespace codes via new XError / factory)", bad);
+}
+
+// v0.13.34 — the wiki compose stop_grace_period MUST exceed the app
+// shutdown orchestrator's total grace budget (graceMs) plus the forced-
+// exit watchdog margin. Otherwise `docker stop` / a rolling redeploy
+// SIGKILLs the container before the DB re-encrypt phase finishes, losing
+// every write since the last periodic flush — the encrypted-DB data-loss
+// class. Cross-artifact guard so raising graceMs in lib/app-shutdown.js
+// without bumping the compose (or dropping the setting) can't silently
+// reopen the hole.
+function testWikiStopGraceExceedsShutdownBudget() {
+  var bad = [];
+  var shutdownSrc;
+  try { shutdownSrc = fs.readFileSync("lib/app-shutdown.js", "utf8"); }
+  catch (_e) { return; }
+  var graceM  = /DEFAULT_GRACE_MS\s*=\s*C\.TIME\.seconds\((\d+)\)/.exec(shutdownSrc);
+  if (!graceM) return;
+  var marginM = /FORCE_EXIT_MARGIN_MS\s*=\s*C\.TIME\.seconds\((\d+)\)/.exec(shutdownSrc);
+  var graceS  = parseInt(graceM[1], 10);
+  var marginS = marginM ? parseInt(marginM[1], 10) : 0;
+  var minGrace = graceS + marginS;
+  var composeFiles = ["examples/wiki/docker-compose.yml", "examples/wiki/docker-compose.prod.yml"];
+  for (var i = 0; i < composeFiles.length; i += 1) {
+    var cf = composeFiles[i];
+    var text;
+    try { text = fs.readFileSync(cf, "utf8"); }
+    catch (_e) { continue; }
+    var m = /stop_grace_period:\s*'?(\d+)\s*s'?/.exec(text);
+    if (!m) {
+      bad.push({ file: cf, line: 1,
+        content: cf + " declares no stop_grace_period — Docker's 10s default SIGKILLs before " +
+                 "the " + graceS + "s shutdown budget finishes the DB re-encrypt. Set " +
+                 "stop_grace_period to at least " + minGrace + "s." });
+      continue;
+    }
+    var graceSet = parseInt(m[1], 10);
+    if (graceSet < minGrace) {
+      bad.push({ file: cf, line: 1,
+        content: cf + " stop_grace_period is " + graceSet + "s but the shutdown budget (graceMs " +
+                 graceS + "s + watchdog margin " + marginS + "s) needs at least " + minGrace +
+                 "s, or the DB re-encrypt is SIGKILLed mid-flush." });
+    }
+  }
+  bad = _filterMarkers(bad, "wiki-stop-grace-below-shutdown-budget");
+  _report("wiki compose stop_grace_period exceeds the app shutdown grace budget " +
+          "(v0.13.34 — no SIGKILL-before-DB-re-encrypt data loss on docker stop / redeploy)",
+    bad);
+}
+
+// v0.13.41 — the agent-orchestrator registry-read paths (_list / _lookup)
+// MUST consult the tenant gate (_tenantAllows) so an actor can't enumerate
+// or acquire a handle to another tenant's agent when tenant scoping is on.
+// agent-event-bus enforces this on subscribe/delivery; the orchestrator now
+// mirrors it. Encoded so a refactor can't silently drop the gate from
+// either read path.
+function testOrchestratorRegistryReadsTenantScoped() {
+  var bad = [];
+  var src;
+  try { src = fs.readFileSync("lib/agent-orchestrator.js", "utf8"); }
+  catch (_e) { return; }
+  ["_list", "_lookup"].forEach(function (fn) {
+    var start = src.indexOf("function " + fn + "(");
+    if (start === -1) {
+      bad.push({ file: "lib/agent-orchestrator.js", line: 1,
+        content: fn + " not found — tenant-scope detector can't verify it" });
+      return;
+    }
+    // Body = from this function to the next top-level function declaration.
+    var rest = src.slice(start + 1);
+    var next = rest.search(/\nasync function |\nfunction /);
+    var body = next === -1 ? rest : rest.slice(0, next);
+    if (body.indexOf("_tenantAllows") === -1) {
+      bad.push({ file: "lib/agent-orchestrator.js", line: 1,
+        content: fn + " does not consult _tenantAllows — registry reads must be tenant-scoped " +
+                 "(cross-tenant enumeration / handle acquisition leak)" });
+    }
+  });
+  bad = _filterMarkers(bad, "orchestrator-registry-tenant-scope");
+  _report("agent-orchestrator _list/_lookup consult the tenant gate " +
+          "(v0.13.41 — no cross-tenant registry enumeration / handle acquisition)", bad);
+}
+
+// v0.13.19 — a CI job that runs the long test suites (smoke / wiki
+// e2e) MUST declare `timeout-minutes`. Without it a hung child (a
+// leaked timer / socket / fs.watch handle — the macOS smoke-hang
+// class) rides GitHub's 6-hour default before the job is reaped. The
+// smoke runner's per-file watchdog (test/smoke.js) catches most
+// hangs; this job-level backstop catches the rest and a regressed
+// watchdog. Encoded so a new test-running workflow job can't ship
+// without the backstop.
+function testTestJobsDeclareTimeout() {
+  var bad = [];
+  var files = _workflowFiles();
+  for (var fi = 0; fi < files.length; fi += 1) {
+    var wf = files[fi];
+    var text;
+    try { text = fs.readFileSync(wf, "utf8"); }
+    catch (_e) { continue; }
+    var lines = text.split(/\r?\n/);
+    var jobs = [];            // { name, startLine, lines: [] }
+    var inJobs = false;
+    var cur = null;
+    for (var li = 0; li < lines.length; li += 1) {
+      var ln = lines[li];
+      if (!inJobs) { if (/^jobs:\s*$/.test(ln)) inJobs = true; continue; }
+      // A job key sits at exactly 2-space indent under `jobs:`.
+      var jm = ln.match(/^ {2}([A-Za-z0-9_-]+):\s*$/);
+      if (jm) { cur = { name: jm[1], startLine: li + 1, lines: [] }; jobs.push(cur); continue; }
+      if (cur) cur.lines.push(ln);
+    }
+    for (var ji = 0; ji < jobs.length; ji += 1) {
+      var body = jobs[ji].lines.join("\n");
+      var runsSuite = /node\s+test\/smoke\.js/.test(body) || /node\s+test\/e2e\.js/.test(body);
+      if (runsSuite && !/(^|\n)\s*timeout-minutes\s*:/.test(body)) {
+        bad.push({ file: wf, line: jobs[ji].startLine,
+          content: "CI job '" + jobs[ji].name + "' runs the test suite but declares no " +
+                   "timeout-minutes — a hung job would ride GitHub's 6h default. Add `timeout-minutes: <n>`." });
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "ci-test-job-missing-timeout");
+  _report("every CI workflow job that runs the test suite declares timeout-minutes " +
+          "(v0.13.19 — no test job rides GitHub's 6h default when a child hangs)", bad);
+}
+
+// v0.11.43 drift cleanup — every `@nav` value in a lib/*.js @module
+// block MUST be one of the canonical category names below. The wiki
+// sidebar derives directly from `@nav`, so unreviewed drift surfaces
+// as a duplicate / typo'd category visible to operators. Adding a
+// new category is a deliberate site-information-architecture edit —
+// it lands in this allowlist + the operator-facing site.config pin
+// list (FIRST_GROUPS / LAST_GROUPS) at the same time.
+function testNavCategoryAllowlist() {
+  var NAV_ALLOWLIST = {
+    "AI": 1, "Agent": 1, "Async": 1, "Communication": 1, "Compliance": 1,
+    "Concepts": 1, "Crypto": 1, "DX": 1, "Data": 1, "Domain": 1,
+    "Filesystem": 1, "Guards": 1, "HTTP": 1, "Identity": 1, "MCP": 1,
+    "Mail": 1, "Network": 1, "Observability": 1, "Other": 1, "Parsers": 1,
+    "Primitives": 1, "Process": 1, "Production": 1, "Reference": 1,
+    "Security": 1, "Supply Chain": 1, "Tools": 1, "Validation": 1,
+    "Welcome": 1,
+  };
+  var bad = [];
+  var libFiles = fs.readdirSync("lib")
+    .filter(function (f) { return /\.js$/.test(f); })
+    .map(function (f) { return "lib/" + f; });
+  for (var nf = 0; nf < libFiles.length; nf += 1) {
+    var navPath = libFiles[nf];
+    var navContent;
+    try { navContent = fs.readFileSync(navPath, "utf8"); }
+    catch (_e) { continue; }
+    var navLines = navContent.split(/\r?\n/);
+    for (var nli = 0; nli < navLines.length; nli += 1) {
+      var nm = /^\s*\*\s*@nav\s+(.+?)\s*$/.exec(navLines[nli]);
+      if (!nm) continue;
+      var nav = nm[1];
+      if (!Object.prototype.hasOwnProperty.call(NAV_ALLOWLIST, nav)) {
+        bad.push({ file: navPath, line: nli + 1,
+          content: "@nav \"" + nav + "\" is not in the canonical category allowlist — " +
+                   "merge into an existing category (preferred) or add to NAV_ALLOWLIST + " +
+                   "FIRST_GROUPS / LAST_GROUPS in examples/wiki/site.config.js" });
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "nav-category-allowlist-drift");
+  _report("lib/*.js @nav categories match the canonical wiki sidebar list " +
+          "(v0.11.43 — prevent re-emergence of Networking-vs-Network / Agent-vs-Agent-Protocols dups)",
+    bad);
+}
+
+// v0.11.42 Codex P1 — `typeof X !== "object"` accepts null (because
+// `typeof null === "object"`), so a structured-validation refusal can
+// be bypassed by passing null and crashing the next Object.keys / .X
+// access with a raw TypeError instead of the structured error
+// callers depend on. Detector flags any line in lib/calendar.js
+// containing `typeof <ident> !== "object"` paired with
+// `!Array.isArray(<ident>)` that does NOT also gate on `=== null`.
+function testCalendarTypeofObjectRefusesNull() {
+  var bad = [];
+  var path = "lib/calendar.js";
+  var content;
+  try { content = fs.readFileSync(path, "utf8"); }
+  catch (_e) { return; }
+  var lines = content.split(/\r?\n/);
+  for (var i = 0; i < lines.length; i += 1) {
+    var line = lines[i];
+    var m = /typeof\s+([a-zA-Z_$][\w.$\]["]*)\s*!==?\s*"object"/.exec(line);
+    if (!m) continue;
+    var ident = m[1];
+    // Look ahead 5 lines for a paired Array.isArray check; if absent
+    // this isn't a "is this a plain object" guard so skip.
+    var hasArrayCheck = false;
+    for (var j = 0; j < 5 && i + j < lines.length; j += 1) {
+      if (lines[i + j].indexOf("Array.isArray") !== -1) { hasArrayCheck = true; break; }
+    }
+    if (!hasArrayCheck) continue;
+    // Look both backward (this line + 1 prior, for `if (x === null ||`
+    // shape) and inside the same line + the next 2 lines for an
+    // explicit null refusal of the same identifier. Full regex-meta
+    // escape so any character in `ident` is treated literally —
+    // CodeQL flags partial escapes (js/incomplete-sanitization) when
+    // backslash isn't covered.
+    var identEscaped = ident.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var nullGuardRe = new RegExp(identEscaped +
+      "\\s*===\\s*null|!\\s*" + identEscaped + "\\b");
+    var hasNullGuard = nullGuardRe.test(line) ||
+      (i > 0 && nullGuardRe.test(lines[i - 1])) ||
+      (i + 1 < lines.length && nullGuardRe.test(lines[i + 1]));
+    if (!hasNullGuard) {
+      bad.push({ file: path, line: i + 1, content: line.trim() });
+    }
+  }
+  bad = _filterMarkers(bad, "calendar-typeof-object-accepts-null");
+  _report("b.calendar validator's `typeof X !== \"object\"` checks must explicitly refuse null " +
+          "(v0.11.42 Codex P1 — structured-error stability)",
+    bad);
+}
+
+// v0.11.41 Codex P1 — BYSETPOS path enumerates candidates starting at
+// the period boundary (month/year/week start), so without a startMs
+// gate it can emit recurrence instances BEFORE the rule's DTSTART —
+// violating RFC 5545 §3.8.5.3 semantics + consuming COUNT on
+// instances the operator never asked for. Detector forces the
+// expand-with-bysetpos emit loop in lib/calendar.js to keep a
+// `pickedMs < startMs` (or equivalent) guard.
+function testCalendarBysetposStartGate() {
+  var bad = [];
+  var path = "lib/calendar.js";
+  var content;
+  try { content = fs.readFileSync(path, "utf8"); }
+  catch (_e) { return; }
+  if (/_expandWithBysetpos\b/.test(content)) {
+    // The function body must contain a pre-DTSTART gate on the
+    // picked candidates. Simple file-scope contains-check is enough
+    // since `pickedMs` is locally-scoped to the bysetpos expander.
+    if (!/pickedMs\s*<\s*startMs|pickedMs\s*<=\s*startMs/.test(content)) {
+      bad.push({ file: path, line: 1,
+        content: "_expandWithBysetpos emit loop must gate `pickedMs < startMs` (RFC 5545 §3.8.5.3 — no instances before DTSTART)" });
+    }
+  }
+  bad = _filterMarkers(bad, "calendar-bysetpos-start-gate");
+  _report("b.calendar BYSETPOS expand path refuses pre-DTSTART instances " +
+          "(v0.11.41 Codex P1 — RFC 5545 §3.8.5.3)",
+    bad);
+}
+
 function testKnownAntipatterns() {
   // class: known-antipattern
   // Fires at n=1 — any file matching a registered antipattern (and not
@@ -9176,13 +10778,255 @@ function testSafeGuardHasMustComposeDetector() {
     unpaired);
 }
 
+// ---- Pattern: every `@primitive b.X.Y` doc block resolves to a real
+//               callable on the public surface (advertised-vs-actual
+//               reachability). A wiki page that documents an
+//               uncallable path is an operator-facing lie: an operator
+//               following the docs gets `undefined is not a function`.
+//
+// Two shapes this catches:
+//   - a wiring gap (the primitive's `create` exists but was never
+//     wired into index.js, so `b.middleware.requireBoundKey` was
+//     undefined);
+//   - a doc-path drop (`b.cra.conformityAssessment` where the real
+//     path is `b.cra.report.conformityAssessment`).
+//
+// Factory namespaces (the parent exposes `create`) document instance
+// methods on the create()-return value with namespace shorthand
+// (`b.auth.oauth.parseCallback` is reached via
+// `b.auth.oauth.create(...).parseCallback`). Those are NOT gaps, so a
+// parent that exposes `create` is skipped.
+function testPrimitiveReachability() {
+  // class: primitive-unreachable
+  var bSurface;
+  try { bSurface = require("../../index.js"); }
+  catch (_e) { check("primitive-reachability — index.js require", false); return; }
+
+  function resolve(dotted) {
+    var parts = dotted.split(".");
+    var cur = bSurface;
+    for (var i = 1; i < parts.length; i += 1) {
+      if (cur == null) return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  // Walk the dotted prefix (every segment except the leaf) so a break at
+  // ANY segment — including a wholesale-wrong namespace whose parent
+  // resolves to undefined — is surfaced rather than silently skipped. A
+  // function OR a `.create`-bearing object anywhere in the chain is a
+  // factory-instance shorthand and stays exempt.
+  function walkPrefix(name, surface) {
+    var parts = name.split(".");
+    var cur = surface;
+    for (var i = 1; i < parts.length - 1; i += 1) {
+      // A missing prefix segment is a wrong-namespace doc path even when
+      // `cur` is itself a factory (has `.create`): a namespace that ALSO
+      // has real static children (e.g. b.mail.create + b.mail.bimi /
+      // b.mail.rbl) is used statically, so an undefined child is a typo,
+      // not a factory-instance method. The factory-shorthand exemption is
+      // therefore applied ONLY at the leaf parent (the trailing function
+      // check below + the caller's `.create` check) — never at an
+      // intermediate segment, which would mask the typo.
+      if (cur == null || typeof cur[parts[i]] === "undefined") {
+        return { brokenName: parts.slice(0, i + 1).join(".") };
+      }
+      cur = cur[parts[i]];
+    }
+    if (typeof cur === "function") return { factory: true };
+    return { parent: cur, parentName: parts.slice(0, -1).join(".") };
+  }
+
+  // @primitive paths that legitimately don't resolve as a flat member
+  // (documented elsewhere / intentional). Keyed by dotted name.
+  var REACHABILITY_ALLOWLIST = {
+    // (none — every surfaced gap is fixed in-tree)
+  };
+
+  // Self-test (locks the fix): a missing intermediate segment under a
+  // mixed factory+static namespace must be flagged, never masked by the
+  // factory-shorthand exemption.
+  var _rMock  = { mail: { create: function () {}, bimi: {} } };
+  var _rProbe = walkPrefix("b.mail.bmi.recordShape", _rMock);
+  check("primitive-reachability: typo under a mixed factory namespace is flagged",
+        _rProbe.brokenName === "b.mail.bmi");
+
+  var libFiles = _libFiles();
+  var unreachable = [];
+  for (var i = 0; i < libFiles.length; i += 1) {
+    var rel = _relPath(libFiles[i]);
+    var src = fs.readFileSync(libFiles[i], "utf8");
+    var re = /@primitive\s+(b\.[A-Za-z0-9_.]+)/g;
+    var m;
+    while ((m = re.exec(src)) !== null) {
+      var name = m[1];
+      if (REACHABILITY_ALLOWLIST[name]) continue;
+      if (typeof resolve(name) !== "undefined") continue;
+      var w = walkPrefix(name, bSurface);
+      // Factory-instance shorthands (b.X.create() → instance method) skip.
+      if (w.factory) continue;
+      if (w.brokenName) {
+        // The whole dotted namespace prefix is unresolvable — the parent
+        // resolved to undefined, so the flat-namespace check below never
+        // fired and the doc-lie was silently skipped. Flag it.
+        unreachable.push({
+          file:    rel,
+          line:    1,
+          content: "@primitive " + name + " documents a b.* path that does not resolve (the namespace `" +
+                   w.brokenName + "` is undefined — no prefix segment resolves on the public surface). " +
+                   "Correct the @primitive/@signature namespace, or wire the namespace into the surface.",
+        });
+        continue;
+      }
+      var parent = w.parent;
+      var parentName = w.parentName;
+      // Flag only flat namespaces (object parent without a `create`
+      // factory). Factory-instance shorthands are skipped.
+      if (parent && typeof parent === "object" && typeof parent.create !== "function") {
+        unreachable.push({
+          file:    rel,
+          line:    1,
+          content: "@primitive " + name + " documents a b.* path that does not resolve (parent `" +
+                   parentName + "` is a flat namespace without this member). Wire it into the " +
+                   "namespace, or correct the @primitive/@signature path.",
+        });
+      }
+    }
+  }
+  _report("every @primitive b.X.Y doc block resolves to a callable on the public surface " +
+          "(advertised-vs-actual reachability; factory-instance shorthands excluded)",
+    unreachable);
+}
+
+// ---- Pattern: every access-refusal middleware routes its deny
+//               response through lib/middleware/deny-response.js so a
+//               consumer can override the body / Content-Type (emit
+//               RFC 9457 application/problem+json) via the uniform
+//               onDeny / problemDetails opts. A new deny-path
+//               middleware that hardcodes
+//               `res.writeHead(<4xx/5xx>, { "Content-Type": ... })`
+//               locks consumers out of the response shape — which is
+//               what pinned rate-limit's 429 to text/plain before this
+//               convention existed. ----
+function testDenyPathComposesDenyResponse() {
+  // class: deny-path-hardcoded-response
+  var MW_ROOT = path.resolve(LIB_ROOT, "middleware");
+  // NOT access-refusals: content-servers that 4xx when the
+  // .well-known resource isn't configured, and the CSP report-ingest
+  // machine endpoint. Their 4xx is not a user-facing access denial.
+  var NOT_DENY_PATH = {
+    "lib/middleware/assetlinks.js":       ".well-known content-server; 4xx = not-configured, not access-refusal",
+    "lib/middleware/security-txt.js":     ".well-known content-server; 4xx = not-configured, not access-refusal",
+    "lib/middleware/web-app-manifest.js": "manifest content-server; 4xx = not-configured, not access-refusal",
+    "lib/middleware/csp-report.js":       "CSP report-ingest machine endpoint; 4xx = malformed-report rejection on a browser-posting sink",
+    "lib/middleware/deny-response.js":    "the shared deny-response helper itself",
+  };
+  var denyStatusRe = new RegExp("writeHead\\(\\s*(?:4\\d\\d|5\\d\\d|requestHelpers\\.HTTP_STATUS\\." +
+    "(?:FORBIDDEN|UNAUTHORIZED|NOT_FOUND|BAD_REQUEST|METHOD_NOT_ALLOWED|UNSUPPORTED_MEDIA_TYPE|" +
+    "TOO_MANY_REQUESTS|UNAVAILABLE_FOR_LEGAL_REASONS|MISDIRECTED_REQUEST))");
+  var composesRe = /require\(\s*["']\.\/deny-response["']\s*\)/;
+  var files = fs.readdirSync(MW_ROOT).filter(function (f) { return f.endsWith(".js"); });
+  var violations = [];
+  for (var i = 0; i < files.length; i += 1) {
+    var rel = "lib/middleware/" + files[i];
+    if (NOT_DENY_PATH[rel]) continue;
+    var src = fs.readFileSync(path.join(MW_ROOT, files[i]), "utf8");
+    if (!denyStatusRe.test(src)) continue;       // doesn't write a deny status
+    if (composesRe.test(src)) continue;          // routes through the helper
+    var lines = src.split("\n");
+    var ln = 1;
+    for (var L = 0; L < lines.length; L += 1) {
+      if (denyStatusRe.test(lines[L])) { ln = L + 1; break; }
+    }
+    violations.push({
+      file:    rel,
+      line:    ln,
+      content: "access-refusal middleware writes a deny-status response without composing deny-response.js — " +
+               "route it through denyResponse() so consumers get onDeny / problemDetails (RFC 9457). If this " +
+               "is NOT an access-refusal (content-server / machine endpoint), add it to NOT_DENY_PATH with a reason.",
+    });
+  }
+  _report("every access-refusal middleware composes deny-response.js (onDeny / problemDetails override path)",
+    violations);
+}
+
+// ---- Pattern: operator-facing source comments must describe the code,
+//               not the internal authoring process. These shapes are
+//               internal slice / bug / plan IDs, code-review-process
+//               residue (Codex P-levels, PR numbers), and dated
+//               decision parentheticals — none of which an operator
+//               reading the shipped source can map to anything in their
+//               own checkout. Genuinely operator-meaningful references
+//               (RFC / CVE / NIST / CWE, "since vX.Y.Z", established
+//               terse markers like D-M4 / AUTH-32) are NOT matched.
+//               Allowlist a false positive with `// allow:internal-
+//               narrative-comment`. ----
+function testNoInternalNarrativeComments() {
+  // class: internal-narrative-comment
+  var NARRATIVE = [
+    { re: /\b(?:SUBSTRATE|BUG|MAIL)-\d+\b/,        what: "internal slice/bug ID" },
+    { re: /\b(?:D-[MLH]\d+|AUTH-\d+|CRYPTO-\d+|SUPPLY-\d+)\b/, what: "internal domain/slice ID" },
+    { re: /\bCodex\s+P\d/,                          what: "code-review-process reference (Codex P#)" },
+    { re: /\bF-[A-Z]{2,}-\d+\b/,                    what: "internal feature/plan item ID" },
+    { re: /\bPR\s+#\d+\b/,                          what: "pull-request number (process residue)" },
+    { re: /\b[Aa]udit\s+\d{4}-\d{2}-\d{2}/,         what: "dated audit/decision residue" },
+    { re: /\bReported\s+\d{4}-\d{2}-\d{2}/,         what: "dated report residue" },
+    { re: /\bCore Rule\s+§\d/,                 what: "internal CLAUDE.md rule-number citation" },
+    { re: /----\s*v\d+\.\d+\.\d+/,             what: "version stamp in a section-divider comment" },
+  ];
+  var files = _libFiles();
+  var bad = [];
+  var jsdocLineRe = /^\s*\*/;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var src = fs.readFileSync(files[fi], "utf8");
+    var lines = src.split("\n");
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li];
+      // Scan the comment portion only: a ` * `-prefixed JSDoc line in
+      // full, or the text after a line's first `//`.
+      var comment = null;
+      if (jsdocLineRe.test(line)) {
+        comment = line;
+      } else {
+        var idx = line.indexOf("//");
+        if (idx !== -1) comment = line.slice(idx);
+      }
+      if (comment === null) continue;
+      for (var p = 0; p < NARRATIVE.length; p++) {
+        var m = comment.match(NARRATIVE[p].re);
+        if (m) {
+          bad.push({
+            file:    rel,
+            line:    li + 1,
+            content: NARRATIVE[p].what + ": `" + m[0] + "` in an operator-facing comment — " +
+                     "describe the change, not the internal process (strip the label / drop the " +
+                     "dated parenthetical / cite the public reason instead)",
+          });
+          break;
+        }
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "internal-narrative-comment");
+  _report("operator-facing source comments must not carry internal-process narrative " +
+          "(slice / bug / plan IDs, Codex / PR references, dated decision parentheticals)",
+    bad);
+}
+
 async function run() {
+  testPrimitiveReachability();
+  testDenyPathComposesDenyResponse();
+  testNoInternalNarrativeComments();
+  testNoOrphanAllowClass();
   testNoRawByteLiterals();
   testNoRawTimeLiterals();
   testNumericOptsValidate();
   testHttp2TeardownPaired();
   testNoStrayConsoleCalls();
   testNoUnresolvedMarkers();
+  testNoStaleDefers();
   testNoLiteralNulBytesInSource();
   testParserPrimitivesHaveFuzzHarness();
   testSafeGuardWiredInIndex();
@@ -9190,6 +11034,7 @@ async function run() {
   testNoTierTerminologyInLib();
   testNoInlineRequires();
   testRequireBindingConsistency();
+  testRequireBlockAlignment();
   testNodeBuiltinPrefixConsistency();
   testNoInternalBindingNameInProse();
   testNoDynamicRequires();
@@ -9229,7 +11074,7 @@ async function run() {
   testNoHandrolledUrlBuild();
   testNoHandrolledRetryLoop();
   await testNoDuplicateCodeBlocks();
-  testNoStateStampsInPublicDocs();
+  testStateStampScanningDeferred();
   testNoLegacyUrlFormat();
   testNoRawHeadersDistinct();
   testNoDenseWildcardRunsInLib();
@@ -9295,6 +11140,29 @@ async function run() {
   // v0.11.31 review-fix detector (Codex P1): UTC DTSTART round-trip
   // preserves timeZone="Etc/UTC" per RFC 8984 §1.4.4.
   testCalendarUtcRoundtrip();
+  // v0.11.41 review-fix detector (Codex P1): BYSETPOS expand path
+  // refuses pre-DTSTART instances per RFC 5545 §3.8.5.3.
+  testCalendarBysetposStartGate();
+  // v0.11.42 review-fix detector (Codex P1): typeof X !== "object"
+  // checks must refuse null (since typeof null === "object").
+  testCalendarTypeofObjectRefusesNull();
+  // v0.11.43 wiki nav drift detector: every @nav in lib/*.js must
+  // be a registered canonical category.
+  testNavCategoryAllowlist();
+  // v0.11.44 wiki-port cross-artifact detector: the Dockerfile's
+  // WIKI_PORT default must match the release-container.yml smoke
+  // step's port mapping + curl host.
+  testWikiPortAgreesAcrossArtifacts();
+  testWikiStopGraceExceedsShutdownBudget();
+  testOrchestratorRegistryReadsTenantScoped();
+  testErrorCodesNamespacedKebab();
+  // v0.13.19 CI hang backstop: every workflow job that runs the test
+  // suite must declare timeout-minutes so a hung child can't ride
+  // GitHub's 6-hour default.
+  testTestJobsDeclareTimeout();
+  // v0.12.1 compliance posture coverage detector: KNOWN_POSTURES ⊇
+  // POSTURE_DEFAULTS + REGIME_MAP ⊇ KNOWN_POSTURES.
+  testCompliancePostureCoverage();
   testKnownAntipatterns();
 
   // Final cumulative assertion — every detector is a hard gate.

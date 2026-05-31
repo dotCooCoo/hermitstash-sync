@@ -15,8 +15,7 @@
  *   ## Smuggling defense — bare-CR / bare-LF refusal
  *
  *   The SMTP smuggling class (`CVE-2023-51764` Postfix, `CVE-2023-51765`
- *   Sendmail, `CVE-2023-51766` Exim, `CVE-2026-32178` .NET
- *   `System.Net.Mail`) exploits implementations that accept the
+ *   Sendmail, `CVE-2023-51766` Exim) exploits implementations that accept the
  *   non-standard end-of-data sequence `<LF>.<LF>` or `<LF>.<CR><LF>`
  *   instead of the standard `<CR><LF>.<CR><LF>`. The introduced break-
  *   out lets a malicious peer inject a second message past SPF / DMARC
@@ -99,9 +98,9 @@ var DEFAULT_PROFILE = "strict";
 // CRLF). SMTPUTF8 / EAI extends this in practice; balanced/permissive
 // raise the cap accordingly.
 var PROFILES = Object.freeze({
-  strict:     { maxLineBytes: 512, maxMailbox: 256, maxLocalPart: 64, maxDomain: 255, allowBareLf: false, allowSmtpUtf8: false },                                                                          // allow:raw-byte-literal — RFC 5321 §4.5.3.1.1 caps
-  balanced:   { maxLineBytes: 1024, maxMailbox: 320, maxLocalPart: 64, maxDomain: 255, allowBareLf: false, allowSmtpUtf8: true },                                                                          // allow:raw-byte-literal — SMTPUTF8 (RFC 6531) line cap
-  permissive: { maxLineBytes: 4096, maxMailbox: 512, maxLocalPart: 64, maxDomain: 255, allowBareLf: true,  allowSmtpUtf8: true },                                                                          // allow:raw-byte-literal — permissive cap for legacy peers
+  strict:     { maxLineBytes: 512, maxMailbox: 256, maxLocalPart: 64, maxDomain: 255, allowBareLf: false, allowSmtpUtf8: false },                                                                          // RFC 5321 §4.5.3.1.1 caps
+  balanced:   { maxLineBytes: 1024, maxMailbox: 320, maxLocalPart: 64, maxDomain: 255, allowBareLf: false, allowSmtpUtf8: true },                                                                          // SMTPUTF8 (RFC 6531) line cap
+  permissive: { maxLineBytes: 4096, maxMailbox: 512, maxLocalPart: 64, maxDomain: 255, allowBareLf: true,  allowSmtpUtf8: true },                                                                          // permissive cap for legacy peers
 });
 
 var COMPLIANCE_POSTURES = Object.freeze({
@@ -192,12 +191,12 @@ function validate(line, opts) {
     // bare-LF refusal earlier in this fn. Skip the control-char throw
     // so the documented allowBareLf path actually accepts LF (Codex
     // caught this: permissive profile was effectively broken).
-    if (c === 0x0a && caps.allowBareLf) continue;                                                                                                                                                            // allow:raw-byte-literal — RFC 5321 §2.3.8 LF, permissive bypass
-    if (c < 0x20 || c === 0x7f) {                                                                                                                                                                          // allow:raw-byte-literal — RFC 5321 §2.3.8 forbids C0 / DEL
+    if (c === 0x0a && caps.allowBareLf) continue;                                                                                                                                                            // RFC 5321 §2.3.8 LF, permissive bypass
+    if (c < 0x20 || c === 0x7f) {                                                                                                                                                                          // RFC 5321 §2.3.8 forbids C0 / DEL
       throw new GuardSmtpCommandError("guard-smtp-command/control-char",
         "guardSmtpCommand.validate: control char 0x" + c.toString(16) + " refused");
     }
-    if (!caps.allowSmtpUtf8 && c > 0x7e) {                                                                                                                                                                 // allow:raw-byte-literal — RFC 5321 §2.3.1 7-bit ASCII; SMTPUTF8 relaxes
+    if (!caps.allowSmtpUtf8 && c > 0x7e) {                                                                                                                                                                 // RFC 5321 §2.3.1 7-bit ASCII; SMTPUTF8 relaxes
       throw new GuardSmtpCommandError("guard-smtp-command/non-ascii",
         "guardSmtpCommand.validate: non-ASCII byte refused (no SMTPUTF8 negotiated)");
     }
@@ -493,7 +492,7 @@ function gate(opts) {
  *
  * Scan a DATA-body byte buffer for the SMTP smuggling shape per
  * CVE-2023-51764 (Postfix), CVE-2023-51765 (Sendmail), CVE-2023-51766
- * (Exim), CVE-2024-32178 (.NET System.Net.Mail). RFC 5321 §2.3.8
+ * (Exim). RFC 5321 §2.3.8
  * mandates canonical CRLF line termination; the smuggling exploit
  * relies on parsers that accept `\n.\n` (bare LF before / after the
  * dot) as an alternate body terminator and then resume parsing the
@@ -517,7 +516,7 @@ function detectBodySmuggling(buf) {
     throw new GuardSmtpCommandError("guard-smtp-command/bad-input",
       "detectBodySmuggling: input must be a Buffer");
   }
-  // The CVE-2023-51764 / 51765 / 51766 / 2024-32178 class is any
+  // The CVE-2023-51764 / 51765 / 51766 class is any
   // dot-line whose line boundary is anything OTHER than canonical
   // \r\n on BOTH sides of the dot. The canonical-and-only terminator
   // is `\r\n.\r\n`. Every other shape that some receiver might honor

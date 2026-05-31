@@ -243,6 +243,7 @@ var FRAMEWORK_NAMESPACES = [
   "auth", "system", "audit", "consent", "subject",
   // Per-primitive namespaces — keep alphabetical
   "apikey",     // b.apiKey
+  "app",        // b.createApp (app.middleware.disabled — a security-default middleware was opted out at construction)
   "backup",     // b.backup
   "breakglass", // b.breakGlass — column-policy / row-enforcement step-up auth (audit namespace lowercased per the validator's `namespace.verb` rule, same convention as b.apiKey → apikey.*)
   "cache",      // b.cache
@@ -303,11 +304,11 @@ var FRAMEWORK_NAMESPACES = [
   "session",    // b.sessionDeviceBinding (session.device.bound / drift / refused)
   "sandbox",    // b.sandbox (sandbox.run / sandbox.run.refused — operator-supplied transform isolation)
   "safeurl",    // b.safeUrl.parse (safeurl.idn_homograph.refused — UTS #39 mixed-script host-label refusal)
-  "http",       // b.middleware.bodyParser (http.chunked.malformed.refused — RFC 9112 §7.1 chunked-decode failure with Connection: close) // allow:raw-byte-literal — RFC number in prose
-  "cryptofield", // b.cryptoField.eraseRow (cryptofield.vacuum.skipped — F-RTBF-2 vacuum-after-erase signal when DB not initialized at erase time)
+  "http",       // b.middleware.bodyParser (http.chunked.malformed.refused — RFC 9112 §7.1 chunked-decode failure with Connection: close) // RFC number in prose
+  "cryptofield", // b.cryptoField.eraseRow (cryptofield.vacuum.skipped — vacuum-after-erase signal when DB not initialized at erase time)
   "acme",       // b.acme (acme.account.registered / order.* / cert.issued / cert.renewed / cert.renew.skipped — RFC 8555 + RFC 9773 ARI workflow)
   "cert",       // b.cert (cert.account.generated / cert.issued / cert.renewed / cert.renew-failed / cert.challenge-cleanup — turnkey cert-manager lifecycle)
-  "tls",        // b.router 0-RTT posture (tls.0rtt.refused / tls.0rtt.replayed) — RFC 8446 §8 anti-replay surface // allow:raw-byte-literal — RFC number in prose
+  "tls",        // b.router 0-RTT posture (tls.0rtt.refused / tls.0rtt.replayed) — RFC 8446 §8 anti-replay surface // RFC number in prose
   "workerpool", // b.workerPool (workerpool.created / terminated / task.completed / task.failed / task.timeout / spawn.failed — generic worker_threads pool)
   "jwt",        // b.auth.jwt-external (jwt.jwe.refused — RFC 7516 5-segment JWE refusal)
   "dr",         // b.drRunbook (dr.runbook.emitted)
@@ -796,9 +797,10 @@ function _checkpointPayload(atMonotonicCounter, atRowHash, createdAt) {
   );
 }
 
-// Anchor the current chain tip with a fresh ML-DSA-87 signature. Inserts
-// a row into audit_checkpoints. Updates <dataDir>/audit.tip for boot-time
-// rollback detection.
+// Anchor the current chain tip with a fresh post-quantum signature (the
+// configured b.auditSign algorithm — SLH-DSA-SHAKE-256f by default).
+// Inserts a row into audit_checkpoints. Updates <dataDir>/audit.tip for
+// boot-time rollback detection.
 //
 // opts:
 //   skipIfUnchanged: bool — return null without inserting if the chain tip
@@ -810,8 +812,10 @@ function _checkpointPayload(atMonotonicCounter, atRowHash, createdAt) {
  * @compliance soc2, pci-dss, sox-404
  * @related   b.audit.verifyCheckpoints, b.audit.verify
  *
- * Anchor the current chain tip with a fresh ML-DSA-87 (post-quantum)
- * signature. Inserts a row into `audit_checkpoints` and updates the
+ * Anchor the current chain tip with a fresh post-quantum signature (the
+ * configured `b.auditSign` algorithm — SLH-DSA-SHAKE-256f by default,
+ * ML-DSA-87 / ML-DSA-65 optional). Inserts a row into `audit_checkpoints`
+ * and updates the
  * boot-time rollback-detection sidecar (single-node) or the cluster
  * audit-tip row (cluster mode, fencing-token guarded). Cluster mode
  * requires the caller hold leader status — `cluster.requireLeader()`
@@ -917,8 +921,8 @@ async function checkpoint(opts) {
  * @related   b.audit.checkpoint, b.audit.verify
  *
  * Walk every checkpoint and verify (a) the public-key fingerprint
- * matches the current signing key, (b) the ML-DSA-87 signature over the
- * payload still verifies, (c) the audit_log row at the anchored counter
+ * matches the current signing key, (b) the post-quantum signature over
+ * the payload still verifies, (c) the audit_log row at the anchored counter
  * still has the recorded rowHash. Catches tampering that recomputed
  * chain hashes after holding the vault key, because the off-chain
  * signature anchor is unforgeable without the signing key.
@@ -967,7 +971,7 @@ async function verifyCheckpoints() {
         checkpointsVerified: i,
         breakAt:             i,
         checkpointId:        c._id,
-        reason:              "ML-DSA-87 signature failed",
+        reason:              "post-quantum signature failed",
       };
     }
     // Also confirm the audit row at atMonotonicCounter still matches the
@@ -1118,17 +1122,28 @@ function _ensureHandler() {
       // items were emitted against. Early-exit drops them; the
       // alternative is silent corruption of the next chain.
       var droppedThisBatch = 0;
+      var firstDropAction = null;
+      var firstDropMessage = null;
       for (var i = 0; i < batch.length; i++) {
         if (ctx && ctx.isShutdown && ctx.isShutdown()) return;
         try { await record(batch[i]); }
         catch (e) {
           droppedThisBatch += 1;
-          // Per-item failure shouldn't drop the whole batch; log and
-          // continue. The handler's onError gets called for batch-
-          // wide failures only.
-          log.error("flush dropped event: " +
-            (e && e.message ? e.message : String(e)) +
-            " (action=" + (batch[i] && batch[i].action) + ")");
+          // Per-item failure shouldn't drop the whole batch; the
+          // signal flows through observability.safeEvent below. The
+          // prior per-drop log.error was noise: boot-phase
+          // audit.emit() racing db.init() fires dozens of these
+          // during normal startup, and operator dashboards
+          // alert-routing on the "error" level read it as a real
+          // failure. The aggregate observability metric is the
+          // documented signal channel; capture the first drop's
+          // action + message in its metadata so operators alerting
+          // on `system.audit.chain_write_dropped` get a
+          // representative sample without per-line log spam.
+          if (firstDropAction === null) {
+            firstDropAction = (batch[i] && batch[i].action) || null;
+            firstDropMessage = (e && e.message) ? e.message : String(e);
+          }
         }
       }
       // Surface chain-write integrity failures via observability so
@@ -1137,7 +1152,11 @@ function _ensureHandler() {
       // broken — so observability is the only sink left.
       if (droppedThisBatch > 0) {
         observability.safeEvent("system.audit.chain_write_dropped",
-          droppedThisBatch, { batchSize: batch.length });
+          droppedThisBatch, {
+            batchSize:        batch.length,
+            firstDropAction:  firstDropAction,
+            firstDropMessage: firstDropMessage,
+          });
       }
     },
   });
@@ -1601,7 +1620,7 @@ async function assertSegregation(opts) {
   return { ok: ok, missing: missing };
 }
 
-// applyPosture — F-POSTURE-1 cascade hook. b.compliance.set(posture)
+// applyPosture — cascade hook. b.compliance.set(posture)
 // calls this to record the active posture so audit emissions can
 // surface the regulatory regime in metadata where downstream tooling
 // (forensic export, SIEM correlation) needs it. The chain itself is

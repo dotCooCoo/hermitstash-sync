@@ -48,10 +48,13 @@
  *   subject:      claims.sub override
  *   expiresInSec: relative exp (claims.exp = now + expiresInSec)
  *   notBeforeSec: relative nbf (claims.nbf = now + notBeforeSec)
- *   jti:          claims.jti override (string; if missing, no jti is added —
- *                  the framework doesn't auto-mint without an operator request
- *                  since jti has uniqueness/replay-tracking semantics that
- *                  belong at the application layer)
+ *   jti:          claims.jti override (string). When omitted, a random
+ *                  128-bit jti is auto-minted if (and only if) the token
+ *                  carries an exp — so a replay-protected token always
+ *                  has the jti the verifier's replay store requires,
+ *                  closing the silent hole where a sign without jti would
+ *                  never replay-protect. Pass an explicit jti for a
+ *                  deterministic value.
  *   now:          test-time clock injection (epoch milliseconds)
  *
  * Verify opts:
@@ -234,8 +237,8 @@ async function verify(token, opts) {
   // SECURITY: when the resolver uses header.kid as a filename / map
   // key / cache index, it MUST sanitize the kid first. Path-traversal
   // (`../etc/passwd`), null-byte (`key\0..`), control chars, and
-  // similar shapes turn a kid lookup into an arbitrary-file-read
-  // primitive (CVE-2018-0114 java-jwt class). Use
+  // similar shapes turn a kid lookup into an arbitrary-file-read or
+  // SQLi primitive (the PortSwigger JWT "kid" injection / LFI class). Use
   // `b.guardJwt.kidSafe(header.kid)` — throws on traversal indicators
   // and control bytes, returns the validated kid on success.
   var key;

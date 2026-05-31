@@ -35,6 +35,9 @@ var ntpCheck = require("./ntp-check");
 var nts      = require("./network-nts");
 var networkDns = require("./network-dns");
 networkDns.resolver = require("./network-dns-resolver");
+networkDns.dnssec = require("./network-dnssec");
+networkDns.dane = require("./network-dane");
+networkDns.tsig = require("./network-tsig");
 var networkProxy = require("./network-proxy");
 var networkTls = require("./network-tls");
 var heartbeat = require("./network-heartbeat");
@@ -105,8 +108,8 @@ function _socketDefaults() {
 }
 
 /**
- * @primitive b.network.applyToSocket
- * @signature b.network.applyToSocket(socket)
+ * @primitive b.network.socket.applyToSocket
+ * @signature b.network.socket.applyToSocket(socket)
  * @since     0.7.68
  * @related   b.network.bootFromEnv, b.network.snapshot
  *
@@ -121,7 +124,7 @@ function _socketDefaults() {
  * @example
  *   var net = require("net");
  *   var s   = new net.Socket();
- *   var ret = b.network.applyToSocket(s);
+ *   var ret = b.network.socket.applyToSocket(s);
  *   ret === s;
  *   // → true
  *   s.destroy();
@@ -161,7 +164,7 @@ var ntpFacade = {
  * @primitive b.network.bootFromEnv
  * @signature b.network.bootFromEnv(opts)
  * @since     0.7.68
- * @related   b.network.snapshot, b.network.applyToSocket
+ * @related   b.network.snapshot, b.network.socket.applyToSocket
  *
  * Read `BLAMEJS_*` environment variables once and apply the union to
  * the live network facade. Recognised keys cover NTP servers /

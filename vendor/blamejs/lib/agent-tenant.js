@@ -11,8 +11,9 @@
  *   tends to leak across handlers, with one centralized scope:
  *
  *     - **Registry** — `register(tenantId, config)` declares a tenant
- *       boundary at boot. Sealed registry rows so tenant metadata
- *       doesn't leak in DB dumps.
+ *       boundary at boot. The row's metadata is sealed at rest via
+ *       `b.cryptoField` when a vault is configured (the default in a
+ *       booted app), so tenant metadata doesn't leak in DB dumps.
  *     - **Cross-tenant gate** — `check(actor, agentTenantId)` refuses
  *       calls where `actor.tenantId !== agentTenantId` unless the
  *       actor holds the `framework.cross-tenant-admin` scope.
@@ -51,16 +52,64 @@
  */
 
 var lazyRequire      = require("./lazy-require");
+var C                = require("./constants");
 var { defineClass }  = require("./framework-error");
 var guardTenantId    = require("./guard-tenant-id");
 var bCrypto          = require("./crypto");
 var agentAudit       = require("./agent-audit");
+var safeJson         = require("./safe-json");
 
 var audit            = lazyRequire(function () { return require("./audit"); });
 var cryptoField      = lazyRequire(function () { return require("./crypto-field"); });
 var vault            = lazyRequire(function () { return require("./vault"); });
 
 var AgentTenantError = defineClass("AgentTenantError", { alwaysPermanent: true });
+
+// At-rest sealing of the tenant registry row's metadata. The registry
+// maps a tenantId to its config; the operator-supplied `metadata` is
+// sealed via b.cryptoField before reaching the backend so a DB dump
+// does not leak it — when a vault is configured (the default in a
+// booted app via b.start). Without a vault there is no key, so the row
+// is stored as-is. The registry is framework-owned coordination state,
+// so it uses the singleton vault key (cryptoField.sealRow) — the
+// per-tenant `sealRowForTenant` path below is for tenant DATA tables
+// where cross-tenant cryptographic isolation matters. AAD binds the
+// ciphertext to the tenantId (the row identity); `metadata` is an
+// object, so it is JSON-serialized before sealing and parsed on read.
+// Rows written before sealing landed carry a plain object; unsealRow
+// passes a non-sealed value through, so they still read.
+var SEAL_TABLE = "agent_tenant_registry";
+var _sealTableRegistered = false;
+var SEAL_METADATA_MAX_BYTES = C.BYTES.mib(1);
+function _ensureSealTable() {
+  if (_sealTableRegistered) return;
+  cryptoField().registerTable(SEAL_TABLE, {
+    sealedFields: ["metadata"],
+    aad:          true,
+    rowIdField:   "tenantId",
+  });
+  _sealTableRegistered = true;
+}
+function _sealRegistryRow(row) {
+  if (!vault().isInitialized()) return row;          // vault-less: store as-is (no key)
+  _ensureSealTable();
+  var pre = Object.assign({}, row);
+  if (pre.metadata !== undefined && pre.metadata !== null && typeof pre.metadata !== "string") {
+    pre.metadata = safeJson.stringify(pre.metadata);
+  }
+  return cryptoField().sealRow(SEAL_TABLE, pre);
+}
+function _unsealMetadata(row) {
+  if (!row) return row;
+  if (!vault().isInitialized()) return row;          // vault-less: row is plain
+  _ensureSealTable();
+  var out = cryptoField().unsealRow(SEAL_TABLE, row);
+  if (typeof out.metadata === "string") {
+    try { out.metadata = safeJson.parse(out.metadata, { maxBytes: SEAL_METADATA_MAX_BYTES }); }
+    catch (_e) { /* legacy raw-string metadata — leave as-is */ }
+  }
+  return out;
+}
 
 var CROSS_TENANT_ADMIN_SCOPE = "framework-cross-tenant-admin";
 
@@ -72,7 +121,7 @@ var TENANT_KDF_LABEL = "blamejs.agent.tenant/v1";
 // 32 bytes — XChaCha20-Poly1305 key length. Distinct from the audit
 // truncation buffer so future key-length bumps don't have to chase a
 // magic constant.
-var TENANT_KEY_BYTES = 32;                                                                              // allow:raw-byte-literal — XChaCha20-Poly1305 key length (256 bits)
+var TENANT_KEY_BYTES = 32;                                                                              // XChaCha20-Poly1305 key length (256 bits)
 
 /**
  * @primitive b.agent.tenant.create
@@ -146,7 +195,9 @@ async function _register(ctx, tenantId, regOpts) {
     metadata:       regOpts.metadata || {},
     registeredAt:   Date.now(),
   };
-  await ctx.backend.set(tenantId, row);
+  // Seal metadata at rest (tenantId is populated, so the AAD binding
+  // resolves). The plaintext `row` is kept for the audit below.
+  await ctx.backend.set(tenantId, _sealRegistryRow(row));
   agentAudit.safeAudit(ctx.audit, "agent.tenant.registered", regOpts.actor, {
     tenantId: tenantId, posture: row.posture,
   });
@@ -171,7 +222,7 @@ async function _unregister(ctx, tenantId, args) {
   }
   // Archive default — retain the key + metadata for retention-mandated
   // restoration. Operator's compliance regime drives archivePolicy.
-  // SUBSTRATE-19 — persist as a `status: "archived"` row in the same
+  // Persist as a `status: "archived"` row in the same
   // backend rather than only the process-local Map. GDPR Art. 17 +
   // HIPAA §164.530(j) require the archived state to survive process
   // restart (auditor pulls a deleted tenant's archival record years
@@ -213,6 +264,7 @@ async function _lookup(ctx, tenantId, args) {
   guardTenantId.validate(tenantId);
   var row = await ctx.backend.get(tenantId);
   if (!row) return null;
+  row = _unsealMetadata(row);
   return {
     tenantId:      row.tenantId,
     posture:       row.posture,
@@ -321,7 +373,7 @@ function _check(ctx, actor, agentTenantId) {
 
 // ---- Per-tenant derived key -----------------------------------------------
 //
-// SUBSTRATE-5 — `namespaceHash(label, tenantId)` is a PUBLIC function
+// `namespaceHash(label, tenantId)` is a PUBLIC function
 // over PUBLIC inputs; an attacker who learns `tenantId` (an account id
 // surfaced in URLs / API responses) reconstructs every per-tenant key
 // without any secret material. The defense the docstring promises —
@@ -386,6 +438,35 @@ function _deriveTenantKeyBytes(tenantId, purpose) {
   return bCrypto.kdf(input, TENANT_KEY_BYTES);
 }
 
+/**
+ * @primitive b.agent.tenant.derivedKey
+ * @signature b.agent.tenant.derivedKey(tenantId, purpose)
+ * @since     0.9.26
+ * @status    stable
+ * @compliance hipaa, pci-dss, gdpr, soc2
+ * @related   b.agent.tenant.create, b.archive.wrap, b.vault
+ *
+ * Derive a deterministic, domain-separated 32-byte key for a tenant
+ * and a named purpose, returned as a 64-char hex string. The key is a
+ * SHAKE256 KDF over the vault root (the master keypair PEM hashed),
+ * the `tenantId`, and the `purpose`, with NUL separators so distinct
+ * `(tenantId, purpose)` pairs cannot collide. The same inputs always
+ * produce the same key, so a value sealed under
+ * `derivedKey(t, "archive-wrap")` is recoverable later from the same
+ * tenant + purpose with no key escrow. Rotating the vault
+ * (`b.vaultRotate.rotate`) changes the root and therefore every
+ * derived key — by design, rotation intent is re-seal.
+ *
+ * Throws if the vault has not been initialized (keys cannot be derived
+ * before bootstrap) or if `purpose` is empty. This is the same
+ * derivation the per-tenant `sealField` / archive `recipient: "tenant"`
+ * paths use internally; call it directly when you need the raw key for
+ * your own AEAD.
+ *
+ * @example
+ *   var key = b.agent.tenant.derivedKey("acme-corp", "archive-wrap");
+ *   // → "9f3c…" (64 hex chars; deterministic per tenant + purpose)
+ */
 function _derivedKey(tenantId, purpose) {
   // Public API — returns hex so the existing wire shape (operators
   // storing the derived key string in their DB) is unchanged. Internal
@@ -474,7 +555,7 @@ var TENANT_FIELD_PREFIX = "tnt-v1:";
 function _tenantFieldKey(tenantId, table) {
   // 32-byte symmetric key for XChaCha20-Poly1305. _deriveTenantKeyBytes
   // returns the raw key bound to the vault master + tenantId + purpose
-  // — see SUBSTRATE-5 commentary above _derivedKey for the threat
+  // — see the commentary above _derivedKey for the threat
   // model that drove this away from public-input-only derivation.
   return _deriveTenantKeyBytes(tenantId, "cryptoField:" + table);
 }
@@ -565,7 +646,7 @@ function _unsealRowForTenant(ctx, tenantId, table, row) {
     if (out[f] !== undefined && out[f] !== null) {
       try { out[f] = _unsealField(tenantId, table, f, out[f]); }
       catch (e) {
-        // BUG-4 — null-on-decrypt-failure was silent; the docstring
+        // Null-on-decrypt-failure was silent; the docstring
         // promised "audit chain surfaces the failure" but no emit ever
         // ran. Cross-tenant ciphertext replay / tampered row / wrong-
         // prefix all hit this path; operator audit pipelines need the
@@ -624,6 +705,7 @@ function _inMemoryBackend() {
 
 module.exports = {
   create:                    create,
+  derivedKey:                _derivedKey,
   CROSS_TENANT_ADMIN_SCOPE:  CROSS_TENANT_ADMIN_SCOPE,
   AgentTenantError:          AgentTenantError,
   guards: {

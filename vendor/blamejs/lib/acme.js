@@ -45,6 +45,7 @@ var nodeCrypto = require("node:crypto");
 
 var C = require("./constants");
 var asn1 = require("./asn1-der");
+var jwk = require("./jwk");
 var safeUrl = require("./safe-url");
 var safeJson = require("./safe-json");
 var validateOpts = require("./validate-opts");
@@ -114,8 +115,7 @@ function _publicJwkFromKeyObject(keyObject) {
 
 function _jwkThumbprint(publicJwk) {
   // RFC 7638 §3 — base64url(SHA-256(canonical JSON of required members)).
-  var canon = JSON.stringify({ crv: publicJwk.crv, kty: publicJwk.kty, x: publicJwk.x, y: publicJwk.y });
-  return _b64u(nodeCrypto.createHash("sha256").update(canon).digest());
+  return jwk.thumbprint(publicJwk);
 }
 
 function _signJws(privateKey, protectedHeader, payload) {
@@ -138,7 +138,7 @@ function _signJws(privateKey, protectedHeader, payload) {
   // ECDSA from node:crypto returns DER-encoded (r,s); RFC 7515 requires
   // raw concatenation of r||s, each padded to the curve byte size (32
   // for P-256).
-  var rawSig = _ecdsaDerToRaw(derSig, 32);                                       // allow:raw-byte-literal — RFC 7518 §3.4 ES256 signature half-length (P-256 byte size)
+  var rawSig = _ecdsaDerToRaw(derSig, 32);                                       // RFC 7518 §3.4 ES256 signature half-length (P-256 byte size)
   return {
     protected: protB64,
     payload:   payloadB64,
@@ -1079,14 +1079,17 @@ function create(opts) {
    * the DER-encoded cert (base64url-encoded automatically) plus an
    * optional `reason` code per RFC 5280 §5.3.1 (0=unspecified,
    * 1=keyCompromise, 3=affiliationChanged, 4=superseded, 5=cessationOfOperation).
-   * Signs with the account key by default; pass `useCertKey:true`
-   * + the cert's private key to authorize via the cert's own key
-   * when the account key is unavailable.
+   * Signs with the account key — the only supported path today, and
+   * sufficient for mainstream CAs. (The cert-key-signed variant —
+   * `useCertKey` / `certPrivateKey` — is reserved and not yet
+   * implemented; passing `useCertKey:true` throws.)
    *
    * @opts
    *   reason:          number,    // RFC 5280 §5.3.1 reason code; default 0 (unspecified)
-   *   useCertKey:      boolean,   // sign with the cert's own key instead of account key
-   *   certPrivateKey:  KeyObject, // required when useCertKey:true
+   *   useCertKey:      boolean,   // RESERVED — cert-key-signed revocation is not yet
+   *                               //   implemented; account-key signing (the default)
+   *                               //   covers mainstream CAs. Passing true throws.
+   *   certPrivateKey:  KeyObject, // RESERVED — consumed only by the cert-key path above
    *
    * @example
    *   await acme.revokeCert(certDerBuffer, { reason: 4 });   // 4 = superseded
@@ -1429,8 +1432,8 @@ function _base32lc(buf) {
   var bits = 0;
   var value = 0;
   for (var i = 0; i < buf.length; i += 1) {
-    value = (value << 8) | buf[i];   // allow:raw-byte-literal — bit-shift count, byte boundary
-    bits += 8;                       // allow:raw-byte-literal — bits-per-byte constant
+    value = (value << 8) | buf[i];   // bit-shift count, byte boundary
+    bits += 8;                       // bits-per-byte constant
     while (bits >= 5) {
       out += alphabet[(value >>> (bits - 5)) & 31];
       bits -= 5;

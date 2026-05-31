@@ -34,7 +34,7 @@
  *   Profiles: `strict` / `balanced` / `permissive`. Compliance
  *   postures: `hipaa` / `pci-dss` / `gdpr` / `soc2`. Operators
  *   select via `{ profile: "strict" }` or
- *   `{ compliance: "hipaa" }`; postures overlay on top of the
+ *   `{ compliancePosture: "hipaa" }`; postures overlay on top of the
  *   profile baseline. Filter / script / dynamic-hint refusal holds
  *   at every profile — the RCE class is never an operator opt-in.
  *
@@ -90,7 +90,7 @@ var PROFILES = Object.freeze({
     dynamicHintPolicy:         "reject",
     bracketNestingPolicy:      "reject",
     recursiveDescentPolicy:    "reject",
-    maxRecursiveDescents:      2,                                                // allow:raw-byte-literal — recursion depth ceiling
+    maxRecursiveDescents:      2,                                                // recursion depth ceiling
     maxPatternBytes:           C.BYTES.kib(1),
     maxBytes:                  C.BYTES.kib(1),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -105,7 +105,7 @@ var PROFILES = Object.freeze({
     dynamicHintPolicy:         "reject",                                         // RCE class — refused at every profile
     bracketNestingPolicy:      "audit",
     recursiveDescentPolicy:    "audit",
-    maxRecursiveDescents:      4,                                                // allow:raw-byte-literal — recursion depth ceiling
+    maxRecursiveDescents:      4,                                                // recursion depth ceiling
     maxPatternBytes:           C.BYTES.kib(2),
     maxBytes:                  C.BYTES.kib(2),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -120,7 +120,7 @@ var PROFILES = Object.freeze({
     dynamicHintPolicy:         "reject",                                          // RCE class refused at every profile
     bracketNestingPolicy:      "audit",
     recursiveDescentPolicy:    "allow",
-    maxRecursiveDescents:      16,                                               // allow:raw-byte-literal — recursion depth ceiling
+    maxRecursiveDescents:      16,                                               // recursion depth ceiling
     maxPatternBytes:           C.BYTES.kib(8),
     maxBytes:                  C.BYTES.kib(8),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -257,7 +257,7 @@ function _detectIssues(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:             "reject"|"audit"|"allow",
  *   controlPolicy:          "reject"|"audit"|"allow",
  *   nullBytePolicy:         "reject"|"audit"|"allow",
@@ -308,7 +308,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   filterExprPolicy:       "reject"|"audit"|"allow",
  *   scriptExprPolicy:       "reject"|"audit"|"allow",
  *   dynamicHintPolicy:      "reject"|"audit"|"allow",
@@ -360,7 +360,7 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:                   string,    // override gate name in audit emissions
  *   filterExprPolicy:       "reject"|"audit"|"allow",
  *   scriptExprPolicy:       "reject"|"audit"|"allow",

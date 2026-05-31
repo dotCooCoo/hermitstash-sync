@@ -12,8 +12,8 @@
  *   - the doc-block contains the required RFC citations + CVE
  *     references + deferral conditions + escape hatch (per the
  *     project's defer-with-condition rule),
- *   - checkCert() refuses SHA-1 / MD5 cert signatures (CVE-2017-9006
- *     class) and < 2048-bit RSA (RFC 8301 §3.1).
+ *   - checkCert() refuses SHA-1 / MD5 cert signatures (SHAttered SHA-1
+ *     collision; RFC 8551 §2.5) and < 2048-bit RSA (RFC 8301 §3.1).
  *
  * Run standalone: `node test/layer-0-primitives/mail-crypto-smime.test.js`
  * Or via smoke:   `node test/smoke.js`
@@ -203,8 +203,8 @@ function testSmimeCheckCertRefusesSha1() {
   try { smime.checkCert({ certPem: certPem }); } catch (e) { threw = e; }
   check("checkCert refuses SHA-1 cert signature",
     threw && threw.code === "mail-crypto/smime/refused-hash");
-  check("checkCert SHA-1 refusal names CVE class",
-    threw && /CVE-2017-9006/.test(threw.message));
+  check("checkCert SHA-1 refusal names the weakness class",
+    threw && /SHAttered|RFC 8551/.test(threw.message));
 }
 
 // ---- checkCert: RSA < 2048 refusal ----
@@ -260,7 +260,7 @@ function testSmimeDocBlockCitations() {
   check("smime doc block names RFC 8550",        src.indexOf("RFC 8550") !== -1);
   check("smime doc block names RFC 8301",        src.indexOf("RFC 8301") !== -1);
   check("smime doc block names CVE-2017-17688",  src.indexOf("CVE-2017-17688") !== -1);
-  check("smime doc block names CVE-2017-9006",   src.indexOf("CVE-2017-9006") !== -1);
+  check("smime doc block names SHAttered SHA-1 class", src.indexOf("SHAttered") !== -1);
   // v0.10.16 — sign/verify went live; deferred-conditions language
   // was replaced with "LIVE on b.cms substrate".
   check("smime doc block names live status",
@@ -269,8 +269,39 @@ function testSmimeDocBlockCitations() {
 
 // ---- Run ----
 
+// ---- trust-chain leaf is bound to the verified signer key ----
+//
+// _verifyTrustChain must select the chain leaf as the cert whose public
+// key matches signerPublicKey (the key that actually verified the
+// signature) — not chain[0] unconditionally. Otherwise a validly-chained
+// cert for a DIFFERENT identity passes chain validation. _certKeyMatches
+// is that binding decision; a mock { publicKey } is all it touches.
+function testSmimeCertKeyBinding() {
+  var kpA = nodeCrypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  var kpB = nodeCrypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  var certA = { publicKey: kpA.publicKey };
+  var spkiA = Buffer.from(kpA.publicKey.export({ format: "der", type: "spki" }));
+  check("smime binding: cert matches its own full SPKI key",
+        smime._certKeyMatches(certA, spkiA) === true);
+  // Production form: signerPublicKey is the raw subjectPublicKey (the
+  // uncompressed EC point 0x04||x||y), which is the SPKI's suffix.
+  var jwkA = kpA.publicKey.export({ format: "jwk" });
+  var rawA = Buffer.concat([Buffer.from([0x04]),
+    Buffer.from(jwkA.x, "base64url"), Buffer.from(jwkA.y, "base64url")]);
+  check("smime binding: cert matches its raw subjectPublicKey (suffix)",
+        smime._certKeyMatches(certA, rawA) === true);
+  // The gap this closes: a DIFFERENT key must not match.
+  var spkiB = Buffer.from(kpB.publicKey.export({ format: "der", type: "spki" }));
+  check("smime binding: cert does NOT match a different cert's key",
+        smime._certKeyMatches(certA, spkiB) === false);
+  // Unextractable / absent key → no match (caller fails closed).
+  check("smime binding: unextractable key → no match",
+        smime._certKeyMatches({ publicKey: { export: function () { throw new Error("nope"); } } }, spkiA) === false);
+}
+
 function run() {
   testSmimeSurface();
+  testSmimeCertKeyBinding();
   testSmimeSignVerifyRoundtrip();
   testSmimeVerifyTamperRefused();
   testSmimeVerifyWrongKeyRefused();

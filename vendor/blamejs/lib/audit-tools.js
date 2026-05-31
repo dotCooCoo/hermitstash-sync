@@ -75,8 +75,38 @@ var FRAMEWORK_VERSION = (pkg && pkg.version) || "unknown";
 // so importing db at audit-tools' top would close the cycle. Lazy
 // keeps the load order one-way.
 var db = lazyRequire(function () { return require("./db"); });
+var audit = lazyRequire(function () { return require("./audit"); });
 
 var AuditToolsError = defineClass("AuditToolsError", { alwaysPermanent: true });
+
+// Dual-control gate constants for the audit_log physical purge. The
+// purge erases signed audit history, so when an operator has declared
+// audit_log under b.db.declareRequireDualControl the deletion requires
+// a consumed m-of-n grant whose action matches AUDIT_LOG_PURGE_ACTION —
+// the same separation-of-duties control b.db.eraseHard enforces (NIST
+// SP 800-53 AU-9 + AC-5, HIPAA 45 CFR 164.312(b), PCI-DSS v4.0 10.5.1 /
+// 10.7, SEC 17a-4(f), CWE-778).
+var AUDIT_LOG_GATE_TABLE   = "audit_log";
+var AUDIT_LOG_PURGE_ACTION = "auditTools.purge";
+
+function _resolveDualControlGate(opts) {
+  var checker = typeof opts.checkDualControlGate === "function"
+    ? opts.checkDualControlGate
+    : function (t) { return db()._checkDualControlGate(t); };
+  try { return checker(AUDIT_LOG_GATE_TABLE); }
+  catch (_e) { return null; }
+}
+
+function _emitPurgeDenied(gate, reason) {
+  try {
+    audit().safeEmit({
+      action:   "auditTools.purge.denied",
+      outcome:  "denied",
+      reason:   reason,
+      metadata: { table: AUDIT_LOG_GATE_TABLE, m: gate.m, n: gate.n, posture: gate.posture || null },
+    });
+  } catch (_e) { /* drop-silent — denial audit is best-effort */ }
+}
 
 var BUNDLE_FORMAT  = "blamejs-audit-bundle-v1";
 var KIND_ARCHIVE   = "archive";
@@ -149,7 +179,7 @@ function _rowToWireForm(row) {
   return out;
 }
 
-// F-AUD-4 — operator-facing wire helper that surfaces recordedAt as
+// Operator-facing wire helper that surfaces recordedAt as
 // ISO-8601 / RFC 3339 alongside the existing Unix-ms integer.
 // Auditors comparing rows against external SIEM events expect ISO
 // with explicit Z; the framework's primary ms storage stays
@@ -291,36 +321,43 @@ async function _defaultReadPredecessorRowHash(firstCounter) {
 
 // ---- Bundle writer ----
 
-async function _writeBundle(args) {
-  var outDir       = args.outDir;
+// Assemble the encrypted bundle entirely in memory: returns the
+// manifest plus an ordered { filename: Buffer } map. Pure — no
+// filesystem touch — so it backs both the on-disk writer and the
+// returnBytes / serverless path. The bundle is always the same 2-3
+// files (rows.enc, optional checkpoint.enc, manifest.json) whether it
+// lands on disk or ships as bytes.
+async function _buildBundle(args) {
   var kind         = args.kind;
   var rows         = args.rows;
   var checkpoint   = args.checkpoint || null;
   var passphrase   = args.passphrase;
   var predecessorRowHash = args.predecessorRowHash;
 
-  atomicFile.ensureDir(outDir);
-
   var firstRow = rows[0];
   var lastRow  = rows[rows.length - 1];
+  var files = {};
 
   // 1. Encrypt the rows JSONL
   var jsonl = rows.map(function (r) {
     return JSON.stringify(_rowToWireForm(r));
   }).join("\n") + "\n";
   var rowsEnc = await backupCrypto.encryptWithFreshSalt(jsonl, passphrase);
-  atomicFile.writeSync(nodePath.join(outDir, "rows.enc"), rowsEnc.encrypted, { fileMode: 0o600 });
+  files["rows.enc"] = rowsEnc.encrypted;
 
   // 2. (archive) Encrypt the checkpoint JSON
   var checkpointSalt = null;
+  var checkpointEncrypted = null;
   if (checkpoint) {
     var ckptJson = _canonicalize(_rowToWireForm(checkpoint));
     var ckptEnc = await backupCrypto.encryptWithFreshSalt(ckptJson, passphrase);
-    atomicFile.writeSync(nodePath.join(outDir, "checkpoint.enc"), ckptEnc.encrypted, { fileMode: 0o600 });
+    files["checkpoint.enc"] = ckptEnc.encrypted;
     checkpointSalt = ckptEnc.salt;
+    checkpointEncrypted = ckptEnc.encrypted;
   }
 
-  // 3. Build manifest
+  // 3. Build manifest — checksums computed from the in-memory buffers
+  // (no read-back of what we just wrote).
   var manifest = {
     format:         BUNDLE_FORMAT,
     kind:           kind,
@@ -342,8 +379,8 @@ async function _writeBundle(args) {
     },
     checksum: {
       rowsSha3_512:       backupCrypto.checksum(rowsEnc.encrypted),
-      checkpointSha3_512: checkpointSalt
-        ? backupCrypto.checksum(nodeFs.readFileSync(nodePath.join(outDir, "checkpoint.enc")))
+      checkpointSha3_512: checkpointEncrypted
+        ? backupCrypto.checksum(checkpointEncrypted)
         : null,
     },
   };
@@ -355,9 +392,22 @@ async function _writeBundle(args) {
       checkpointId:         String(checkpoint._id),
     };
   }
+  files["manifest.json"] = Buffer.from(_canonicalize(manifest), "utf8");
+  return { manifest: manifest, files: files };
+}
+
+async function _writeBundle(args) {
+  var outDir = args.outDir;
+  var built  = await _buildBundle(args);
+
+  atomicFile.ensureDir(outDir);
+  atomicFile.writeSync(nodePath.join(outDir, "rows.enc"), built.files["rows.enc"], { fileMode: 0o600 });
+  if (built.files["checkpoint.enc"]) {
+    atomicFile.writeSync(nodePath.join(outDir, "checkpoint.enc"), built.files["checkpoint.enc"], { fileMode: 0o600 });
+  }
   var manifestPath = nodePath.join(outDir, "manifest.json");
-  atomicFile.writeSync(manifestPath, _canonicalize(manifest), { fileMode: 0o600 });
-  return { manifest: manifest, manifestPath: manifestPath };
+  atomicFile.writeSync(manifestPath, built.files["manifest.json"], { fileMode: 0o600 });
+  return { manifest: built.manifest, manifestPath: manifestPath };
 }
 
 // ---- Bundle reader ----
@@ -437,8 +487,14 @@ async function _readBundle(inDir, passphrase) {
  * Refuses if `opts.out` exists, no rows match, or no signed
  * checkpoint covers the slice (run `b.audit.checkpoint()` first).
  *
+ * Pass `returnBytes: true` instead of `out` for the bundle as an
+ * in-memory `{ filename: Buffer }` map (`rows.enc` + `checkpoint.enc`
+ * + `manifest.json`) — the read-only / serverless path. `out` and
+ * `returnBytes` are mutually exclusive.
+ *
  * @opts
- *   out:        string,         // fresh directory path for the bundle
+ *   out:        string,         // fresh directory path (omit when returnBytes)
+ *   returnBytes:boolean,        // true → return { manifest, files } in memory, no disk
  *   before:     number|Date|string,  // archive rows recordedAt < this
  *   passphrase: Buffer|string,  // bundle-encryption passphrase
  *
@@ -455,7 +511,12 @@ async function _readBundle(inDir, passphrase) {
 async function archive(opts) {
   opts = opts || {};
   _requirePassphrase(opts.passphrase);
-  _requireOutDir(opts.out, "archive");
+  var returnBytes = opts.returnBytes === true;
+  if (returnBytes && opts.out !== undefined) {
+    throw new AuditToolsError("audit-tools/out-and-return-bytes",
+      "archive: specify either opts.out (write to disk) or opts.returnBytes (in-memory bytes), not both");
+  }
+  if (!returnBytes) _requireOutDir(opts.out, "archive");
   var beforeMs = _toMs(opts.before);
   if (beforeMs == null) {
     throw new AuditToolsError("audit-tools/no-before",
@@ -481,6 +542,22 @@ async function archive(opts) {
   }
 
   var predecessorRowHash = await readPredecessorHash(firstCounter);
+
+  if (returnBytes) {
+    var built = await _buildBundle({
+      kind:       KIND_ARCHIVE,
+      rows:       rows,
+      checkpoint: checkpoint,
+      passphrase: opts.passphrase,
+      predecessorRowHash: predecessorRowHash,
+    });
+    return {
+      manifest: built.manifest,
+      files:    built.files,
+      rowCount: rows.length,
+      range:    built.manifest.range,
+    };
+  }
 
   var written = await _writeBundle({
     outDir:     opts.out,
@@ -517,8 +594,15 @@ async function archive(opts) {
  * action filter that drops intermediate counters is rejected with
  * `audit-tools/non-contiguous`.
  *
+ * Pass `returnBytes: true` instead of `out` to get the bundle as an
+ * in-memory `{ filename: Buffer }` map (`rows.enc` + `manifest.json`)
+ * with no filesystem touch — the read-only / serverless path; ship it
+ * to object storage or over the wire. `out` and `returnBytes` are
+ * mutually exclusive.
+ *
  * @opts
- *   out:        string,                // fresh directory path
+ *   out:        string,                // fresh directory path (omit when returnBytes)
+ *   returnBytes:boolean,               // true → return { manifest, files } in memory, no disk
  *   from:       number|Date|string,    // recordedAt >= this (inclusive)
  *   to:         number|Date|string,    // recordedAt <= this (inclusive)
  *   action:     string,                // exact action match (optional)
@@ -536,7 +620,12 @@ async function archive(opts) {
 async function exportSlice(opts) {
   opts = opts || {};
   _requirePassphrase(opts.passphrase);
-  _requireOutDir(opts.out, "export");
+  var returnBytes = opts.returnBytes === true;
+  if (returnBytes && opts.out !== undefined) {
+    throw new AuditToolsError("audit-tools/out-and-return-bytes",
+      "export: specify either opts.out (write to disk) or opts.returnBytes (in-memory bytes), not both");
+  }
+  if (!returnBytes) _requireOutDir(opts.out, "export");
   var fromMs = _toMs(opts.from);
   var toMs   = _toMs(opts.to);
   var readRows = opts.readRows || _defaultReadRows;
@@ -566,6 +655,22 @@ async function exportSlice(opts) {
   }
   var firstCounter = Number(rows[0].monotonicCounter);
   var predecessorRowHash = await readPredecessorHash(firstCounter);
+
+  if (returnBytes) {
+    var built = await _buildBundle({
+      kind:       KIND_EXPORT,
+      rows:       rows,
+      checkpoint: null,
+      passphrase: opts.passphrase,
+      predecessorRowHash: predecessorRowHash,
+    });
+    return {
+      manifest: built.manifest,
+      files:    built.files,
+      rowCount: rows.length,
+      range:    built.manifest.range,
+    };
+  }
 
   var written = await _writeBundle({
     outDir:     opts.out,
@@ -731,10 +836,11 @@ function _defaultVerifyCheckpointSignature(checkpoint) {
  * `lastPurgedRowHash` becomes the new chain origin.
  *
  * @opts
- *   confirm:         true,                // exact `true` required
- *   archive:         string,              // path to a verified archive bundle
- *   passphrase:      Buffer|string,       // bundle decryption passphrase
- *   verifySignature: function(checkpoint),// auditor pubkey override
+ *   confirm:          true,               // exact `true` required
+ *   archive:          string,             // path to a verified archive bundle
+ *   passphrase:       Buffer|string,      // bundle decryption passphrase
+ *   verifySignature:  function(checkpoint),// auditor pubkey override
+ *   dualControlGrant: object,             // required when audit_log is declared under b.db.declareRequireDualControl — from b.dualControl.consume({ action: "auditTools.purge" })
  *
  * @example
  *   var result = await b.auditTools.purge({
@@ -769,6 +875,34 @@ async function purge(opts) {
   if (v.kind !== KIND_ARCHIVE) {
     throw new AuditToolsError("audit-tools/wrong-kind",
       "purge: bundle kind is '" + v.kind + "', must be 'archive'");
+  }
+
+  // Dual-control gate. When audit_log is declared under
+  // b.db.declareRequireDualControl, the physical purge requires a
+  // consumed m-of-n grant — confirm:true alone is not enough. Mirrors
+  // b.db.eraseHard, and additionally binds the grant's action so a
+  // grant minted for a different operation can't be replayed here.
+  var dcGate = _resolveDualControlGate(opts);
+  if (dcGate) {
+    var grant = opts.dualControlGrant;
+    if (!grant) {
+      _emitPurgeDenied(dcGate, "no-grant");
+      throw new AuditToolsError("audit-tools/dual-control-required",
+        "purge: audit_log is under dual control (m=" + dcGate.m + ", n=" + dcGate.n +
+        "); pass opts.dualControlGrant from b.dualControl.consume({ action: \"" +
+        AUDIT_LOG_PURGE_ACTION + "\" }).");
+    }
+    if (grant.ready !== true) {
+      _emitPurgeDenied(dcGate, "grant-not-ready");
+      throw new AuditToolsError("audit-tools/dual-control-grant-not-ready",
+        "purge: opts.dualControlGrant.ready must be true (a consumed m-of-n grant)");
+    }
+    if (grant.action !== AUDIT_LOG_PURGE_ACTION) {
+      _emitPurgeDenied(dcGate, "grant-action-mismatch");
+      throw new AuditToolsError("audit-tools/dual-control-grant-mismatch",
+        "purge: dualControlGrant.action is '" + grant.action + "', must be '" +
+        AUDIT_LOG_PURGE_ACTION + "'");
+    }
   }
 
   // 2. Refuse if the archive doesn't start at the next purge point. Keeps
@@ -806,6 +940,7 @@ async function purge(opts) {
     lastPurgedCounter:    Number(v.range.lastCounter),
     lastPurgedRowHash:    v.range.lastRowHash,
     archiveBundleId:      result.archiveBundleId,
+    dualControlConsumed:  !!dcGate,
   };
 }
 
@@ -852,9 +987,15 @@ async function _defaultApplyPurge(args) {
  * `audit.forensic_snapshot.composed` audit event so the act of
  * composing the snapshot is itself on-chain.
  *
+ * Pass `returnBytes: true` instead of `out` for the snapshot as an
+ * in-memory `{ filename: Buffer }` map (the slice's `rows.enc` +
+ * `manifest.json` plus `forensic-snapshot.json`) — the read-only /
+ * serverless path. `out` and `returnBytes` are mutually exclusive.
+ *
  * @opts
- *   out:        string,               // fresh directory path
- *   since:      number|Date|string,   // include rows recordedAt >= this
+ *   out:        string,               // fresh directory path (omit when returnBytes)
+ *   returnBytes:boolean,              // true → return { ...manifest, files } in memory, no disk
+ *   since:      number|Date|string,   // include rows recordedAt >= this (windowed since → now)
  *   passphrase: Buffer|string,        // bundle-encryption passphrase
  *   reason:     string,               // required incident-context reason
  *   incidentId: string,               // optional ticket / incident id
@@ -874,29 +1015,39 @@ async function _defaultApplyPurge(args) {
 async function forensicSnapshot(opts) {
   opts = opts || {};
   _requirePassphrase(opts.passphrase);
-  _requireOutDir(opts.out, "forensicSnapshot");
+  var returnBytes = opts.returnBytes === true;
+  if (returnBytes && opts.out !== undefined) {
+    throw new AuditToolsError("audit-tools/out-and-return-bytes",
+      "forensicSnapshot: specify either opts.out (write to disk) or opts.returnBytes (in-memory bytes), not both");
+  }
+  if (!returnBytes) _requireOutDir(opts.out, "forensicSnapshot");
   var sinceMs = _toMs(opts.since);
   if (sinceMs == null) {
     throw new AuditToolsError("audit-tools/no-since",
       "forensicSnapshot: opts.since is required");
   }
   validateOpts.requireNonEmptyString(opts.reason, "reason", AuditToolsError, "audit-tools/no-reason");
+  // exportSlice windows by from/to — pass the requested `since` as `from`
+  // and now as `to` so the snapshot captures only the incident window
+  // rather than the entire audit history.
   var sliceResult = await exportSlice({
-    out:        opts.out,
-    since:      sinceMs,
-    until:      Date.now(),
-    passphrase: opts.passphrase,
-    readRows:   opts.readRows,
+    out:         returnBytes ? undefined : opts.out,
+    returnBytes: returnBytes,
+    from:        sinceMs,
+    to:          Date.now(),
+    passphrase:  opts.passphrase,
+    readRows:    opts.readRows,
     readCoveringCheckpoint: opts.readCoveringCheckpoint,
   });
-  // Compose snapshot manifest with operator-supplied IR context.
+  // Compose snapshot manifest with operator-supplied IR context. The
+  // audit slice lands as rows.enc inside the bundle either way.
   var manifest = {
     snapshotKind:      "forensic",
     incidentId:        opts.incidentId || null,
     reason:            opts.reason,
     actor:             opts.actor || null,
     composedAt:        new Date().toISOString(),
-    auditSliceFile:    sliceResult && sliceResult.path,
+    auditSliceFile:    returnBytes ? "rows.enc" : (sliceResult && sliceResult.manifestPath),
     auditSliceCount:   sliceResult && sliceResult.rowCount,
     runtime: {
       nodeVersion: process.version,
@@ -906,14 +1057,18 @@ async function forensicSnapshot(opts) {
       uptimeSec:   Math.round(process.uptime()),
     },
   };
-  var manifestPath = require("node:path").join(opts.out, "forensic-snapshot.json");
-  require("node:fs").writeFileSync(manifestPath, _canonicalize(manifest), "utf8");
+  var manifestBytes = Buffer.from(_canonicalize(manifest), "utf8");
+  var manifestPath = null;
+  if (!returnBytes) {
+    manifestPath = nodePath.join(opts.out, "forensic-snapshot.json");
+    atomicFile.writeSync(manifestPath, manifestBytes, { fileMode: 0o600 });
+  }
   try {
     require("./audit").safeEmit({
       action:  "audit.forensic_snapshot.composed",
       outcome: "success",
       metadata: {
-        out:               opts.out,
+        out:               returnBytes ? null : opts.out,
         incidentId:        manifest.incidentId,
         reason:            opts.reason,
         actor:             opts.actor || null,
@@ -921,6 +1076,12 @@ async function forensicSnapshot(opts) {
       },
     });
   } catch (_e) { /* audit best-effort */ }
+  if (returnBytes) {
+    // Mirror the on-disk layout: the slice's files plus the IR wrapper.
+    var files = Object.assign({}, sliceResult.files);
+    files["forensic-snapshot.json"] = manifestBytes;
+    return Object.assign({}, manifest, { files: files });
+  }
   return Object.assign({}, manifest, { manifestPath: manifestPath });
 }
 
@@ -982,7 +1143,7 @@ function _toCadfEvent(row) {
       name:    "blamejs.audit",
     },
     reason: row.reason ? {
-      reasonCode: String(row.reason).slice(0, 256),                                // allow:raw-byte-literal — reason cap
+      reasonCode: String(row.reason).slice(0, 256),                                // reason cap
       policyType: "blamejs.audit-chain",
     } : undefined,
     attachments: meta ? [{

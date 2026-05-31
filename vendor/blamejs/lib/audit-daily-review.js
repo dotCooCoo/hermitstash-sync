@@ -17,8 +17,8 @@
  *   review of activity records), SOX §302/§404 (quarterly self-
  *   attestation), SOC 2 CC7.2 (anomaly identification and response),
  *   GDPR Art. 32 (ongoing security testing/evaluation). When `posture`
- *   is one of `pci-dss` / `hipaa` / `sox` / `soc2`, a `notify`
- *   callback is mandatory at create-time — the regulators all demand
+ *   is one of `pci-dss` / `hipaa` / `sox` / `sox-404` / `soc2`, a
+ *   `notify` callback is mandatory at create-time — the regulators all demand
  *   a follow-up channel.
  *
  *   Severity classification: `denied` / `failure` outcomes default to
@@ -65,7 +65,7 @@ var CRITICAL_PATTERNS = [
   /^ato\.killSwitch\.tripped/,
 ];
 
-var POSTURES_REQUIRING_NOTIFY = ["pci-dss", "hipaa", "sox", "soc2"];
+var POSTURES_REQUIRING_NOTIFY = ["pci-dss", "hipaa", "sox", "sox-404", "soc2"];
 
 function _defaultClassify(event) {
   if (!event || typeof event !== "object" || typeof event.action !== "string") {
@@ -181,7 +181,7 @@ function create(opts) {
 
   // lookbackHours — default 24 per PCI DSS 4.0 daily cadence. Caller can
   // pass weekly / monthly via larger numbers.
-  var lookbackHours = 24; // allow:raw-byte-literal — lookback in HOURS, not bytes
+  var lookbackHours = 24; // lookback in HOURS, not bytes
   if (opts.lookbackHours !== undefined) {
     if (typeof opts.lookbackHours !== "number" || !isFinite(opts.lookbackHours) ||
         opts.lookbackHours <= 0) {
@@ -206,8 +206,8 @@ function create(opts) {
   }
 
   var cron = opts.cron || "0 6 * * *";   // 06:00 UTC daily
-  var queryLimit = opts.queryLimit || 10000;                                    // allow:raw-byte-literal — operator-tunable result cap, count not bytes
-  var historyLimit = opts.historyLimit || 30;                                   // allow:raw-byte-literal — bounded history buffer (count, not bytes)
+  var queryLimit = opts.queryLimit || 10000;                                    // operator-tunable result cap, count not bytes
+  var historyLimit = opts.historyLimit || 30;                                   // bounded history buffer (count, not bytes)
   var classify = typeof opts.classify === "function" ? opts.classify : _defaultClassify;
   var now = typeof opts.now === "function" ? opts.now : Date.now;
   var auditMod = opts.audit;

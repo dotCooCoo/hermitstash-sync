@@ -1003,7 +1003,7 @@ function _smtpSend(message, cfg) {
     var peerSupportsSmtpUtf8 = false;     // RFC 6531 — set from EHLO response
     var peerSupportsChunking = false;     // RFC 3030 §2 CHUNKING
     var peerSupportsBinaryMime = false;   // RFC 3030 §3 BINARYMIME
-    var peerSupports8BitMime = false;     // RFC 6152 (eight-bit MIME)                                            // allow:raw-byte-literal — RFC number, not a byte literal
+    var peerSupports8BitMime = false;     // RFC 6152 (eight-bit MIME)                                            // RFC number, not a byte literal
     var peerSizeCap = -1;                 // RFC 1870 SIZE — -1 unset, 0 = no cap, >0 = byte limit
     var upgradedToTLS = false;
     var settled = false;
@@ -1594,10 +1594,10 @@ function create(opts) {
   var auditOn = opts.audit !== false;
 
   // Default-on guardDomain hardening for every outbound recipient + the
-  // sender address. Refuses CVE-2017-5469-class IDN homograph spoofs in
+  // sender address. Refuses IDN homograph / mixed-script-confusable spoofs in
   // recipient or from domains, RFC 6761 special-use domain names
   // (`.localhost`, `.test`, `.invalid`, `.example`) in production sends,
-  // RFC 1035 §2.3.4 label-length violations, and CVE-2021-22931-class
+  // RFC 1035 §2.3.4 label-length violations, and CVE-2021-22931 class
   // bare-IP-as-domain (DNS-rebinding allowlist-bypass class). Operators
   // sending to address literals (`<x@[1.2.3.4]>`) — rare; mostly mailing-
   // list internals — pass `guardDomain: false` to opt out, or pass
@@ -1688,7 +1688,7 @@ function create(opts) {
     if (country && footerHtml.indexOf(country) === -1) {
       throw new MailError("mail/bad-footer-html",
         "mail.create({ footerHtml }): override must contain the postalAddress.country '" +
-        country + "' (CAN-SPAM §7704(a)(5)). Got: " + footerHtml.slice(0, 200),                                   // allow:raw-byte-literal — diagnostic clamp characters, not bytes
+        country + "' (CAN-SPAM §7704(a)(5)). Got: " + footerHtml.slice(0, 200),                                   // diagnostic clamp characters, not bytes
         true);
     }
     if (postalCode && footerHtml.indexOf(postalCode) === -1) {
@@ -1896,7 +1896,7 @@ function feedbackId(opts) {
       throw new MailError("mail/bad-feedback-id-field",
         "feedbackId: " + f.key + " must be a non-empty string");
     }
-    if (f.value.length > 64) {                                                                     // allow:raw-byte-literal — Gmail FBL per-field cap, not byte arithmetic
+    if (f.value.length > 64) {                                                                     // Gmail FBL per-field cap, not byte arithmetic
       throw new MailError("mail/bad-feedback-id-field",
         "feedbackId: " + f.key + " exceeds 64 chars (Gmail FBL truncation threshold)");
     }
@@ -1909,7 +1909,7 @@ function feedbackId(opts) {
     // ranges in regex literals regardless of escape form.
     for (var ci = 0; ci < f.value.length; ci += 1) {
       var code = f.value.charCodeAt(ci);
-      if (code < 32 || code === 127) {                                                             // allow:raw-byte-literal — C0 + DEL codepoint range
+      if (code < 32 || code === 127) {                                                             // C0 + DEL codepoint range
         throw new MailError("mail/bad-feedback-id-field",
           "feedbackId: " + f.key + " contains control characters");
       }

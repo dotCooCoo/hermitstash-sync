@@ -70,6 +70,7 @@ var safeJson = require("./safe-json");
 var safeSql = require("./safe-sql");
 var validateOpts = require("./validate-opts");
 var vault = require("./vault");
+var vaultAad = require("./vault-aad");
 
 var DbError = defineClass("DbError", { alwaysPermanent: true });
 var WormViolationError = require("./framework-error").WormViolationError;
@@ -132,17 +133,39 @@ var encPath   = null;       // encrypted-at-rest path (null in plain mode)
 var encKey    = null;       // DB encryption key buffer (null in plain mode)
 var encTimer  = null;       // periodic encrypt interval handle
 var atRest    = null;       // 'encrypted' or 'plain'
+// Tmpfs free-space guard (encrypted mode). The working copy lives on a
+// bounded tmpfs (Docker /dev/shm defaults to 64 MiB); if it fills, SQLite
+// hits ENOSPC and corrupts the working copy. A periodic probe refuses
+// growth writes (INSERT/UPDATE/REPLACE) before that happens — fail-clear
+// instead of corrupt-then-recover. DELETE + reads stay available so
+// retention can reclaim space and the app can keep serving.
+var storageProbeTimer = null;  // periodic free-space probe handle
+var writesRefused = false;     // true when free space < minFreeBytes
+var minFreeBytes  = 0;         // refuse growth writes below this (0 = guard off)
+var statfsProbe   = null;      // free-space reader (fs.statfsSync; injectable for tests)
+// The process-exit final-flush handler is registered ONCE at first
+// encrypted init. Re-registering per init() leaked an 'exit' listener on
+// every init/close cycle (MaxListenersExceeded in long test runs / hot
+// reload); the flag makes it idempotent. The handler reads live module
+// state at exit time, so a later re-init is still covered.
+var _exitHandlerRegistered = false;
 var dataDir   = null;
 var initialized = false;
 var dataResidency = null;   // operator's declared region config (validated by storage backends)
 var subjectTables = [];     // [{ name, subjectField, personalDataCategories }] — for subject.export/erase
 var tableMetadata = {};     // table name → metadata snapshot (PK/FK/sealed/derived) for getTableMetadata
-// D-M5 — streamLimit ceiling. db.stream() / Query.stream() consult this
+// StreamLimit ceiling. db.stream() / Query.stream() consult this
 // (overridden per-call via opts.streamLimit). Default cap matches a
 // generous-but-bounded 1M rows so an accidentally-unbounded export
 // surfaces a thrown error instead of OOM. v0.7.67's maxRowsPerQuery
 // bounds .all() / .first() — this is its streaming counterpart.
-var streamLimit = C.BYTES.bytes(1000000);                                                              // allow:raw-byte-literal — row-count ceiling, not bytes
+var streamLimit = C.BYTES.bytes(1000000);                                                              // row-count ceiling, not bytes
+// Column-membership gate mode, set by db.init({ columnGate }). Default
+// "reject" (security-on): a query that orders / selects / filters on a
+// column that is not declared in the table's schema is refused before
+// the identifier interpolates into SQL. "warn" audits + allows; "off"
+// disables the gate.
+var columnGateMode = "reject";
 
 // ---- Framework-baked tables ----
 //
@@ -271,7 +294,7 @@ var FRAMEWORK_SCHEMA = [
     indexes: ["placedAt"],
   },
   {
-    // Per-row crypto-erasure key registry — F-RTBF-3 per-row keys.
+    // Per-row crypto-erasure key registry — per-row keys.
     // Each entry holds a sealed wrapped K_row keyed by (table,
     // rowId). b.subject.eraseHard deletes the entry, leaving WAL /
     // replica residuals undecryptable.
@@ -598,8 +621,8 @@ var FRAMEWORK_SCHEMA = [
   {
     // _blamejs_break_glass_grants — issued grants. Each successful
     // step-up creates one row; each row read decrements rowsRemaining.
-    // Default maxRowsPerGrant=1 enforces "row by row" auth per the
-    // operator-confirmed shape (each row access = its own grant).
+    // Default maxRowsPerGrant=1 enforces "row by row" auth
+    // (each row access = its own grant).
     // Sealed columns hold reason + scopeColumns so audit-readable
     // metadata doesn't leak in cleartext.
     name: "_blamejs_break_glass_grants",
@@ -645,25 +668,58 @@ function resolveTmpDir(optsTmpDir) {
 
 // ---- DB encryption key management ----
 
+// AAD binds the sealed DB encryption key to the deployment's dataDir
+// + key-file path, so a key file substituted from another deployment
+// fails the AEAD tag check on unseal (cross-deployment ciphertext
+// substitution / silent re-key — CWE-345 / CWE-441; the AAD itself is
+// NIST SP 800-38D additional-authenticated-data over the XChaCha20-
+// Poly1305 seal). nodePath.resolve (not realpathSync) — the key file
+// may not exist yet at first-run seal.
+function _dbKeyAad(dataDirPath, keyPath) {
+  return vaultAad.buildContextAad({
+    purpose: "blamejs/db-encryption-key/v1",
+    dataDir: nodePath.resolve(dataDirPath),
+    keyPath: nodePath.resolve(keyPath),
+  });
+}
+
 function loadOrCreateDbKey(dataDirPath, keyPathOverride) {
   // Operator opt: `opts.dbKeyPath` — useful when the encryption key
   // needs to live outside `dataDir` (e.g. a separate volume mounted
   // from a KMS-fronted secret store). Default places it next to the
   // encrypted DB so backup capture is one-tarball.
   var keyPath = keyPathOverride || nodePath.join(dataDirPath, "db.key.enc");
+  var aad = _dbKeyAad(dataDirPath, keyPath);
   if (nodeFs.existsSync(keyPath)) {
     var sealed = atomicFile.readSync(keyPath, { encoding: "utf8" }).trim();
-    var b64 = vault.unseal(sealed);
+    var b64;
+    // isAadSealed is checked FIRST and is load-bearing: AAD_PREFIX
+    // ("vault.aad:") is NOT a prefix of VAULT_PREFIX ("vault:"), so a
+    // plain vault.unseal would silently pass an AAD-sealed value
+    // through unchanged. AAD-bound keys verify the deployment context;
+    // a key file lifted from another deployment fails the tag check.
+    if (vaultAad.isAadSealed(sealed)) {
+      b64 = vaultAad.unseal(sealed, aad);
+    } else {
+      // Legacy plain-sealed key (pre-AAD): unseal with the classic
+      // path, then re-seal in place with the deployment-path binding so
+      // the next boot is AAD-verified. Read-migration preserves the key
+      // bytes — no re-key, no operator action.
+      b64 = vault.unseal(sealed);
+      if (b64) {
+        atomicFile.writeSync(keyPath, vaultAad.seal(b64, aad), { fileMode: 0o600 });
+        log("re-sealed DB encryption key with deployment-path binding at " + keyPath);
+      }
+    }
     if (!b64) {
       throw _dbErr("db/key-unseal-empty",
         "FATAL: db.key.enc unseal returned empty — vault may not be initialized or key file corrupted");
     }
     return Buffer.from(b64, "base64");
   }
-  // First run — generate, seal, persist (atomic)
+  // First run — generate, AAD-seal, persist (atomic).
   var raw = generateBytes(C.BYTES.bytes(32));
-  // allow:seal-without-aad — whole-file DB encryption key, not a row column
-  var sealedKey = vault.seal(raw.toString("base64"));
+  var sealedKey = vaultAad.seal(raw.toString("base64"), aad);
   atomicFile.writeSync(keyPath, sealedKey, { fileMode: 0o600 });
   log("generated DB encryption key at " + keyPath);
   return raw;
@@ -672,13 +728,30 @@ function loadOrCreateDbKey(dataDirPath, keyPathOverride) {
 function decryptToTmp() {
   if (!encPath || !nodeFs.existsSync(encPath)) return;
   // If a plaintext file already exists in tmpfs from a prior process, prefer
-  // the newer mtime (crash recovery — operator's most recent state wins).
+  // the newer mtime (crash recovery — operator's most recent state wins) —
+  // but ONLY if it is a readable SQLite file. A working copy corrupted by
+  // an unclean shutdown or a full tmpfs (e.g. Docker's 64 MiB /dev/shm
+  // default overflowing) would otherwise be kept on every boot, and
+  // db.init's integrity gate would fail identically forever — an
+  // unrecoverable crash loop. When the newer plaintext fails a fast
+  // integrity probe, discard it and fall through to re-decrypt the
+  // last-good db.enc snapshot. db.enc itself is never modified here, so
+  // this only ever rolls back to the persistent encrypted copy; if THAT
+  // is also corrupt, db.init still fails loudly (no silent data loss).
   if (nodeFs.existsSync(dbPath)) {
     var plainStat = nodeFs.statSync(dbPath);
     var encStat = nodeFs.statSync(encPath);
     if (plainStat.mtimeMs > encStat.mtimeMs && plainStat.size > 0) {
-      log("plaintext is newer than encrypted — keeping plaintext (crash recovery)");
-      return;
+      if (_tmpWorkingCopyIsHealthy(dbPath)) {
+        log("plaintext is newer than encrypted — keeping plaintext (crash recovery)");
+        return;
+      }
+      log("newer tmpfs working copy failed its integrity probe (corrupt — likely an " +
+          "unclean shutdown or a full /dev/shm); discarding it and re-decrypting from " +
+          "db.enc (auto-recovery to the last-good encrypted snapshot)");
+      try { nodeFs.unlinkSync(dbPath); }          catch (_e) { /* fall through to overwrite */ }
+      try { nodeFs.unlinkSync(dbPath + "-wal"); } catch (_e) { /* may not exist */ }
+      try { nodeFs.unlinkSync(dbPath + "-shm"); } catch (_e) { /* may not exist */ }
     }
   }
   var packed = nodeFs.readFileSync(encPath);
@@ -696,8 +769,88 @@ function decryptToTmp() {
   }
 }
 
+// Fast "is this a usable SQLite file" probe for the crash-recovery path.
+// Opens the candidate working copy and runs PRAGMA quick_check(1) (far
+// cheaper than full integrity_check — header + page-structure sanity,
+// enough to catch a "database disk image is malformed" / truncated /
+// non-DB file). Any throw (malformed image, not-a-DB) or non-"ok" result
+// is unhealthy. The probe handle is always closed so it never holds the
+// tmpfs file open against the subsequent real open.
+function _tmpWorkingCopyIsHealthy(p) {
+  var probe = null;
+  try {
+    probe = new DatabaseSync(p);
+    var rows = probe.prepare("PRAGMA quick_check(1)").all();
+    return rows.length >= 1 && rows[0] && rows[0].quick_check === "ok";
+  } catch (_e) {
+    return false;
+  } finally {
+    if (probe) { try { probe.close(); } catch (_e2) { /* already gone */ } }
+  }
+}
+
 function _dbEncAad(dir) {
   return Buffer.from("blamejs.db-enc.v1\0" + (dir || ""), "utf8");
+}
+
+// Probe free space on the tmpfs holding the working copy and flip the
+// write-refusal flag. Encrypted mode only (the bounded-tmpfs surface);
+// guard disabled when minFreeBytes is 0. A probe failure leaves the flag
+// unchanged — we never refuse writes on a stat error (that would be a
+// self-inflicted outage). Growth writes (INSERT/UPDATE/REPLACE) are gated
+// by the prepare() wrapper installed in init(); DELETE + reads always pass
+// so retention can reclaim space and the app keeps serving.
+function _probeStorageHeadroom() {
+  if (atRest !== "encrypted" || !minFreeBytes || !dbPath || !statfsProbe) return;
+  var free;
+  try {
+    var st = statfsProbe(nodePath.dirname(dbPath));
+    free = st.bavail * st.bsize;
+    if (!isFinite(free)) return;
+  } catch (_e) { return; }
+  if (free < minFreeBytes && !writesRefused) {
+    writesRefused = true;
+    log.error("storage low: " + free + " bytes free on the tmpfs working-copy mount (< " +
+      minFreeBytes + ") — refusing growth writes (INSERT/UPDATE/REPLACE) until space " +
+      "recovers. Raise shm_size / --shm-size, or let retention prune. DELETE + reads still serve.");
+    try {
+      audit.safeEmit({ action: "db.storage.low", outcome: "failure",
+        metadata: { freeBytes: free, minFreeBytes: minFreeBytes } });
+    } catch (_e2) { /* drop-silent — observability */ }
+  } else if (free >= minFreeBytes && writesRefused) {
+    writesRefused = false;
+    log("storage recovered: " + free + " bytes free — growth writes re-enabled");
+    try {
+      audit.safeEmit({ action: "db.storage.recovered", outcome: "success",
+        metadata: { freeBytes: free } });
+    } catch (_e3) { /* drop-silent */ }
+  }
+}
+
+// Install the growth-write gate on the SQLite handle: shadow prepare() so
+// INSERT/UPDATE/REPLACE statements throw db/storage-low when the tmpfs is
+// critically low, instead of proceeding into an ENOSPC corruption. Reads,
+// DELETE, PRAGMA, and DDL pass through ungated. Called once in init() after
+// schema setup so init's own writes are never gated (writesRefused is false
+// until the first probe anyway).
+function _installWriteGate() {
+  var rawPrepare = database.prepare.bind(database);
+  database.prepare = function (sql) {
+    var stmt = rawPrepare(sql);
+    if (/^\s*(?:INSERT|UPDATE|REPLACE)\b/i.test(sql)) {
+      var rawRun = stmt.run.bind(stmt);
+      stmt.run = function () {
+        if (writesRefused) {
+          throw _dbErr("db/storage-low",
+            "db: refusing write — the encrypted-mode working copy is on a tmpfs with less than " +
+            minFreeBytes + " bytes free (Docker /dev/shm defaults to 64 MiB). Raise shm_size / " +
+            "--shm-size, or let retention prune expired rows. DELETE and reads remain available.");
+        }
+        return rawRun.apply(stmt, arguments);
+      };
+    }
+    return stmt;
+  };
 }
 
 function encryptToDisk() {
@@ -805,6 +958,7 @@ function cleanStaleTmpDbs(tmpDir) {
  *   tmpDir:                  string,            // override the encrypted-mode tmpfs path (default /dev/shm or BLAMEJS_TMPDIR)
  *   migrationDir:            string,            // optional — path to ./migrations/ (run-once each)
  *   streamLimit:             number,            // default 1_000_000 — db.stream row ceiling
+ *   columnGate:              "reject"|"warn"|"off", // default "reject" — refuse queries on columns not declared in the table schema
  *   skipBootIntegrityCheck:  boolean,           // default false — skip PRAGMA integrity_check
  *   skipIntegrityCheck:      boolean,           // default false — alias
  *   auditSigning:            { mode, algorithm }, // default { mode: "wrapped" }
@@ -853,7 +1007,7 @@ async function init(opts) {
     throw new DbError("db/bad-at-rest",
       "db.init: atRest must be 'encrypted' or 'plain', got: " + opts.atRest);
   }
-  // D-M5 — operator-tunable streamLimit ceiling. Throw at config-time
+  // Operator-tunable streamLimit ceiling. Throw at config-time
   // on bad shape so a typo surfaces at boot rather than as an
   // unbounded stream at first export.
   if (opts.streamLimit !== undefined) {
@@ -865,6 +1019,15 @@ async function init(opts) {
     }
     streamLimit = opts.streamLimit;
   }
+  // Column-membership gate mode — throw at config-time on a typo so it
+  // surfaces at boot, not as a query that silently bypasses the gate.
+  if (opts.columnGate !== undefined &&
+      opts.columnGate !== "reject" && opts.columnGate !== "warn" && opts.columnGate !== "off") {
+    throw new DbError("db/bad-init",
+      "db.init: columnGate must be 'reject' (default), 'warn', or 'off'; got " +
+      JSON.stringify(opts.columnGate));
+  }
+  columnGateMode = opts.columnGate || "reject";
   dataDir = opts.dataDir;
   if (!nodeFs.existsSync(dataDir)) nodeFs.mkdirSync(dataDir, { recursive: true });
 
@@ -877,12 +1040,12 @@ async function init(opts) {
     }
     if (!nodeFs.existsSync(tmpDir)) nodeFs.mkdirSync(tmpDir, { recursive: true });
 
-    // D-H7 — if the resolved tmpDir is NOT actually tmpfs, the
-    // plaintext DB file lives on persistent storage. statvfs/statfs
-    // isn't in stable Node, but on Linux we can check that tmpDir
-    // resolves under /dev/shm or /run/shm as a heuristic. On other
+    // If the resolved tmpDir is NOT actually tmpfs, the
+    // plaintext DB file lives on persistent storage. We check that tmpDir
+    // resolves under /dev/shm or /run/shm on Linux as a heuristic; on other
     // platforms we warn that the operator must verify tmpfs binding
-    // out-of-band.
+    // out-of-band. (Free-space headroom is enforced separately via
+    // fs.statfsSync in the storage guard below.)
     if (process.platform === "linux") {
       var realTmp = "";
       try { realTmp = nodeFs.realpathSync(tmpDir); } catch (_e) { /* stat best-effort */ }
@@ -903,6 +1066,21 @@ async function init(opts) {
               nodePath.join(dataDir, opts.encryptedDbName || "db.enc");
     dbPath  = nodePath.join(tmpDir, "blamejs-" + generateToken(C.BYTES.bytes(16)) + ".db");
     encKey  = loadOrCreateDbKey(dataDir, opts.dbKeyPath);
+
+    // Tmpfs free-space guard. Default headroom is 16 MiB below which growth
+    // writes are refused (fail-clear) before the working copy fills its
+    // bounded tmpfs and corrupts. opts.minFreeBytes tunes it; 0 disables.
+    // opts._statfsForTest injects a free-space reader for tests.
+    if (opts.minFreeBytes !== undefined) {
+      require("./numeric-bounds").requireNonNegativeFiniteIntIfPresent(
+        opts.minFreeBytes, "db.init: opts.minFreeBytes", DbError, "db/bad-min-free-bytes");
+      minFreeBytes = opts.minFreeBytes;
+    } else {
+      minFreeBytes = C.BYTES.mib(16);
+    }
+    statfsProbe = typeof opts._statfsForTest === "function"
+      ? opts._statfsForTest
+      : (typeof nodeFs.statfsSync === "function" ? nodeFs.statfsSync : null);
 
     cleanStaleTmpDbs(tmpDir);
     decryptToTmp();
@@ -961,7 +1139,25 @@ async function init(opts) {
   // the freshly-decrypted-into-tmpfs file (<1 second on a typical
   // multi-MB DB) and the result is "ok" or a list of issues.
   if (opts.skipBootIntegrityCheck !== true) {
-    var ic = database.prepare("PRAGMA integrity_check").all();
+    var ic;
+    try {
+      ic = database.prepare("PRAGMA integrity_check").all();
+    } catch (corruptErr) {
+      // SQLite throws "database disk image is malformed" / "file is not a
+      // database" when the file is too corrupt to even run the check.
+      // Translate the raw native error into an actionable one — the most
+      // common operational cause in encrypted mode is a too-small tmpfs.
+      throw new DbError("db/integrity-check-failed",
+        "database is corrupt at boot — SQLite: " +
+        ((corruptErr && corruptErr.message) || String(corruptErr)) + ". " +
+        (atRest === "encrypted"
+          ? "Encrypted mode runs the live DB as a tmpfs working copy (" + dbPath +
+            "); a recurring failure here usually means the tmpfs is too small " +
+            "(Docker's /dev/shm defaults to 64 MiB — raise it via shm_size / " +
+            "--shm-size), or db.enc itself is corrupt (restore <dataDir>/db.enc " +
+            "from backup)."
+          : "Restore the database file (" + dbPath + ") from backup."));
+    }
     var icIssues = ic.map(function (r) { return r && r.integrity_check; })
                      .filter(function (s) { return s && s !== "ok"; });
     if (icIssues.length > 0) {
@@ -1118,9 +1314,10 @@ async function init(opts) {
   for (var i = 0; i < fullSchema.length; i++) {
     var t = fullSchema[i];
     cryptoField.registerTable(t.name, {
-      sealedFields:   t.sealedFields,
-      derivedHashes:  t.derivedHashes,
-      hashNamespaces: t.hashNamespaces,
+      sealedFields:    t.sealedFields,
+      derivedHashes:   t.derivedHashes,
+      hashNamespaces:  t.hashNamespaces,
+      derivedHashMode: t.derivedHashMode,
     });
     tableMetadata[t.name] = {
       primaryKey:             _normalizePk(t),
@@ -1203,7 +1400,7 @@ async function init(opts) {
   // is BELOW tip — the DB was rolled back to an older snapshot. Refuse boot.
   _checkRollback(dataDir);
 
-  // ---- F-RET-2 — WORM posture assertion ----
+  // ---- WORM posture assertion ----
   // Under sec-17a-4 / finra-4511 / fda-21cfr11 postures the operator
   // MUST have declared row-level WORM on at least one business-record
   // table. Refuse boot otherwise so missing-declaration drift is
@@ -1282,12 +1479,30 @@ async function init(opts) {
       }
     }, C.TIME.minutes(5), { name: "db-periodic-encrypt" });
 
+    // Tmpfs free-space guard. Install the growth-write gate now (after all
+    // of init's own writes), then probe on a short interval so the
+    // refuse-writes flag tracks a fast-filling tmpfs (the 5-minute encrypt
+    // cadence is far too coarse to catch a fill in time). The guard is a
+    // no-op when minFreeBytes is 0 or no statfs reader is available.
+    if (minFreeBytes && statfsProbe) {
+      _installWriteGate();
+      _probeStorageHeadroom();   // seed the flag from current free space
+      storageProbeTimer = safeAsync.repeating(_probeStorageHeadroom,
+        C.TIME.seconds(10), { name: "db-storage-probe" });
+    }
+
     // Final encrypt on process exit. We don't try to unlink the plaintext
     // here — the SQLite handle may still be open, and the OS reclaims tmpfs
-    // on reboot anyway. close() does the orderly shutdown.
-    process.on("exit", function () {
-      try { encryptToDisk(); } catch (_e) { /* exit handler — silent */ }
-    });
+    // on reboot anyway. close() does the orderly shutdown. Registered ONCE
+    // (guarded by the module flag) — re-registering per init() leaked an
+    // 'exit' listener on every init/close cycle. The handler reads live
+    // module state, so it still flushes whatever DB is open at exit.
+    if (!_exitHandlerRegistered) {
+      _exitHandlerRegistered = true;
+      process.on("exit", function () {
+        try { if (atRest === "encrypted") encryptToDisk(); } catch (_e) { /* exit handler — silent */ }
+      });
+    }
   }
 
   log("ready (mode: " + atRest + ", path: " + dbPath + ")");
@@ -1327,17 +1542,48 @@ async function init(opts) {
  */
 function from(tableName) {
   _requireInit();
-  return new Query(database, tableName);
+  return new Query(database, tableName, {
+    declaredColumns: getDeclaredColumns(tableName),
+    columnGateMode:  columnGateMode,
+  });
 }
 
-// D-M6 — bounded prepared-statement cache for SQLite. Long-running
+/**
+ * @primitive b.db.getDeclaredColumns
+ * @signature b.db.getDeclaredColumns(tableName)
+ * @since     0.14.7
+ * @status    stable
+ * @related   b.db.from, b.db.getTableMetadata
+ *
+ * Returns the declared column names for a table as an array, or `null`
+ * when the table has no registered schema metadata (a cross- or
+ * attached-schema table — the column-membership gate is a no-op for
+ * those). The declared set includes `_id` and any derived-hash columns,
+ * so sealed-field queries (which rewrite to the hash column) and `_id`
+ * lookups pass the gate. Backs the `db.init({ columnGate })` gate that
+ * refuses queries ordering / selecting / filtering on an undeclared
+ * column before the identifier interpolates into SQL.
+ *
+ * @example
+ *   b.db.getDeclaredColumns("orders");
+ *   // → ["_id", "customerId", "total", "createdAt"]
+ */
+// The declared set includes `_id` and any derived-hash columns, so
+// sealed-field queries (which rewrite to the hash column) and `_id`
+// lookups pass membership.
+function getDeclaredColumns(tableName) {
+  var md = tableMetadata[tableName];
+  return (md && md.columns) ? Object.keys(md.columns) : null;
+}
+
+// Bounded prepared-statement cache for SQLite. Long-running
 // daemons with diverse query shapes accumulate node:sqlite Statement
 // handles indefinitely; the LRU here caps at PREPARE_CACHE_MAX (256)
 // distinct SQL strings and finalizes the oldest when over. Reuse of
 // the same SQL string returns the cached Statement (the canonical
 // node:sqlite-style win); previously this was ad-hoc and operators
 // re-preparing in a hot path leaked fds.
-var PREPARE_CACHE_MAX = 256;                                                       // allow:raw-byte-literal — distinct-statement cache cap
+var PREPARE_CACHE_MAX = 256;                                                       // distinct-statement cache cap
 var _prepareCache = new Map();                                                     // sql → Statement (insertion order = LRU)
 
 /**
@@ -1447,7 +1693,7 @@ function stream(sql) {
   var table = opts && typeof opts.table === "string" ? opts.table : null;
   var unseal = table ? cryptoField : null;
 
-  // D-M5 — streamLimit ceiling. Per-call opts.streamLimit overrides
+  // StreamLimit ceiling. Per-call opts.streamLimit overrides
   // the module-level default; bad shape throws at call time so the
   // typo surfaces instead of an unbounded stream.
   var perCallLimit = streamLimit;
@@ -1497,10 +1743,10 @@ function stream(sql) {
 
 // DDL_RE — case-insensitive prefix match for the eight statement
 // shapes that MUTATE schema. Audited individually so a forensic
-// review can reconstruct schema evolution from the chain alone (D-M1).
+// review can reconstruct schema evolution from the chain alone.
 var DDL_RE = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|ATTACH|DETACH|REINDEX)\b/i;
 
-// D-L7 — slow-query observability buckets for the local SQLite nodePath.
+// Slow-query observability buckets for the local SQLite nodePath.
 // Highest matched bucket wins so the per-query emit is single-shot;
 // operators dashboard on the `bucket` label.
 var _SLOW_QUERY_BUCKETS_LOCAL = Object.freeze([
@@ -1524,7 +1770,7 @@ function _reportSlowSqlite(durationMs, statement) {
           backend:        "sqlite",
           bucket:         bucket.label,
           statementClass: _classifyStatementLocal(statement),
-          "db.statement": String(statement || "").slice(0, 256),                                       // allow:raw-byte-literal — log-truncation length, not bytes
+          "db.statement": String(statement || "").slice(0, 256),                                       // log-truncation length, not bytes
         });
       } catch (_e) { /* hot-path observability sink — drop-silent by design */ }
       return;
@@ -1548,12 +1794,12 @@ function execRaw(sql) {
         action:   "db.ddl.executed",
         outcome:  "success",
         metadata: {
-          // OTel db.* semconv (F-RFC-4) — emit framework-conventional
+          // OTel db.* semconv — emit framework-conventional
           // attributes alongside the audit row so dashboards built on
           // OTel can correlate without an adapter.
           "db.system":     "sqlite",
           "db.operation":  String(sql).match(DDL_RE)[1].toUpperCase(),
-          "db.statement":  String(sql).slice(0, 256),                                          // allow:raw-byte-literal — log-truncation length, not bytes
+          "db.statement":  String(sql).slice(0, 256),                                          // log-truncation length, not bytes
           durationMs:      durationMs,
         },
       });
@@ -1570,7 +1816,7 @@ function execRaw(sql) {
         metadata: {
           "db.system":     "sqlite",
           "db.operation":  String(sql).match(DDL_RE)[1].toUpperCase(),
-          "db.statement":  String(sql).slice(0, 256),                                          // allow:raw-byte-literal — log-truncation length, not bytes
+          "db.statement":  String(sql).slice(0, 256),                                          // log-truncation length, not bytes
           durationMs:      failureMs,
         },
       });
@@ -1924,6 +2170,11 @@ function close() {
     encTimer.stop();
     encTimer = null;
   }
+  if (storageProbeTimer) {
+    storageProbeTimer.stop();
+    storageProbeTimer = null;
+  }
+  writesRefused = false;
   // Drop prepared-statement cache so the underlying Statement handles
   // release ahead of database.close().
   _prepareCache.clear();
@@ -1942,11 +2193,19 @@ function close() {
   // Order: encrypt while the DB is still open (so the file is consistent),
   // then close the SQLite handle (releases the file lock on Windows),
   // THEN unlink the plaintext sidecar files.
-  try { encryptToDisk(); } catch (e) {
-    log.error("close: final encrypt failed: " + e.message);
+  var encryptOk = false;
+  try { encryptToDisk(); encryptOk = true; } catch (e) {
+    log.error("close: final encrypt failed: " + e.message +
+      " — keeping the plaintext working copy so the next boot can recover " +
+      "the latest writes (db.enc still holds the prior snapshot)");
   }
   try { database.close(); } catch (_e) { /* already closed */ }
-  if (atRest === "encrypted") removePlaintextFiles();
+  // Only discard the plaintext working copy once it has been safely
+  // re-encrypted. If the final encrypt failed (full /dev/shm, disk-full),
+  // the working copy is the ONLY carrier of writes since the last periodic
+  // flush — keep it so decryptToTmp's newer-mtime recovery picks it up next
+  // boot (integrity-probed, falling back to db.enc if it is itself corrupt).
+  if (atRest === "encrypted" && encryptOk) removePlaintextFiles();
   database = null;
   initialized = false;
 }
@@ -2440,6 +2699,7 @@ function _cascadeStep(name, ref) {
 // Test helpers — not part of public contract
 function _resetForTest() {
   if (encTimer) { encTimer.stop(); encTimer = null; }
+  if (storageProbeTimer) { storageProbeTimer.stop(); storageProbeTimer = null; }
   try { if (database) database.close(); }
   catch (e) { log.debug("test-reset close failed", { error: e.message }); }
   database = null;
@@ -2448,8 +2708,18 @@ function _resetForTest() {
   encKey = null;
   atRest = null;
   dataDir = null;
+  minFreeBytes = 0;
+  statfsProbe = null;
+  writesRefused = false;
   initialized = false;
   cryptoField.clearForTest();
+}
+
+// Test seam — force a storage-headroom probe synchronously (the production
+// path runs it on a 10s timer) and read the resulting refuse-writes flag.
+function _probeStorageForTest() {
+  _probeStorageHeadroom();
+  return { writesRefused: writesRefused, minFreeBytes: minFreeBytes };
 }
 
 
@@ -2496,7 +2766,7 @@ function vacuumAfterErase(opts) {
   } else {
     require("./numeric-bounds").requirePositiveFiniteIntIfPresent(
       opts.pages, "pages", DbError, "db/bad-vacuum-pages");
-    var pages = (opts.pages == null) ? 1000                                       // allow:raw-byte-literal — incremental_vacuum default page count
+    var pages = (opts.pages == null) ? 1000                                       // incremental_vacuum default page count
       : Math.floor(opts.pages);
     sqlStmt = "PRAGMA incremental_vacuum(" + pages + ");";
   }
@@ -2513,7 +2783,7 @@ function vacuumAfterErase(opts) {
   } catch (_e) { /* audit best-effort */ }
 }
 
-// F-POSTURE-1 — cascade-installed posture name. b.compliance.set(p)
+// Cascade-installed posture name. b.compliance.set(p)
 // calls applyPosture(p) which records the posture; the downstream
 // cryptoField.eraseRow path consults this via getActivePosture() to
 // auto-vacuum under postures whose POSTURE_DEFAULTS sets
@@ -2866,10 +3136,12 @@ module.exports = {
   getActivePosture:    getActivePosture,
   vacuumAfterErase:    vacuumAfterErase,
   from:                from,
+  getDeclaredColumns:  getDeclaredColumns,
+  _checkDualControlGate: _checkDualControlGate,
   collection:          require("./db-collection").collection,                              // allow:inline-require — db-collection lazy-requires db.js back; the inline require here breaks the cycle without needing a stub
   prepare:             prepare,
   stream:              stream,
-  // D-M5 — runtime read-only accessor so Query.stream picks up the
+  // Runtime read-only accessor so Query.stream picks up the
   // configured ceiling without re-importing module state.
   getStreamLimit:      function () { return streamLimit; },
   runSql:              execRaw,
@@ -3102,6 +3374,8 @@ module.exports = {
     _cascadeStep("redact",      _resetRedact);
     _cascadeStep("external-db", _resetExternalDb);
   },
+  // Test seam for the tmpfs free-space guard — force a probe + read the flag.
+  _probeStorageForTest: _probeStorageForTest,
   // Helper for audit.checkpoint to write the rollback-detection sidecar
   _writeAuditTip: function (tip) {
     if (!dataDir) return;

@@ -155,6 +155,18 @@ function fromAssertion(opts) {
       "fal.fromAssertion: channel must be 'front' or 'back'");
   }
   var hokBinding = opts.hokBinding;
+  // `bearerOnly: true` is the explicit alias for "no proof-of-possession
+  // binding" (hokBinding === null). It contradicts a non-null hokBinding;
+  // refuse the contradiction at the entry point rather than silently
+  // picking one — an operator who sets both has a config bug.
+  if (opts.bearerOnly === true) {
+    if (hokBinding !== undefined && hokBinding !== null) {
+      throw new AuthError("auth/bad-fal-opts",
+        "fal.fromAssertion: bearerOnly:true conflicts with hokBinding '" + hokBinding +
+        "' (bearerOnly forces no proof-of-possession binding)");
+    }
+    hokBinding = null;
+  }
   if (hokBinding !== undefined && hokBinding !== null) {
     if (hokBinding !== "mtls" && hokBinding !== "dpop" && hokBinding !== "saml-hok") {
       throw new AuthError("auth/bad-fal-opts",
@@ -167,7 +179,7 @@ function fromAssertion(opts) {
     return FAL3;
   }
 
-  // AUTH-19 — FAL2 per NIST SP 800-63C-4 §5.2 requires "injection
+  // FAL2 per NIST SP 800-63C-4 §5.2 requires "injection
   // protection" on the back-channel: either the back-channel itself is
   // encrypted-and-authenticated (mTLS / signed transport) OR the
   // assertion is encrypted to the RP. A plain HTTP back-channel with

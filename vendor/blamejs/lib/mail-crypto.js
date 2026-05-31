@@ -22,11 +22,11 @@
  *       (pub-alg 1, EMSA-PKCS1-v1_5 + SHA-256, 2048-bit floor per
  *       RFC 8301).
  *     - `b.mail.crypto.smime` — S/MIME 4.0 per RFC 8551 with CMS
- *       SignedData per RFC 5652. v1 surface: checkCert() — the
- *       operator-side preflight that refuses SHA-1 / MD5 / < 2048-bit
- *       RSA certs at boot. sign() + verify() are DEFERRED in v1; see
- *       the @intro block in lib/mail-crypto-smime.js for the deferral
- *       conditions and the operator escape hatch.
+ *       SignedData per RFC 5652. Surface: sign() + verify() + verifyAll()
+ *       (built on the `b.cms` substrate — digest recompute + timing-safe
+ *       compare + PQC signature verify + X.509 chain walk) plus
+ *       checkCert(), the operator-side preflight that refuses SHA-1 /
+ *       MD5 / < 2048-bit RSA certs at boot.
  *
  *   Both sub-namespaces share `MailCryptoError` (FrameworkError
  *   subclass via defineClass with alwaysPermanent: true) so operator
@@ -62,7 +62,7 @@
  *
  * CVE citations:
  *   - CVE-2017-17688 / CVE-2017-17689 (EFAIL)
- *   - CVE-2017-9006 (PKCS#7 / S/MIME signature-validation bypass class)
+ *   - SHAttered (2017 SHA-1 collision) + RFC 8551 §2.5 — SHA-1 signature-hash refusal
  */
 
 var pgp   = require("./mail-crypto-pgp");

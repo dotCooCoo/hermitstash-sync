@@ -16,8 +16,9 @@
  *
  *   Algorithm-confusion defense: `alg=none` is universally refused
  *   at every profile (RFC 7518 §3.6 explicit-no-signature, the
- *   canonical CVE-2015-9235 jsonwebtoken / CVE-2018-0114 java-jwt
- *   class). The operator-supplied `allowedAlgs` allowlist defaults
+ *   canonical CVE-2015-9235 jsonwebtoken alg:none / CVE-2018-0114
+ *   Cisco node-jose embedded-JWK confusion class). The
+ *   operator-supplied `allowedAlgs` allowlist defaults
  *   to the framework's PQC-first set (ML-DSA-87 / ML-DSA-65 /
  *   ML-DSA-44 / SLH-DSA-SHAKE-256{f,s} / SLH-DSA-SHA2-256{f,s} /
  *   EdDSA / ES* / RS* / PS*) so HS256-against-RSA-public-key
@@ -367,7 +368,7 @@ function _detectIssues(input, opts) {
   // Payload claim sanity (only if payload is decodable).
   var payload = _b64urlDecodeJson(payloadSeg);
   if (payload && typeof payload === "object") {
-    var nowSec = Math.floor(Date.now() / 1000);                                  // allow:raw-byte-literal — seconds-per-millisecond conversion
+    var nowSec = Math.floor(Date.now() / 1000);                                  // seconds-per-millisecond conversion
 
     // exp in the past.
     if (typeof payload.exp === "number" &&
@@ -386,7 +387,7 @@ function _detectIssues(input, opts) {
     // nbf far-future.
     if (typeof payload.nbf === "number" &&
         opts.nbfSanityPolicy !== "allow") {
-      var nbfSlackSec = Math.floor(opts.nbfFutureSlackMs / 1000);                // allow:raw-byte-literal — seconds-per-millisecond conversion
+      var nbfSlackSec = Math.floor(opts.nbfFutureSlackMs / 1000);                // seconds-per-millisecond conversion
       if (payload.nbf > nowSec + nbfSlackSec) {
         issues.push({
           kind: "nbf-far-future",
@@ -401,7 +402,7 @@ function _detectIssues(input, opts) {
     // iat far-future.
     if (typeof payload.iat === "number" &&
         opts.iatSanityPolicy !== "allow") {
-      var iatSlackSec = Math.floor(opts.iatFutureSlackMs / 1000);                // allow:raw-byte-literal — seconds-per-millisecond conversion
+      var iatSlackSec = Math.floor(opts.iatFutureSlackMs / 1000);                // seconds-per-millisecond conversion
       if (payload.iat > nowSec + iatSlackSec) {
         issues.push({
           kind: "iat-far-future",
@@ -440,7 +441,7 @@ function _detectIssues(input, opts) {
  * @related    b.guardJwt.sanitize, b.guardJwt.gate
  *
  * Apply the full guard-jwt threat catalog to a JWT compact-
- * serialization string. Returns `{ ok, issues, refusal? }` per
+ * serialization string. Returns `{ ok, issues }` per
  * `gateContract.aggregateIssues`. Detected classes include
  * `alg-none` (always critical), `kid-traversal` (always critical),
  * `alg-not-allowed`, `typ-confusion`, `crit-unknown`, `exp-past`,
@@ -455,7 +456,7 @@ function _detectIssues(input, opts) {
  *
  * @opts
  *   profile:              "strict"|"balanced"|"permissive",
- *   compliance:           "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   allowedAlgs:          string[],
  *   requiredClaims:       string[],
  *   knownCrit:            string[],
@@ -523,7 +524,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:        every guardJwt.validate opt is honored,
  *
  * @example
@@ -572,13 +573,13 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,            // gate label for audit trails
  *   ...:        every guardJwt.validate opt is honored,
  *
  * @example
  *   var jwtGate = b.guardJwt.gate({ profile: "strict" });
- *   var rv = await jwtGate.run({
+ *   var rv = await jwtGate.check({
  *     identifier:
  *       "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." +
  *       "eyJzdWIiOiJhdHRhY2tlciJ9.",
@@ -726,7 +727,7 @@ function kidSafe(kid) {
   }
   for (var i = 0; i < kid.length; i += 1) {
     var cc = kid.charCodeAt(i);
-    if (cc < 0x20 || cc === 0x7F) {                                              // allow:raw-byte-literal — control-byte boundary check
+    if (cc < 0x20 || cc === 0x7F) {                                              // control-byte boundary check
       throw _err("jwt.kid-control",
         "kid contains control byte at index " + i);
     }

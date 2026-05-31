@@ -9,8 +9,10 @@
  * @card
  *   S/MIME 4.0 sign + verify (PQC-first ML-DSA / SLH-DSA signers) on
  *   the b.cms substrate. RFC 8551 multipart/signed with RFC 5652
- *   SignedData; EFAIL-class encrypt/decrypt deferred until the AAD-
- *   binding posture lands.
+ *   SignedData. Confidentiality (encrypt/decrypt) is deferred — use
+ *   `b.mail.crypto.pgp.encrypt`/`decrypt` today; S/MIME-specific
+ *   (X.509-recipient) encryption re-opens when an operator surfaces a
+ *   peer that requires it, with the EFAIL defenses below applied then.
  *
  * @intro
  *   S/MIME 4.0 (RFC 8551, replacing RFC 5751) `multipart/signed;
@@ -21,9 +23,9 @@
  *   second part as base64-encoded DER.
  *
  *   Posture (when the surface lights up):
- *     - Refuses SHA-1 as the signature hash (CVE-2017-9006-class —
- *       PKCS#7 collision attacks against legacy S/MIME) and as the
- *       certificate signature algorithm.
+ *     - Refuses SHA-1 as the signature hash (SHAttered, 2017 — practical
+ *       SHA-1 collision; RFC 8551 §2.5 mandates SHA-256+ for S/MIME) and
+ *       as the certificate signature algorithm.
  *     - Refuses RSA keys < 2048 bits (RFC 8301 §3.1 — same posture
  *       as the rest of the mail surface).
  *     - Refuses MD5 anywhere (the historical S/MIME-v2 default; long
@@ -87,8 +89,8 @@
  * CVE citations:
  *   - CVE-2017-17688 / CVE-2017-17689 (EFAIL — S/MIME variant; informs
  *     the encrypt+decrypt deferral when that surface lights up)
- *   - CVE-2017-9006 (PKCS#7 / S/MIME signature-validation bypass
- *     class — informs the SHA-1 refusal posture)
+ *   - SHAttered (2017 practical SHA-1 collision) + RFC 8551 §2.5 (SHA-256
+ *     floor for S/MIME) — inform the SHA-1 signature-hash refusal posture
  *   - CVE-2018-5407 (PortSmash — informs the side-channel hardening
  *     posture when private operations land in v2)
  */
@@ -107,15 +109,17 @@ var MailCryptoError = defineClass("MailCryptoError", { alwaysPermanent: true });
 // Constant posture values exported so operators reading this module
 // from configuration code can pin to them by reference rather than
 // hand-copying strings. These reflect RFC 8551 §2.5 + RFC 8301 floors.
-var RSA_MIN_BITS = 2048;                                                          // allow:raw-byte-literal — RFC 8301 §3.1
+var RSA_MIN_BITS = 2048;                                                          // RFC 8301 §3.1
 var ALLOWED_HASHES = ["sha256", "sha384", "sha512"];
-var REFUSED_HASHES = ["md5", "sha1"];                                             // allow:raw-byte-literal — CVE-2017-9006-class
+var REFUSED_HASHES = ["md5", "sha1"];                                             // SHAttered / RFC 8551 §2.5
 
 // PROFILES + COMPLIANCE_POSTURES — the framework's standard cross-
-// primitive contract. sign() and verify() (live since v0.10.16) read
-// these to determine which hash + RSA-bit floors apply per operator
-// posture; encrypt() / decrypt() (deferred per the @intro EFAIL note)
-// will compose the same set when they land.
+// primitive contract. sign() and verify() read these to determine which
+// hash + RSA-bit floors apply per operator posture. Confidentiality
+// (encrypt/decrypt) is deferred — b.mail.crypto.pgp.encrypt/decrypt is the
+// confidentiality path today; if S/MIME-specific X.509-recipient
+// encryption is added, it composes the same set with the @intro EFAIL
+// defenses applied.
 var PROFILES = ["strict", "balanced", "permissive"];
 var COMPLIANCE_POSTURES = {
   hipaa:     "strict",
@@ -203,7 +207,7 @@ function sign(opts) {
       "smime.sign: " + ((e && e.message) || String(e)));
   }
   var boundary = opts.boundary ||
-    "blamejs-smime-" + bCrypto.generateToken(32);                                                     // allow:raw-byte-literal — 32-hex-char boundary token
+    "blamejs-smime-" + bCrypto.generateToken(32);                                                     // 32-hex-char boundary token
   var sigBase64 = _wrapBase64(sd.toString("base64"));
   var multipart =
     "Content-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; " +
@@ -386,6 +390,25 @@ function _verifySignerInfo(si, msgBytes, signerPublicKey, auditHandle) {
   return { sigAlg: sigAlg, digestAlg: digestAlg };
 }
 
+// Does this cert's public key match the raw signer key that verified the
+// signature? signerBytes is the key passed to the PQC/classical verify; a
+// cert exposes its key as SPKI DER. The raw subjectPublicKey is the tail of
+// the SPKI (its last element), so a suffix match catches the raw-key form
+// while a full-length compare catches a caller who passed the SPKI itself.
+// If the key can't be exported (an algorithm this Node build can't parse),
+// the cert can't be bound — return false so the caller fails closed rather
+// than trusting an unverifiable binding.
+function _certKeyMatches(cert, signerBytes) {
+  var spki;
+  try { spki = Buffer.from(cert.publicKey.export({ format: "der", type: "spki" })); }
+  catch (_e) { return false; }
+  if (spki.length === signerBytes.length) return Buffer.compare(spki, signerBytes) === 0;
+  if (signerBytes.length < spki.length) {
+    return Buffer.compare(spki.subarray(spki.length - signerBytes.length), signerBytes) === 0;
+  }
+  return false;
+}
+
 function _verifyTrustChain(sd, trustAnchorCertsPem, signerPublicKey, auditHandle) {
   if (sd.certificates.length === 0) {
     throw new MailCryptoError("mail-crypto/smime/no-certs",
@@ -411,13 +434,24 @@ function _verifyTrustChain(sd, trustAnchorCertsPem, signerPublicKey, auditHandle
         "trustAnchorCertsPem[" + idx + "] parse failed: " + ((e && e.message) || String(e)));
     }
   });
-  // Pick the leaf — the cert whose public key matches the verified
-  // signature. signerPublicKey is the PQC raw bytes; we compare
-  // against each chain cert's exported jwk x / SPKI. Hardest path:
-  // PQC isn't in node:crypto X509Certificate yet, so the leaf might
-  // be ECDSA / RSA. Fall back to picking the first cert when no
-  // other comparison applies (operator's chain is operator-curated).
-  var leaf = chain[0];
+  // Bind the leaf to the key that ACTUALLY verified the signature
+  // (signerPublicKey). Without this, a validly-chained certificate for a
+  // DIFFERENT identity would pass chain validation while the signature was
+  // verified under an unrelated key — chainVerified would assert a binding
+  // the code never made. Find the chain cert whose public key matches
+  // signerPublicKey; if none does, the supplied chain does not correspond
+  // to the verified signer, so fail closed.
+  var signerBytes = Buffer.from(signerPublicKey);
+  var leaf = null;
+  for (var lci = 0; lci < chain.length; lci += 1) {
+    if (_certKeyMatches(chain[lci], signerBytes)) { leaf = chain[lci]; break; }
+  }
+  if (!leaf) {
+    throw new MailCryptoError("mail-crypto/smime/signer-not-in-chain",
+      "trust-chain validation: no certificate in SignedData.certificates carries the " +
+      "public key that verified the signature — the supplied chain does not correspond " +
+      "to the verified signer");
+  }
   // Validity window check (RFC 5280 §4.1.2.5) — every cert in chain
   // must be within validFrom..validTo at the current wall-clock.
   var nowMs = Date.now();
@@ -444,8 +478,8 @@ function _verifyTrustChain(sd, trustAnchorCertsPem, signerPublicKey, auditHandle
       if (current.issuer === r.subject) {
         try {
           if (current.verify(r.publicKey)) {
-            void signerPublicKey; void auditHandle;
-            return;   // chain validates
+            void auditHandle;
+            return;   // chain validates (and the leaf is the verified signer)
           }
         } catch (_e) { /* fall through to next root */ }
       }
@@ -645,8 +679,8 @@ function _oidToDigest(oid) {
 function _wrapBase64(s) {
   // 64-char lines per RFC 2045 §6.8.
   var out = [];
-  for (var i = 0; i < s.length; i += 64) {                                                            // allow:raw-byte-literal — RFC 2045 §6.8 line length
-    out.push(s.slice(i, i + 64));                                                                     // allow:raw-byte-literal — RFC 2045 §6.8 line length
+  for (var i = 0; i < s.length; i += 64) {                                                            // RFC 2045 §6.8 line length
+    out.push(s.slice(i, i + 64));                                                                     // RFC 2045 §6.8 line length
   }
   return out.join("\r\n");
 }
@@ -670,14 +704,15 @@ function _wrapBase64(s) {
  * Operator-side cert preflight that lights up at boot: refuses
  * SHA-1 / MD5 signatures, RSA keys < 2048 bits, MD2 / MD5 / SHA-1
  * as the certificate-signature algorithm. Returns the parsed cert
- * shape (subject CN, issuer CN, validFrom / validTo, key algorithm
- * + size, signature algorithm). Throws `mail-crypto/smime/bad-cert`
- * on any of the above; throws `mail-crypto/smime/expired-cert` if
- * the cert is outside its validity window.
+ * shape: the full subject / issuer DN strings, the validity window,
+ * the signature algorithm (name + OID), the key type, and the SHA-256
+ * fingerprint. Throws `mail-crypto/smime/bad-cert` on any of the above;
+ * throws `mail-crypto/smime/expired-cert` if the cert is outside its
+ * validity window.
  *
  * @example
  *   var info = b.mail.crypto.smime.checkCert({ certPem: pem });
- *   // → { subjectCN, issuerCN, validFrom, validTo, keyAlg, keyBits, sigAlg }
+ *   // → { subject, issuer, validFrom, validTo, sigAlgName, sigAlgOid, keyType, fingerprint256 }
  */
 function checkCert(opts) {
   opts = validateOpts.requireObject(opts, "mail.crypto.smime.checkCert",
@@ -708,7 +743,7 @@ function checkCert(opts) {
       throw new MailCryptoError("mail-crypto/smime/refused-hash",
         "cert signature algorithm '" + sigAlgName +
         "' refused — SHA-1 / MD5 in cert signatures is forbidden " +
-        "(CVE-2017-9006-class). Acceptable hashes: " + ALLOWED_HASHES.join(", "));
+        "(SHAttered SHA-1 collision; RFC 8551 §2.5). Acceptable hashes: " + ALLOWED_HASHES.join(", "));
     }
   }
 
@@ -719,7 +754,7 @@ function checkCert(opts) {
   if (pub && pub.asymmetricKeyType === "rsa") {
     var jwk = pub.export({ format: "jwk" });
     var nBytes = Buffer.from(jwk.n, "base64url");
-    var bits = nBytes.length * 8;                                                                     // allow:raw-byte-literal — bits-per-byte conversion // allow:raw-time-literal — RFC 5280 in comment, not seconds
+    var bits = nBytes.length * 8;                                                                     // allow:raw-time-literal — byte-length*8 bit count; coincidental multiple-of-60 product, not a duration, C.TIME N/A
     if (bits < RSA_MIN_BITS) {
       throw new MailCryptoError("mail-crypto/smime/rsa-too-small",
         "cert public key is " + bits + " RSA bits; minimum is " + RSA_MIN_BITS +
@@ -728,7 +763,7 @@ function checkCert(opts) {
   }
 
   // Validity window — refuse certs outside their notBefore / notAfter
-  // window. Codex P1: checkCert's docstring promises this throws
+  // window. checkCert's docstring promises this throws
   // `mail-crypto/smime/expired-cert` but the impl was missing, letting
   // expired or not-yet-valid signing certs pass boot-time preflight
   // and fail interop later when peers verify signatures against the
@@ -786,4 +821,8 @@ module.exports = {
   ALLOWED_HASHES:      ALLOWED_HASHES,
   REFUSED_HASHES:      REFUSED_HASHES,
   RSA_MIN_BITS:        RSA_MIN_BITS,
+  // Exposed for tests — the leaf↔signer-key binding used by trust-chain
+  // validation (a cert matches the verified signer key iff its SPKI public
+  // key equals, or has as a suffix, the raw signer key bytes).
+  _certKeyMatches:     _certKeyMatches,
 };

@@ -42,15 +42,16 @@
  *     refuses EnvelopedData and accepts only the §5083 ContentInfo
  *     OID. Cheap escape hatch: operators on such a peer compose
  *     `b.asn1Der` directly to rewrap an EnvelopedData blob into an
- *     AuthEnvelopedData ContentInfo. Lights up in v0.10.14 alongside
- *     `b.mail.smime` sign + verify, where the on-the-wire S/MIME 4.0
- *     content shape calls for it.
+ *     AuthEnvelopedData ContentInfo. A built-in encode path is deferred
+ *     until an interop case requires a peer that refuses EnvelopedData;
+ *     the `b.asn1Der` rewrap covers the gap until then.
  *   - **`b.cms.decode` parse-tree of inner SignedData / EnvelopedData**
- *     beyond the ContentInfo wrapper. v0.10.13 returns the inner
+ *     beyond the ContentInfo wrapper. `b.cms.decode` returns the inner
  *     SEQUENCE bytes as `content` (an asn1-der node); callers that
- *     need fielded access walk it via `b.asn1Der.readSequence`. The
- *     fielded decoders ship alongside S/MIME verify in v0.10.14 where
- *     they're actually consumed.
+ *     need fielded access walk it via `b.asn1Der.readSequence`. Built-in
+ *     fielded decoders are deferred until they're actually consumed by a
+ *     shipping primitive; the `b.asn1Der.readSequence` walk is the escape
+ *     hatch until then.
  *
  *   Refusal posture:
  *
@@ -106,14 +107,14 @@ var OID = Object.freeze({
 });
 
 // Refusal ceilings.
-var MAX_DEPTH       = 32;                                                                             // allow:raw-byte-literal — ASN.1 recursion ceiling
+var MAX_DEPTH       = 32;                                                                             // ASN.1 recursion ceiling
 var DEFAULT_MAX_LEN = 64 * 1024 * 1024;                                                               // allow:raw-byte-literal — 64 MiB default decode cap
 
 // Universal-tag bytes used in encode helpers.
-var TAG_SEQUENCE = 0x30;                                                                              // allow:raw-byte-literal — ASN.1 SEQUENCE constructed
-var TAG_SET      = 0x31;                                                                              // allow:raw-byte-literal — ASN.1 SET constructed
-var TAG_UTCTIME  = 0x17;                                                                              // allow:raw-byte-literal — UTCTime universal
-var TAG_GENTIME  = 0x18;                                                                              // allow:raw-byte-literal — GeneralizedTime universal
+var TAG_SEQUENCE = 0x30;                                                                              // ASN.1 SEQUENCE constructed
+var TAG_SET      = 0x31;                                                                              // ASN.1 SET constructed
+var TAG_UTCTIME  = 0x17;                                                                              // UTCTime universal
+var TAG_GENTIME  = 0x18;                                                                              // GeneralizedTime universal
 
 /**
  * @primitive b.cms.encodeSignedData
@@ -196,7 +197,7 @@ function encodeSignedData(opts) {
 
   // SignedData SEQUENCE per §5.1.
   var signedDataSeq = asn1.writeNode(TAG_SEQUENCE, Buffer.concat([
-    asn1.writeInteger(Buffer.from([1])),                                                              // allow:raw-byte-literal — CMSVersion 1 per §5.1
+    asn1.writeInteger(Buffer.from([1])),                                                              // CMSVersion 1 per §5.1
     digestAlgs,
     encapInfo,
     certsBlock,
@@ -257,7 +258,7 @@ function encodeEnvelopedData(opts) {
       "encodeEnvelopedData: opts.recipients must be a non-empty array");
   }
   // Fresh ChaCha20-Poly1305 content key.
-  var contentKey = bCrypto.generateBytes(32);                                                         // allow:raw-byte-literal — 256-bit ChaCha20 key
+  var contentKey = bCrypto.generateBytes(32);                                                         // 256-bit ChaCha20 key
 
   // recipientInfos SET — one KEMRecipientInfo per recipient.
   var ris = opts.recipients.map(function (r) {
@@ -271,7 +272,7 @@ function encodeEnvelopedData(opts) {
   // EnvelopedData SEQUENCE per §6.1. CMSVersion 4 (RFC 9629 §3 — when
   // any RecipientInfo is OtherRecipientInfo, here KEMRecipientInfo).
   var envelopedSeq = asn1.writeNode(TAG_SEQUENCE, Buffer.concat([
-    asn1.writeInteger(Buffer.from([4])),                                                              // allow:raw-byte-literal — CMSVersion 4 per RFC 9629 §3
+    asn1.writeInteger(Buffer.from([4])),                                                              // CMSVersion 4 per RFC 9629 §3
     recipientInfosSet,
     encContent,
   ]));
@@ -302,8 +303,8 @@ function encodeEnvelopedData(opts) {
  * string (e.g. `"1.2.840.113549.1.7.2"` for SignedData) and
  * `content` is the inner asn1-der node (SignedData / EnvelopedData /
  * other) — operators walk it via `b.asn1Der.readSequence`. Fielded
- * decoders for SignedData / EnvelopedData ship in v0.10.14 alongside
- * S/MIME sign+verify.
+ * decoders for SignedData / EnvelopedData are deferred; the
+ * `b.asn1Der.readSequence` walk is the escape hatch until then.
  *
  * Refuses input past `opts.maxBytes` (default 64 MiB), top-level
  * non-SEQUENCE shapes, missing OID + [0] EXPLICIT child pair.
@@ -333,7 +334,7 @@ function decode(buf, opts) {
   }
   if (!(node.tag === asn1.TAG.SEQUENCE && node.constructed)) {
     throw new CmsCodecError("cms/bad-content-info",
-      "decode: top-level must be SEQUENCE (got tag 0x" + node.tag.toString(16) + ")");                // allow:raw-byte-literal — hex radix for error-message formatting
+      "decode: top-level must be SEQUENCE (got tag 0x" + node.tag.toString(16) + ")");                // hex radix for error-message formatting
   }
   // ContentInfo SEQUENCE children: { contentType OID, [0] EXPLICIT ANY }.
   var children;
@@ -366,7 +367,7 @@ function decode(buf, opts) {
 
 // OIDs whose AlgorithmIdentifier specifies ABSENT parameters per their
 // publishing RFC — emitting NULL here would make the CMS structure
-// non-conformant for strict validators (Codex P1 finding on PR #102).
+// non-conformant for strict validators.
 // ML-DSA per RFC 9909 §3, SLH-DSA per RFC 9881 §3, ML-KEM per
 // RFC 9936 §3. SHAKE-family per FIPS 202 (NIST registry — absent params).
 var ABSENT_PARAM_OIDS = new Set([
@@ -398,7 +399,7 @@ function _writeImplicitConstructed(tagNumber, payload) {
   // [N] IMPLICIT context-specific CONSTRUCTED — for wrapping SEQUENCE /
   // SET payloads (e.g. certificates [0], crls [1], OtherRecipientInfo
   // value).
-  var tagByte = 0xa0 | (tagNumber & 0x1f);                                                            // allow:raw-byte-literal — context-specific constructed mask
+  var tagByte = 0xa0 | (tagNumber & 0x1f);                                                            // context-specific constructed mask
   return asn1.writeNode(tagByte, payload);
 }
 
@@ -406,10 +407,10 @@ function _writeImplicitPrimitive(tagNumber, value) {
   // [N] IMPLICIT context-specific PRIMITIVE — for wrapping primitive
   // ASN.1 types (OCTET STRING / INTEGER / OID) that have been IMPLICIT-
   // tagged. The constructed bit MUST NOT be set or strict CMS parsers
-  // reject the structure (Codex P1 finding on PR #102 — RecipientIdentifier
+  // reject the structure (RecipientIdentifier
   // CHOICE's SubjectKeyIdentifier alternative is `[0] IMPLICIT OCTET STRING`,
   // a primitive type).
-  var tagByte = 0x80 | (tagNumber & 0x1f);                                                            // allow:raw-byte-literal — context-specific primitive mask
+  var tagByte = 0x80 | (tagNumber & 0x1f);                                                            // context-specific primitive mask
   return asn1.writeNode(tagByte, value);
 }
 
@@ -458,7 +459,7 @@ function _signerInfo(signer, msgDigest, digestOid) {
   // SignerInfo, and use the original `31 LL VV...` form as the signature
   // input.
   var signatureInput = signedAttrs;
-  var signedAttrsImplicit = Buffer.concat([Buffer.from([0xa0]),                                       // allow:raw-byte-literal — IMPLICIT [0] tag per RFC 5652 §5.3
+  var signedAttrsImplicit = Buffer.concat([Buffer.from([0xa0]),                                       // IMPLICIT [0] tag per RFC 5652 §5.3
                                             signedAttrs.slice(1)]);
 
   var signature;
@@ -473,7 +474,7 @@ function _signerInfo(signer, msgDigest, digestOid) {
 
   // SignerInfo SEQUENCE per §5.3 (issuerAndSerialNumber variant — CMSVersion 1).
   return asn1.writeNode(TAG_SEQUENCE, Buffer.concat([
-    asn1.writeInteger(Buffer.from([1])),                                                              // allow:raw-byte-literal — CMSVersion 1 for issuerAndSerialNumber
+    asn1.writeInteger(Buffer.from([1])),                                                              // CMSVersion 1 for issuerAndSerialNumber
     _issuerAndSerialNumber(signer.certificate),
     _algorithmIdentifier(digestOid),
     signedAttrsImplicit,
@@ -575,9 +576,9 @@ function _reEncodeNode(node) {
   // TLV. writeNode rebuilds canonical DER from the original tag byte +
   // value bytes; the tag byte is reconstructed from tagClass + constructed +
   // tag number.
-  var classBits  = (node.tagClass & 0x03) << 6;                                                       // allow:raw-byte-literal — tag-class shift
-  var consBit    = node.constructed ? 0x20 : 0x00;                                                    // allow:raw-byte-literal — constructed bit
-  var tagBits    = node.tag & 0x1f;                                                                   // allow:raw-byte-literal — short-form tag
+  var classBits  = (node.tagClass & 0x03) << 6;                                                       // tag-class shift
+  var consBit    = node.constructed ? 0x20 : 0x00;                                                    // constructed bit
+  var tagBits    = node.tag & 0x1f;                                                                   // short-form tag
   var tagByte    = classBits | consBit | tagBits;
   return asn1.writeNode(tagByte, node.value);
 }
@@ -619,7 +620,7 @@ function _recipientInfo(recipient, contentKey) {
   // composition path.
   var infoLabel = Buffer.from("cms/kemri/chacha20-poly1305", "ascii");
   var kdfInput  = Buffer.concat([Buffer.from(encap.sharedSecret), infoLabel]);
-  var kek       = bCrypto.kdf(kdfInput, 32);                                                          // allow:raw-byte-literal — 256-bit KEK
+  var kek       = bCrypto.kdf(kdfInput, 32);                                                          // 256-bit KEK
   // Wrap the content key under the KEK using ChaCha20-Poly1305.
   var wrapped;
   try { wrapped = bCrypto.encryptPacked(contentKey, kek); }
@@ -630,7 +631,7 @@ function _recipientInfo(recipient, contentKey) {
   // KEMRecipientInfo SEQUENCE.
   // Simplified ordering, version 0 per RFC 9629 §3.
   var kemRi = asn1.writeNode(TAG_SEQUENCE, Buffer.concat([
-    asn1.writeInteger(Buffer.from([0])),                                                              // allow:raw-byte-literal — KEMRecipientInfo version 0
+    asn1.writeInteger(Buffer.from([0])),                                                              // KEMRecipientInfo version 0
     // rid CHOICE per RFC 9629 §3: this module ships the [0] IMPLICIT
     // SubjectKeyIdentifier alternative — SKI is `[0] IMPLICIT OCTET
     // STRING` (PRIMITIVE per RFC 5652 §10.2.4). The constructed form
@@ -641,7 +642,7 @@ function _recipientInfo(recipient, contentKey) {
     _algorithmIdentifier(OID.mlkem1024),                                                              // kem
     asn1.writeOctetString(Buffer.from(encap.cipherText)),                                             // kemct
     _algorithmIdentifier(OID.shake256),                                                               // kdf
-    asn1.writeInteger(Buffer.from([32])),                                                             // allow:raw-byte-literal — kekLength = 32 bytes
+    asn1.writeInteger(Buffer.from([32])),                                                             // kekLength = 32 bytes
     _algorithmIdentifier(OID.chacha20Poly1305),                                                       // wrap (also used as content-encryption AlgId; same OID)
     asn1.writeOctetString(wrapped),                                                                   // encryptedKey
   ]));
@@ -652,7 +653,7 @@ function _recipientInfo(recipient, contentKey) {
     asn1.writeOid(OID.kemri),
     kemRi,
   ]);
-  return asn1.writeNode(0xa4, oriValue);                                                              // allow:raw-byte-literal — [4] IMPLICIT context-specific constructed (ori CHOICE)
+  return asn1.writeNode(0xa4, oriValue);                                                              // [4] IMPLICIT context-specific constructed (ori CHOICE)
 }
 
 function _encryptedContentInfo(plaintext, contentKey) {
@@ -796,7 +797,7 @@ function _readSignerInfo(siNode) {
   var signedAttrsRaw = null;
   if (c[idx] && c[idx].tagClass === asn1.TAG_CLASS.CONTEXT_SPECIFIC && c[idx].tag === 0) {
     var implicitRaw = _reEncodeNode(c[idx]);
-    signedAttrsRaw = Buffer.concat([Buffer.from([0x31]), implicitRaw.slice(1)]);                      // allow:raw-byte-literal — universal SET tag per RFC 5652 §5.4
+    signedAttrsRaw = Buffer.concat([Buffer.from([0x31]), implicitRaw.slice(1)]);                      // universal SET tag per RFC 5652 §5.4
     idx += 1;
   }
   var sigAlgOid = _readAlgIdOid(c[idx]); idx += 1;

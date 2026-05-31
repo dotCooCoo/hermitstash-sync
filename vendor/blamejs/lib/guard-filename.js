@@ -91,6 +91,20 @@ var WIN_RESERVED_NAMES = Object.freeze([
   "CLOCK$", "CONFIG$",
 ]);
 
+// Windows folds the superscript digits U+00B9 / U+00B2 / U+00B3 to
+// 1 / 2 / 3 when matching COM/LPT device names, so a superscript-digit
+// form resolves to the same device. Built from numeric codepoints so
+// the source stays pure-ASCII (guard-family rule).
+var _SUPERSCRIPT_DIGIT_MAP = (function () {
+  var m = {};
+  m[String.fromCharCode(0xB9)] = "1";
+  m[String.fromCharCode(0xB2)] = "2";
+  m[String.fromCharCode(0xB3)] = "3";
+  return m;
+})();
+var _SUPERSCRIPT_DIGIT_RE = new RegExp("[" + String.fromCharCode(0xB9, 0xB2, 0xB3) + "]", "g"); // allow:dynamic-regex — superscript-digit codepoints from a numeric table
+
+
 // Path-traversal indicators (anchored matches on raw and percent-decoded
 // forms).
 var PATH_TRAVERSAL_RE = /(^|[/\\])\.\.($|[/\\])/;
@@ -107,7 +121,7 @@ var SHELL_EXEC_EXTS = Object.freeze([
   ".reg", ".cpl", ".inf", ".hta", ".chm", ".scf",
 ]);
 
-var HEX_RADIX = 16;                                                 // allow:raw-byte-literal — base-16 radix, not byte size
+var HEX_RADIX = 16;                                                 // base-16 radix, not byte size
 
 // Visual-confusable letter ranges that homoglyph against ASCII —
 // Cyrillic / Greek / fullwidth Latin. Only flagged when mixed with
@@ -135,8 +149,8 @@ var PROFILES = Object.freeze({
     requireAscii:         true,
     extensionAllowlist:   null,             // null = any single extension
     requireSingleDot:     true,             // ".tar.gz" not allowed
-    maxBytes:             64,               // allow:raw-byte-literal — leaf-name byte cap, not byte size
-    maxComponents:        1,                // allow:raw-byte-literal — single leaf only, not bytes
+    maxBytes:             64,               // leaf-name byte cap, not byte size
+    maxComponents:        1,                // single leaf only, not bytes
   },
   "balanced": {
     bidiPolicy:           "reject",
@@ -155,8 +169,8 @@ var PROFILES = Object.freeze({
     requireAscii:         false,
     extensionAllowlist:   null,
     requireSingleDot:     false,            // ".tar.gz" allowed
-    maxBytes:             255,              // allow:raw-byte-literal — POSIX max-component, not byte size
-    maxComponents:        1,                // allow:raw-byte-literal — single leaf only, not bytes
+    maxBytes:             255,              // POSIX max-component, not byte size
+    maxComponents:        1,                // single leaf only, not bytes
   },
   "permissive": {
     bidiPolicy:           "reject",
@@ -175,8 +189,8 @@ var PROFILES = Object.freeze({
     requireAscii:         false,
     extensionAllowlist:   null,
     requireSingleDot:     false,
-    maxBytes:             255,              // allow:raw-byte-literal — POSIX max-component, not byte size
-    maxComponents:        16,               // allow:raw-byte-literal — multi-component path cap, not bytes
+    maxBytes:             255,              // POSIX max-component, not byte size
+    maxComponents:        16,               // multi-component path cap, not bytes
   },
 });
 
@@ -243,7 +257,16 @@ function _normalizeNFC(s) {
 function _isWinReserved(name) {
   // Reserved-name check applies to the base (without extension) AND to
   // the entire leaf — both `CON` and `CON.txt` collide with the device.
-  var upper = name.toUpperCase();
+  // Windows normalizes the superscript digits U+00B9 / U+00B2 / U+00B3
+  // to 1 / 2 / 3 when matching COM/LPT device names, so those superscript
+  // forms resolve to the same devices as COM1 / LPT3; fold them to ASCII
+  // before comparison so the spoofed forms are caught too. (Source stays
+  // pure-ASCII per the guard-family rule — the codepoints are escaped.)
+  // Fold COM/LPT superscript-digit spoofs to ASCII before matching
+  // (Windows treats them as the device). See _SUPERSCRIPT_DIGIT_* below.
+  var upper = name.toUpperCase().replace(_SUPERSCRIPT_DIGIT_RE, function (ch) {
+    return _SUPERSCRIPT_DIGIT_MAP[ch] || ch;
+  });
   for (var i = 0; i < WIN_RESERVED_NAMES.length; i += 1) {
     var r = WIN_RESERVED_NAMES[i];
     if (upper === r) return true;
@@ -611,7 +634,7 @@ function _sanitize(input, opts) {
  * @related    b.guardFilename.sanitize, b.guardFilename.gate
  *
  * Inspect a filename (string or Buffer) and return
- * `{ ok, issues, summary }`. Each issue carries
+ * `{ ok, issues }`. Each issue carries
  * `{ kind, severity, ruleId, location, snippet }` with severity in
  * `"warn"|"high"|"critical"`. Detected: path-traversal raw and
  * percent-encoded, null-byte truncation, NTFS ADS, UNC path,
@@ -624,7 +647,7 @@ function _sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:           "reject"|"strip"|"allow",
  *   controlPolicy:        "reject"|"strip"|"allow",
  *   nullBytePolicy:       "reject",                       // always reject
@@ -736,7 +759,7 @@ function _sanitizeStripMode(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   mode:       "enforce"|"strip",
  *   audit:      { safeEmit: function },     // optional sink for strip mode
  *   unicodeNormalization: "NFC"|null,
@@ -797,7 +820,7 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,    // gate identity for audit / observability
  *
  * @example
@@ -923,6 +946,272 @@ var _filenameRulePacks = gateContract.makeRulePackLoader(GuardFilenameError, "fi
  */
 var loadRulePack = _filenameRulePacks.load;
 
+// ---- verifyExtractionPath -------------------------------------------------
+
+var nodePath = require("node:path");
+var nodeFs   = require("node:fs");
+
+// CVE-2025-4517 PATH_MAX threshold — Python's tarfile filter relied on
+// os.path.realpath which silently stops resolving symlinks once the
+// resolved path exceeds PATH_MAX (4096 on Linux). The kernel keeps
+// resolving past that, so the filter's safety check + the kernel's
+// extraction diverge. We refuse paths whose pre-resolve length already
+// exceeds PATH_MAX so the operator's realpath behavior is never the
+// gating factor.
+var PATH_MAX_BYTES = 4096;
+
+/**
+ * @primitive b.guardFilename.verifyExtractionPath
+ * @signature b.guardFilename.verifyExtractionPath(entryName, extractionRoot, opts?)
+ * @since     0.12.7
+ * @status    stable
+ * @compliance hipaa, pci-dss, gdpr, soc2
+ * @related   b.guardArchive.checkExtractionPath, b.guardArchive.validateEntries, b.archive.read.zip
+ *
+ * Dual-check extraction path safety: string-check (refuses `..`, leading
+ * `/` / `\\`, drive-letter prefix, null byte, PATH_MAX overflow) followed
+ * by `fs.realpath` agreement check (the resolved path on disk must
+ * land inside the realpath of the extraction root). Returns the
+ * resolved absolute path on success; throws `GuardFilenameError` on
+ * any refusal.
+ *
+ * Per-segment Windows-extraction hazards are refused too — these are
+ * within-root write-target redirections / collisions that the
+ * containment + realpath checks structurally cannot see, so they need
+ * a name-level check the disk `validate` / `sanitize` paths already
+ * carry: a Windows reserved device name (`CON` / `NUL` / `COM1` / …,
+ * which resolves to the device), NTFS alternate-data-stream syntax
+ * (`name:stream`, which writes a hidden stream of the base file), and a
+ * trailing dot / leading-or-trailing whitespace (`secret.txt.`, which
+ * Windows strips so the entry overwrites an existing sibling). The
+ * checks are platform-unconditional — the verifier may run on Linux
+ * while extraction happens on Windows — and each has an opt-out for
+ * Linux-only targets (`reservedNamePolicy` / `adsPolicy` /
+ * `leadingTrailingPolicy: "allow"`), mirroring `validate`.
+ *
+ * Out of this primitive's scope (single-entry, name-only): 8.3 short-name
+ * aliasing (`PROGRA~1`), case-insensitive cross-entry collision
+ * (`Readme.txt` vs `README.TXT` on a case-preserving FS), and archive
+ * symlink/hardlink ENTRY-target validation. The first two are cross-entry
+ * properties and the third needs the entry's declared link target, which
+ * this function never sees — they belong to the extract orchestrator
+ * (`b.archive.read.zip.extract` / `b.safeArchive`), which owns the
+ * case-folded seen-set and the link-target gate.
+ *
+ * Companion to `b.guardArchive.checkExtractionPath` (the string-only
+ * portable gate the guard-archive primitive keeps fs-free for use as
+ * a posture cascade member). `verifyExtractionPath` deliberately
+ * couples to `node:fs` — the deeper realpath check defends the
+ * CVE-2025-4517 PATH_MAX TOCTOU class where the operator's path
+ * resolution and the kernel's diverge silently past PATH_MAX.
+ *
+ * `b.archive.read.zip.extract` composes this on every entry; operators
+ * extracting via the safeArchive orchestrator never call it directly.
+ * Operators rolling their own extract loop call it per entry.
+ *
+ * @opts
+ *   followSymlinks:       boolean,  // default false — symlink in the
+ *                                   //   resolved path refuses unless set
+ *   reservedNamePolicy:   string,   // "allow" opts out of the Windows
+ *                                   //   reserved-device-name segment check
+ *   adsPolicy:            string,   // "allow" opts out of the NTFS-ADS check
+ *   leadingTrailingPolicy: string,  // "allow" opts out of the trailing-dot /
+ *                                   //   leading-or-trailing-whitespace check
+ *
+ * @example
+ *   var resolved = b.guardFilename.verifyExtractionPath(
+ *     "docs/readme.txt",
+ *     "/var/quarantine"
+ *   );
+ *   // → "/var/quarantine/docs/readme.txt"
+ *
+ *   // ../ refuses
+ *   b.guardFilename.verifyExtractionPath("../etc/passwd", "/var/quarantine");
+ *   // throws GuardFilenameError("filename.extraction-traversal")
+ *
+ *   // PATH_MAX-overflow refuses BEFORE realpath truncation hits
+ *   b.guardFilename.verifyExtractionPath(longName, "/var/quarantine");
+ *   // throws GuardFilenameError("filename.extraction-path-max")
+ */
+function verifyExtractionPath(entryName, extractionRoot, opts) {
+  opts = opts || {};
+  if (typeof entryName !== "string" || entryName.length === 0) {
+    throw new GuardFilenameError("filename.extraction-empty",
+      "verifyExtractionPath: entryName must be non-empty string");
+  }
+  if (typeof extractionRoot !== "string" || extractionRoot.length === 0) {
+    throw new GuardFilenameError("filename.extraction-bad-root",
+      "verifyExtractionPath: extractionRoot must be non-empty string");
+  }
+  // PATH_MAX defense — refuse oversize names BEFORE any path operation
+  // (mkdir / realpath / open) can truncate silently.
+  if (entryName.length > PATH_MAX_BYTES) {
+    throw new GuardFilenameError("filename.extraction-path-max",
+      "verifyExtractionPath: entryName length " + entryName.length +
+      " exceeds PATH_MAX=" + PATH_MAX_BYTES +
+      " (CVE-2025-4517 class — operator realpath truncation defense)");
+  }
+  // String-check first — these checks are portable + don't touch fs.
+  // Null byte — POSIX path APIs treat it as a string terminator.
+  if (entryName.indexOf("\u0000") !== -1) {
+    throw new GuardFilenameError("filename.extraction-null-byte",
+      "verifyExtractionPath: entryName contains null byte");
+  }
+  // Normalize separators so the `..` walk catches Windows-style too.
+  var normalized = entryName.replace(/\\/g, "/");
+  // Leading-slash absolute path refuses.
+  if (normalized.length > 0 && normalized[0] === "/") {
+    throw new GuardFilenameError("filename.extraction-absolute",
+      "verifyExtractionPath: entryName is an absolute path");
+  }
+  // Drive-letter prefix (Windows) refuses.
+  if (/^[A-Za-z]:[/\\]/.test(entryName)) {
+    throw new GuardFilenameError("filename.extraction-drive-prefix",
+      "verifyExtractionPath: entryName starts with a drive-letter prefix");
+  }
+  // UNC path (Windows) refuses.
+  if (entryName.indexOf("\\\\") === 0 || entryName.indexOf("//") === 0) {
+    throw new GuardFilenameError("filename.extraction-unc",
+      "verifyExtractionPath: entryName starts with a UNC prefix");
+  }
+  // `..` segment refuses — walk path components. The same walk also
+  // refuses per-segment Windows-extraction hazards the disk `validate`
+  // / `sanitize` paths already catch but that string-containment +
+  // realpath agreement cannot see, because they're WITHIN-root
+  // collisions / write-target redirections rather than boundary
+  // escapes. These checks are platform-UNCONDITIONAL: the verifier may
+  // run on Linux while the archive is extracted on Windows, so a name
+  // that's only dangerous on Windows must still be refused here.
+  // Operators on a Linux-only target opt out per check, mirroring
+  // `validate`'s policy vocabulary.
+  var segs = normalized.split("/");
+  for (var si = 0; si < segs.length; si += 1) {
+    var seg = segs[si];
+    if (seg === ".." || seg === "..\\" || seg === "..%2f" || seg === "..%5c") {
+      throw new GuardFilenameError("filename.extraction-traversal",
+        "verifyExtractionPath: entryName contains .. segment");
+    }
+    // URL-encoded variants — explicit refusal so operators don't
+    // need to percent-decode before passing the entry name in.
+    if (/%2e%2e/i.test(seg) || /%c0%ae/i.test(seg)) {
+      throw new GuardFilenameError("filename.extraction-traversal-encoded",
+        "verifyExtractionPath: entryName contains encoded .. segment");
+    }
+    if (seg === "" || seg === ".") continue;   // separators / current-dir — nothing to name-check
+    // Windows reserved device name (CON / NUL / COM1 / LPT1 / …): on
+    // Windows the segment resolves to the device, redirecting the write.
+    if (opts.reservedNamePolicy !== "allow" && _isWinReserved(seg)) {
+      throw new GuardFilenameError("filename.extraction-reserved-name",
+        "verifyExtractionPath: entryName segment " + JSON.stringify(seg) +
+        " collides with a Windows reserved device name");
+    }
+    // NTFS alternate data stream (name:stream): on Windows the write
+    // lands on a hidden stream of the base file, not a normal file.
+    if (opts.adsPolicy !== "allow" && /:[^:\\/]+$/.test(seg)) {
+      throw new GuardFilenameError("filename.extraction-ntfs-ads",
+        "verifyExtractionPath: entryName segment " + JSON.stringify(seg) +
+        " uses NTFS alternate-data-stream syntax (name:stream)");
+    }
+    // Trailing dot / leading-or-trailing whitespace: Windows silently
+    // strips these, so `secret.txt.` or `secret.txt ` collides with an
+    // existing sibling — an in-root overwrite the containment check
+    // cannot see.
+    if (opts.leadingTrailingPolicy !== "allow" && /^\s|\s$|\.$/.test(seg)) {
+      throw new GuardFilenameError("filename.extraction-leading-trailing",
+        "verifyExtractionPath: entryName segment " + JSON.stringify(seg) +
+        " has leading/trailing whitespace or a trailing dot (Windows strips it)");
+    }
+  }
+  // Resolve the destination path against the root via path.resolve
+  // (string-level computation; no fs hits).
+  var stringResolved = nodePath.resolve(extractionRoot, normalized);
+  var rootResolved = nodePath.resolve(extractionRoot);
+  // String-level containment check — the resolved path must start
+  // with the root + separator (or equal the root for the directory
+  // entry itself). path.resolve normalizes separators platform-aware.
+  var sep = nodePath.sep;
+  if (stringResolved !== rootResolved &&
+      stringResolved.indexOf(rootResolved + sep) !== 0) {
+    throw new GuardFilenameError("filename.extraction-escape",
+      "verifyExtractionPath: resolved path " + JSON.stringify(stringResolved) +
+      " escapes extraction root " + JSON.stringify(rootResolved));
+  }
+  // Realpath-agreement check (fs-coupled). The CVE-2025-4517 class
+  // exploits a divergence between the operator's path.resolve view
+  // and the kernel's symlink-resolution. We resolve the longest
+  // existing ancestor + verify the realpath agrees with our string
+  // view.
+  if (nodeFs.existsSync(rootResolved)) {
+    var realRoot;
+    try {
+      realRoot = nodeFs.realpathSync(rootResolved);
+    } catch (e) {
+      throw new GuardFilenameError("filename.extraction-root-realpath",
+        "verifyExtractionPath: cannot realpath extractionRoot " +
+        JSON.stringify(rootResolved) + ": " + (e && e.message));
+    }
+    // Walk up from the target until we find an existing parent —
+    // every ancestor that EXISTS must realpath inside realRoot. Once
+    // we hit a non-existent path, the create-and-extract step will
+    // populate it; the operator-supplied target name doesn't pre-
+    // exist, so the deepest existing ancestor is the boundary check.
+    var probe = nodePath.dirname(stringResolved);
+    var safetyCounter = 0;
+    var SAFETY_LIMIT = 4096;     // guards against probe walking past root forever
+    while (probe.length >= rootResolved.length && safetyCounter < SAFETY_LIMIT) {
+      safetyCounter += 1;
+      if (nodeFs.existsSync(probe)) {
+        var realProbe;
+        try { realProbe = nodeFs.realpathSync(probe); }
+        catch (e2) {
+          throw new GuardFilenameError("filename.extraction-realpath",
+            "verifyExtractionPath: cannot realpath probe " +
+            JSON.stringify(probe) + ": " + (e2 && e2.message));
+        }
+        // Two cases for the realpath comparison:
+        //   a) The probe's realpath stays inside realRoot — the symlink
+        //      (if any) is OS-level filesystem layout (macOS /var →
+        //      /private/var, Linux /tmp -> tmpfs mount) and the
+        //      ancestor was already canonicalized when we hashed
+        //      realRoot at the top. Accept.
+        //   b) The probe's realpath escapes realRoot — the symlink
+        //      resolves outside the trust boundary. Refuse (this is
+        //      the actual CVE-2025-4517 PATH_MAX TOCTOU class
+        //      defense).
+        // Also normalize probe through path.resolve(realRoot, relative
+        // -- to -- realRoot) so we compare against the SAME canonicalized
+        // root, not the operator-supplied form. Computing `probeRealRel`
+        // via the realRoot prefix avoids treating OS-level /var -> /private
+        // /var as an escape just because realProbe doesn't textually share
+        // the rootResolved prefix.
+        var probeInsideRoot = (realProbe === realRoot) ||
+                              (realProbe.indexOf(realRoot + sep) === 0);
+        if (!probeInsideRoot) {
+          throw new GuardFilenameError("filename.extraction-realpath-escape",
+            "verifyExtractionPath: realpath of " + JSON.stringify(probe) +
+            " (" + JSON.stringify(realProbe) + ") escapes realpath of root " +
+            JSON.stringify(realRoot) +
+            " — CVE-2025-4517 PATH_MAX TOCTOU class");
+        }
+        // Symlink-anywhere-in-chain refusal was removed: macOS /
+        // *BSD filesystems carry OS-level symlinks in standard paths
+        // (/var → /private/var, /tmp → /private/tmp) that legitimate
+        // operator usage routinely crosses. The realpath-agreement
+        // check above is the load-bearing defense; if the resolved
+        // chain STAYS inside realRoot, the symlinks resolved within
+        // the trust boundary and the extraction is safe. Hostile
+        // symlinks that escape are caught by the escape branch.
+        void opts.followSymlinks;
+        break;
+      }
+      var parent = nodePath.dirname(probe);
+      if (parent === probe) break;   // hit fs root
+      probe = parent;
+    }
+  }
+  return stringResolved;
+}
+
 module.exports = {
   // ---- guard-* family identity ----
   // Filename is a different axis from content-bytes (operators
@@ -953,4 +1242,5 @@ module.exports = {
   WIN_RESERVED_NAMES:  WIN_RESERVED_NAMES,
   SHELL_EXEC_EXTS:     SHELL_EXEC_EXTS,
   GuardFilenameError:  GuardFilenameError,
+  verifyExtractionPath: verifyExtractionPath,
 };

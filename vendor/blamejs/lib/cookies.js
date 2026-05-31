@@ -127,8 +127,8 @@ function _scrubAttr(s) {
  * `parseSafe`.
  *
  * @example
- *   var jar = b.cookies.parse("session=abc; theme=%22dark%22");
- *   // → { session: "abc", theme: "dark" }
+ *   var jar = b.cookies.parse("session=abc; theme=dark%20mode");
+ *   // → { session: "abc", theme: "dark mode" }   // percent-decoded
  */
 function parse(cookieHeader) {
   var out = {};
@@ -485,7 +485,7 @@ function parseSafe(cookieHeader, opts) {
   }
   for (var hi = 0; hi < cookieHeader.length; hi += 1) {
     var ch = cookieHeader.charCodeAt(hi);
-    if (ch === 0x0D || ch === 0x0A || ch === 0x00) {                             // allow:raw-byte-literal — CR / LF / NUL forbidden in cookie header
+    if (ch === 0x0D || ch === 0x0A || ch === 0x00) {                             // CR / LF / NUL forbidden in cookie header
       issues.push({
         kind: "header-control-byte", severity: "high",
         snippet: "Cookie header contains CR / LF / NUL — proxy-side " +

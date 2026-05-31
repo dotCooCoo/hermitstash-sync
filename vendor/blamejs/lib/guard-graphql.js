@@ -113,9 +113,9 @@ var PROFILES = Object.freeze({
     aliasBombPolicy:            "reject",
     depthPolicy:                "reject",
     variableShapePolicy:        "reject",
-    maxDepth:                   8,                                               // allow:raw-byte-literal — selection-set depth ceiling
-    maxAliasesPerSelection:     8,                                               // allow:raw-byte-literal — alias breadth ceiling
-    maxBatchSize:               1,                                               // allow:raw-byte-literal — strict refuses batch
+    maxDepth:                   8,                                               // selection-set depth ceiling
+    maxAliasesPerSelection:     8,                                               // alias breadth ceiling
+    maxBatchSize:               1,                                               // strict refuses batch
     maxQueryBytes:              C.BYTES.kib(8),
     maxVariableBytes:           C.BYTES.kib(8),
     maxBytes:                   C.BYTES.kib(32),
@@ -133,9 +133,9 @@ var PROFILES = Object.freeze({
     aliasBombPolicy:            "audit",
     depthPolicy:                "audit",
     variableShapePolicy:        "audit",
-    maxDepth:                   12,                                              // allow:raw-byte-literal — selection-set depth ceiling
-    maxAliasesPerSelection:     16,                                              // allow:raw-byte-literal — alias breadth ceiling
-    maxBatchSize:               10,                                              // allow:raw-byte-literal — batch size ceiling
+    maxDepth:                   12,                                              // selection-set depth ceiling
+    maxAliasesPerSelection:     16,                                              // alias breadth ceiling
+    maxBatchSize:               10,                                              // batch size ceiling
     maxQueryBytes:              C.BYTES.kib(16),
     maxVariableBytes:           C.BYTES.kib(16),
     maxBytes:                   C.BYTES.kib(64),
@@ -153,9 +153,9 @@ var PROFILES = Object.freeze({
     aliasBombPolicy:            "audit",
     depthPolicy:                "audit",
     variableShapePolicy:        "audit",
-    maxDepth:                   24,                                              // allow:raw-byte-literal — selection-set depth ceiling
-    maxAliasesPerSelection:     32,                                              // allow:raw-byte-literal — alias breadth ceiling
-    maxBatchSize:               50,                                              // allow:raw-byte-literal — batch size ceiling
+    maxDepth:                   24,                                              // selection-set depth ceiling
+    maxAliasesPerSelection:     32,                                              // alias breadth ceiling
+    maxBatchSize:               50,                                              // batch size ceiling
     maxQueryBytes:              C.BYTES.kib(64),
     maxVariableBytes:           C.BYTES.kib(64),
     maxBytes:                   C.BYTES.kib(256),
@@ -458,7 +458,7 @@ function _detectIssues(req, opts) {
  * @related    b.guardGraphql.sanitize, b.guardGraphql.gate
  *
  * Apply the full guard-graphql threat catalog to a request bundle
- * (or batch array). Returns `{ ok, issues, refusal? }` per
+ * (or batch array). Returns `{ ok, issues }` per
  * `gateContract.aggregateIssues`. Detected classes include
  * `query-missing`, `query-cap`, `variables-cap`, `request-cap`,
  * `batch-size`, `introspection`, `persisted-query-missing`,
@@ -469,7 +469,7 @@ function _detectIssues(req, opts) {
  *
  * @opts
  *   profile:                 "strict"|"balanced"|"permissive",
- *   compliance:              "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   introspectionPolicy:     "reject"|"audit"|"allow",
  *   persistedQueryPolicy:    "require"|"audit"|"allow",
  *   operationNamePolicy:     "reject"|"audit"|"allow",
@@ -528,7 +528,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:        every guardGraphql.validate opt is honored,
  *
  * @example
@@ -573,13 +573,13 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:    "strict"|"balanced"|"permissive",
- *   compliance: "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:       string,            // gate label for audit trails
  *   ...:        every guardGraphql.validate opt is honored,
  *
  * @example
  *   var gqlGate = b.guardGraphql.gate({ profile: "strict" });
- *   var rv = await gqlGate.run({
+ *   var rv = await gqlGate.check({
  *     graphqlRequest: {
  *       query: "{ a:me { id } b:me { id } c:me { id } d:me { id } " +
  *              "e:me { id } f:me { id } g:me { id } h:me { id } " +

@@ -6,8 +6,12 @@
  *
  * Heuristics (all combined):
  *   - Missing Accept-Language header (real browsers always send one)
- *   - Missing Sec-Fetch-Mode header (modern browsers send these on every
- *     navigation; absence is suspicious for HTML routes but not API)
+ *   - Missing Sec-Fetch-Mode header — ADVISORY ONLY (never blocks). Tagged
+ *     in mode:"tag" on secure-context HTML GETs where a modern browser
+ *     would have sent it. It cannot block because the header is absent for
+ *     entire browser families (Safari < 16.4) and for every plain-HTTP
+ *     non-localhost origin (Umbrel, LAN / *.local proxies) — a 403 on it
+ *     alone would refuse real users.
  *   - User-Agent matches known automation libraries (curl, wget, python-
  *     requests, axios, Go-http-client) — operators can add or remove
  *     entries via config
@@ -47,6 +51,7 @@ var DEFAULT_BLOCKED_AGENTS = [
 var lazyRequire = require("../lazy-require");
 var requestHelpers = require("../request-helpers");
 var validateOpts = require("../validate-opts");
+var denyResponse = require("./deny-response").denyResponse;
 var { defineClass } = require("../framework-error");
 var audit = lazyRequire(function () { return require("../audit"); });
 
@@ -86,9 +91,13 @@ function _xffIpFor(trustProxy) {
  * Cheap fingerprint-based detection of obviously-non-browser requests.
  * Constructed via `b.middleware.botGuard(opts)`; the resulting
  * middleware has the `(req, res, next)` shape shown above.
- * Combines three heuristics: missing `Accept-Language`, missing
- * `Sec-Fetch-Mode` (HTML routes), and User-Agent regex match against
- * a default list (curl / wget / python-requests / axios / etc.). Not
+ * Two blocking heuristics — missing `Accept-Language` and a User-Agent
+ * regex match against a default list (curl / wget / python-requests /
+ * axios / etc.) — plus one advisory signal: a missing `Sec-Fetch-Mode`
+ * on a secure-context HTML GET sets `req.suspectedBot` in `mode: "tag"`
+ * but NEVER blocks (the header is absent for Safari < 16.4 and every
+ * plain-HTTP non-localhost origin, so blocking on it refuses real
+ * users). Not
  * a substitute for proper authentication — catches drive-by scrapers
  * and low-effort bots. In `mode: "block"` (default) the request is
  * refused; in `mode: "tag"` `req.suspectedBot = true` is set and the
@@ -104,6 +113,8 @@ function _xffIpFor(trustProxy) {
  *     skipPaths:     string[],
  *     statusOnBlock: number,            // default 403
  *     bodyOnBlock:   string,
+ *     onDeny:        function(req, res, info): void,  // own the block response; info = { status, reason }
+ *     problemDetails: boolean,          // default false — emit RFC 9457 application/problem+json instead of text/plain
  *     trustProxy:    boolean|number,
  *   }
  *
@@ -120,7 +131,7 @@ function create(opts) {
   opts = opts || {};
   validateOpts(opts, [
     "mode", "onlyForHtml", "allowedAgents", "blockedAgents",
-    "skipPaths", "statusOnBlock", "bodyOnBlock", "trustProxy",
+    "skipPaths", "statusOnBlock", "bodyOnBlock", "onDeny", "problemDetails", "trustProxy",
   ], "middleware.botGuard");
   var trustProxy = opts.trustProxy === true || typeof opts.trustProxy === "number"
     ? opts.trustProxy : false;
@@ -136,6 +147,8 @@ function create(opts) {
   var skipPaths = opts.skipPaths || [];
   var statusOnBlock = opts.statusOnBlock || 403;
   var bodyOnBlock = opts.bodyOnBlock !== undefined ? opts.bodyOnBlock : "Forbidden";
+  var onDeny = typeof opts.onDeny === "function" ? opts.onDeny : null;
+  var problemMode = opts.problemDetails === true;
 
   function _shouldSkip(req) {
     var path = req.pathname || req.url || "/";
@@ -150,6 +163,28 @@ function create(opts) {
   function _looksLikeApi(req) {
     var path = req.pathname || req.url || "/";
     return /^\/api\//.test(path);
+  }
+
+  // Browsers only emit Fetch Metadata (Sec-Fetch-*) in a *secure context*
+  // (W3C Secure Contexts): an HTTPS origin, or a localhost-family origin
+  // even over plain HTTP. On a plain-HTTP non-localhost origin — an Umbrel
+  // app, a LAN / *.local reverse-proxy deployment — the browser omits
+  // Sec-Fetch-* entirely, so a missing Sec-Fetch-Mode is NORMAL there and
+  // must not be read as a bot signal. The effective scheme honours
+  // X-Forwarded-Proto only under trustProxy (otherwise it is forgeable).
+  function _isSecureContext(req) {
+    if (requestHelpers.requestProtocol(req, { trustProxy: trustProxy }) === "https") return true;
+    var host = (req.headers && req.headers.host) || "";
+    host = String(host).toLowerCase().replace(/:\d+$/, "");   // strip :port
+    if (host.charAt(0) === "[") {                              // [::1] IPv6 literal
+      var end = host.indexOf("]");
+      host = end === -1 ? host.slice(1) : host.slice(1, end);
+    }
+    host = host.replace(/\.$/, "");                            // strip trailing root-zone dot (RFC 1034 §3.1) so "localhost." matches
+    if (host === "localhost" || /\.localhost$/.test(host)) return true;
+    if (host === "::1") return true;
+    if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;   // allow:regex-no-length-cap — bounded dotted-quad loopback
+    return false;
   }
 
   function _checkHeuristics(req) {
@@ -167,7 +202,14 @@ function create(opts) {
       return null;
     }
     if (!headers["accept-language"]) return "missing-accept-language";
-    if (req.method === "GET" && !headers["sec-fetch-mode"]) return "missing-sec-fetch-mode";
+    // Missing Sec-Fetch-Mode NEVER blocks: the header is absent for entire
+    // browser families (Safari < 16.4 omits Fetch Metadata even over HTTPS)
+    // and for every plain-HTTP non-localhost origin (Umbrel, LAN / *.local
+    // reverse proxies), so a 403 on it alone refuses real users. It survives
+    // only as an advisory TAG in mode:"tag", and even then only in a secure
+    // context where a modern browser would have sent it. Drive-by bots are
+    // still blocked by missing Accept-Language + the User-Agent deny-list.
+    if (mode === "tag" && req.method === "GET" && _isSecureContext(req) && !headers["sec-fetch-mode"]) return "missing-sec-fetch-mode";
     return null;
   }
 
@@ -203,10 +245,17 @@ function create(opts) {
     } catch (_e) { /* audit best-effort */ }
 
     if (res.writableEnded) return;
-    if (typeof res.writeHead === "function") {
-      res.writeHead(statusOnBlock, { "Content-Type": "text/plain" });
-      res.end(bodyOnBlock);
-    }
+    denyResponse(req, res, {
+      onDeny:        onDeny,
+      problem:       problemMode,
+      status:        statusOnBlock,
+      info:          { status: statusOnBlock, reason: hit },
+      problemCode:   "bot-blocked",
+      problemTitle:  "Forbidden",
+      problemDetail: "The request was identified as automated traffic and refused.",
+      contentType:   "text/plain",
+      body:          bodyOnBlock,
+    });
     // Don't call next() — terminate the chain
   };
 }

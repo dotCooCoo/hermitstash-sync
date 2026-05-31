@@ -50,7 +50,7 @@
  *   of caller; only `b.legalHold.release` can flip the flag.
  *
  *   Parses messages on append via `b.safeMime.parse` (bounded
- *   substrate, defends CVE-2024-39929 + CVE-2025-30258). Validates
+ *   substrate, defends CVE-2024-39929 + CVE-2026-26312). Validates
  *   `Message-Id` via `b.guardMessageId.validate`.
  *
  * @card
@@ -60,6 +60,7 @@
 var C = require("./constants");
 var bCrypto = require("./crypto");
 var cryptoField = require("./crypto-field");
+var vault = require("./vault");
 var safeMime = require("./safe-mime");
 var safeSql = require("./safe-sql");
 var guardMessageId = require("./guard-message-id");
@@ -71,6 +72,14 @@ var MailStoreError = defineClass("MailStoreError", { alwaysPermanent: true });
 var DEFAULT_TABLE_PREFIX = "blamejs_mail";
 var DEFAULT_MAX_MESSAGE_BYTES = C.BYTES.mib(50);
 var DEFAULT_MAX_BODY_BYTES    = C.BYTES.mib(25);
+
+// `<prefix>_meta` marker key carrying the FTS on-disk format version.
+// The reindex path writes a `'rebuilding'` sentinel BEFORE clearing the
+// index and the final format-version string only AFTER every row is
+// reinserted, so a partial / interrupted rebuild is never marked
+// complete and never queried as a finished index.
+var FTS_FORMAT_META_KEY = "fts_format";
+var FTS_REBUILDING_SENTINEL = "rebuilding";
 
 // Standard IMAP4rev2 default folders + JMAP role mapping.
 var DEFAULT_FOLDERS = Object.freeze([
@@ -90,8 +99,9 @@ var DEFAULT_FOLDERS = Object.freeze([
  * @related   b.safeMime, b.guardMessageId, b.cryptoField
  *
  * Build a mail-store handle. Returns an object with `appendMessage` /
- * `fetchByObjectId` / `queryByModseq` / `setFlags` / `createFolder` /
- * `listFolders` / `threadFor` / `quota` / `setLegalHold` / `destroy`.
+ * `fetchByObjectId` / `search` / `queryByModseq` / `setFlags` /
+ * `createFolder` / `listFolders` / `threadFor` / `quota` /
+ * `moveMessages` / `setLegalHold` / `hardExpunge`.
  *
  * @opts
  *   backend:     object,   // required — sqlite-shaped { prepare(sql) → { run, get, all }, transaction(fn) }
@@ -128,6 +138,7 @@ function create(opts) {
   var qFlags   = safeSql.quoteIdentifier(prefix + "_flags",     "sqlite");
   var qQuota   = safeSql.quoteIdentifier(prefix + "_quota",     "sqlite");
   var qFts     = safeSql.quoteIdentifier(prefix + "_messages_fts", "sqlite");
+  var qMeta    = safeSql.quoteIdentifier(prefix + "_meta",      "sqlite");
   var messagesTable = prefix + "_messages";
 
   var maxMessageBytes = opts.maxMessageBytes !== undefined ? opts.maxMessageBytes : DEFAULT_MAX_MESSAGE_BYTES;
@@ -149,7 +160,7 @@ function create(opts) {
   });
 
   if (doInit) {
-    _ensureSchema(db, qMsgs, qFolders, qFlags, qQuota, qFts);
+    _ensureSchema(db, qMsgs, qFolders, qFlags, qQuota, qFts, qMeta);
     _ensureDefaultFolders(db, qFolders);
   }
 
@@ -205,6 +216,150 @@ function create(opts) {
   var stmtInsertFts        = db.prepare(
     "INSERT INTO " + qFts + " (objectid, subject_toks, addr_toks, body_toks) VALUES (?, ?, ?, ?)");
   var stmtDeleteFts        = db.prepare("DELETE FROM " + qFts + " WHERE objectid = ?");
+
+  // `<prefix>_meta` marker read — used by the reindex gate at create()
+  // AND by every FTS query path (search) to refuse a half-built index.
+  // Guarded behind a closure so a store opened with init:false against a
+  // pre-format-version database (no _meta table) reads as "no marker"
+  // instead of throwing.
+  function _readFtsMarker() {
+    try {
+      var row = db.prepare("SELECT value FROM " + qMeta + " WHERE key = ?")
+        .get(FTS_FORMAT_META_KEY);
+      return row ? row.value : null;
+    } catch (_e) {
+      // _meta table absent (init:false against a legacy store) — treat
+      // as no marker so the FTS query path falls back rather than
+      // querying a possibly-stale index as if it were current.
+      return null;
+    }
+  }
+  // The FTS index is queryable only when the on-disk marker equals the
+  // current format version. A `'rebuilding'` sentinel or any other
+  // value (stale format, missing marker) means the index is non-final;
+  // search() falls back to the modseq cursor rather than returning
+  // partial / mixed-scheme FTS hits.
+  var CURRENT_FTS_FMT = String(mailStoreFts.FTS_FORMAT_VERSION);
+  function _ftsIndexUsable() {
+    return _readFtsMarker() === CURRENT_FTS_FMT;
+  }
+
+  // Reindex-on-upgrade. Runs once at create() (when doInit) AFTER the
+  // schema is ensured. Rebuilds the sealed-token FTS index from the
+  // canonical (sealed) messages table whenever the on-disk format
+  // marker is missing or stale — the token-hash transform changed, so
+  // every previously-indexed row hashes to a different value and the
+  // old rows are unsearchable under the new scheme.
+  //
+  // Data-safety contract:
+  //   - A `'rebuilding'` sentinel is written BEFORE the DELETE, so an
+  //     interrupted rebuild leaves a non-final marker; search() refuses
+  //     the index until a later create() completes the rebuild.
+  //   - The DELETE + every reinsert run inside an explicit
+  //     BEGIN/COMMIT/ROLLBACK (ordinary SQLite — works on node:sqlite
+  //     and b.db alike; neither exposes a usable `.transaction(fn)()`
+  //     for this shape). A throw inside the insert loop rolls the whole
+  //     rebuild back, leaving the OLD index intact + queryable... except
+  //     the marker still reads as non-final, so search falls back until
+  //     the next successful create() — the index is never silently
+  //     half-built.
+  //   - The final format-version marker is written ONLY after every row
+  //     reinserts and the COMMIT lands.
+  function _reindexFts() {
+    var fmt = _readFtsMarker();
+    if (fmt === CURRENT_FTS_FMT) return { reindexed: false, reason: "current" };
+
+    // Count existing FTS rows AFTER the early-return so the common
+    // already-current path pays nothing for the scan.
+    var ftsCountRow = db.prepare("SELECT COUNT(*) AS n FROM " + qFts).get();
+    var ftsCount = (ftsCountRow && ftsCountRow.n) || 0;
+    var msgCountRow = db.prepare("SELECT COUNT(*) AS n FROM " + qMsgs).get();
+    var msgCount = (msgCountRow && msgCountRow.n) || 0;
+
+    // Fresh store — no marker AND nothing indexed AND no messages to
+    // index. Just stamp the current format; there is nothing to rebuild.
+    if (fmt === null && ftsCount === 0 && msgCount === 0) {
+      _writeFtsMarker(CURRENT_FTS_FMT);
+      return { reindexed: false, reason: "fresh" };
+    }
+
+    // Reindex unseals EVERY message row — a runtime dependency on the
+    // vault that a bare create() otherwise wouldn't have. Fail loud at
+    // boot (entry-point tier) rather than silently leaving a stale,
+    // wrong-scheme index searchable: an operator who constructs the
+    // store before vault.init() must see the misordering immediately.
+    if (!vault.isInitialized()) {
+      throw new MailStoreError("mail-store/fts-reindex-vault-uninitialized",
+        "mailStore.create: FTS index format is stale (marker=" +
+        JSON.stringify(fmt) + ", current=" + CURRENT_FTS_FMT + ") and a " +
+        "reindex from the sealed messages table requires the vault - call " +
+        "b.vault.init(...) BEFORE b.mailStore.create(...). Refusing to leave " +
+        "a stale, wrong-scheme search index queryable.");
+    }
+
+    // Sentinel BEFORE any destructive work — a crash between here and
+    // the final marker leaves the index marked non-final.
+    _writeFtsMarker(FTS_REBUILDING_SENTINEL);
+
+    // BEGIN IMMEDIATE takes the write lock up front so the message
+    // snapshot, the FTS delete, and the reinsert are one isolated window.
+    // The snapshot is read INSIDE the lock: a concurrent writer in another
+    // process cannot append a message between the snapshot and the delete
+    // (which would otherwise drop that row's freshly-inserted FTS entry
+    // without re-adding it, silently losing it from search).
+    var allRows;
+    db.prepare("BEGIN IMMEDIATE").run();
+    try {
+      allRows = db.prepare("SELECT * FROM " + qMsgs).all();
+      db.prepare("DELETE FROM " + qFts).run();
+      for (var i = 0; i < allRows.length; i += 1) {
+        // unsealRow returns the DB column names (subject / from_addr /
+        // to_addrs / body_text); map them into the FTS param shape
+        // (subject / from / to / body) rowFromMessage expects.
+        var clear = cryptoField.unsealRow(messagesTable, allRows[i]);
+        var ftsRow = mailStoreFts.rowFromMessage(messagesTable, {
+          objectid: clear.objectid,
+          subject:  clear.subject   || "",
+          from:     clear.from_addr || "",
+          to:       clear.to_addrs  || "",
+          body:     clear.body_text || "",
+        });
+        stmtInsertFts.run(ftsRow.objectid, ftsRow.subject_toks,
+          ftsRow.addr_toks, ftsRow.body_toks);
+      }
+      db.prepare("COMMIT").run();
+    } catch (e) {
+      // Roll the partial rebuild back — the OLD index rows are restored
+      // (the DELETE is undone), so the prior scheme stays intact and
+      // queryable. The marker still reads as the sentinel, so search()
+      // falls back until a later create() completes the rebuild: a
+      // retriable, never-silently-half-built state.
+      try { db.prepare("ROLLBACK").run(); } catch (_re) { /* best-effort */ }
+      throw new MailStoreError("mail-store/fts-reindex-failed",
+        "mailStore.create: FTS reindex from the sealed messages table " +
+        "failed and was rolled back (the prior index is intact); retry " +
+        "after resolving: " + ((e && e.message) || String(e)));
+    }
+
+    // Full rebuild committed — stamp the current format LAST so the
+    // index only reads as final once every row is present.
+    _writeFtsMarker(CURRENT_FTS_FMT);
+    return { reindexed: true, rows: allRows.length };
+  }
+
+  function _writeFtsMarker(value) {
+    db.prepare(
+      "INSERT INTO " + qMeta + " (key, value) VALUES (?, ?) " +
+      "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(FTS_FORMAT_META_KEY, value);
+  }
+
+  // Wire the reindex into create() AFTER schema bootstrap. A fresh store
+  // (no marker, 0 FTS rows, 0 messages) just stamps the format; a store
+  // carrying an old-format index rebuilds from the sealed rows.
+  if (doInit) {
+    _reindexFts();
+  }
 
   return {
     appendMessage:    function (folderName, rawBytes, appendOpts) {
@@ -274,7 +429,28 @@ function create(opts) {
       var f = filter || {};
       var sinceModseq = f.sinceModseq || 0;
       var limit = f.limit || 100;
-      if (limit > 1000) limit = 1000;                                                                  // allow:raw-byte-literal — query row cap, not bytes
+      if (limit > 1000) limit = 1000;                                                                  // query row cap, not bytes
+
+      // The FTS index is queryable only when the on-disk format marker
+      // is current. A `'rebuilding'` sentinel (mid-rebuild / interrupted
+      // rebuild) or a stale/missing marker means the index is non-final
+      // — fall back to the bare modseq cursor rather than returning
+      // partial or wrong-scheme FTS hits. Returning a subset of the true
+      // matches as if it were complete is the corruption hazard the
+      // reindex sentinel exists to prevent.
+      if (!_ftsIndexUsable()) {
+        var nonFinal = stmtQueryByModseq.all(folder.id, sinceModseq, limit);
+        return {
+          rows: nonFinal.map(function (r) {
+            return {
+              objectid: r.objectid, modseq: r.modseq, sizeBytes: r.size_bytes,
+              internalDate: r.internal_date, legalHold: r.legal_hold === 1,
+            };
+          }),
+          nextModseq: nonFinal.length > 0 ? nonFinal[nonFinal.length - 1].modseq : sinceModseq,
+          ftsUnavailable: true,
+        };
+      }
 
       var matchClauses = [];
       function addMatch(filterKey, term) {
@@ -341,7 +517,7 @@ function create(opts) {
           "queryByModseq: folder '" + folderName + "' not found");
       }
       var sinceModseq = (queryOpts && queryOpts.sinceModseq) || 0;
-      var limit = (queryOpts && queryOpts.limit) || 1000;                                          // allow:raw-byte-literal — query row cap, not bytes
+      var limit = (queryOpts && queryOpts.limit) || 1000;                                          // query row cap, not bytes
       var rows = stmtQueryByModseq.all(folder.id, sinceModseq, limit);
       return rows.map(function (r) {
         return {
@@ -372,7 +548,7 @@ function create(opts) {
       var fo = folderOpts || {};
       var role = fo.role || null;
       var parentId = fo.parentId || null;
-      var uidvalidity = Math.floor(Date.now() / 1000);                                              // allow:raw-byte-literal — Unix timestamp, not bytes
+      var uidvalidity = Math.floor(Date.now() / 1000);                                              // Unix timestamp, not bytes
       stmtInsertFolder.run(name, role, parentId, uidvalidity);
       return stmtGetFolderByName.get(name);
     },
@@ -405,7 +581,7 @@ function create(opts) {
       });
     },
     setLegalHold:     function (objectids, holdOpts) {
-      var hold = (holdOpts && holdOpts.hold) ? 1 : 0;                                              // allow:raw-byte-literal — boolean cast for sqlite INTEGER column
+      var hold = (holdOpts && holdOpts.hold) ? 1 : 0;                                              // boolean cast for sqlite INTEGER column
       objectids.forEach(function (oid) { stmtLegalHold.run(hold, oid); });
       return { changed: objectids.length };
     },
@@ -526,7 +702,7 @@ function _appendMessage(args) {
       "appendMessage: folder '" + args.folderName + "' not found");
   }
 
-  // Parse via safe-mime — bounded; defends CVE-2024-39929 + CVE-2025-30258.
+  // Parse via safe-mime — bounded; defends CVE-2024-39929 + CVE-2026-26312.
   var tree = safeMime.parse(buf, args.safeMimeOpts);
 
   // Extract canonical fields.
@@ -590,7 +766,7 @@ function _appendMessage(args) {
   // token = 32-char hex = 128 bits, well above the birthday bound
   // for any plausible message corpus. The prior `.slice(0, 24)` cut
   // entropy to 96 bits; removed.
-  var objectid = "obj_" + bCrypto.generateToken(16);                                                // allow:raw-byte-literal — 16-byte token, 32-char hex JMAP objectid (RFC 8474 §1.5.1)
+  var objectid = "obj_" + bCrypto.generateToken(16);                                                // 16-byte token, 32-char hex JMAP objectid (RFC 8474 §1.5.1)
   var modseq = (folder.modseq_max || 0) + 1;
   if (!threadRootId) threadRootId = objectid;   // root of new thread
 
@@ -674,7 +850,7 @@ function _fetchByObjectId(args) {
     bodyText:       unsealed.body_text,
     bodyHtml:       unsealed.body_html,
     flags:          flags,
-    legalHold:      row.legal_hold === 1,                                                            // allow:raw-byte-literal — sqlite INTEGER column 0|1
+    legalHold:      row.legal_hold === 1,                                                            // sqlite INTEGER column 0|1
   };
 }
 
@@ -752,7 +928,7 @@ function _setFlags(args) {
   // Per-message modseq bump — without this, queryByModseq filters
   // `messages.modseq > sinceModseq` and misses the flag change. CONDSTORE
   // (RFC 7162) / JMAP Email/changes both depend on the per-message
-  // modseq being current. Per Codex P1 on PR #49.
+  // modseq being current.
   if (args.objectids.length > 0 && (setFlags.length > 0 || unsetFlags.length > 0)) {
     // Bulk-update via IN-clause. SQLite caps IN-clause at 32766 (max
     // bound parameters); chunk for very large operands.
@@ -762,7 +938,7 @@ function _setFlags(args) {
     // which both leaks a prepared-statement handle per chunk and
     // doubles the SQL parse cost. Hold the stmt on a local + invoke
     // .run() directly with the bound argument list.
-    var CHUNK = 500;                                                                               // allow:raw-byte-literal — IN-clause chunk size, not bytes
+    var CHUNK = 500;                                                                               // IN-clause chunk size, not bytes
     for (var i = 0; i < args.objectids.length; i += CHUNK) {
       var chunk = args.objectids.slice(i, i + CHUNK);
       var placeholders = chunk.map(function () { return "?"; }).join(",");
@@ -833,7 +1009,7 @@ function _normalizeMsgId(s) {
 
 // ---- Schema bootstrap ----------------------------------------------------
 
-function _ensureSchema(db, qMsgs, qFolders, qFlags, qQuota, qFts) {
+function _ensureSchema(db, qMsgs, qFolders, qFlags, qQuota, qFts, qMeta) {
   // Folders table — created first since messages reference folder_id.
   db.prepare(
     "CREATE TABLE IF NOT EXISTS " + qFolders + " (" +
@@ -909,12 +1085,23 @@ function _ensureSchema(db, qMsgs, qFolders, qFlags, qQuota, qFts) {
   // tokens on whitespace exactly — hashes are ASCII-hex-only, so no
   // Unicode case-fold runs at MATCH time.
   db.prepare(mailStoreFts.createSql(qFts)).run();
+
+  // Per-prefix key/value metadata table. Holds the FTS on-disk format
+  // marker (`fts_format`) so the reindex path can detect a stale index
+  // and rebuild it. Scoped per table-prefix (NOT PRAGMA user_version,
+  // which is db-global and would collide across stores sharing one
+  // sqlite file).
+  db.prepare(
+    "CREATE TABLE IF NOT EXISTS " + qMeta + " (" +
+    "key TEXT PRIMARY KEY, " +
+    "value TEXT)"
+  ).run();
 }
 
 function _ensureDefaultFolders(db, qFolders) {
   var stmt = db.prepare("INSERT OR IGNORE INTO " + qFolders +
     " (name, role, parent_id, modseq_max, uidvalidity) VALUES (?, ?, NULL, 0, ?)");
-  var uv = Math.floor(Date.now() / 1000);                                                          // allow:raw-byte-literal — Unix timestamp, not bytes
+  var uv = Math.floor(Date.now() / 1000);                                                          // Unix timestamp, not bytes
   DEFAULT_FOLDERS.forEach(function (f) { stmt.run(f.name, f.role, uv); });
 }
 

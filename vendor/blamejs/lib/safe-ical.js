@@ -15,7 +15,7 @@
  *   delivery-time iTIP processing, and the scheduling primitives that
  *   compose against ical bytes.
  *
- *   Defends `CVE-2024-39687` (ical4j RRULE recursion / "Outlook
+ *   Defends the ical4j RRULE-recursion expansion-DoS class ("Outlook
  *   calendar bomb" — a hostile RRULE with unbounded COUNT and
  *   recursive BYxxx expansion can pin a CalDAV server's CPU at 100%
  *   until the request times out). Caps:
@@ -36,8 +36,8 @@
  *       instances than this cap.
  *     - RRULE BYDAY / BYMONTH / BYMONTHDAY / BYHOUR / BYMINUTE /
  *       BYSECOND / BYSETPOS / BYWEEKNO / BYYEARDAY list-length cap
- *       (24 entries) — refused regardless of profile. CVE-2024-39687
- *       achieves expansion blow-up by stacking long BYxxx lists.
+ *       (24 entries) — refused regardless of profile. The recursion
+ *       DoS achieves expansion blow-up by stacking long BYxxx lists.
  *
  *   Header-injection / control-char defense: refuses NUL, C0 control
  *   bytes (other than TAB inside QUOTED-PRINTABLE-shaped values), and
@@ -75,8 +75,8 @@
  * @card
  *   Bounded RFC 5545 iCalendar parser — caps total bytes, nesting
  *   depth, RRULE COUNT and BYxxx list-lengths; refuses NUL / C0 / DEL
- *   inside property values; allowlists property names; defends
- *   CVE-2024-39687 (ical4j RRULE recursion / Outlook calendar-bomb).
+ *   inside property values; allowlists property names; defends the
+ *   ical4j RRULE-recursion expansion-DoS class (Outlook calendar-bomb).
  */
 
 var C = require("./constants");
@@ -84,35 +84,35 @@ var { defineClass } = require("./framework-error");
 
 var SafeIcalError = defineClass("SafeIcalError", { alwaysPermanent: true });
 
-// RRULE caps are enforced regardless of profile — CVE-2024-39687 has
-// no safe permissive posture.
-var RRULE_MAX_COUNT      = 10000;                                                                          // allow:raw-byte-literal — RFC 5545 §3.3.10 recurrence-count cap
-var RRULE_MAX_BY_ENTRIES = 24;                                                                             // allow:raw-byte-literal — BYxxx list-length cap
+// RRULE caps are enforced regardless of profile — the recursion-DoS
+// class has no safe permissive posture.
+var RRULE_MAX_COUNT      = 10000;                                                                          // RFC 5545 §3.3.10 recurrence-count cap
+var RRULE_MAX_BY_ENTRIES = 24;                                                                             // BYxxx list-length cap
 
 var PROFILES = Object.freeze({
   strict: Object.freeze({
     maxBytes:        C.BYTES.kib(256),
     maxLineBytes:    C.BYTES.kib(8),
-    maxLines:        16384,                                                                                // allow:raw-byte-literal — line count cap, not byte size
-    maxNestingDepth: 16,                                                                                   // allow:raw-byte-literal — nesting depth cap, not bytes
-    maxComponents:   4096,                                                                                 // allow:raw-byte-literal — total component count cap, not bytes
-    maxPropertiesPerComponent: 256,                                                                        // allow:raw-byte-literal — per-component prop count, not bytes
+    maxLines:        16384,                                                                                // line count cap, not byte size
+    maxNestingDepth: 16,                                                                                   // nesting depth cap, not bytes
+    maxComponents:   4096,                                                                                 // total component count cap, not bytes
+    maxPropertiesPerComponent: 256,                                                                        // per-component prop count, not bytes
   }),
   balanced: Object.freeze({
     maxBytes:        C.BYTES.mib(1),
     maxLineBytes:    C.BYTES.kib(32),
-    maxLines:        65536,                                                                                // allow:raw-byte-literal — line count cap, not byte size
-    maxNestingDepth: 32,                                                                                   // allow:raw-byte-literal — nesting depth cap, not bytes
-    maxComponents:   16384,                                                                                // allow:raw-byte-literal — total component count cap, not bytes
-    maxPropertiesPerComponent: 1024,                                                                       // allow:raw-byte-literal — per-component prop count, not bytes
+    maxLines:        65536,                                                                                // line count cap, not byte size
+    maxNestingDepth: 32,                                                                                   // nesting depth cap, not bytes
+    maxComponents:   16384,                                                                                // total component count cap, not bytes
+    maxPropertiesPerComponent: 1024,                                                                       // per-component prop count, not bytes
   }),
   permissive: Object.freeze({
     maxBytes:        C.BYTES.mib(4),
     maxLineBytes:    C.BYTES.kib(128),
-    maxLines:        262144,                                                                               // allow:raw-byte-literal — line count cap, not byte size
-    maxNestingDepth: 64,                                                                                   // allow:raw-byte-literal — nesting depth cap, not bytes
-    maxComponents:   65536,                                                                                // allow:raw-byte-literal — total component count cap, not bytes
-    maxPropertiesPerComponent: 4096,                                                                       // allow:raw-byte-literal — per-component prop count, not bytes
+    maxLines:        262144,                                                                               // line count cap, not byte size
+    maxNestingDepth: 64,                                                                                   // nesting depth cap, not bytes
+    maxComponents:   65536,                                                                                // total component count cap, not bytes
+    maxPropertiesPerComponent: 4096,                                                                       // per-component prop count, not bytes
   }),
 });
 
@@ -223,7 +223,7 @@ function parse(text, opts) {
   if (byteLen > caps.maxBytes) {
     throw new SafeIcalError("safe-ical/oversize-bytes",
       "safeIcal.parse: input " + byteLen + " bytes exceeds maxBytes=" + caps.maxBytes +
-      " (CVE-2024-39687-class defense)");
+      " (calendar-bomb defense)");
   }
 
   var lines = _unfold(s, caps);
@@ -251,9 +251,9 @@ function parse(text, opts) {
   var vcal = consumed.component;
   // RFC 5545 §3.4 — a stream may carry multiple VCALENDAR objects.
   // Walk the remainder so trailing objects are validated under the
-  // same caps + control-char + property allowlist (Codex P2 — without
+  // same caps + control-char + property allowlist; without
   // this, CalDAV ingest can pass validation on the first object while
-  // trailing malformed objects ride through untouched).
+  // trailing malformed objects ride through untouched.
   var vcalendars = [_shapeVcalendar(vcal)];
   var cursor = consumed.nextIdx;
   while (cursor < lines.length) {
@@ -345,7 +345,7 @@ function _unfold(s, caps) {
       continue;
     }
     var firstChar = line.charCodeAt(0);
-    if (firstChar === 0x20 || firstChar === 0x09) {                                                       // allow:raw-byte-literal — SPACE / HTAB are RFC 5545 §3.1 fold markers
+    if (firstChar === 0x20 || firstChar === 0x09) {                                                       // SPACE / HTAB are RFC 5545 §3.1 fold markers
       if (unfolded.length === 0) {
         throw new SafeIcalError("safe-ical/bad-line",
           "safeIcal.parse: continuation line before any content line");
@@ -393,7 +393,7 @@ function _parseContentLine(line) {
   // value. Header-injection / log-poisoning defense.
   for (var k = 0; k < value.length; k++) {
     var cc = value.charCodeAt(k);
-    if ((cc < 0x20 && cc !== 0x09) || cc === 0x7F) {                                                      // allow:raw-byte-literal — C0 + DEL refusal
+    if ((cc < 0x20 && cc !== 0x09) || cc === 0x7F) {                                                      // C0 + DEL refusal
       throw new SafeIcalError("safe-ical/control-char-in-value",
         "safeIcal.parse: control char 0x" + cc.toString(16) +
         " in property value (header-injection defense)");
@@ -427,8 +427,8 @@ function _findUnquotedColon(line) {
   var inQ = false;
   for (var i = 0; i < line.length; i++) {
     var c = line.charCodeAt(i);
-    if (c === 0x22) { inQ = !inQ; continue; }                                                             // allow:raw-byte-literal — DQUOTE per RFC 5545 §3.1 quoted-string
-    if (c === 0x3A && !inQ) return i;                                                                     // allow:raw-byte-literal — colon separator per RFC 5545 §3.1
+    if (c === 0x22) { inQ = !inQ; continue; }                                                             // DQUOTE per RFC 5545 §3.1 quoted-string
+    if (c === 0x3A && !inQ) return i;                                                                     // colon separator per RFC 5545 §3.1
   }
   return -1;
 }
@@ -466,7 +466,7 @@ function _parseComponent(lines, startIdx, ctx, depth) {
   if (depth > ctx.caps.maxNestingDepth) {
     throw new SafeIcalError("safe-ical/oversize-nesting",
       "safeIcal.parse: nesting depth exceeds maxNestingDepth=" +
-      ctx.caps.maxNestingDepth + " (CVE-2024-39687-class defense)");
+      ctx.caps.maxNestingDepth + " (calendar-bomb defense)");
   }
   ctx.componentCount += 1;
   if (ctx.componentCount > ctx.caps.maxComponents) {
@@ -516,7 +516,7 @@ function _parseComponent(lines, startIdx, ctx, depth) {
         "safeIcal.parse: unknown property '" + pn +
         "' (extend via opts.extraProperties or use X- prefix)");
     }
-    // RRULE caps — CVE-2024-39687 defense.
+    // RRULE caps — recursion-DoS / calendar-bomb defense.
     if (pn === "RRULE" || pn === "EXRULE") {
       _validateRrule(ln.value);
     }
@@ -558,7 +558,7 @@ function _validateRrule(value) {
       if (!isFinite(n) || n < 0 || n > RRULE_MAX_COUNT) {
         throw new SafeIcalError("safe-ical/oversize-rrule-count",
           "safeIcal.parse: RRULE COUNT=" + val + " exceeds cap=" +
-          RRULE_MAX_COUNT + " (CVE-2024-39687 defense)");
+          RRULE_MAX_COUNT + " (calendar-bomb defense)");
       }
     } else if (key === "BYDAY" || key === "BYMONTH" || key === "BYMONTHDAY" ||
                key === "BYHOUR" || key === "BYMINUTE" || key === "BYSECOND" ||
@@ -567,7 +567,7 @@ function _validateRrule(value) {
       if (entries.length > RRULE_MAX_BY_ENTRIES) {
         throw new SafeIcalError("safe-ical/oversize-rrule-by",
           "safeIcal.parse: RRULE " + key + " list length " + entries.length +
-          " exceeds cap=" + RRULE_MAX_BY_ENTRIES + " (CVE-2024-39687 defense)");
+          " exceeds cap=" + RRULE_MAX_BY_ENTRIES + " (calendar-bomb defense)");
       }
     }
   }
@@ -620,7 +620,7 @@ function _shapeComponent(comp) {
 
 function _preview(s) {
   if (typeof s !== "string") s = String(s);
-  return s.length > 64 ? s.slice(0, 64) + "..." : s;                                                       // allow:raw-byte-literal — log-preview length cap
+  return s.length > 64 ? s.slice(0, 64) + "..." : s;                                                       // log-preview length cap
 }
 
 module.exports = {

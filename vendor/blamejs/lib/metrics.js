@@ -45,7 +45,8 @@ var safeJson = require("./safe-json");
 var { defineClass } = require("./framework-error");
 var { boot } = require("./log");
 var numericBounds = require("./numeric-bounds");
-var { resolveRoute, captureResponseStatus, HTTP_STATUS } = require("./request-helpers");
+var requestHelpers = require("./request-helpers");
+var { resolveRoute, captureResponseStatus, HTTP_STATUS } = requestHelpers;
 var validateOpts = require("./validate-opts");
 
 var MetricsError = defineClass("MetricsError", { alwaysPermanent: true });
@@ -142,7 +143,7 @@ function _normalizeLabelArg(callLabels, value, defaultValue) {
   };
 }
 
-// CRYPTO-18 — credential-shape detector. Operators routinely tap their
+// Credential-shape detector. Operators routinely tap their
 // own observability with `{ token: req.headers.authorization }` or
 // `{ apiKey: req.headers["x-api-key"] }`, which then leak through the
 // /metrics scrape surface to any reader of the metrics endpoint. The
@@ -160,8 +161,8 @@ function _normalizeLabelArg(callLabels, value, defaultValue) {
 //     a heuristic fallback so unknown-issuer tokens still get caught
 var _CRED_PREFIX_RE = /^(?:Bearer|Basic|Negotiate|Token|Digest)\s+\S/i;
 var _CRED_ISSUER_RE = /^(?:sk-|pk-|rk-|ghp_|ghs_|gho_|github_pat_|xoxb-|xoxa-|xoxp-|xoxr-|xapp-)/;
-var _CRED_JWT_RE    = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;                   // allow:raw-byte-literal — JWT segment min length
-var _CRED_ENTROPY_RE = /^[A-Za-z0-9_+/=-]{40,}$/;                                                    // allow:raw-byte-literal — high-entropy length floor
+var _CRED_JWT_RE    = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;                   // JWT segment min length
+var _CRED_ENTROPY_RE = /^[A-Za-z0-9_+/=-]{40,}$/;                                                    // high-entropy length floor
 
 // CRED_MAX_SCAN — upper bound on the byte slice the credential
 // detector inspects. Operator-supplied label values longer than this
@@ -169,11 +170,11 @@ var _CRED_ENTROPY_RE = /^[A-Za-z0-9_+/=-]{40,}$/;                               
 // still a credential), but the regex tests run on the prefix slice so
 // a 1 GB string can't ReDoS the scanner. Counter cardinality stays
 // stable: the same long string always maps to the same prefix slice.
-var CRED_MAX_SCAN = 256;                                                                             // allow:raw-byte-literal — prefix-scan length cap
+var CRED_MAX_SCAN = 256;                                                                             // prefix-scan length cap
 
 function _looksLikeCredential(str) {
   if (typeof str !== "string") return false;
-  if (str.length < 8) return false;                                                                  // allow:raw-byte-literal — minimum credential length floor
+  if (str.length < 8) return false;                                                                  // minimum credential length floor
   // Clamp to the prefix slice so a hostile label value can't push the
   // regex into superlinear time. All four credential shapes have
   // signature in the first ~256 bytes; Stripe / GitHub / OpenAI tokens
@@ -184,7 +185,7 @@ function _looksLikeCredential(str) {
   // enough entropy to be real tokens; hoisted to a named constant so
   // every test() has its length floor visible at the call site
   // (testFormatValidatorLengthCap convention).
-  var CRED_MIN_LEN = 8;                                                                              // allow:raw-byte-literal — minimum credential length floor
+  var CRED_MIN_LEN = 8;                                                                              // minimum credential length floor
   if (clamped.length >= CRED_MIN_LEN && _CRED_PREFIX_RE.test(clamped)) return true;
   if (clamped.length >= CRED_MIN_LEN && _CRED_ISSUER_RE.test(clamped)) return true;
   if (clamped.length >= CRED_MIN_LEN && _CRED_JWT_RE.test(clamped)) return true;
@@ -198,7 +199,7 @@ function _validateLabelValue(value) {
   // counters indexed by various input types still work.
   if (value === null || value === undefined) return "";
   var coerced = String(value);
-  // CRYPTO-18 — credential-shape detector. Operators who tap their
+  // Credential-shape detector. Operators who tap their
   // observability with raw header values leak bearer tokens / API
   // keys through /metrics to every scrape reader. Refuse the value
   // and surface a redaction marker so the metric still labels (so
@@ -635,9 +636,42 @@ function create(opts) {
 
   function expositionHandler() {
     return function metricsHandler(req, res) {
-      var body = exposition();
+      // OpenMetrics §1.2 content-negotiation. Operators with
+      // OpenMetrics-strict scrapers (Prometheus 2.x with strict mode,
+      // OpenObservability tooling) send
+      // `Accept: application/openmetrics-text; version=1.0.0`. The
+      // handler returns the OpenMetrics-1.0 wire format when that
+      // media type has the highest q-value among supported types;
+      // defaults to Prometheus 0.0.4 otherwise.
+      // Honor RFC 9110 §12.5.1 weighted negotiation: a client that
+      // sends `Accept: text/plain;q=1.0, application/openmetrics-
+      // text;q=0.5` (or `;q=0`) gets text/plain back, even though
+      // both media types are supported.
+      var acceptHeader = req && req.headers ? String(req.headers.accept || "") : "";
+      var entries = requestHelpers.parseQualityList(acceptHeader);
+      var openMetricsQ = 0;
+      var prometheusQ = 0;
+      var sawAccept = entries.length > 0;
+      for (var i = 0; i < entries.length; i += 1) {
+        var v = entries[i].value;
+        var q = entries[i].q;
+        if (v === "application/openmetrics-text" || v === "*/*" || v === "application/*") {
+          if (q > openMetricsQ) openMetricsQ = q;
+        }
+        if (v === "text/plain" || v === "*/*" || v === "text/*") {
+          if (q > prometheusQ) prometheusQ = q;
+        }
+      }
+      // Default Prometheus when client sent no Accept header or both
+      // q-values are zero. Tie-break favours Prometheus for
+      // backward-compatibility with legacy scrapers.
+      var wantOpenMetrics = sawAccept && openMetricsQ > prometheusQ && openMetricsQ > 0;
+      var body = exposition(wantOpenMetrics ? { format: "openmetrics" } : undefined);
+      var contentType = wantOpenMetrics
+        ? "application/openmetrics-text; version=1.0.0; charset=utf-8"
+        : "text/plain; version=0.0.4; charset=utf-8";
       res.writeHead(HTTP_STATUS.OK, {
-        "Content-Type":   "text/plain; version=0.0.4; charset=utf-8",
+        "Content-Type":   contentType,
         "Content-Length": Buffer.byteLength(body),
         "Cache-Control":  "no-store",
       });
@@ -679,7 +713,37 @@ function create(opts) {
         // the rest of the framework's diagnostics.
         try { requestsTotal.inc(labels); }
         catch (e) { log.warn("metrics/request-counter-failed: " + e.message); }
-        try { requestDuration.observe(durLabels, elapsedSec); }
+        // OpenMetrics §6.2 — when a sampled trace context is active
+        // on the request, attach the trace + active SERVER-span id
+        // as the histogram bucket's exemplar so downstream scrapers
+        // (Prometheus 2.x, Grafana exemplar-renderer) can pivot
+        // from a slow-request bucket to the trace that produced it.
+        //
+        // The span_id MUST be the server-handling
+        // span (created by b.middleware.spanHttpServer + stamped on
+        // req.span), not the upstream `traceparent`'s parent-id.
+        // The parent-id points at the CALLER's span (or nothing for
+        // root requests); using it would mis-pivot the exemplar.
+        var exemplar = null;
+        if (req.span && req.span.traceId && req.span.spanId && req.span.sampled !== false) {
+          exemplar = {
+            labels:    { trace_id: req.span.traceId, span_id: req.span.spanId },
+            value:     elapsedSec,
+            timestamp: Date.now() / 1000,
+          };
+        } else if (req.trace && req.trace.sampled && req.trace.traceId && req.trace.spanId) {
+          // Operators wiring traceparent directly without
+          // spanHttpServer surface the inbound span as
+          // req.trace.spanId. Fall back to it; refuse to invent a
+          // span_id from parentId since that points at the upstream
+          // caller, not the work the metric measures.
+          exemplar = {
+            labels:    { trace_id: req.trace.traceId, span_id: req.trace.spanId },
+            value:     elapsedSec,
+            timestamp: Date.now() / 1000,
+          };
+        }
+        try { requestDuration.observe(durLabels, elapsedSec, exemplar); }
         catch (e) { log.warn("metrics/request-duration-failed: " + e.message); }
       });
       return next();
@@ -922,11 +986,11 @@ function snapshotStartWriter(opts) {
   var fieldsFn   = opts.fields;
   var registry   = opts.registry || null;
   var intervalMs = opts.intervalMs;
-  // CRYPTO-6 — file mode for the atomic write. Default 0o640
+  // File mode for the atomic write. Default 0o640
   // (owner rw, group r, world none). Operators with a sidecar
   // reader in a different group override to 0o644; multi-tenant
   // hosts may even tighten to 0o600.
-  var fileMode = opts.fileMode !== undefined ? opts.fileMode : 0o640;                                // allow:raw-byte-literal — POSIX file mode octal
+  var fileMode = opts.fileMode !== undefined ? opts.fileMode : 0o640;                                // POSIX file mode octal
   if (typeof fileMode !== "number" || !isFinite(fileMode) ||
       fileMode < 0 || fileMode > 0o777 || Math.floor(fileMode) !== fileMode) {
     throw new MetricsError("metrics-snapshot/bad-file-mode",
@@ -955,7 +1019,7 @@ function snapshotStartWriter(opts) {
       catch (e2) { log("snapshot.metrics serialize failed: " + ((e2 && e2.message) || String(e2))); }
     }
     try {
-      // CRYPTO-6 — default 0o640 (owner rw, group r, world none) so
+      // Default 0o640 (owner rw, group r, world none) so
       // operator-supplied snapshot fields aren't world-readable on a
       // multi-tenant host. Operators with a sidecar reader running as
       // a different group override via opts.fileMode at startWriter
@@ -1014,7 +1078,7 @@ function snapshotRead(p) {
   // is well above the framework's expected snapshot size (~5-50 KiB)
   // and the safeJson absolute cap stays within reach.
   try {
-    // CRYPTO-21 — route through C.BYTES.mib(4); the raw byte literal
+    // Route through C.BYTES.mib(4); the raw byte literal
     // was a drift smell flagged by codebase-patterns.
     parsed = safeJson.parse(raw, { maxBytes: C.BYTES.mib(4) });
   } catch (e) {
@@ -1199,7 +1263,7 @@ function snapshotRender(snap, opts) {
       var kd = keys2[jd];
       var vd = fields[kd];
       if (typeof vd !== "string") continue;
-      if (vd.length > 64) continue;                                                                  // allow:raw-byte-literal — ISO 8601 max length cap, not bytes
+      if (vd.length > 64) continue;                                                                  // ISO 8601 max length cap, not bytes
       if (!ISO_DATE_RE.test(vd)) continue;                                                           // allow:regex-no-length-cap — length-bounded immediately above
       if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(kd)) continue;                                            // allow:regex-no-length-cap — field-name shape, length-bounded by snap field naming
       var ms = Date.parse(vd);
@@ -1247,7 +1311,7 @@ function snapshotRender(snap, opts) {
  *   shadow.set("queue_depth", 42);
  *   shadow.snapshot();
  */
-var SHADOW_DEFAULT_CARDINALITY = 10000;                                                              // allow:raw-byte-literal — cardinality cap, not bytes
+var SHADOW_DEFAULT_CARDINALITY = 10000;                                                              // cardinality cap, not bytes
 function shadowRegistry(opts) {
   if (!opts || typeof opts !== "object") {
     throw new MetricsError("metrics-shadow/bad-opts",

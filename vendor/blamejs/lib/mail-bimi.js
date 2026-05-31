@@ -34,8 +34,9 @@
  *   subjectAltName URI matches the BIMI domain, and confirms the
  *   cert carries the BIMI mark-verification policy OID
  *   (1.3.6.1.5.5.7.3.31). The verified mark is returned as
- *   { svg, evidenceDocument } pulled from RFC 3709 logotype extension
- *   when present.
+ *   { svg, evidenceDocument } — `svg` pulled from the RFC 3709
+ *   logotype extension when present, `evidenceDocument` echoed from the
+ *   operator-supplied opts.evidenceDocument.
  *
  *   `validateTinyPsSvg` enforces the AuthIndicators-WG Tiny PS subset:
  *   single root <svg>, version="1.2", baseProfile="tiny-ps", viewBox
@@ -386,7 +387,7 @@ function validateTinyPsSvg(svgBytes) {
     if (t.type === "processingInstruction") {
       var pir = (t.raw || "").trim();
       if (!/^<\?xml\b/i.test(pir)) {
-        _vio("pi-forbidden", "processing instruction is forbidden in Tiny-PS: " + pir.slice(0, 40))   /* allow:raw-byte-literal — display truncation chars, not bytes */;
+        _vio("pi-forbidden", "processing instruction is forbidden in Tiny-PS: " + pir.slice(0, 40))   /* display truncation chars, not bytes */;
       }
       continue;
     }
@@ -443,7 +444,7 @@ function validateTinyPsSvg(svgBytes) {
         if (lname === "href" || lname === "xlink:href") {
           if (aval.length > 0 && aval.charAt(0) !== "#") {
             _vio("external-ref-forbidden",
-              "external reference in `" + aname + "='" + aval.slice(0, 60) /* allow:raw-time-literal — display truncation chars, not seconds */ + "...'` " +
+              "external reference in `" + aname + "='" + aval.slice(0, 60) /* allow:raw-time-literal — display truncation char-count 60; coincidental multiple-of-60, not a duration, C.TIME N/A */ + "...'` " +
               "is forbidden in Tiny-PS (only `#fragment` permitted)");
           }
         }
@@ -978,7 +979,7 @@ function _extractBimiCertPolicy(cert) {
       // RFC 3709 4.1 - LogotypeExtn carries SubjectLogo (best-effort
       // SVG extraction; full RFC 3709 unpack requires walking nested
       // SEQUENCEs to LogotypeImageData).
-      var found = _scanForEmbeddedSvg(inner, 8); /* allow:raw-byte-literal — string-prefix length for magic-bytes match, not bytes */
+      var found = _scanForEmbeddedSvg(inner, 8); /* string-prefix length for magic-bytes match, not bytes */
       if (found) rv.logoSvg = found;
     }
   }
@@ -991,7 +992,7 @@ function _scanForEmbeddedSvg(node, depthBudget) {
 
   if (!node.constructed) {
     if (!node.value || node.value.length < 4) return null;
-    var prefix = node.value.slice(0, Math.min(node.value.length, 64)).toString("utf8");   /* allow:raw-byte-literal — display truncation length, not bytes */
+    var prefix = node.value.slice(0, Math.min(node.value.length, 64)).toString("utf8");   /* display truncation length, not bytes */
     if (prefix.indexOf("<svg") !== -1 || /<\?xml[\s\S]*<svg/.test(prefix)) {
       return node.value.toString("utf8");
     }

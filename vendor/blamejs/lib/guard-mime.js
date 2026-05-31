@@ -58,7 +58,7 @@ var TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&\-^_.+]{0,126}$/;
 var PARAM_TOKEN_RE = safeBuffer.RFC7230_TCHAR_RE;
 
 // Quoted-string body (between double quotes) per RFC 7230 §3.2.6.
-var QUOTED_STRING_BODY_RE = /^[\t\x20-\x7e]*$/;                                   // allow:raw-byte-literal — printable ASCII range
+var QUOTED_STRING_BODY_RE = /^[\t\x20-\x7e]*$/;                                   // printable ASCII range
 
 // Risky-type refuse list (operator-supplied scripts handed to a host).
 var RISKY_TYPES = Object.freeze([
@@ -369,7 +369,7 @@ function _detectIssues(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:             "reject"|"strip"|"audit"|"allow",
  *   controlPolicy:          "reject"|"strip"|"allow",
  *   nullBytePolicy:         "reject"|"strip"|"allow",
@@ -423,7 +423,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:                    same shape as b.guardMime.validate opts,
  *
  * @example
@@ -467,7 +467,7 @@ function sanitize(input, opts) {
  * @compliance hipaa, pci-dss, gdpr, soc2
  * @related    b.guardMime.validate, b.guardMime.sanitize, b.guardAll.gate
  *
- * Build an async gate `(ctx) -> { ok, action, issues }` consumable
+ * Build a guard gate whose async `check(ctx)` returns `{ ok, action, issues }`, consumable
  * by `b.guardAll`, `b.staticServe`, `b.fileUpload`, and any other
  * host that integrates the guard contract. The gate reads
  * `ctx.identifier` (or `ctx.mime`), runs `validate`, and maps
@@ -477,15 +477,15 @@ function sanitize(input, opts) {
  * @opts
  *   name:                   string,    // gate label for audit / observability
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   ...:                    same shape as b.guardMime.validate opts,
  *
  * @example
  *   var g = b.guardMime.gate({ profile: "strict" });
- *   var rv = await g({ identifier: "application/json" });
+ *   var rv = await g.check({ identifier: "application/json" });
  *   rv.action;                                         // → "serve"
  *
- *   var bad = await g({ identifier: "application/x-msdownload" });
+ *   var bad = await g.check({ identifier: "application/x-msdownload" });
  *   bad.action;                                        // → "refuse"
  */
 function gate(opts) {

@@ -57,6 +57,8 @@ var crypto = require("./lib/crypto");
 // remembering separate top-level namespaces. Implementations live in
 // the dedicated lib files; these are thin aliases.
 crypto.hpke = require("./lib/crypto-hpke");
+crypto.oprf = require("./lib/crypto-oprf");
+crypto.xwing = require("./lib/crypto-xwing");
 // Both PQ-HPKE drafts behind one opt-in sub-namespace — see
 // lib/crypto-hpke-pq.js. Operators that need a draft-codepoint
 // shape reach for b.crypto.hpke.pq.connolly / .wg explicitly; the
@@ -243,6 +245,7 @@ var auth = {
               require("./lib/auth/jwt"),
               { verifyExternal: require("./lib/auth/jwt-external").verifyExternal }),
   oauth:    require("./lib/auth/oauth"),
+  jar:      require("./lib/auth/jar"),
   lockout:  require("./lib/auth/lockout"),
   dpop:     require("./lib/auth/dpop"),
   aal:      require("./lib/auth/aal"),
@@ -271,6 +274,8 @@ var forms = require("./lib/forms");
 var app = require("./lib/app");
 var jobs = require("./lib/jobs");
 var archive = require("./lib/archive");
+var archiveAdapters = require("./lib/archive-adapters");
+var safeArchive = require("./lib/safe-archive");
 var breakGlass = require("./lib/break-glass");
 var config = require("./lib/config");
 var csv = require("./lib/csv");
@@ -368,6 +373,8 @@ var fileUpload = require("./lib/file-upload");
 var dualControl = require("./lib/dual-control");
 var retention = require("./lib/retention");
 var legalHold = require("./lib/legal-hold");
+var worm = require("./lib/worm");
+var crdt = require("./lib/crdt");
 var network = require("./lib/network");
 var cloudEvents = require("./lib/cloud-events");
 var dsr = require("./lib/dsr");
@@ -391,6 +398,19 @@ var webPush = require("./lib/web-push-vapid");
 var fedcm = require("./lib/fedcm");
 var dbsc = require("./lib/dbsc");
 var importmapIntegrity = require("./lib/importmap-integrity");
+var privacyPass = require("./lib/privacy-pass");
+var contentDigest = require("./lib/content-digest");
+var canonicalJson = require("./lib/canonical-json");
+var linkHeader = require("./lib/link-header");
+var jsonPointer = require("./lib/json-pointer");
+var jsonPatch = require("./lib/json-patch");
+var jsonMergePatch = require("./lib/json-merge-patch");
+var jsonPath = require("./lib/json-path");
+var jtd = require("./lib/jtd");
+var jsonSchema = require("./lib/json-schema");
+var base32 = require("./lib/base32");
+var uriTemplate = require("./lib/uri-template");
+var jwk = require("./lib/jwk");
 var standardWebhooks = require("./lib/standard-webhooks");
 var lro = require("./lib/lro");
 var jsonApi = require("./lib/jsonapi");
@@ -406,6 +426,19 @@ module.exports = {
   fedcm:            fedcm,
   dbsc:             dbsc,
   importmapIntegrity: importmapIntegrity,
+  privacyPass:      privacyPass,
+  contentDigest:    contentDigest,
+  canonicalJson:    canonicalJson,
+  linkHeader:       linkHeader,
+  jsonPointer:      jsonPointer,
+  jsonPatch:        jsonPatch,
+  jsonMergePatch:   jsonMergePatch,
+  jsonPath:         jsonPath,
+  jtd:              jtd,
+  jsonSchema:       jsonSchema,
+  base32:           base32,
+  uriTemplate:      uriTemplate,
+  jwk:              jwk,
   standardWebhooks: standardWebhooks,
   lro:              lro,
   jsonApi:          jsonApi,
@@ -440,6 +473,12 @@ module.exports = {
     input:           aiInput,
     aiContentDetect: require("./lib/ai-content-detect"),
     modelManifest:   require("./lib/ai-model-manifest"),
+    disclosure:      require("./lib/ai-disclosure"),
+    quota:           require("./lib/ai-quota"),
+    capability:      require("./lib/ai-capability"),
+    dp:              require("./lib/ai-dp"),
+    aedtBiasAudit:   require("./lib/ai-aedt-bias-audit"),
+    frontierModelProtocol: require("./lib/ai-frontier-protocol"),
   },
   promisePool:      require("./lib/promise-pool"),
   sdNotify:         require("./lib/sd-notify"),
@@ -448,6 +487,15 @@ module.exports = {
   // b.jose.jwe.experimental — see lib/jose-jwe-experimental.js for
   // the codepoint-stability contract.
   jose:             { jwe: { experimental: require("./lib/jose-jwe-experimental") } },
+  cbor:             require("./lib/cbor"),
+  cose:             require("./lib/cose"),
+  cwt:              require("./lib/cwt"),
+  eat:              require("./lib/eat"),
+  scitt:            require("./lib/scitt"),
+  tsa:              require("./lib/tsa"),
+  vc:               require("./lib/vc"),
+  mdoc:             require("./lib/mdoc"),
+  did:              require("./lib/did"),
   queue:            queue,
   logStream:        logStream,
   redact:           redact,
@@ -571,7 +619,19 @@ module.exports = {
   forms:            forms,
   createApp:        app.createApp,
   jobs:             jobs,
-  archive:          archive,
+  archive:          Object.assign({}, archive, {
+    adapters: {
+      fs:                     archiveAdapters.fs,
+      buffer:                 archiveAdapters.buffer,
+      objectStore:            archiveAdapters.objectStore,
+      http:                   archiveAdapters.http,
+      trustedStream:          archiveAdapters.trustedStream,
+      isRandomAccessAdapter:  archiveAdapters.isRandomAccessAdapter,
+      isTrustedStreamAdapter: archiveAdapters.isTrustedStreamAdapter,
+    },
+    read:             archive.read,
+  }),
+  safeArchive:      safeArchive,
   breakGlass:       breakGlass,
   config:           config,
   csv:              csv,
@@ -655,6 +715,8 @@ module.exports = {
   dualControl:      dualControl,
   retention:        retention,
   legalHold:        legalHold,
+  worm:             worm,
+  crdt:             crdt,
   network:          network,
   cloudEvents:      cloudEvents,
   dsr:              dsr,

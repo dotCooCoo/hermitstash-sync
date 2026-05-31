@@ -36,24 +36,27 @@ var retryHelper = require("./retry");
  * Build a circuit-breaker. Returns a CircuitBreaker instance with
  * `wrap(fn)` (executes `fn` if the breaker is closed; throws an
  * `Error` with `code: "CIRCUIT_OPEN"` + `isObjectStoreError: true` +
- * `permanent: false` when open), `state()`, `reset()`, and
- * `onStateChange(handler)` listener registration. Pass-through
+ * `permanent: false` when open), `getState()`, `reset()`, and
+ * `onStateChange(handler)` listener registration (the handler, and the
+ * `onStateChange` opt, receive `{ name, from, to, at }` on every
+ * transition). Pass-through
  * factory: identical instance shape to `b.retry.CircuitBreaker`,
  * with the framework's `create(opts)` vocabulary.
  *
  * The `CIRCUIT_OPEN` error code is a pre-v1 artifact — every other
- * framework error class uses namespaced codes (`retry/...`). The
- * rename is deferred to v0.10 with a deprecation cycle so existing
- * operators who match `err.code === "CIRCUIT_OPEN"` aren't broken
- * in a patch.
+ * framework error class uses namespaced codes (`retry/...`). It is
+ * kept through the pre-1.0 line so existing operators who match
+ * `err.code === "CIRCUIT_OPEN"` aren't broken in a patch; the rename
+ * to a namespaced code lands at v1.0 alongside the namespaced-error
+ * sweep, with a deprecation warning shipping a minor ahead.
  *
  * @opts
  *   name:             string,    // identifier used in audit + state-change events
  *   failureThreshold: number,    // failures in the closed state before opening
  *   cooldownMs:       number,    // milliseconds the breaker stays open before probing
  *   successThreshold: number,    // probe successes required to close from half-open
- *   audit:            Object,    // optional b.audit instance for state-change emission
- *   onStateChange:    Function,  // ({ name, from, to, at }) → void
+ *   onStateChange:    Function,  // ({ name, from, to, at }) → void; also emits the
+ *                                //   `breaker.state.change` observability event
  *
  * @example
  *   var cb = b.circuitBreaker.create({
@@ -79,7 +82,7 @@ function create(opts) {
   // split the name out of opts before invoking the constructor.
   // Caught by hermitstash-sync operator review against v0.9.12.
   //
-  // CRYPTO-19 — the previous empty-string fallback was unreachable
+  // The previous empty-string fallback was unreachable
   // (retryHelper.CircuitBreaker validator throws on "" first) AND
   // produced a confusing error message ("name must be a non-empty
   // string, got string \"\"") that obscured the real opt-shape

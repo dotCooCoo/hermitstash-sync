@@ -415,7 +415,7 @@ function create(opts) {
    * (Response-level OR Assertion-level signature), the assertion's
    * SubjectConfirmation Bearer constraints, and Conditions audience
    * + time bounds. Returns `{ nameId, nameIdFormat, sessionIndex,
-   * attributes, audience, inResponseTo }`.
+   * attributes, audience, inResponseTo, issuer }`.
    *
    * @opts
    *   {
@@ -428,7 +428,7 @@ function create(opts) {
    *     var info = sp.verifyResponse(req.body.SAMLResponse, {
    *       expectedInResponseTo: req.session.samlRequestId,
    *     });
-   *     // → { nameId, nameIdFormat, sessionIndex, attributes, audience, issuer }
+   *     // → { nameId, nameIdFormat, sessionIndex, attributes, audience, inResponseTo, issuer }
    *   });
    */
   function verifyResponse(samlResponseB64, vopts) {
@@ -453,12 +453,14 @@ function create(opts) {
 
     // XSW defense — refuse duplicate top-level security-critical
     // elements. SAML XML signature wrapping (XSW) attacks shuffle
-    // signed elements alongside unsigned siblings; the parser's
-    // first-match `_findChild` lookup combined with the signed-
-    // element-ID check at L479 was vulnerable to a multi-Assertion
-    // payload where the verifier signed one but the consumer read
-    // attributes from another. Reject any Response with more than
-    // one of these structural children (Audit 2026-05-11).
+    // signed elements alongside unsigned siblings; a first-match
+    // child lookup combined with a signed-element-ID check is
+    // vulnerable to a multi-Assertion payload where the verifier
+    // signs one element but the consumer reads attributes from
+    // another. This is the class behind CVE-2024-45409 (ruby-saml,
+    // CVSS 10.0, actively exploited) and CVE-2025-25291/25292
+    // (omniauth-saml / ruby-saml namespace-confusion XSW). Reject
+    // any Response with more than one of these structural children.
     var statusChildren = _findAllChildren(root, "Status", SAML_NS.protocol);
     if (statusChildren.length > 1) {
       throw new AuthError("auth-saml/duplicate-status",
@@ -590,10 +592,14 @@ function create(opts) {
     var nameId = _textContent(nameIdEl);
     var nameIdFormat = _attr(nameIdEl, "Format");
 
-    var nowSec = Math.floor((vopts.now || Date.now()) / 1000);                                  // allow:raw-byte-literal — ms→s
+    var nowSec = Math.floor((vopts.now || Date.now()) / 1000);                                  // ms→s
     var confirmations = _findAllChildren(subject, "SubjectConfirmation", SAML_NS.assertion);
     var bearerOk = false;
     var hokOk = false;
+    // InResponseTo of the SubjectConfirmation that actually passed bearer
+    // validation — captured so the returned value can't be sourced from a
+    // different (non-validated) confirmation when several are present.
+    var matchedInResponseTo = null;
     var hokFingerprint = null;
     // Holder-of-Key SubjectConfirmation per SAML 2.0 Profile §3.1
     // (urn:oasis:names:tc:SAML:2.0:cm:holder-of-key). The IdP binds
@@ -678,10 +684,10 @@ function create(opts) {
         // as Bearer (Profile §3.1 incorporates §3 by reference).
         var nbHok = _attr(scdHok, "NotBefore");
         var noaHok = _attr(scdHok, "NotOnOrAfter");
-        if (nbHok && isFinite(Date.parse(nbHok) / 1000) &&                                          // allow:raw-byte-literal — ms→s
-            Date.parse(nbHok) / 1000 > nowSec + clockSkewSec) continue;                             // allow:raw-byte-literal — ms→s
-        if (noaHok && isFinite(Date.parse(noaHok) / 1000) &&                                        // allow:raw-byte-literal — ms→s
-            Date.parse(noaHok) / 1000 < nowSec - clockSkewSec) continue;                            // allow:raw-byte-literal — ms→s
+        if (nbHok && isFinite(Date.parse(nbHok) / 1000) &&                                          // ms→s
+            Date.parse(nbHok) / 1000 > nowSec + clockSkewSec) continue;                             // ms→s
+        if (noaHok && isFinite(Date.parse(noaHok) / 1000) &&                                        // ms→s
+            Date.parse(noaHok) / 1000 < nowSec - clockSkewSec) continue;                            // ms→s
         var recipHok = _attr(scdHok, "Recipient");
         if (recipHok && recipHok !== opts.assertionConsumerServiceUrl) continue;
         hokOk = true;
@@ -692,14 +698,14 @@ function create(opts) {
       if (!scd) continue;
       var notOnOrAfter = _attr(scd, "NotOnOrAfter");
       if (notOnOrAfter) {
-        var t = Date.parse(notOnOrAfter) / 1000;                                                // allow:raw-byte-literal — ms→s
+        var t = Date.parse(notOnOrAfter) / 1000;                                                // ms→s
         if (!isFinite(t) || t < nowSec - clockSkewSec) {
           continue; // expired confirmation — try next
         }
       }
       var notBefore = _attr(scd, "NotBefore");
       if (notBefore) {
-        var nb = Date.parse(notBefore) / 1000;                                                  // allow:raw-byte-literal — ms→s
+        var nb = Date.parse(notBefore) / 1000;                                                  // ms→s
         if (isFinite(nb) && nb > nowSec + clockSkewSec) continue;
       }
       var recipient = _attr(scd, "Recipient");
@@ -711,7 +717,7 @@ function create(opts) {
         // Constant-time compare against the AuthnRequest ID the
         // operator stored — protects against timing-based InResponseTo
         // probing. timingSafeEqual returns false for missing /
-        // length-mismatch without leaking. (Audit 2026-05-11.)
+        // length-mismatch without leaking.
         if (inResponseTo === null || inResponseTo === undefined ||
             !timingSafeEqual(inResponseTo, vopts.expectedInResponseTo)) {
           throw new AuthError("auth-saml/bad-in-response-to",
@@ -719,6 +725,7 @@ function create(opts) {
             "AuthnRequest ID (replay defense)");
         }
       }
+      matchedInResponseTo = inResponseTo;
       bearerOk = true;
       break;
     }
@@ -734,14 +741,14 @@ function create(opts) {
       var cNotBefore = _attr(conditions, "NotBefore");
       var cNotOnOrAfter = _attr(conditions, "NotOnOrAfter");
       if (cNotBefore) {
-        var cnb = Date.parse(cNotBefore) / 1000;                                                // allow:raw-byte-literal — ms→s
+        var cnb = Date.parse(cNotBefore) / 1000;                                                // ms→s
         if (isFinite(cnb) && cnb > nowSec + clockSkewSec) {
           throw new AuthError("auth-saml/conditions-not-yet-valid",
             "Conditions NotBefore is in the future");
         }
       }
       if (cNotOnOrAfter) {
-        var cnoa = Date.parse(cNotOnOrAfter) / 1000;                                            // allow:raw-byte-literal — ms→s
+        var cnoa = Date.parse(cNotOnOrAfter) / 1000;                                            // ms→s
         if (isFinite(cnoa) && cnoa < nowSec - clockSkewSec) {
           throw new AuthError("auth-saml/conditions-expired",
             "Conditions NotOnOrAfter has passed");
@@ -785,8 +792,7 @@ function create(opts) {
       sessionIndex:    sessionIndex,
       attributes:      attributes,
       audience:        audience,
-      inResponseTo:    bearerOk ? _attr(_findChild(_findChild(subject, "SubjectConfirmation", SAML_NS.assertion),
-                                       "SubjectConfirmationData", SAML_NS.assertion), "InResponseTo") : null,
+      inResponseTo:    bearerOk ? matchedInResponseTo : null,
       issuer:          issuer,
     };
   }
@@ -836,7 +842,7 @@ function create(opts) {
       "</md:EntityDescriptor>";
   }
 
-  // ---- v0.10.16 — Single Logout (RFC SAML Bindings §3.4 HTTP-Redirect) ----
+  // ---- Single Logout (RFC SAML Bindings §3.4 HTTP-Redirect) ----
 
   /**
    * @primitive b.auth.saml.sp.buildLogoutRequest
@@ -882,7 +888,7 @@ function create(opts) {
       throw new AuthError("auth-saml/no-idp-slo",
         "buildLogoutRequest: opts.idpSloUrl (or sp.create's opts.idpSloUrl) required");
     }
-    var id = "_" + generateToken(20);                                                                 // allow:raw-byte-literal — 20-byte SAML ID token
+    var id = "_" + generateToken(20);                                                                 // 20-byte SAML ID token
     var issueInstant = new Date().toISOString();
     var c14n = xmlC14n();
     var nameIdFormatAttr = bopts.nameIdFormat
@@ -1083,7 +1089,7 @@ function create(opts) {
     validateOpts.requireNonEmptyString(bopts.inResponseTo, "inResponseTo", AuthError, "auth-saml/no-in-response-to");
     validateOpts.requireNonEmptyString(bopts.destination, "destination", AuthError, "auth-saml/no-destination");
     var statusCode = bopts.statusCode || "urn:oasis:names:tc:SAML:2.0:status:Success";
-    var id = "_" + generateToken(20);                                                                 // allow:raw-byte-literal — 20-byte SAML ID token
+    var id = "_" + generateToken(20);                                                                 // 20-byte SAML ID token
     var issueInstant = new Date().toISOString();
     var c14n = xmlC14n();
     var xml =
@@ -1244,7 +1250,7 @@ function create(opts) {
     };
   }
 
-  // ---- v0.10.16 — SLO HTTP-POST binding (SAML Bindings §3.5) ----
+  // ---- SLO HTTP-POST binding (SAML Bindings §3.5) ----
 
   /**
    * @primitive b.auth.saml.sp.buildLogoutRequestPost
@@ -1286,7 +1292,7 @@ function create(opts) {
       throw new AuthError("auth-saml/no-idp-slo",
         "buildLogoutRequestPost: opts.idpSloUrl required");
     }
-    var id = "_" + generateToken(20);                                                                 // allow:raw-byte-literal — 20-byte SAML ID token
+    var id = "_" + generateToken(20);                                                                 // 20-byte SAML ID token
     var issueInstant = new Date().toISOString();
     var c14n = xmlC14n();
     var nameIdFormatAttr = bopts.nameIdFormat
@@ -1518,7 +1524,7 @@ function create(opts) {
   };
 }
 
-// ---- v0.10.16 — SAML EncryptedAssertion decrypt (XMLEnc) ----
+// ---- SAML EncryptedAssertion decrypt (XMLEnc) ----
 
 // XMLEnc Algorithm URIs we support.
 //
@@ -1531,9 +1537,10 @@ function create(opts) {
 //     http://www.w3.org/2009/xmlenc11#rsa-oaep          (XMLEnc 1.1 §5.4.2)
 //
 // AES-CBC content encryption (xmlenc#aes128-cbc / aes256-cbc) is
-// intentionally REFUSED: CVE-2011-1473 + the broader XML-Encryption
-// padding-oracle research (Jager & Somorovsky 2011) demonstrate that
-// CBC mode under XMLEnc is exploitable without per-content MAC.
+// intentionally REFUSED: the XML-Encryption padding-oracle research
+// (Jager & Somorovsky, "How to Break XML Encryption", CCS 2011)
+// demonstrates that CBC mode under XMLEnc is exploitable without per-
+// content MAC.
 // Operators integrating with IdPs that default to CBC (older ADFS /
 // Azure AD / Okta / Keycloak / OneLogin) MUST switch the IdP's
 // content-encryption setting to AES-128-GCM or AES-256-GCM. The
@@ -1543,7 +1550,7 @@ function create(opts) {
 //
 // SHA-1 anywhere (rsa-oaep-mgf1p with SHA-1 OAEP DigestMethod,
 // xmldsig#sha1 DigestMethod) is also refused — Bleichenbacher /
-// collision risk plus CVE-2023-49141-class advisories outweigh
+// collision risk plus CVE-2023-49141 class advisories outweigh
 // "interop with stale IdPs". Operators upgrade the IdP's digest
 // algorithm to SHA-256+ rather than relax the framework defense.
 //
@@ -1606,7 +1613,7 @@ function _decryptEncryptedAssertion(encAssertion, spPrivateKeyPem) {
     }
     if (oaepHashName === "sha1") {
       throw new AuthError("auth-saml/encrypted-weak-oaep-digest",
-        "EncryptedKey OAEP DigestMethod is SHA-1 — refused (CVE-2023-49141-class). " +
+        "EncryptedKey OAEP DigestMethod is SHA-1 — refused (CVE-2023-49141 class). " +
         "Require SHA-256+ on IdP side.");
     }
     var spKey;
@@ -1660,18 +1667,18 @@ function _decryptEncryptedAssertion(encAssertion, spPrivateKeyPem) {
   var clearBytes;
   if (contentAlg === "http://www.w3.org/2009/xmlenc11#aes128-gcm" ||
       contentAlg === "http://www.w3.org/2009/xmlenc11#aes256-gcm") {
-    var aesBits = contentAlg.indexOf("aes128") !== -1 ? 128 : 256;                                // allow:raw-byte-literal — AES key size
-    var expectedKeyBytes = aesBits / 8;                                                            // allow:raw-byte-literal — bits→bytes
+    var aesBits = contentAlg.indexOf("aes128") !== -1 ? 128 : 256;                                // AES key size
+    var expectedKeyBytes = aesBits / 8;                                                            // bits→bytes
     if (cek.length !== expectedKeyBytes) {
       throw new AuthError("auth-saml/encrypted-wrong-cek-len",
         "AES-" + aesBits + "-GCM CEK length is " + cek.length + ", expected " + expectedKeyBytes);
     }
-    if (contentBlob.length < 28) {                                                                 // allow:raw-byte-literal — 12 IV + 16 tag
+    if (contentBlob.length < 28) {                                                                 // 12 IV + 16 tag
       throw new AuthError("auth-saml/encrypted-content-too-short",
         "AES-GCM CipherValue too short to contain IV (12) + tag (16)");
     }
-    var iv  = contentBlob.subarray(0, 12);                                                          // allow:raw-byte-literal — GCM IV size
-    var tag = contentBlob.subarray(contentBlob.length - 16);                                       // allow:raw-byte-literal — GCM tag size
+    var iv  = contentBlob.subarray(0, 12);                                                          // GCM IV size
+    var tag = contentBlob.subarray(contentBlob.length - 16);                                       // GCM tag size
     var ct  = contentBlob.subarray(12, contentBlob.length - 16);
     var decipher = nodeCrypto.createDecipheriv("aes-" + aesBits + "-gcm", cek, iv);
     decipher.setAuthTag(tag);
@@ -1681,16 +1688,16 @@ function _decryptEncryptedAssertion(encAssertion, spPrivateKeyPem) {
         "AES-GCM authentication tag mismatch: " + ((eD && eD.message) || String(eD)));
     }
   } else if (contentAlg === "urn:blamejs:experimental:xmlenc:xchacha20-poly1305") {
-    if (cek.length !== 32) {                                                                       // allow:raw-byte-literal — XChaCha20 key size
+    if (cek.length !== 32) {                                                                       // XChaCha20 key size
       throw new AuthError("auth-saml/encrypted-wrong-cek-len",
         "XChaCha20-Poly1305 CEK length is " + cek.length + ", expected 32");
     }
-    if (contentBlob.length < 40) {                                                                 // allow:raw-byte-literal — 24 nonce + 16 tag
+    if (contentBlob.length < 40) {                                                                 // 24 nonce + 16 tag
       throw new AuthError("auth-saml/encrypted-content-too-short",
         "XChaCha20-Poly1305 CipherValue too short");
     }
-    var xnonce = contentBlob.subarray(0, 24);                                                       // allow:raw-byte-literal — XChaCha20 nonce size
-    var xtag   = contentBlob.subarray(contentBlob.length - 16);                                    // allow:raw-byte-literal — Poly1305 tag size
+    var xnonce = contentBlob.subarray(0, 24);                                                       // XChaCha20 nonce size
+    var xtag   = contentBlob.subarray(contentBlob.length - 16);                                    // Poly1305 tag size
     var xct    = contentBlob.subarray(24, contentBlob.length - 16);
     try {
       clearBytes = bCrypto.aeadDecrypt({
@@ -1710,17 +1717,17 @@ function _decryptEncryptedAssertion(encAssertion, spPrivateKeyPem) {
       "(supported: W3C xmlenc11#aes128-gcm, xmlenc11#aes256-gcm, " +
       "framework-experimental urn:blamejs:experimental:xmlenc:xchacha20-poly1305). " +
       "AES-CBC content encryption is refused — switch the IdP to AES-128-GCM or AES-256-GCM " +
-      "(CVE-2011-1473 padding-oracle class).");
+      "(XMLEnc CBC padding-oracle class, Jager & Somorovsky CCS 2011).");
   }
   return clearBytes.toString("utf8");
 }
 
-// ---- v0.10.16 — SAML SLO XMLDSig-Enveloped (HTTP-POST/SOAP) ----
+// ---- SAML SLO XMLDSig-Enveloped (HTTP-POST/SOAP) ----
 
 // PQC SignatureMethod URIs used by the embedded XMLDSig signatures.
 // Standard XMLDSig vocabulary classical signing URIs (W3C XMLDSig
-// Core 1.1 + RFC 9231 for Ed25519) are dispatched via _sigAlgUrn /
-// _sigAlgFromUri. The framework adds two non-standard URNs for
+// Core 1.1 + RFC 9231 for Ed25519) are dispatched via _sigAlgUrn (sign
+// side) and the SUPPORTED_SIG table (verify side). The framework adds two non-standard URNs for
 // ML-DSA because no W3C/IETF XMLDSig URI registration exists for
 // post-quantum signers yet (LAMPS WG has open drafts but none final).
 // Operators integrating with PQC-aware IdPs that exchange those URNs
@@ -1929,7 +1936,7 @@ function _verifyEmbeddedXmlDsig(xml, idpVerifyKey, idpVerifyAlg, expectedRootLoc
   }
 }
 
-// ---- v0.10.16 SAML SLO signature-alg dispatch ----
+// ---- SAML SLO signature-alg dispatch ----
 
 function _sigAlgUrn(alg) {
   // PQC signers — framework-private experimental URIs. The `urn:`
@@ -1968,7 +1975,7 @@ function _sigAlgUrn(alg) {
         var keyObj = (sk && typeof sk === "object" && sk.type === "private") ? sk
           : (typeof sk === "string" || (sk && sk.kty)) ? nodeCrypto.createPrivateKey(sk)
           : nodeCrypto.createPrivateKey({ key: Buffer.concat([
-              Buffer.from("302e020100300506032b657004220420", "hex"),                                 // allow:raw-byte-literal — Ed25519 PKCS#8 prefix
+              Buffer.from("302e020100300506032b657004220420", "hex"),                                 // Ed25519 PKCS#8 prefix
               Buffer.from(sk),
             ]), format: "der", type: "pkcs8" });
         return nodeCrypto.sign(null, Buffer.from(bytes), keyObj);
@@ -1977,7 +1984,7 @@ function _sigAlgUrn(alg) {
         var keyObj = (pk && typeof pk === "object" && pk.type === "public") ? pk
           : (typeof pk === "string" || (pk && pk.kty)) ? nodeCrypto.createPublicKey(pk)
           : nodeCrypto.createPublicKey({ key: Buffer.concat([
-              Buffer.from("302a300506032b6570032100", "hex"),                                         // allow:raw-byte-literal — Ed25519 SPKI prefix
+              Buffer.from("302a300506032b6570032100", "hex"),                                         // Ed25519 SPKI prefix
               Buffer.from(pk),
             ]), format: "der", type: "spki" });
         return nodeCrypto.verify(null, Buffer.from(msg), keyObj, Buffer.from(sig));
@@ -2017,22 +2024,6 @@ function _sigAlgUrn(alg) {
       },
     };
   }
-  return null;
-}
-
-// Reverse lookup — SignatureMethod URI on the inbound wire → alg
-// shorthand for _sigAlgUrn dispatch. Used by _verifyEmbeddedXmlDsig
-// to pick the right verifier when an IdP signs with a classical alg.
-function _sigAlgFromUri(uri) {
-  if (uri === "urn:blamejs:experimental:saml-sig-alg:ml-dsa-65") return "ml-dsa-65";
-  if (uri === "urn:blamejs:experimental:saml-sig-alg:ml-dsa-87") return "ml-dsa-87";
-  if (uri === "http://www.w3.org/2021/04/xmldsig-more#ed25519") return "ed25519";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")   return "rsa-sha256";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384")   return "rsa-sha384";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512")   return "rsa-sha512";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256") return "ecdsa-sha256";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384") return "ecdsa-sha384";
-  if (uri === "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512") return "ecdsa-sha512";
   return null;
 }
 

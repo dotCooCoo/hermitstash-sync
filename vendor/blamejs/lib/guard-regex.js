@@ -30,7 +30,7 @@
  *   Profiles: `strict` / `balanced` / `permissive`. Compliance
  *   postures: `hipaa` / `pci-dss` / `gdpr` / `soc2`. Operators
  *   select via `{ profile: "strict" }` or
- *   `{ compliance: "hipaa" }`; postures overlay on top of the
+ *   `{ compliancePosture: "hipaa" }`; postures overlay on top of the
  *   profile baseline. Nested-quantifier rejection holds at every
  *   profile — the catastrophic class is never an operator opt-in.
  *
@@ -93,8 +93,8 @@ var PROFILES = Object.freeze({
     consecutiveStarPolicy:    "reject",
     nestedExtglobPolicy:      "reject",
     inputKind:                "regex",                                            // CVE-2026-26996 + CVE-2026-33671 detectors apply only when inputKind=="glob"
-    maxBoundedRepeat:          100,                                              // allow:raw-byte-literal — bounded repeat ceiling
-    maxConsecutiveStars:        2,                                                // allow:raw-byte-literal — `**` recursive glob permitted; >=3 refused
+    maxBoundedRepeat:          100,                                              // bounded repeat ceiling
+    maxConsecutiveStars:        2,                                                // `**` recursive glob permitted; >=3 refused
     maxPatternBytes:           C.BYTES.kib(1),
     maxBytes:                  C.BYTES.kib(1),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -110,8 +110,8 @@ var PROFILES = Object.freeze({
     lookaroundQuantPolicy:     "audit",
     consecutiveStarPolicy:    "reject",                                          // CVE-2026-26996 refused at every profile
     nestedExtglobPolicy:      "reject",                                          // CVE-2026-33671 refused at every profile
-    maxBoundedRepeat:          1000,                                             // allow:raw-byte-literal — bounded repeat ceiling
-    maxConsecutiveStars:        2,                                                // allow:raw-byte-literal — `**` recursive glob permitted; >=3 refused
+    maxBoundedRepeat:          1000,                                             // bounded repeat ceiling
+    maxConsecutiveStars:        2,                                                // `**` recursive glob permitted; >=3 refused
     maxPatternBytes:           C.BYTES.kib(2),
     maxBytes:                  C.BYTES.kib(2),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -127,8 +127,8 @@ var PROFILES = Object.freeze({
     lookaroundQuantPolicy:     "audit",
     consecutiveStarPolicy:    "reject",                                          // CVE-2026-26996 refused at every profile
     nestedExtglobPolicy:      "reject",                                          // CVE-2026-33671 refused at every profile
-    maxBoundedRepeat:          10000,                                            // allow:raw-byte-literal — bounded repeat ceiling
-    maxConsecutiveStars:        2,                                                // allow:raw-byte-literal — `**` recursive glob permitted; >=3 refused
+    maxBoundedRepeat:          10000,                                            // bounded repeat ceiling
+    maxConsecutiveStars:        2,                                                // `**` recursive glob permitted; >=3 refused
     maxPatternBytes:           C.BYTES.kib(8),
     maxBytes:                  C.BYTES.kib(8),
     maxRuntimeMs:              C.TIME.seconds(2),
@@ -223,9 +223,9 @@ function _detectIssues(input, opts) {
     BOUNDED_REPEAT_RE.lastIndex = 0;
     var match;
     while ((match = BOUNDED_REPEAT_RE.exec(input)) !== null) {                   // allow:regex-no-length-cap — input bounded by maxPatternBytes
-      var lower = parseInt(match[1], 10);                                        // allow:raw-byte-literal — base-10 radix
+      var lower = parseInt(match[1], 10);                                        // base-10 radix
       var upper = match[2] === undefined ? lower :
-                  match[2] === "" ? Infinity : parseInt(match[2], 10);           // allow:raw-byte-literal — base-10 radix
+                  match[2] === "" ? Infinity : parseInt(match[2], 10);           // base-10 radix
       var ceiling = (upper === Infinity || upper > lower) ? upper : lower;
       if (ceiling > opts.maxBoundedRepeat) {
         issues.push({
@@ -248,14 +248,14 @@ function _detectIssues(input, opts) {
 }
 
 // Consecutive-star wildcard cap (CVE-2026-26996). Operator-supplied
-// glob fragments compile to picomatch / RegExp; a long run of `*`
-// against a non-matching literal walks O(4^N). Three-or-more
+// glob fragments compile to minimatch / picomatch / RegExp; a long run
+// of `*` against a non-matching literal walks O(4^N). Three-or-more
 // consecutive `*` is the canonical bad shape; `**` (recursive glob)
 // stays permitted, gated by the profile's `maxConsecutiveStars`.
 function _detectConsecutiveStar(input, opts, issues) {
   if (opts.consecutiveStarPolicy === "allow") return;
-  // CVE-2026-26996 is a picomatch / glob-shape backtracking class —
-  // `***+literal` walks O(4^N) when picomatch translates the run to a
+  // CVE-2026-26996 is a minimatch glob-shape backtracking class —
+  // `***+literal` walks O(4^N) when minimatch translates the run to a
   // backtracking-heavy regex. Native ECMAScript regex syntax cannot
   // produce three consecutive `*` quantifiers (it's a SyntaxError),
   // so applying this detector to `inputKind: "regex"` strings only
@@ -273,7 +273,7 @@ function _detectConsecutiveStar(input, opts, issues) {
     }
   }
   var starCeiling = opts.maxConsecutiveStars === undefined ?
-                    2 : opts.maxConsecutiveStars;                                // allow:raw-byte-literal — `**` glob ceiling
+                    2 : opts.maxConsecutiveStars;                                // `**` glob ceiling
   if (starRunMax > starCeiling) {
     issues.push({
       kind: "consecutive-star",
@@ -315,7 +315,7 @@ function _detectNestedExtglob(input, opts, issues) {
     }
     heads.push(idx);
     scanFrom = idx + 1;
-    if (heads.length > 1024) break;                                              // allow:raw-byte-literal — head-count safety cap
+    if (heads.length > 1024) break;                                              // head-count safety cap
   }
   var nested = false;
   for (var hi = 0; hi < heads.length && !nested; hi += 1) {
@@ -368,7 +368,7 @@ function _detectNestedExtglob(input, opts, issues) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   bidiPolicy:             "reject"|"audit"|"allow",
  *   controlPolicy:          "reject"|"audit"|"allow",
  *   nullBytePolicy:         "reject"|"audit"|"allow",
@@ -422,7 +422,7 @@ function validate(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   nestedQuantPolicy:      "reject"|"audit"|"allow",
  *   alternationQuantPolicy: "reject"|"audit"|"allow",
  *   boundedRepeatPolicy:    "reject"|"audit"|"allow",
@@ -477,7 +477,7 @@ function sanitize(input, opts) {
  *
  * @opts
  *   profile:                "strict"|"balanced"|"permissive",
- *   compliance:             "hipaa"|"pci-dss"|"gdpr"|"soc2",
+ *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
  *   name:                   string,    // override gate name in audit emissions
  *   nestedQuantPolicy:      "reject"|"audit"|"allow",
  *   alternationQuantPolicy: "reject"|"audit"|"allow",

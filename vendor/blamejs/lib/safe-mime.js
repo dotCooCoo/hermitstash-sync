@@ -27,7 +27,7 @@
  *       crypto.
  *
  *   Defends `CVE-2024-39929` (Exim MIME multipart parser) and
- *   `CVE-2025-30258` (gnumail truncated-MIME-tree class) by capping
+ *   `CVE-2026-26312` (Stalwart nested `message/rfc822` MIME OOM) by capping
  *   total parts, nesting depth, boundary length, header bytes,
  *   header-line bytes, decoded body bytes, message bytes — plus
  *   charset + transfer-encoding allowlists.
@@ -41,7 +41,7 @@
  *   incoming message above a threshold.
  *
  * @card
- *   Bounded MIME parser — walks RFC 5322 + 2045 / 2046 / 2047 + EAI message structure into a part tree with hard caps on depth, part count, body size, header bytes, and charset / transfer-encoding allowlists. Defends CVE-2024-39929 + CVE-2025-30258.
+ *   Bounded MIME parser — walks RFC 5322 + 2045 / 2046 / 2047 + EAI message structure into a part tree with hard caps on depth, part count, body size, header bytes, and charset / transfer-encoding allowlists. Defends CVE-2024-39929 + CVE-2026-26312.
  */
 
 var C = require("./constants");
@@ -49,7 +49,7 @@ var { defineClass } = require("./framework-error");
 
 var SafeMimeError = defineClass("SafeMimeError", { alwaysPermanent: true });
 
-var DEFAULT_MAX_PARTS         = 64;                          // allow:raw-byte-literal — total parts cap, not bytes
+var DEFAULT_MAX_PARTS         = 64;                          // total parts cap, not bytes
 var DEFAULT_MAX_NESTING_DEPTH = 16;
 var DEFAULT_MAX_BOUNDARY      = 70;                          // RFC 2046 §5.1.1
 var DEFAULT_MAX_HEADER_BYTES  = C.BYTES.kib(64);
@@ -61,7 +61,7 @@ var DEFAULT_MAX_HEADER_BYTES  = C.BYTES.kib(64);
 // strict 78-byte refusal would reject legitimate mail. We enforce
 // only the 998-byte MUST. Future drift attempting to "fix" this to
 // 78 would be a regression and should fail the audit gate.
-var DEFAULT_MAX_HEADER_LINE   = 998;                         // allow:raw-byte-literal — RFC 5322 §2.1.1 MUST (998); the SHOULD (78) is by design not enforced
+var DEFAULT_MAX_HEADER_LINE   = 998;                         // RFC 5322 §2.1.1 MUST (998); the SHOULD (78) is by design not enforced
 // Per-message header-count cap. RFC 5322 places no upper bound on
 // the number of headers in a message; without one, a sender can pack
 // tens of thousands of one-byte headers into the maxHeaderBytes budget
@@ -71,7 +71,7 @@ var DEFAULT_MAX_HEADER_LINE   = 998;                         // allow:raw-byte-l
 // Microsoft 365 `MaxRecipientEnvelopePerMessage`) cap in the low
 // hundreds; the framework picks 512 as a generous default with
 // `maxHeaderCount` exposed for operators that legitimately need more.
-var DEFAULT_MAX_HEADER_COUNT  = 512;                         // allow:raw-byte-literal — DoS bound, not bytes
+var DEFAULT_MAX_HEADER_COUNT  = 512;                         // DoS bound, not bytes
 var DEFAULT_MAX_BODY_BYTES    = C.BYTES.mib(25);
 var DEFAULT_MAX_MESSAGE_BYTES = C.BYTES.mib(50);
 
@@ -125,7 +125,7 @@ var DEFAULT_TRANSFER_ENCODINGS = Object.freeze([
  *   maxBodyBytes:             number,     // default 25 MiB
  *   maxMessageBytes:          number,     // default 50 MiB
  *   charsetAllowlist:         string[],   // default UTF-8 / US-ASCII / common legacy 8-bit
- *   transferEncodingAllowlist: string[],  // default 7bit/8bit/binary/qp/base64
+ *   transferEncodingAllowlist: string[],  // default 7bit/8bit/quoted-printable/base64 (binary is opt-in, RFC 3030 BINARYMIME)
  *
  * @example
  *   var msg = b.safeMime.parse(messageBuffer);
@@ -332,13 +332,13 @@ function _parsePart(buf, ctx, depth) {
   if (depth > ctx.maxNestingDepth) {
     throw new SafeMimeError("safe-mime/oversize-nesting",
       "safeMime.parse: nesting depth exceeded maxNestingDepth=" + ctx.maxNestingDepth +
-      " (CVE-2024-39929-class defense)");
+      " (CVE-2024-39929 class defense)");
   }
   ctx.partCount += 1;
   if (ctx.partCount > ctx.maxParts) {
     throw new SafeMimeError("safe-mime/oversize-part-count",
       "safeMime.parse: total parts exceeded maxParts=" + ctx.maxParts +
-      " (CVE-2024-39929-class defense)");
+      " (CVE-2024-39929 class defense)");
   }
 
   var sep = _findHeaderBodySep(buf);
@@ -475,11 +475,11 @@ function _parseHeaders(buf, ctx) {
     // they're inspecting.
     for (var hci = 0; hci < value.length; hci += 1) {
       var hcc = value.charCodeAt(hci);
-      if ((hcc < 0x20 && hcc !== 0x09) || hcc === 0x7F) {                                          // allow:raw-byte-literal — C0 control char + DEL refusal
+      if ((hcc < 0x20 && hcc !== 0x09) || hcc === 0x7F) {                                          // C0 control char + DEL refusal
         var byteOffset = Buffer.byteLength(value.slice(0, hci), "utf8");
         throw new SafeMimeError("safe-mime/control-char-in-header",
           "safeMime.parse: header '" + name + "' contains control char 0x" +
-          hcc.toString(16) + " at byte offset " + byteOffset);                                            // allow:raw-byte-literal — toString radix 16 hex, not bytes
+          hcc.toString(16) + " at byte offset " + byteOffset);                                            // toString radix 16 hex, not bytes
       }
     }
     value = _decodeRfc2047Words(value);
@@ -549,7 +549,7 @@ function _splitMultipart(buf, boundary) {
     // Per RFC 2046 §5.1.1 a boundary delimiter is `--<value>` preceded
     // by CRLF (or LF) — OR at the very start of the body. A boundary-
     // shaped sequence elsewhere in a part's body MUST NOT be treated
-    // as a delimiter. Per Codex P1 on PR #49.
+    // as a delimiter.
     var idx = _findBoundaryAtLineStart(buf, delimiter, pos);
     if (idx < 0) break;
     if (buf[idx + delimiter.length] === 0x2D && buf[idx + delimiter.length + 1] === 0x2D) {
@@ -596,7 +596,7 @@ function _splitMultipart(buf, boundary) {
 var _BOUNDARY_BCHARSNOSPACE = /^[0-9A-Za-z'()+_,./:=?-]+$/;                         // allow:regex-no-length-cap — length checked separately
 var _BOUNDARY_BCHARS_WITH_SP = /^[0-9A-Za-z'()+_,./:=? -]+$/;                       // allow:regex-no-length-cap — length checked separately
 function _isValidMimeBoundary(value) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 70) return false; // allow:raw-byte-literal — RFC 2046 §5.1.1 bound
+  if (typeof value !== "string" || value.length === 0 || value.length > 70) return false; // RFC 2046 §5.1.1 bound
   // First char MUST be bcharsnospace; remainder MAY be bchars (which
   // permits SP). Last char MUST also be bcharsnospace (no trailing SP).
   if (!_BOUNDARY_BCHARSNOSPACE.test(value.charAt(0))) return false;
@@ -652,7 +652,7 @@ function _decodeQuotedPrintable(buf) {
   var s = buf.toString("binary");
   s = s.replace(/=\r?\n/g, "");
   s = s.replace(/=([0-9A-Fa-f]{2})/g, function (_, hex) {
-    return String.fromCharCode(parseInt(hex, 16));                                                 // allow:raw-byte-literal — parseInt radix 16, not bytes
+    return String.fromCharCode(parseInt(hex, 16));                                                 // parseInt radix 16, not bytes
   });
   return Buffer.from(s, "binary");
 }
@@ -666,9 +666,9 @@ function _decodeRfc2047Words(value) {
         raw = Buffer.from(text, "base64");
       } else {
         raw = Buffer.from(text.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g,
-          function (__, hex) { return String.fromCharCode(parseInt(hex, 16)); }), "binary");      // allow:raw-byte-literal — parseInt radix 16, not bytes
+          function (__, hex) { return String.fromCharCode(parseInt(hex, 16)); }), "binary");      // parseInt radix 16, not bytes
       }
-      // RFC 2047 §5 / CVE-2020-7244 header-injection defense — after
+      // RFC 2047 §5 encoded-word header-injection defense — after
       // base64 / Q-encoded decode, check the DECODED bytes for header
       // separators (CR, LF, NUL). A sender that base64-encodes
       // `\r\nBcc: attacker@x.com` would otherwise reach the consumer's
@@ -680,7 +680,7 @@ function _decodeRfc2047Words(value) {
         if (b === 0x0d /* CR */ || b === 0x0a /* LF */ || b === 0x00 /* NUL */) {
           throw new SafeMimeError("safe-mime/rfc2047-header-injection",
             "RFC 2047 encoded-word decoded to bytes containing CR/LF/NUL " +
-            "(byte index " + bi + "); refusing per RFC 2047 §5 / CVE-2020-7244 class");
+            "(byte index " + bi + "); refusing per RFC 2047 §5 (encoded-word header injection)");
         }
       }
       return _decodeBufferAs(raw, charset);
@@ -714,7 +714,7 @@ function _decodeBufferAs(buf, charset) {
 // Byte-pair endian flip into a temporary buffer, then decode as
 // utf-16le. Allocates a single buffer (no per-character churn).
 function _decodeUtf16BE(buf) {
-  var n = buf.length & ~1;                                                                                // allow:raw-byte-literal — pair alignment mask
+  var n = buf.length & ~1;                                                                                // pair alignment mask
   var swapped = Buffer.alloc(n);
   for (var i = 0; i < n; i += 2) {
     swapped[i]     = buf[i + 1];
@@ -806,7 +806,7 @@ function _normalizeCharsetName(c) {
 
 function _previewBytes(line) {
   if (typeof line !== "string") line = String(line);
-  return line.length > 64 ? line.slice(0, 64) + "..." : line;                                       // allow:raw-byte-literal — log-preview length cap
+  return line.length > 64 ? line.slice(0, 64) + "..." : line;                                       // log-preview length cap
 }
 
 module.exports = {

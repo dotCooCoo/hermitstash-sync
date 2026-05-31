@@ -52,7 +52,7 @@ var compliance    = lazyRequire(function () { return require("./compliance"); })
 var db            = lazyRequire(function () { return require("./db"); });
 var audit         = lazyRequire(function () { return require("./audit"); });
 
-// F-POSTURE-1 cascade hook + F-RTBF-2 integration. Recording the
+// Posture cascade hook + erase-vacuum integration. Recording the
 // posture lets eraseRow call b.db.vacuumAfterErase({ mode: "full" })
 // automatically under postures whose POSTURE_DEFAULTS sets
 // requireVacuumAfterErase: true (gdpr / dpdp / pipl-cn / lgpd-br /
@@ -113,7 +113,7 @@ function getActivePosture() { return _activePosture; }
 // Per-table registry, populated by db.init()
 var schemas = Object.create(null);
 
-// F-CBT-1 — per-COLUMN data residency registry. Real GDPR / DPDP
+// Per-COLUMN data residency registry. Real GDPR / DPDP
 // deployments have row-level mixed residency: a `users.name` column
 // may be global, but `users.addressLine1` must stay in EU storage.
 // db.init({ schema }) carries the operator's residency declaration
@@ -123,7 +123,7 @@ var schemas = Object.create(null);
 //   { tableName: { columnName: "eu" | "us" | "global" | <tag> } }
 var columnResidency = Object.create(null);
 
-// F-RTBF-3 — per-row key declaration registry. For tables that opt
+// Per-row key declaration registry. For tables that opt
 // into per-row keying, b.subject.eraseHard deletes the wrapped K_row
 // from _blamejs_per_row_keys, leaving WAL/replica residual ciphertext
 // undecryptable.
@@ -152,7 +152,7 @@ var perRowKeyTables = Object.create(null);
  *                                          // b.vault.aad — AEAD-binds the ciphertext
  *                                          // to (table, rowIdField=primary key, column)
  *                                          // so a DB-write attacker can't copy a
- *                                          // sealed value between rows. CRYPTO-1.
+ *                                          // sealed value between rows.
  *   rowIdField:     string,                // when aad=true, the column name carrying
  *                                          // the row identity. Default "id". The row
  *                                          // passed to sealRow MUST already have this
@@ -173,7 +173,7 @@ var perRowKeyTables = Object.create(null);
  *   });
  *   b.cryptoField.getSealedFields("patients");   // → ["ssn", "diagnosis"]
  *
- *   // AAD-bound table (recommended for new schemas — CRYPTO-1).
+ *   // AAD-bound table (recommended for new schemas).
  *   b.cryptoField.registerTable("idempotency_keys", {
  *     sealedFields: ["headers", "body"],
  *     aad:          true,
@@ -185,14 +185,122 @@ function registerTable(name, opts) {
   var rowIdField = typeof opts.rowIdField === "string" && opts.rowIdField.length > 0
     ? opts.rowIdField : "id";
   var schemaVersion = opts.schemaVersion != null ? String(opts.schemaVersion) : "1";
+  var derivedHashMode = opts.derivedHashMode || "salted-sha3";
+  if (derivedHashMode !== "salted-sha3" && derivedHashMode !== "hmac-shake256") {
+    throw new Error("registerTable: derivedHashMode must be 'salted-sha3' (default) or " +
+      "'hmac-shake256', got " + JSON.stringify(derivedHashMode));
+  }
+  var derivedHashes = Object.assign({}, opts.derivedHashes || {});
+  for (var col in derivedHashes) {
+    if (!Object.prototype.hasOwnProperty.call(derivedHashes, col)) continue;
+    var colMode = derivedHashes[col] && derivedHashes[col].mode;
+    if (colMode !== undefined && colMode !== "salted-sha3" && colMode !== "hmac-shake256") {
+      throw new Error("registerTable: derivedHashes." + col + ".mode must be " +
+        "'salted-sha3' or 'hmac-shake256', got " + JSON.stringify(colMode));
+    }
+  }
   schemas[name] = {
-    sealedFields:   Array.isArray(opts.sealedFields)   ? opts.sealedFields.slice()   : [],
-    derivedHashes:  Object.assign({}, opts.derivedHashes || {}),
-    hashNamespaces: Object.assign({}, opts.hashNamespaces || {}),
-    aad:            aadOn,
-    rowIdField:     rowIdField,
-    schemaVersion:  schemaVersion,
+    sealedFields:    Array.isArray(opts.sealedFields)   ? opts.sealedFields.slice()   : [],
+    derivedHashes:   derivedHashes,
+    hashNamespaces:  Object.assign({}, opts.hashNamespaces || {}),
+    aad:             aadOn,
+    rowIdField:      rowIdField,
+    schemaVersion:   schemaVersion,
+    derivedHashMode: derivedHashMode,
   };
+}
+
+// Derived-hash digest width for the keyed (hmac-shake256) mode: 32
+// bytes -> 64 hex chars.
+var DERIVED_HASH_BYTES = 32;
+
+// Compute the indexed-lookup digest for a derived-hash column.
+//   - "salted-sha3" (default): SHA3-512 over <per-deployment salt> + ns
+//     + value (128 hex). Deterministic per deployment.
+//   - "hmac-shake256": SHAKE256(<vault-sealed MAC key> || ns + value)
+//     truncated to 32 bytes (64 hex). The key is a vault-derived secret,
+//     NOT a static salt, so an attacker who recovers the salt alone
+//     can't correlate two low-entropy plaintexts; the sponge has no
+//     length-extension weakness. (b.crypto.hmacSha3 (HMAC-SHA3-512) was
+//     considered; SHAKE256(key||msg) is chosen for the fixed-width keyed
+//     digest with the same MAC-grade guarantee.) FIPS 202; NIST SP
+//     800-185; GDPR Art. 4(5) pseudonymisation; HIPAA 45 CFR 164.514(b).
+function _computeDerivedHash(spec, tableMode, ns, normalized) {
+  var mode = (spec && spec.mode) || tableMode || "salted-sha3";
+  if (mode === "hmac-shake256") {
+    var macKey = vault.getDerivedHashMacKey();
+    return kdf(Buffer.concat([macKey, Buffer.from(ns + normalized, "utf8")]),
+      DERIVED_HASH_BYTES).toString("hex");
+  }
+  return sha3Hash(vault.getDerivedHashSalt().toString("hex") + ns + normalized);
+}
+
+/**
+ * @primitive b.cryptoField.computeNamespacedHash
+ * @signature b.cryptoField.computeNamespacedHash(ns, value, opts?)
+ * @since     0.14.10
+ * @compliance gdpr, hipaa
+ * @related   b.cryptoField.computeDerived, b.cryptoField.lookupHash
+ *
+ * Computes a namespaced indexed-lookup digest of `value` for a
+ * pseudo-field that is NOT backed by a registered derived-hash column
+ * (e.g. the sealed-token FTS index in `b.mailStore.fts`). The caller
+ * supplies the full namespace string directly — there is no schema
+ * lookup — so the same keyed/salted hash machinery that protects
+ * registered derived hashes also covers ad-hoc indexed tokens. This is
+ * the canonical entry point: hand-rolling
+ * `sha3Hash(vault.getDerivedHashSalt() + ns + value)` at a call site
+ * bypasses the keyed-MAC mode (`hmac-shake256` off
+ * `vault.getDerivedHashMacKey`) and the per-deployment salt policy.
+ *
+ * `opts.mode` selects the digest:
+ *   - `"salted-sha3"` (default): SHA3-512 over `<salt-hex> + ns + value`
+ *     (deterministic per deployment; byte-identical to the legacy
+ *     hand-rolled scheme).
+ *   - `"hmac-shake256"`: SHAKE256(`<vault MAC key> || ns + value`) — a
+ *     keyed MAC so an attacker who recovers the salt alone cannot
+ *     correlate two low-entropy plaintexts.
+ *
+ * `opts.truncateBytes` truncates the hex digest to that many BYTES
+ * (the hex string is sliced to `truncateBytes * 2` characters). Throws
+ * (config-time / entry-point tier) on an unknown `mode` or a
+ * non-positive-integer `truncateBytes` so an operator catches the typo
+ * at boot rather than silently indexing under a malformed digest.
+ *
+ * @opts
+ *   mode:          string,   // "salted-sha3" (default) | "hmac-shake256"
+ *   truncateBytes: number,   // optional; positive integer byte width to slice to
+ *
+ * @example
+ *   var ns = "bj-mail_messages-body:fts:";
+ *   var h = b.cryptoField.computeNamespacedHash(ns, "kubernetes", {
+ *     mode: "hmac-shake256", truncateBytes: 8
+ *   });
+ *   /^[0-9a-f]{16}$/.test(h);   // → true
+ *
+ *   // Default mode is byte-identical to the legacy salted-sha3 hash.
+ *   b.cryptoField.computeNamespacedHash(ns, "kubernetes").length;   // → 128
+ */
+function computeNamespacedHash(ns, value, opts) {
+  opts = opts || {};
+  var mode = opts.mode || "salted-sha3";
+  if (mode !== "salted-sha3" && mode !== "hmac-shake256") {
+    throw new Error("computeNamespacedHash: opts.mode must be 'salted-sha3' " +
+      "(default) or 'hmac-shake256', got " + JSON.stringify(mode));
+  }
+  var truncateBytes = opts.truncateBytes;
+  if (truncateBytes !== undefined) {
+    if (typeof truncateBytes !== "number" || !isFinite(truncateBytes) ||
+        truncateBytes <= 0 || Math.floor(truncateBytes) !== truncateBytes) {
+      throw new Error("computeNamespacedHash: opts.truncateBytes must be a " +
+        "positive integer (bytes), got " + JSON.stringify(truncateBytes));
+    }
+  }
+  var hex = _computeDerivedHash({ mode: mode }, mode, ns, String(value));
+  if (truncateBytes !== undefined) {
+    return hex.slice(0, truncateBytes * 2);
+  }
+  return hex;
 }
 
 /**
@@ -308,8 +416,7 @@ function computeDerived(table, sourceField, sourceValue) {
     if (spec.from === sourceField) {
       var ns = namespaceFor(table, sourceField, s.hashNamespaces);
       var normalized = spec.normalize ? spec.normalize(sourceValue) : String(sourceValue);
-      var saltHex = vault.getDerivedHashSalt().toString("hex");
-      return { field: derivedField, value: sha3Hash(saltHex + ns + normalized) };
+      return { field: derivedField, value: _computeDerivedHash(spec, s.derivedHashMode, ns, normalized) };
     }
   }
   return null;
@@ -367,12 +474,11 @@ function sealRow(table, row) {
       }
       var ns = namespaceFor(table, spec.from, s.hashNamespaces);
       var normalized = spec.normalize ? spec.normalize(plain) : String(plain);
-      var saltHex2 = vault.getDerivedHashSalt().toString("hex");
-      out[derivedField] = sha3Hash(saltHex2 + ns + normalized);
+      out[derivedField] = _computeDerivedHash(spec, s.derivedHashMode, ns, normalized);
     }
   }
 
-  // CRYPTO-1 — AAD-bound table requires the row's identity column to
+  // AAD-bound table requires the row's identity column to
   // be populated BEFORE sealRow runs. Sealing under a placeholder /
   // missing rowId produces ciphertext that no later unseal can open
   // because the AAD on read is computed against the row's actual id.
@@ -390,7 +496,7 @@ function sealRow(table, row) {
   // Seal fields. Plain mode: vault.seal (idempotent — already-sealed
   // values pass through). AAD mode: vault.aad.seal binds the AEAD tag
   // to (table, rowId, column, schemaVersion) — cross-row copy of a
-  // ciphertext fails Poly1305 on read. CRYPTO-1.
+  // ciphertext fails Poly1305 on read.
   for (var i = 0; i < s.sealedFields.length; i++) {
     var field = s.sealedFields[i];
     if (out[field] !== undefined && out[field] !== null) {
@@ -495,9 +601,14 @@ function unsealRow(table, row) {
         } catch (_e) { /* drop-silent */ }
         unsealed = null;
       }
-      // If the value wasn't actually sealed, vault.unseal returns the input
-      // unchanged — keep the original.
-      out[field] = unsealed !== undefined && unsealed !== null ? unsealed : out[field];
+      // Assign unconditionally. `unsealed` already carries the right value
+      // for every branch: the plaintext on success, the original value on
+      // the not-actually-sealed pass-through (set above), and `null` on an
+      // unseal failure. The failure case MUST null the column so downstream
+      // sees "no value" rather than the attacker-crafted `vault:<…>` string
+      // (a prior `... ? unsealed : out[field]` guard silently kept the
+      // forged ciphertext on failure, defeating the documented defense).
+      out[field] = unsealed;
     }
   }
 
@@ -568,7 +679,7 @@ function eraseRow(table, row) {
       out[derivedField] = null;
     }
   }
-  // F-RTBF-4 — `__erasedAt` was previously a plaintext UTC ms integer.
+  // `__erasedAt` was previously a plaintext UTC ms integer.
   // That value alone fingerprints the erasure event (audit-log
   // exfiltration + cross-tenant correlation: "this row was erased
   // 2.3s before that one"). Bucket the timestamp to a 1-day floor so
@@ -579,7 +690,7 @@ function eraseRow(table, row) {
   var dayMs = TIME.days(1);
   out.__erasedAt = Math.floor(Date.now() / dayMs) * dayMs;
 
-  // F-RTBF-2 — under regulatory postures whose POSTURE_DEFAULTS sets
+  // Under regulatory postures whose POSTURE_DEFAULTS sets
   // requireVacuumAfterErase: true (gdpr / dpdp / pipl-cn / lgpd-br /
   // hipaa), the B-tree index pages freed by the upcoming UPDATE/DELETE
   // would otherwise linger with sealed-column ciphertext readable
@@ -657,8 +768,7 @@ function lookupHash(table, field, value) {
     if (spec.from === field) {
       var ns = namespaceFor(table, field, s.hashNamespaces);
       var normalized = spec.normalize ? spec.normalize(value) : String(value);
-      var saltHex = vault.getDerivedHashSalt().toString("hex");
-      return { field: derivedField, value: sha3Hash(saltHex + ns + normalized) };
+      return { field: derivedField, value: _computeDerivedHash(spec, s.derivedHashMode, ns, normalized) };
     }
   }
   return null;
@@ -836,9 +946,9 @@ function declarePerRowKey(table, opts) {
     throw new Error("declarePerRowKey: table must be a non-empty string");
   }
   opts = opts || {};
-  var keySize = opts.keySize === undefined ? 32 : opts.keySize; // allow:raw-byte-literal — XChaCha20-Poly1305 key length in bytes
+  var keySize = opts.keySize === undefined ? 32 : opts.keySize; // XChaCha20-Poly1305 key length in bytes
   if (typeof keySize !== "number" || !isFinite(keySize) ||
-      keySize < 16 || Math.floor(keySize) !== keySize) { // allow:raw-byte-literal — minimum AES-128 key length in bytes
+      keySize < 16 || Math.floor(keySize) !== keySize) { // minimum AES-128 key length in bytes
     throw new Error("declarePerRowKey: opts.keySize must be an integer >= 16 (bytes)");
   }
   var info = opts.info || ("blamejs-per-row-key:" + table);
@@ -1004,6 +1114,7 @@ module.exports = {
   applyPosture:     applyPosture,
   getActivePosture: getActivePosture,
   computeDerived:   computeDerived,
+  computeNamespacedHash: computeNamespacedHash,
   lookupHash:       lookupHash,
   clearForTest:     clearForTest,
   declareColumnResidency: declareColumnResidency,

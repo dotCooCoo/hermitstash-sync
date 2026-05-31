@@ -13,9 +13,10 @@
  *
  *     - **Registry** (`register` / `lookup` / `unregister` / `list`)
  *       — pluggable backend; in-memory default, durable via operator-
- *       supplied `b.config.loadDbBacked` for restart-survival. Sealed
- *       rows so tenant names + endpoint metadata don't leak in DB
- *       dumps.
+ *       supplied `b.config.loadDbBacked` for restart-survival. Rows are
+ *       sealed at rest via `b.cryptoField` when a vault is configured
+ *       (the default in a booted app), so tenant names + endpoint
+ *       metadata don't leak in DB dumps.
  *     - **Sharded topics** (`spawnConsumers`) — consistent-hash route
  *       per-shard so each tenant's traffic owns one shard's ordering.
  *     - **Leader-elected singletons** (`elect`) — composes `b.cluster`
@@ -61,13 +62,64 @@ var agentAudit        = require("./agent-audit");
 var audit             = lazyRequire(function () { return require("./audit"); });
 var cluster           = lazyRequire(function () { return require("./cluster"); });
 var vault             = lazyRequire(function () { return require("./vault"); });
+var cryptoField       = lazyRequire(function () { return require("./crypto-field"); });
+var safeJson          = require("./safe-json");
+var agentTenant       = lazyRequire(function () { return require("./agent-tenant"); });
 
 var AgentOrchestratorError = defineClass("AgentOrchestratorError", { alwaysPermanent: true });
 
+// At-rest sealing of registry rows. The owning tenant id and the
+// operator-supplied endpoint metadata are sealed via b.cryptoField
+// before a row reaches the backend, so a DB dump does not leak which
+// tenants own which agents or their endpoint detail — when a vault is
+// configured (the default in a booted app via b.start). Without a vault
+// there is no key, so rows are stored as-is (the same vault-less mode
+// the salted-FNV shard fallback below supports). AAD binds each
+// ciphertext to the agent `name` (the row identity). `metadata` is an
+// object, so it is JSON-serialized before sealing and parsed back on
+// read; `tenantId` may be null (sealRow leaves null fields untouched).
+// Vault-less or pre-sealing rows carry plain values; unsealRow passes a
+// non-sealed value through, so they still read.
+var SEAL_TABLE = "agent_orchestrator_registry";
+var _sealTableRegistered = false;
+var SEAL_METADATA_MAX_BYTES = C.BYTES.mib(1);
+function _ensureSealTable() {
+  if (_sealTableRegistered) return;
+  cryptoField().registerTable(SEAL_TABLE, {
+    sealedFields: ["tenantId", "metadata"],
+    aad:          true,
+    rowIdField:   "name",
+  });
+  _sealTableRegistered = true;
+}
+function _sealRegistryRow(row) {
+  if (!vault().isInitialized()) return row;          // vault-less: store as-is (no key)
+  _ensureSealTable();
+  var pre = Object.assign({}, row);
+  if (pre.metadata !== undefined && pre.metadata !== null && typeof pre.metadata !== "string") {
+    pre.metadata = safeJson.stringify(pre.metadata);
+  }
+  return cryptoField().sealRow(SEAL_TABLE, pre);
+}
+function _unsealRegistryRow(row) {
+  if (!row) return row;
+  if (!vault().isInitialized()) return row;          // vault-less: rows are plain
+  _ensureSealTable();
+  var out = cryptoField().unsealRow(SEAL_TABLE, row);
+  // New rows stored metadata as a sealed JSON string; legacy rows stored
+  // it as a plain object (which passes through unseal untouched). Only
+  // the string form needs parsing back to an object.
+  if (typeof out.metadata === "string") {
+    try { out.metadata = safeJson.parse(out.metadata, { maxBytes: SEAL_METADATA_MAX_BYTES }); }
+    catch (_e) { /* leave as-is — operator-stored raw string metadata */ }
+  }
+  return out;
+}
+
 var DEFAULT_DRAIN_TIMEOUT_MS = C.TIME.minutes(2);
-var STREAM_ID_RAND_BYTES     = 8;                                                                     // allow:raw-byte-literal — stream-id random-suffix byte length, not a size cap
+var STREAM_ID_RAND_BYTES     = 8;                                                                     // stream-id random-suffix byte length, not a size cap
 var DEFAULT_PER_CONSUMER_STOP_MS = C.TIME.seconds(5);
-// SUBSTRATE-20 — FNV-1a offset basis salted with the first 32 bits of
+// FNV-1a offset basis salted with the first 32 bits of
 // SHA3-512(vault master). Attackers who don't have read access to the
 // vault keypair can't compute the salt, so they can't engineer
 // tenantIds that all map to one shard. Cached per-process; rotation
@@ -117,6 +169,12 @@ function create(opts) {
     cluster:     clusterImpl,
     audit:       auditImpl,
     permissions: permissions,
+    // When true, registry reads (list / lookup) are scoped to the actor's
+    // tenant — an actor only sees / resolves agents in its own tenant
+    // unless it holds the cross-tenant-admin scope. Mirrors the tenant
+    // scoping agent-event-bus enforces on subscribe / delivery. Off by
+    // default (single-tenant deployments are unaffected).
+    tenantScope: opts.tenantScope === true,
     spawnedConsumers: [],
     streams:     new Map(),
     elections:   new Map(),
@@ -125,7 +183,7 @@ function create(opts) {
     // operator-supplied metadata (kind / tenantId / posture / ...);
     // every consuming process holds its own runtime map of name → agent.
     liveAgents:  new Map(),
-    // SUBSTRATE-8 — drain quiesce wiring. Operator passes
+    // Drain quiesce wiring. Operator passes
     // { outbox, sagaInFlightCount, pubsubFlush } via create() so the
     // drain phase can quiesce real in-flight work, not just stop
     // consumers. Optional — operators with no outbox / saga / pubsub
@@ -134,7 +192,7 @@ function create(opts) {
     sagaInFlightCount: typeof opts.sagaInFlightCount === "function" ? opts.sagaInFlightCount : null,
     pubsubFlush:      typeof opts.pubsubFlush === "function" ? opts.pubsubFlush : null,
     perConsumerStopMs: typeof opts.perConsumerStopMs === "number" ? opts.perConsumerStopMs : DEFAULT_PER_CONSUMER_STOP_MS,
-    // SUBSTRATE-9 — onTransition handler invalidates election cache
+    // onTransition handler invalidates election cache
     // on lease-lost / acquired / released. Operator opts out via
     // { cacheElections: false } to always re-query b.cluster.
     cacheElections:   opts.cacheElections !== false,
@@ -147,7 +205,7 @@ function create(opts) {
     });
   }
 
-  // SUBSTRATE-9 — subscribe to cluster lease transitions so cached
+  // Subscribe to cluster lease transitions so cached
   // election state can't go stale after a partition. b.cluster
   // .onTransition fires for every lease-acquired / lease-lost / lease-
   // released event; we invalidate the affected resource's cached
@@ -196,7 +254,7 @@ function create(opts) {
  * @status    stable
  * @related   b.agent.orchestrator.create
  *
- * SUBSTRATE-3 — attach an in-process live agent reference to a row
+ * Attach an in-process live agent reference to a row
  * that already exists in the persistent registry backend. The
  * canonical boot-phase contract: the *first* process to start a new
  * agent calls `register()` (writes the backend row + holds the live
@@ -278,7 +336,9 @@ async function _register(ctx, name, agent, regOpts) {
     registeredAt:   Date.now(),
     metadata:       regOpts.metadata || {},
   };
-  await ctx.backend.set(name, row);
+  // Seal tenantId + metadata at rest (name is populated, so the AAD
+  // binding resolves). The plaintext `row` is kept for the audit below.
+  await ctx.backend.set(name, _sealRegistryRow(row));
   ctx.liveAgents.set(name, agent);
   _safeAudit(ctx, "agent.orchestrator.registered", regOpts.actor, {
     name: name, agentKind: regOpts.agentKind, tenantId: row.tenantId,
@@ -305,6 +365,19 @@ async function _unregister(ctx, name, args) {
 async function _lookup(ctx, name, args) {
   guardAgentRegistry.validate({ kind: "lookup", name: name }, {});
   _checkPermission(ctx, args.actor, "agent-registry:read");
+  // Tenant-scope gate: the row's declared tenant gates access even to a
+  // live in-process ref, so an actor can't acquire a handle to another
+  // tenant's agent. Consult the backend row (it exists as a metadata
+  // declaration even where a live ref is hydrated).
+  if (ctx.tenantScope) {
+    var sealedRow = await ctx.backend.get(name);
+    var declRow = sealedRow ? _unsealRegistryRow(sealedRow) : null;
+    if (declRow && !_tenantAllows(ctx, args.actor, declRow.tenantId)) {
+      _safeAudit(ctx, "agent.orchestrator.lookup_denied", args.actor,
+        { name: name, reason: "cross-tenant" });
+      return null;
+    }
+  }
   // Live agent ref lives in-process; the backend row exists only as
   // a metadata declaration. In multi-process deployments each process
   // hydrates its own liveAgents map by calling register() locally.
@@ -326,10 +399,14 @@ async function _lookup(ctx, name, args) {
 async function _list(ctx, args) {
   guardAgentRegistry.validate({ kind: "list" }, {});
   _checkPermission(ctx, args.actor, "agent-registry:read");
-  var rows = await ctx.backend.list();
+  var rows = (await ctx.backend.list()).map(_unsealRegistryRow);
   return rows.filter(function (r) {
     if (args.kind && r.kind !== args.kind) return false;
     if (args.tenantId && r.tenantId !== args.tenantId) return false;
+    // Tenant-scope gate: drop rows the actor's tenant may not see, so
+    // enumeration can't disclose other tenants' agents. The args.tenantId
+    // above is a caller-supplied FILTER, not an authorization boundary.
+    if (!_tenantAllows(ctx, args.actor, r.tenantId)) return false;
     return true;
   }).map(function (r) {
     return {
@@ -351,7 +428,7 @@ function _spawnConsumers(ctx, args) {
       "spawnConsumers: queue with .consume() required");
   }
   var shards = typeof args.shards === "number" ? args.shards : 1;
-  if (!Number.isInteger(shards) || shards < 1 || shards > 256) {                                      // allow:raw-byte-literal — shard cap
+  if (!Number.isInteger(shards) || shards < 1 || shards > 256) {                                      // shard cap
     throw new AgentOrchestratorError("agent-orchestrator/bad-shard-count",
       "spawnConsumers: shards must be an integer in 1..256");
   }
@@ -422,7 +499,7 @@ function _spawnSingleConsumer(ctx, agent, queue, topic, maxConcurrency) {
  *   // → integer in [0, 8)
  */
 function _saltedFnvBasis() {
-  // SUBSTRATE-20 — salt FNV-1a offset basis with the vault master so
+  // Salt FNV-1a offset basis with the vault master so
   // an attacker can't engineer tenantIds that all hash to one shard.
   // Vault-less path (single-process tests / dev) falls back to the
   // standard FNV offset basis; production deployments with vault
@@ -431,21 +508,21 @@ function _saltedFnvBasis() {
   var v;
   try { v = vault(); } catch (_e) { v = null; }
   if (!v || typeof v.getKeysJson !== "function") {
-    _saltedFnvBasisCache = 2166136261;                                                                  // allow:raw-byte-literal — FNV-1a offset basis (vault-less fallback)
+    _saltedFnvBasisCache = 2166136261;                                                                  // FNV-1a offset basis (vault-less fallback)
     return _saltedFnvBasisCache;
   }
   var keysJson;
   try { keysJson = v.getKeysJson(); }
   catch (_e) {
-    _saltedFnvBasisCache = 2166136261;                                                                  // allow:raw-byte-literal — FNV-1a offset basis (vault-init-pending fallback)
+    _saltedFnvBasisCache = 2166136261;                                                                  // FNV-1a offset basis (vault-init-pending fallback)
     return _saltedFnvBasisCache;
   }
   var hashHex = bCrypto.sha3Hash(keysJson);
   // Read the first 32 bits as the salt; mix into the offset basis via
   // XOR so the distribution properties of FNV are preserved.
-  var saltBuf = Buffer.from(hashHex.slice(0, 8), "hex");                                                // allow:raw-byte-literal — 32-bit prefix of SHA3-512 hex (4 bytes = 8 hex chars)
+  var saltBuf = Buffer.from(hashHex.slice(0, 8), "hex");                                                // 32-bit prefix of SHA3-512 hex (4 bytes = 8 hex chars)
   var salt = saltBuf.readUInt32BE(0);
-  _saltedFnvBasisCache = ((2166136261 ^ salt) >>> 0);                                                   // allow:raw-byte-literal — FNV-1a offset basis (vault-salted)
+  _saltedFnvBasisCache = ((2166136261 ^ salt) >>> 0);                                                   // FNV-1a offset basis (vault-salted)
   return _saltedFnvBasisCache;
 }
 
@@ -458,7 +535,7 @@ function shardFor(shardKey, shards) {
   var h = _saltedFnvBasis();
   for (var i = 0; i < shardKey.length; i += 1) {
     h ^= shardKey.charCodeAt(i);
-    h = (h * 16777619) >>> 0;                                                                         // allow:raw-byte-literal — FNV-1a prime
+    h = (h * 16777619) >>> 0;                                                                         // FNV-1a prime
   }
   return h % shards;
 }
@@ -484,7 +561,7 @@ async function _elect(ctx, args) {
     });
     return elec;
   }
-  // SUBSTRATE-9 — cluster mode: ALWAYS query truth from b.cluster.
+  // Cluster mode: ALWAYS query truth from b.cluster.
   // The onTransition handler installed in create() invalidates the
   // cache on every lease event, so a cache hit here is safe (it
   // means no lease event has fired since the last query). But the
@@ -523,10 +600,10 @@ async function _drain(ctx, args) {
   var drained = 0;
   var startedAt = Date.now();
   var perConsumerMs = ctx.perConsumerStopMs;
-  // SUBSTRATE-8 — drain phases:
+  // Drain phases:
   //   1. set ctx.draining so streams emit drain-markers + new task
   //      dispatches refuse (consumers re-check on every envelope).
-  //   2. stop each consumer with BUG-6 per-consumer timeout race —
+  //   2. stop each consumer with a per-consumer timeout race —
   //      one hung consumer can't block the full drain budget.
   //   3. quiesce in-flight: poll outbox.pendingCount + sagaInFlightCount
   //      until 0 OR remaining-budget-ms elapses.
@@ -633,7 +710,7 @@ async function _quiesceInFlight(ctx, startedAt, timeoutMs) {
     }
     if (!anyInFlight) return true;
     await new Promise(function (r) {
-      var t = setTimeout(r, 50);                                                                       // allow:raw-byte-literal — 50ms in-flight poll interval
+      var t = setTimeout(r, 50);                                                                       // 50ms in-flight poll interval
       if (t && typeof t.unref === "function") t.unref();
     });
   }
@@ -698,6 +775,21 @@ function _checkPermission(ctx, actor, scope) {
     throw new AgentOrchestratorError("agent-orchestrator/permission-denied",
       "actor lacks scope '" + scope + "'");
   }
+}
+
+// Tenant-scope gate for registry reads. Returns true when the actor may
+// see / resolve an agent row in `rowTenantId`: scoping disabled, the actor
+// holds the cross-tenant-admin scope, or the actor's tenant matches the
+// row's. Mirrors agent-tenant's CROSS_TENANT_ADMIN_SCOPE check so registry
+// enumeration can't leak agents (or hand out live refs) across tenants.
+function _tenantAllows(ctx, actor, rowTenantId) {
+  if (!ctx.tenantScope) return true;
+  if (ctx.permissions && actor &&
+      ctx.permissions.check(actor, agentTenant().CROSS_TENANT_ADMIN_SCOPE)) {
+    return true;
+  }
+  var actorTenant = (actor && actor.tenantId) || null;
+  return actorTenant !== null && actorTenant === (rowTenantId || null);
 }
 
 function _safeAudit(ctx, action, actor, metadata) {
