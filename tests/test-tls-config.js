@@ -21,6 +21,7 @@ const SERVER_DIR = process.env.HERMITSTASH_SERVER_DIR
   || path.resolve(__dirname, '..', '..', 'hermitstash');
 const serverConstants = require(path.join(SERVER_DIR, 'lib', 'constants'));
 const syncConstants = require(path.join(__dirname, '..', 'lib', 'constants'));
+const { buildEnrollmentAgent } = require(path.join(__dirname, '..', 'lib', 'cli'));
 
 describe('Server TLS Constants (hermitstash)', function () {
   it('TLS_GROUP_PREFERENCE is exported', function () {
@@ -126,5 +127,40 @@ describe('OpenSSL TLS Context Validation', function () {
         minVersion: 'TLSv1.3',
       });
     });
+  });
+});
+
+describe('Enrollment TLS agent (first contact)', function () {
+  it('advertises the PQC group preference on both ecdhCurve and groups', function () {
+    const agent = buildEnrollmentAgent();
+    try {
+      // A bare https.Agent would negotiate Node's default non-PQC curves and
+      // be rejected by a server that enforces the PQC gate. Both options must
+      // be set — OpenSSL honours ecdhCurve vs groups differently across Node
+      // versions.
+      assert.strictEqual(agent.options.ecdhCurve, syncConstants.TLS_GROUPS);
+      assert.strictEqual(agent.options.groups, syncConstants.TLS_GROUPS);
+    } finally {
+      try { agent.destroy(); } catch (_e) { /* best-effort */ }
+    }
+  });
+
+  it('pins TLS 1.3', function () {
+    const agent = buildEnrollmentAgent();
+    try {
+      assert.strictEqual(agent.options.minVersion, syncConstants.TLS_MIN_VERSION);
+      assert.strictEqual(agent.options.minVersion, 'TLSv1.3');
+    } finally {
+      try { agent.destroy(); } catch (_e) { /* best-effort */ }
+    }
+  });
+
+  it('accepts self-signed certs at first contact (CA pin takes over post-enrollment)', function () {
+    const agent = buildEnrollmentAgent();
+    try {
+      assert.strictEqual(agent.options.rejectUnauthorized, false);
+    } finally {
+      try { agent.destroy(); } catch (_e) { /* best-effort */ }
+    }
   });
 });
