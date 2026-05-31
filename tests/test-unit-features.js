@@ -1,11 +1,11 @@
 'use strict';
 
-// Unit regression tests for features added in v0.8.1 — v0.8.13 that
-// don't need the server harness. Server-driven paths (conflict copies
-// during real downloads, parallel uploads against multipart endpoints,
-// SIGHUP reload over a running engine) live in test-functional.js +
-// test-stash.js. These tests exercise the LIBRARY surface in isolation:
-// config validation, path matcher, SPKI pin shape, env-overlay, etc.
+// Unit regression tests for library features that don't need the server
+// harness: config validation, path matcher, SPKI pin shape, env-overlay,
+// recursive temp-file cleanup, and the sync-cursor advance on dropped
+// (path-traversal) server events. Server-driven paths (parallel uploads
+// against multipart endpoints, SIGHUP reload over a running engine) live in
+// the integration suites.
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,7 +15,13 @@ const nodeOs = require('node:os');
 
 const pathFilter = require('../lib/path-filter');
 const config = require('../lib/config');
+const SyncEngine = require('../lib/sync-engine');
+const logger = require('../lib/logger');
 const b = require('../vendor/blamejs');
+
+// Quiet the engine's structured logger (its server-event handlers log) so unit
+// runs don't spew to the console; mirrors the harness's logger setup.
+logger.init({ level: 'error', stdout: false, file: nodePath.join(nodeOs.tmpdir(), 'hs-unit-' + process.pid + '.log') });
 
 describe('Selective sync — path-filter', () => {
   it('empty include = sync everything', () => {
@@ -205,5 +211,82 @@ describe('SPKI pin computation (from a real cert)', () => {
       server: 'https://x', bundleId: 'a', syncFolder: tmp,
       pinnedServerSpki: [pin],
     }), []);
+  });
+});
+
+describe('Recursive temp-file cleanup', () => {
+  function withEngine(fn) {
+    const tmp = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-tmpclean-'));
+    try { fn(new SyncEngine({ syncFolder: tmp }, 'k'), tmp); }
+    finally { nodeFs.rmSync(tmp, { recursive: true, force: true }); }
+  }
+
+  it('removes .tmp.<hex> files at any depth, keeps real files and decoys', () => {
+    withEngine((engine, tmp) => {
+      nodeFs.mkdirSync(nodePath.join(tmp, 'sub', 'deep'), { recursive: true });
+      const mk = (p) => nodeFs.writeFileSync(nodePath.join(tmp, p), 'x');
+      mk('a.txt');                   // keep — real file
+      mk('b.tmp.deadbeef');          // delete — root temp
+      mk('sub/c.txt');               // keep
+      mk('sub/d.tmp.12345678');      // delete — nested temp
+      mk('sub/e.tmp.nothexxx');      // keep — suffix not all-hex
+      mk('sub/deep/f.tmp.aabbccdd'); // delete — deep temp
+      mk('report.tmp.final');        // keep — decoy ("final" is not all-hex)
+
+      engine._cleanupTempFiles();
+
+      const has = (p) => nodeFs.existsSync(nodePath.join(tmp, p));
+      assert.equal(has('a.txt'), true);
+      assert.equal(has('b.tmp.deadbeef'), false);
+      assert.equal(has('sub/c.txt'), true);
+      assert.equal(has('sub/d.tmp.12345678'), false);
+      assert.equal(has('sub/e.tmp.nothexxx'), true);
+      assert.equal(has('sub/deep/f.tmp.aabbccdd'), false);
+      assert.equal(has('report.tmp.final'), true);
+    });
+  });
+
+  it('does not throw when the sync folder is missing', () => {
+    const gone = nodePath.join(nodeOs.tmpdir(), 'hs-absent-' + process.pid);
+    const engine = new SyncEngine({ syncFolder: gone }, 'k');
+    assert.doesNotThrow(() => engine._cleanupTempFiles());
+  });
+});
+
+describe('Sync cursor advances on dropped (path-traversal) server events', () => {
+  function tinyEngine() {
+    const tmp = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-wedge-'));
+    const engine = new SyncEngine({ syncFolder: tmp }, 'k');
+    let advanced = null;
+    engine._updateSeq = (s) => { advanced = s; }; // spy: avoids touching the state DB
+    return { engine, tmp, seqOf: () => advanced };
+  }
+
+  it('file_added with a traversal path still advances seq', async () => {
+    const { engine, tmp, seqOf } = tinyEngine();
+    await engine._handleFileAdded({ relativePath: '../escape.txt', seq: 7, fileId: 'f', checksum: 'c', size: 1 });
+    assert.equal(seqOf(), 7);
+    nodeFs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('file_replaced with a traversal path still advances seq', async () => {
+    const { engine, tmp, seqOf } = tinyEngine();
+    await engine._handleFileReplaced({ relativePath: '../escape.txt', seq: 8, fileId: 'f', checksum: 'c', size: 1 });
+    assert.equal(seqOf(), 8);
+    nodeFs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('file_removed with a traversal path still advances seq', async () => {
+    const { engine, tmp, seqOf } = tinyEngine();
+    await engine._handleFileRemoved({ relativePath: '../escape.txt', seq: 9 });
+    assert.equal(seqOf(), 9);
+    nodeFs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('file_renamed with a traversal path still advances seq', async () => {
+    const { engine, tmp, seqOf } = tinyEngine();
+    await engine._handleFileRenamed({ oldRelativePath: '../evil.txt', relativePath: 'ok.txt', seq: 10, fileId: 'f', checksum: 'c', size: 1 });
+    assert.equal(seqOf(), 10);
+    nodeFs.rmSync(tmp, { recursive: true, force: true });
   });
 });
