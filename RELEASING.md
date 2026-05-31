@@ -2,7 +2,7 @@
 
 This document is the procedure for cutting a release. It complements `SECURITY.md` (which covers what operators verify against a downloaded release) and `CHANGELOG.md` (the generated history of past releases).
 
-Releases are automated end-to-end via GitHub Actions. The operator-side workflow is:
+Releases are automated end-to-end via GitHub Actions. The canonical local driver is `node scripts/release.js all`, which runs the prepare → test → commit → tag sequence below and stops once the signed tag is pushed (the tag push is what triggers `release.yml`). Each phase is also a standalone subcommand — `prepare`, `test`, `commit`, `tag`, plus `regen`, `watch`, and `status` — so a failed step can be re-run in isolation without repeating the others; `node scripts/release.js help` lists them. `prepare`, `commit`, and `tag` run only on `main`, and `prepare` refuses unless `release-notes/vX.Y.Z.json` for the next version already exists. The numbered steps below document the contract each subcommand automates:
 
 1. **Verify version match.** `VERSION` in `lib/constants.js` and `"version"` in `package.json` must match. The first matrix step of `.github/workflows/release.yml` is a tag-vs-VERSION gate and refuses to build if they diverge.
 
@@ -34,7 +34,7 @@ Releases are automated end-to-end via GitHub Actions. The operator-side workflow
 4. **Run the local gates.** Two checks gate every commit on the release path. Both also run automatically in `ci.yml` on every push and PR to `main`, so a missed local run surfaces in the CI step summary rather than at tag time — but the local invocation is fast feedback:
 
    - `node scripts/check-changelog-extract.js` — refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time.
-   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite (38 detectors) includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
+   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite (46 detectors) includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
 
 5. **Update `README.md`** if anything user-visible changed — commands, requirements, attached artifacts, security claims.
 
@@ -107,20 +107,22 @@ The signer in `scripts/sign-release-artifact.js` self-verifies every signature a
 ## Release-checklist summary
 
 ```
-1. Verify VERSION (lib/constants.js) matches package.json "version".
-2. Author release-notes/vX.Y.Z.json.
-3. node scripts/generate-changelog-entry.js --rebuild
-4. node scripts/check-changelog-extract.js
-5. node --test scripts/test-codebase-patterns.js
-6. Update README.md if anything user-visible changed.
-7. git commit && git push origin main
-8. git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
-9. Watch release.yml + docker-publish.yml; share both URLs.
+# Canonical driver — runs prepare -> test -> commit -> tag, then stops:
+node scripts/release.js all
+
+# Equivalent step-by-step (each a standalone, re-runnable subcommand; run on main):
+1. Author release-notes/vX.Y.Z.json      # prepare refuses without it
+2. node scripts/release.js prepare        # bump VERSION (constants.js + package.json), rebuild CHANGELOG, run gates
+3. Update README.md if anything user-visible changed
+4. node scripts/release.js test           # full suite (node tests/run-all.js)
+5. node scripts/release.js commit         # signed release commit
+6. node scripts/release.js tag            # signed tag + push; prints the run + release URLs
+7. node scripts/release.js watch          # optional: follow release.yml + docker-publish.yml to completion
 ```
 
-## Local release alternative
+## Offline local build (`scripts/release.sh`)
 
-`bash scripts/release.sh` runs the same build end-to-end locally and uploads to the GitHub release using `gh` CLI credentials. Loads API keys from `~/.hermitstash-sync/release.env`. The local path produces the same artifacts as the workflow except for the SLSA L3 attestation (which requires the workflow's OIDC token to sign via Sigstore-keyless) and the cosign bundles. Use the local path only as a backup when the workflow runner is unavailable.
+`node scripts/release.js` is the normal local driver — it prepares, commits, and tags, then lets `release.yml` build and sign on the runner. `bash scripts/release.sh` is a separate offline fallback for when the GitHub Actions runner is unavailable: it runs the full build end-to-end locally and uploads to the GitHub release using `gh` CLI credentials, loading API keys from `~/.hermitstash-sync/release.env`. It produces the same artifacts as the workflow except the SLSA L3 attestation (which needs the workflow's OIDC token to sign via Sigstore-keyless) and the cosign bundles. It also creates the tag unsigned, unlike the `release.js tag` path — so do not run both for the same version, and prefer `release.js` whenever the runner is available.
 
 ## Operator-facing doc gates
 

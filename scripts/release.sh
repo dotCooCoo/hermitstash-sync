@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# release.sh — Automated release for HermitStash Sync
+# release.sh — OFFLINE local-build fallback for HermitStash Sync releases.
+#
+# The normal release driver is `node scripts/release.js` — it prepares, commits,
+# and tags, then lets .github/workflows/release.yml build and sign on the runner.
+# Use this script only when the GitHub Actions runner is unavailable: it builds
+# and publishes the full release locally. Note it creates the tag UNSIGNED,
+# unlike `release.js tag`, so do not run both for the same version.
 #
 # Usage:
 #   bash scripts/release.sh
