@@ -82,7 +82,7 @@ describe('mTLS CA Regeneration', { timeout: 30000 }, function () {
     var res = await client.request('/admin/api/mtls-ca/regenerate', 'POST', { confirm: 'wrong' });
     assert.equal(res.statusCode, 400, 'Missing/wrong confirm → 400');
     var b = body(res);
-    assert.ok(b && /REGEN/.test(b.error || ''),
+    assert.ok(b && /REGEN/.test(b.detail || b.error || ''),
       'Error mentions REGEN: ' + JSON.stringify(b));
   });
 

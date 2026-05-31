@@ -146,7 +146,7 @@ describe('Backup → Restore Roundtrip (S3)', { timeout: 60000 }, function () {
       'wrong passphrase → 403 or 500, got ' + res.statusCode + ' ' + (res.body || ''));
     var b = body(res) || {};
     // Error message should hint at passphrase, not leak crypto internals
-    var errStr = String(b.error || '');
+    var errStr = String(b.detail || b.error || '');
     assert.ok(/passphrase|decrypt|invalid/i.test(errStr),
       'error mentions passphrase/decrypt/invalid, got: ' + errStr);
   });
@@ -160,8 +160,8 @@ describe('Backup → Restore Roundtrip (S3)', { timeout: 60000 }, function () {
     });
     assert.ok(res.statusCode >= 400, 'nonexistent timestamp → 4xx/5xx, got ' + res.statusCode);
     var b = body(res) || {};
-    assert.ok(/not found|timestamp/i.test(String(b.error || '')),
-      'error mentions not-found/timestamp, got: ' + (b.error || ''));
+    assert.ok(/not found|timestamp/i.test(String(b.detail || b.error || '')),
+      'error mentions not-found/timestamp, got: ' + (b.detail || b.error || ''));
   });
 
   it('POST /admin/restore/run rejects missing passphrase with 400', async function () {
