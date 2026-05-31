@@ -149,8 +149,9 @@ describe('Certificate Renewal', { timeout: 30000 }, function () {
       assert.ok(res.statusCode === 403 || res.statusCode === 429,
         'Mismatched fingerprint -> ' + res.statusCode);
       if (res.statusCode === 403 && res.json) {
-        assert.ok(res.json.error.includes('does not match'),
-          'Error message should mention cert mismatch: ' + res.json.error);
+        var renewErrMsg = res.json.detail || res.json.error || '';
+        assert.ok(renewErrMsg.includes('does not match'),
+          'Error message should mention cert mismatch: ' + renewErrMsg);
       }
     });
   });

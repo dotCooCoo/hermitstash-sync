@@ -189,7 +189,7 @@ describe('SPKI pin computation (from a real cert)', () => {
     const certPath = nodePath.join(tmp, 'c.pem');
     try {
       execFileSync('openssl', ['ecparam', '-genkey', '-name', 'secp256r1', '-noout', '-out', keyPath], { stdio: 'pipe' });
-      execFileSync('openssl', ['req', '-new', '-x509', '-key', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=test'], { stdio: 'pipe' });
+      execFileSync('openssl', ['req', '-new', '-x509', '-key', keyPath, '-out', certPath, '-days', '3650', '-subj', '/CN=test'], { stdio: 'pipe' });
     } catch {
       // openssl not available — skip rather than fail. Test farms
       // without it (rare) still pass.

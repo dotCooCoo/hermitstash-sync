@@ -541,7 +541,7 @@ async function generateTestCerts() {
       cn:           'localhost',
       usage:        'server',
       sans:         ['DNS:localhost', 'DNS:host.docker.internal', 'IP:127.0.0.1'],
-      validityDays: 1,
+      validityDays: 3650,
     });
     const serverCertPath = path.join(certsDir, 'server.crt');
     const serverKeyPath  = path.join(certsDir, 'server.key');
@@ -552,7 +552,7 @@ async function generateTestCerts() {
     const client = await ca.generateClientCert({
       cn:           'hs_test_client',
       usage:        'client',
-      validityDays: 1,
+      validityDays: 3650,
     });
     const clientCertPath = path.join(certsDir, 'client.crt');
     const clientKeyPath  = path.join(certsDir, 'client.key');

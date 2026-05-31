@@ -26,17 +26,33 @@
   const serverCertPath = path.join(certsDir, 'server.crt');
   const serverKeyPath = path.join(certsDir, 'server.key');
 
-  if (!fs.existsSync(caCertPath) || !fs.existsSync(serverCertPath)) {
+  // Regenerate the test PKI when a cert file is missing OR the cached cert is
+  // expired / within 24h of expiry. Certs are issued for 10 years below, so in
+  // practice this only fires on a fresh checkout — but the expiry check
+  // self-heals a stale short-lived cert from an older revision instead of
+  // failing every run with "certificate has expired" until it's deleted by hand.
+  function _needsRegen() {
+    if (!fs.existsSync(caCertPath) || !fs.existsSync(caKeyPath) ||
+        !fs.existsSync(serverCertPath) || !fs.existsSync(serverKeyPath)) return true;
+    try {
+      var nodeCrypto = require('node:crypto');
+      var soon = Date.now() + 24 * 60 * 60 * 1000;
+      var srv = new nodeCrypto.X509Certificate(fs.readFileSync(serverCertPath));
+      var ca = new nodeCrypto.X509Certificate(fs.readFileSync(caCertPath));
+      return Date.parse(srv.validTo) < soon || Date.parse(ca.validTo) < soon;
+    } catch (_e) { return true; }
+  }
+  if (_needsRegen()) {
     fs.mkdirSync(certsDir, { recursive: true });
     const extFile = path.join(certsDir, 'server.ext');
     const serverCsrPath = path.join(certsDir, 'server.csr');
     try {
       execFileSync('openssl', ['ecparam', '-genkey', '-name', 'secp384r1', '-noout', '-out', caKeyPath], { stdio: 'pipe' });
-      execFileSync('openssl', ['req', '-new', '-x509', '-key', caKeyPath, '-out', caCertPath, '-days', '1', '-subj', '/CN=HermitStash Test CA/O=HermitStash Test'], { stdio: 'pipe' });
+      execFileSync('openssl', ['req', '-new', '-x509', '-key', caKeyPath, '-out', caCertPath, '-days', '3650', '-subj', '/CN=HermitStash Test CA/O=HermitStash Test'], { stdio: 'pipe' });
       fs.writeFileSync(extFile, 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n');
       execFileSync('openssl', ['ecparam', '-genkey', '-name', 'secp384r1', '-noout', '-out', serverKeyPath], { stdio: 'pipe' });
       execFileSync('openssl', ['req', '-new', '-key', serverKeyPath, '-out', serverCsrPath, '-subj', '/CN=localhost/O=HermitStash Test Server'], { stdio: 'pipe' });
-      execFileSync('openssl', ['x509', '-req', '-in', serverCsrPath, '-CA', caCertPath, '-CAkey', caKeyPath, '-CAcreateserial', '-out', serverCertPath, '-days', '1', '-extfile', extFile], { stdio: 'pipe' });
+      execFileSync('openssl', ['x509', '-req', '-in', serverCsrPath, '-CA', caCertPath, '-CAkey', caKeyPath, '-CAcreateserial', '-out', serverCertPath, '-days', '3650', '-extfile', extFile], { stdio: 'pipe' });
       try { fs.unlinkSync(serverCsrPath); } catch {}
       try { fs.unlinkSync(extFile); } catch {}
       try { fs.unlinkSync(path.join(certsDir, 'ca.srl')); } catch {}

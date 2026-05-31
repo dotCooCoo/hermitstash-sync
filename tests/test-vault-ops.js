@@ -13,12 +13,17 @@ if (!url) {
 }
 
 var VAULT_PREFIX = 'vault:';
+var VAULT_AAD_PREFIX = 'vault.aad:';
 
 /**
- * Helper: check if a value looks vault-sealed (starts with "vault:").
+ * Helper: check if a value looks vault-sealed — either the legacy "vault:"
+ * envelope or the AAD-bound "vault.aad:" form. The server AEAD-binds sealed
+ * columns to their row identity (table + primary key + column); legacy "vault:"
+ * rows still read via dual-read until rewritten.
  */
 function isSealed(value) {
-  return typeof value === 'string' && value.startsWith(VAULT_PREFIX);
+  return typeof value === 'string' &&
+    (value.startsWith(VAULT_AAD_PREFIX) || value.startsWith(VAULT_PREFIX));
 }
 
 /**
