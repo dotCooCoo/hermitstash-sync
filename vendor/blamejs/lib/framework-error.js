@@ -370,6 +370,10 @@ var DoraError             = defineClass("DoraError",             { alwaysPermane
 // posture name, runtime-switch refusal, assertion failures.
 // Permanent — these are configuration errors, not transient.
 var ComplianceError       = defineClass("ComplianceError",       { alwaysPermanent: true });
+// PrivacyError covers b.privacy config-time misuse: a malformed
+// vendorReview opts object, a non-boolean clause attestation, or an
+// unknown clause key. Permanent — operator configuration, not transient.
+var PrivacyError          = defineClass("PrivacyError",          { alwaysPermanent: true });
 // SmtpPolicyError covers MTA-STS / DANE / TLS-RPT misuse: bad-policy
 // shape, fetch failures, TLSA-record format errors, missing records.
 // Permanent — these are policy / DNS configuration errors, not
@@ -412,6 +416,20 @@ var McpError              = defineClass("McpError",              { alwaysPermane
 // input shape, classifier-result-shape errors, oversized input bypass.
 // Permanent — caller-shape errors.
 var AiInputError          = defineClass("AiInputError",          { alwaysPermanent: true });
+// AiOutputError covers LLM output-handling violations raised by
+// b.ai.output.sanitize / b.ai.output.redact: malformed input shape
+// (non-string), oversized output bypass (exceeds maxBytes cap), bad
+// maxBytes opt, unknown redaction entity. Permanent — caller-shape
+// errors that retry will not recover. OWASP LLM05:2025 (Improper
+// Output Handling) + LLM02:2025 (Sensitive Information Disclosure).
+var AiOutputError         = defineClass("AiOutputError",         { alwaysPermanent: true });
+// AiPromptError covers LLM prompt-assembly violations raised by
+// b.ai.prompt.template: malformed segment shape (non-string system /
+// context / user), bad maxBytes / nonceBytes opt, oversized assembled
+// prompt. Permanent — caller-shape errors that retry will not recover.
+// OWASP LLM01:2025 (Prompt Injection — indirect / data-plane injection
+// from untrusted context).
+var AiPromptError         = defineClass("AiPromptError",         { alwaysPermanent: true });
 // A2aError covers A2A (Agent-to-Agent) protocol violations: signed-
 // agent-card signature mismatch, expired card, unknown card id,
 // malformed card shape, signature-algorithm allowlist drift.
@@ -684,6 +702,7 @@ module.exports = {
   GuardAuthError:         GuardAuthError,
   DoraError:              DoraError,
   ComplianceError:        ComplianceError,
+  PrivacyError:           PrivacyError,
   SmtpPolicyError:        SmtpPolicyError,
   MailAuthError:          MailAuthError,
   MailArfError:           MailArfError,
@@ -691,6 +710,8 @@ module.exports = {
   SseError:               SseError,
   McpError:               McpError,
   AiInputError:           AiInputError,
+  AiOutputError:          AiOutputError,
+  AiPromptError:          AiPromptError,
   A2aError:               A2aError,
   GraphqlFederationError: GraphqlFederationError,
   Fda21Cfr11Error:        Fda21Cfr11Error,

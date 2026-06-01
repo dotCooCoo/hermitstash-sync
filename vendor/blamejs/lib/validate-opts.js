@@ -27,6 +27,8 @@
  * a typed error wrap the call.
  */
 
+var numericBounds = require("./numeric-bounds");
+
 function _format(primitive, unknownKey, allowedKeys) {
   return primitive + ": unknown option '" + unknownKey + "'. " +
     "Allowed keys: " + allowedKeys.slice().sort().join(", ") + ".";
@@ -150,6 +152,26 @@ function optionalFunction(value, label, errorClass, code) {
   return value;
 }
 
+// optionalPort — a TCP/UDP port number must be an integer in the wire-valid
+// range (RFC 6335 §6). Outbound-connect sites require [1,65535]; pass
+// { allowZero: true } for a listen-bind site where port 0 is the legitimate
+// ephemeral-bind sentinel the OS replaces with a kernel-assigned port. Uses
+// numericBounds.shape() in the message so Infinity / NaN / "443" stay visible.
+function optionalPort(value, label, errorClass, code, opts) {
+  if (value === undefined || value === null) return value;
+  opts = opts || {};
+  var ok = opts.allowZero
+    ? (numericBounds.isNonNegativeFiniteInt(value) && value <= 65535)
+    : (numericBounds.isPositiveFiniteInt(value) && value <= 65535);
+  if (!ok) {
+    _throw(errorClass, code, (label || "opt") + " must be " +
+           (opts.allowZero ? "0 (ephemeral) or " : "") +
+           "an integer in [" + (opts.allowZero ? 0 : 1) + ",65535], got " + numericBounds.shape(value),
+           "validate-opts/bad-port");
+  }
+  return value;
+}
+
 // applyDefaults — resolve every key in DEFAULTS against opts. For each
 // key, the operator's value (if not undefined) wins; otherwise the
 // default is used. Returns a new plain object — NOT a frozen one, so
@@ -188,6 +210,29 @@ function requireObject(opts, callerLabel, errorClass, code) {
     _throw(errorClass, code, msg, "validate-opts/bad-object");
   }
   return opts;
+}
+
+// requireMethods — validate an injected dependency exposes the named
+// methods. Collapses the repeated `if (!obj || typeof obj.fn !==
+// "function" || ...) throw` injected-store / exporter / backend guards
+// (b.agent.*.reseal stores, b.dsr / b.outbox create() backends, etc.)
+// into one definition. Throws on null / non-object / any missing-or-
+// non-function method; returns obj on success.
+function requireMethods(obj, methods, callerLabel, errorClass, code) {
+  var label = callerLabel || "dependency";
+  if (!obj || typeof obj !== "object") {
+    _throw(errorClass, code, label + " must be an object exposing { " +
+           methods.join(", ") + " }, got " + (obj === null ? "null" : typeof obj),
+           "validate-opts/bad-methods-object");
+  }
+  for (var i = 0; i < methods.length; i += 1) {
+    if (typeof obj[methods[i]] !== "function") {
+      _throw(errorClass, code, label + " must expose a " + methods[i] +
+             "() method (requires { " + methods.join(", ") + " })",
+             "validate-opts/missing-method");
+    }
+  }
+  return obj;
 }
 
 function optionalNonEmptyString(value, label, errorClass, code) {
@@ -368,6 +413,7 @@ module.exports.optionalBoolean = optionalBoolean;
 module.exports.optionalPositiveInt = optionalPositiveInt;
 module.exports.optionalFiniteNonNegative = optionalFiniteNonNegative;
 module.exports.optionalPositiveFinite = optionalPositiveFinite;
+module.exports.optionalPort = optionalPort;
 module.exports.optionalFunction = optionalFunction;
 module.exports.optionalNonEmptyString = optionalNonEmptyString;
 module.exports.optionalNonEmptyStringArray = optionalNonEmptyStringArray;
@@ -376,6 +422,7 @@ module.exports.optionalPlainObject = optionalPlainObject;
 module.exports.requireNonEmptyString = requireNonEmptyString;
 module.exports.observabilityShape = observabilityShape;
 module.exports.requireObject = requireObject;
+module.exports.requireMethods = requireMethods;
 module.exports.applyDefaults = applyDefaults;
 module.exports.makeAuditEmitter = makeAuditEmitter;
 module.exports.makeNamespacedEmitters = makeNamespacedEmitters;

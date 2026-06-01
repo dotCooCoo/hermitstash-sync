@@ -26,7 +26,7 @@ _tls.DEFAULT_MIN_VERSION = "TLSv1.3";
  *                 frameworkSchema, clusterStorage, session, atomicFile,
  *                 cookies
  *   Audit:        audit, auditChain, auditSign, auditTools, consent,
- *                 subject, events, redact
+ *                 subject, events, redact, privacy
  *   HTTP:         router, middleware (csrf, cors, rate-limit, request-id,
  *                 security-headers, bot-guard, attach-user, require-auth,
  *                 error-handler, body-parser, csp-nonce, compression,
@@ -88,6 +88,7 @@ audit.export = function (opts) {
 };
 var auditChain = require("./lib/audit-chain");
 var consent = require("./lib/consent");
+var privacy = require("./lib/privacy");
 var subject = require("./lib/subject");
 var session = require("./lib/session");
 var storage = require("./lib/storage");
@@ -139,6 +140,8 @@ var sse = require("./lib/sse");
 var mcp = require("./lib/mcp");
 var graphqlFederation = require("./lib/graphql-federation");
 var aiInput = require("./lib/ai-input");
+var aiOutput = require("./lib/ai-output");
+var aiPrompt = require("./lib/ai-prompt");
 var a2a = require("./lib/a2a");
 var darkPatterns = require("./lib/dark-patterns");
 var budr = require("./lib/budr");
@@ -457,6 +460,7 @@ module.exports = {
   auditTools:       auditTools,
   events:           events,
   consent:          consent,
+  privacy:          privacy,
   subject:          subject,
   session:          session,
   storage:          storage,
@@ -471,6 +475,8 @@ module.exports = {
   ai:               {
     adverseDecision: require("./lib/ai-adverse-decision"),
     input:           aiInput,
+    output:          aiOutput,
+    prompt:          aiPrompt,
     aiContentDetect: require("./lib/ai-content-detect"),
     modelManifest:   require("./lib/ai-model-manifest"),
     disclosure:      require("./lib/ai-disclosure"),

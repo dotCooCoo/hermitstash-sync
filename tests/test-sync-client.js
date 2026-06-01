@@ -229,6 +229,28 @@ describe('Sync Client Modules', { timeout: 30000 }, () => {
     client.destroy();
   });
 
+  it('HttpClient.renameFile() surfaces the decrypted server error detail on failure', async () => {
+    const HttpClient = require(path.join(CLIENT_LIB, 'http-client'));
+    var client = new HttpClient({ server: ctx.url, mtls: { cert: ctx.clientCert, key: ctx.clientKey, ca: ctx.caCert } }, ctx.apiKey);
+    client._agent.options.rejectUnauthorized = false;
+
+    var bundle = createBundleViaDb(ctx.dbPath, { bundleType: 'sync' });
+    // No file exists at 'ghost.txt', so the server returns a 404 problem-details
+    // — encrypted inside the per-session envelope on this route. The client must
+    // resolve the non-2xx response (responseMode passthrough), decrypt it, and
+    // surface `.detail` rather than throwing on raw ciphertext. A bare
+    // "Rename failed: HTTP 404" would mean the encrypted error never decrypted.
+    await assert.rejects(
+      client.renameFile(bundle.bundleId, 'ghost.txt', 'renamed.txt'),
+      function (err) {
+        assert.match(err.message, /File not found at old nodePath/i,
+          'thrown error should carry the decrypted server detail, got: ' + err.message);
+        return true;
+      }
+    );
+    client.destroy();
+  });
+
   it('HttpClient.getBundleMetadata() returns file list', async () => {
     const HttpClient = require(path.join(CLIENT_LIB, 'http-client'));
     var client = new HttpClient({ server: ctx.url, mtls: { cert: ctx.clientCert, key: ctx.clientKey, ca: ctx.caCert } }, ctx.apiKey);

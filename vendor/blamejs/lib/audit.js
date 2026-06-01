@@ -270,6 +270,7 @@ var FRAMEWORK_NAMESPACES = [
   "flag",       // b.flag (flag.evaluated / flag.evaluation.error / flag.cache.bust)
   "permissions", // b.permissions
   "pqcagent",   // b.pqcAgent (pqcagent.operator_group.accepted)
+  "privacy",    // b.privacy (privacy.vendor_review.recorded)
   "restore",    // b.restore
   "retention",  // b.retention (retention.rule.declared / sweep.started / row.processed / sweep.completed / sweep.failed)
   "scheduler",  // b.scheduler (lifecycle: scheduler.start / scheduler.stop;
@@ -280,6 +281,8 @@ var FRAMEWORK_NAMESPACES = [
   "mcp",        // b.mcp.serverGuard (mcp.auth.* / mcp.tool.* / mcp.resource.* / mcp.register.* / mcp.envelope.*)
   "graphqlfederation", // b.graphqlFederation.guardSdl (sdl-refused / sdl-allowed)
   "aiinput",    // b.ai.input.classify (aiInput.classify)
+  "aioutput",   // b.ai.output.sanitize / redact (aioutput.sanitize / aioutput.redact)
+  "aiprompt",   // b.ai.prompt.template (aiprompt.template — stripped-threat warning)
   "a2a",        // b.a2a (a2a.card_signed / verified / rejected)
   "darkpatterns", // b.darkPatterns (darkPatterns.attest / cancel-blocked)
   "budr",       // b.budr (budr.declared)
