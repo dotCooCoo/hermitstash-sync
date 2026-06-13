@@ -63,12 +63,31 @@ const NATIVE_AVAILABLE = `(() => {
   };
 })()`;
 
-// A native keychain stub that always fails — forces the file fallback.
+// A native keychain stub that always fails — forces the file fallback. Carries
+// the real KeychainError so lib/keychain.js's world-readable-file refusal can
+// construct the typed error it surfaces (b.keychain is replaced by this stub
+// in the child, so the class has to come along).
 const NATIVE_UNAVAILABLE = `{
   store: async () => { throw new Error('no native credential store'); },
   retrieve: async () => { throw new Error('no native credential store'); },
   remove: async () => { throw new Error('no native credential store'); },
+  KeychainError: b.keychain.KeychainError,
 }`;
+
+// A native stub that records the service name it was called with into a
+// global so the body can assert config.apiKeyRef threaded through to the
+// backend. Backed by a per-(service) in-memory map so a custom service is
+// isolated from the default.
+const NATIVE_RECORDS_SERVICE = `(() => {
+  globalThis.__svc = { store: null, retrieve: null, remove: null };
+  const mem = {};
+  return {
+    store: async ({ service, password }) => { globalThis.__svc.store = service; mem[service] = password; return { stored: true, backend: 'test-native' }; },
+    retrieve: async ({ service }) => { globalThis.__svc.retrieve = service; return (mem[service] != null ? { password: mem[service] } : {}); },
+    remove: async ({ service }) => { globalThis.__svc.remove = service; delete mem[service]; return { removed: true }; },
+    KeychainError: b.keychain.KeychainError,
+  };
+})()`;
 
 describe('keychain — native store removes stale plaintext fallback', () => {
   it('store to file, then store with native available, leaves no plaintext file and reads from keychain', () => {
@@ -140,6 +159,138 @@ describe('keychain — atomic 0o600 file fallback', () => {
       assert.equal(got, 'LEGACY-KEY');
       const mode = (fs.statSync(CREDENTIALS_FILE).mode & 0o777).toString(8);
       assert.equal(mode, '600', 'retrieve should correct loose perms in place');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+});
+
+describe('keychain — config.apiKeyRef is honored (R27)', () => {
+  it('store/retrieve/remove thread keychain:<service> through to the backend', () => {
+    const dir = tmpConfigDir('ref');
+    const out = runChild(dir, NATIVE_RECORDS_SERVICE, `
+      const REF = 'keychain:my-custom-stash';
+      const where = await keychain.store('REF-SECRET', REF);
+      assert.equal(where, 'keychain', 'native store under the custom service should win');
+      assert.equal(globalThis.__svc.store, 'my-custom-stash', 'store must use the apiKeyRef service');
+      const got = await keychain.retrieve(REF);
+      assert.equal(got, 'REF-SECRET', 'retrieve must read back from the same service');
+      assert.equal(globalThis.__svc.retrieve, 'my-custom-stash', 'retrieve must use the apiKeyRef service');
+      await keychain.remove(REF);
+      assert.equal(globalThis.__svc.remove, 'my-custom-stash', 'remove must use the apiKeyRef service');
+      const gone = await keychain.retrieve(REF);
+      assert.equal(gone, null, 'removed key should be gone');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it("parseApiKeyRef maps the documented forms", () => {
+    const dir = tmpConfigDir('parse');
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const k = require(${JSON.stringify(KEYCHAIN)});
+      assert.deepEqual(k.parseApiKeyRef('keychain:foo'), { mode: 'keychain', service: 'foo' });
+      assert.deepEqual(k.parseApiKeyRef('keychain'), { mode: 'keychain', service: 'hermitstash-sync' });
+      assert.deepEqual(k.parseApiKeyRef('keychain:'), { mode: 'keychain', service: 'hermitstash-sync' });
+      assert.deepEqual(k.parseApiKeyRef('file'), { mode: 'file' });
+      assert.deepEqual(k.parseApiKeyRef(undefined), { mode: 'keychain', service: 'hermitstash-sync' });
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it('file-mode ref forces the plaintext fallback and skips native probing', () => {
+    const dir = tmpConfigDir('filemode');
+    const out = runChild(dir, NATIVE_RECORDS_SERVICE, `
+      const where = await keychain.store('FILE-MODE-SECRET', 'file');
+      assert.equal(where, 'file', 'file-mode ref must write the plaintext fallback');
+      assert.equal(globalThis.__svc.store, null, 'native store must not be touched in file mode');
+      assert.ok(fs.existsSync(CREDENTIALS_FILE), 'plaintext fallback should exist');
+      const got = await keychain.retrieve('file');
+      assert.equal(got, 'FILE-MODE-SECRET');
+      assert.equal(globalThis.__svc.retrieve, null, 'native retrieve must not be touched in file mode');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+});
+
+describe('keychain — backend-unreachable vs no-credential (R28)', () => {
+  it('keychain ref + native throws + no file → retrieveDetailed signals backendUnreachable', () => {
+    const dir = tmpConfigDir('unreach');
+    // Native store succeeds (records the service), then on a fresh process the
+    // native backend is unreachable (throws) and there is no file fallback —
+    // the operator's key is still in the keychain, the store is just down.
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const r = await keychain.retrieveDetailed('keychain:hermitstash-sync');
+      assert.equal(r.found, false, 'no usable credential resolved');
+      assert.equal(r.backendUnreachable, true, 'must flag the backend as unreachable, not "no credential"');
+      // The back-compat surface still returns null, but the DETAILED result is
+      // what lets the CLI print the keychain-down guidance.
+      const bare = await keychain.retrieve('keychain:hermitstash-sync');
+      assert.equal(bare, null);
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it('file-mode ref + no file → genuine no-credential (NOT backendUnreachable)', () => {
+    const dir = tmpConfigDir('nocred');
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const r = await keychain.retrieveDetailed('file');
+      assert.equal(r.found, false, 'no credential present');
+      assert.notEqual(r.backendUnreachable, true, 'file mode with no file is genuine no-credential, not unreachable');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it('the unreachable signal does not fire when a file fallback exists', () => {
+    const dir = tmpConfigDir('hasfile');
+    // Plant a file fallback, then retrieve with a keychain ref + unreachable
+    // native: the file answers, so this is NOT the unreachable case.
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      await keychain.store('FALLBACK-SECRET', 'file');
+      const r = await keychain.retrieveDetailed('keychain:hermitstash-sync');
+      assert.equal(r.found, true, 'file fallback should satisfy the retrieve');
+      assert.equal(r.apiKey, 'FALLBACK-SECRET');
+      assert.notEqual(r.backendUnreachable, true);
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+});
+
+describe('keychain — world-readable credentials file is refused when un-tightenable (R29)', () => {
+  it('refuses (does not serve) a world-readable file whose chmod fails (POSIX)', function () {
+    if (process.platform === 'win32') return; // POSIX mode bits only
+    const dir = tmpConfigDir('exposed');
+    const credFile = path.join(dir, 'credentials');
+    fs.writeFileSync(credFile, 'EXPOSED-KEY', { mode: 0o644 });
+    fs.chmodSync(credFile, 0o644);
+
+    // Make chmodSync throw so the self-heal can't tighten the loose perms; the
+    // retrieve must then REFUSE rather than serve a credential other users can
+    // read. A bare warn-and-return would silently keep the exposed key in use.
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const realChmod = fs.chmodSync;
+      fs.chmodSync = () => { throw Object.assign(new Error('EPERM: chmod blocked'), { code: 'EPERM' }); };
+      let threw = null;
+      try { await keychain.retrieve('file'); }
+      catch (e) { threw = e; }
+      finally { fs.chmodSync = realChmod; }
+      assert.ok(threw, 'a world-readable file that cannot be tightened must be refused, not served');
+      assert.match(String(threw.message), /readable by other users/i);
+      assert.match(String(threw.message), /chmod 600|re-enroll/i, 'the error must be actionable');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it('still tightens-and-serves when chmod succeeds (no regression)', function () {
+    if (process.platform === 'win32') return;
+    const dir = tmpConfigDir('tighten-ok');
+    const credFile = path.join(dir, 'credentials');
+    fs.writeFileSync(credFile, 'OK-KEY', { mode: 0o644 });
+    fs.chmodSync(credFile, 0o644);
+
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const got = await keychain.retrieve('file');
+      assert.equal(got, 'OK-KEY', 'a tightenable loose-perm file should still be served after re-chmod');
+      const mode = (fs.statSync(CREDENTIALS_FILE).mode & 0o777).toString(8);
+      assert.equal(mode, '600');
     `);
     assert.match(out, /CHILD_OK/);
   });
