@@ -391,7 +391,7 @@ describe('Auto-update — install and swap', { timeout: 20000 }, () => {
 
   after(async () => { await stopServerAsync(server); });
 
-  it('installs new binary, writes marker, copies old to .prev, spawns child', async () => {
+  it('installs new binary, writes marker, backs up the old image, spawns child', async () => {
     const execDir = tempDir('exec');
     const currentPath = path.join(execDir, process.platform === 'win32' ? 'hs.exe' : 'hs');
     fs.writeFileSync(currentPath, 'OLD BINARY CONTENTS', { mode: 0o755 });
@@ -426,17 +426,223 @@ describe('Auto-update — install and swap', { timeout: 20000 }, () => {
     assert.equal(spawnCalled.cmd, currentPath);
     assert.deepEqual(spawnCalled.args, ['start']);
 
+    // The backup path differs by platform: POSIX renames the new asset
+    // ONTO the running image and keeps the old bytes at `<exec>.prev`;
+    // Windows can't overwrite a running image, so it renames the running
+    // image away to `<exec>.old` and drops the new bytes at the original.
     const ext = process.platform === 'win32' ? '.exe' : '';
     const base = currentPath.slice(0, currentPath.length - ext.length);
-    const prevPath = `${base}.prev${ext}`;
+    const backupPath = process.platform === 'win32'
+      ? `${base}.old${ext}`
+      : `${base}.prev${ext}`;
 
     assert.equal(fs.readFileSync(currentPath, 'utf8'), 'new binary v9.9.9');
-    assert.equal(fs.readFileSync(prevPath, 'utf8'), 'OLD BINARY CONTENTS');
+    assert.equal(fs.readFileSync(backupPath, 'utf8'), 'OLD BINARY CONTENTS');
 
     const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
     assert.equal(marker.newVersion, '9.9.9');
-    assert.equal(marker.prevBinaryPath, prevPath);
+    assert.equal(marker.prevBinaryPath, backupPath);
     assert.ok(marker.installedAt > 0);
+  });
+
+  it('marker is written whole via the atomic primitive (no torn JSON, no .tmp left behind)', async () => {
+    const execDir = tempDir('exec');
+    const currentPath = path.join(execDir, process.platform === 'win32' ? 'hs.exe' : 'hs');
+    fs.writeFileSync(currentPath, 'OLD', { mode: 0o755 });
+    const markerDir = tempDir('marker');
+    const markerPath = path.join(markerDir, 'update-pending.json');
+
+    const up = createUpdater({
+      currentVersion: '0.4.6',
+      pubkeyPem: PUBKEY_PEM,
+      apiBase: `https://127.0.0.1:${port}`,
+      httpsAgent: new https.Agent({ keepAlive: true }),
+      isSeaBinary: () => true,
+      pollMs: 60_000,
+      initialDelayMs: 0,
+      probationMs: 2000,
+      markerPath,
+      getExecPath: () => currentPath,
+      getArgv: () => [],
+      exitFn: () => {},
+      spawnFn: () => ({ unref() {} }),
+    });
+
+    await up.checkOnce(async (install) => { await install(); });
+
+    // The marker parses cleanly (whole write) and no atomic temp file
+    // (<marker>.tmp-*) is left in the directory after the rename.
+    const parsed = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    assert.equal(parsed.newVersion, '9.9.9');
+    const leftovers = fs.readdirSync(markerDir).filter(n => n.includes('.tmp-'));
+    assert.deepEqual(leftovers, [], 'atomic write should leave no .tmp- artifact');
+  });
+});
+
+describe('Auto-update — streaming download', { timeout: 30000 }, () => {
+
+  if (!HAS_KEY) {
+    it.skip('signing key missing');
+    return;
+  }
+
+  let server;
+  let port;
+  let state;
+
+  // A multi-MiB asset — large enough that a buffer-everything path would
+  // be observable, small enough to keep the test fast. The streaming path
+  // writes it straight to the temp dir and re-verifies the signature off
+  // disk before any swap.
+  const BIG = crypto.randomBytes(6 * 1024 * 1024);
+
+  before(async () => {
+    state = buildReleaseState('9.9.9', BIG);
+    server = createMockServer(state);
+    port = await startServerAsync(server);
+  });
+
+  after(async () => { await stopServerAsync(server); });
+
+  it('streams a multi-MiB asset to disk and installs it intact', async () => {
+    const execDir = tempDir('exec');
+    const currentPath = path.join(execDir, process.platform === 'win32' ? 'hs.exe' : 'hs');
+    fs.writeFileSync(currentPath, 'OLD', { mode: 0o755 });
+    const markerPath = path.join(tempDir('marker'), 'update-pending.json');
+
+    const up = createUpdater({
+      currentVersion: '0.4.6',
+      pubkeyPem: PUBKEY_PEM,
+      apiBase: `https://127.0.0.1:${port}`,
+      httpsAgent: new https.Agent({ keepAlive: true }),
+      isSeaBinary: () => true,
+      pollMs: 60_000,
+      initialDelayMs: 0,
+      probationMs: 2000,
+      markerPath,
+      getExecPath: () => currentPath,
+      getArgv: () => [],
+      exitFn: () => {},
+      spawnFn: () => ({ unref() {} }),
+    });
+
+    const result = await up.checkOnce(async (install) => { await install(); });
+    assert.equal(result.status, 'ready', result.error ? result.error.message : '');
+
+    const installed = fs.readFileSync(currentPath);
+    assert.equal(installed.length, BIG.length, 'installed binary size must match the streamed asset');
+    assert.ok(installed.equals(BIG), 'installed bytes must match the streamed asset byte-for-byte');
+  });
+});
+
+describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
+
+  if (!HAS_KEY) {
+    it.skip('signing key missing');
+    return;
+  }
+
+  let server;
+  let port;
+  let state;
+
+  before(async () => {
+    state = buildReleaseState('9.9.9', Buffer.from('new binary v9.9.9'));
+    server = createMockServer(state);
+    port = await startServerAsync(server);
+  });
+
+  after(async () => { await stopServerAsync(server); });
+
+  // Exercise performInstall directly so the win32 rename-away path is
+  // covered on every platform (it doesn't depend on a real running image —
+  // it renames whatever getExecPath() points at). On win32 in production
+  // this is the swap that avoids the EBUSY/EPERM the old rename-onto-self
+  // path hit; here we drive _internals.performInstall with a temp file
+  // standing in for the running .exe.
+  it('renames the running image to .old and installs the new bytes at the original path', async () => {
+    const dir = tempDir('winswap');
+    const currentPath = path.join(dir, 'hs.exe');
+    const assetPath = path.join(dir, 'asset.exe');
+    fs.writeFileSync(currentPath, 'RUNNING IMAGE', { mode: 0o755 });
+    fs.writeFileSync(assetPath, 'NEW IMAGE', { mode: 0o755 });
+    const markerPath = path.join(tempDir('marker'), 'update-pending.json');
+
+    // Force the win32 branch regardless of host OS by stubbing platform.
+    const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const up = createUpdater({
+        currentVersion: '0.4.6',
+        pubkeyPem: PUBKEY_PEM,
+        httpsAgent: new https.Agent({ keepAlive: true }),
+        isSeaBinary: () => true,
+        markerPath,
+        getExecPath: () => currentPath,
+        getArgv: () => [],
+        exitFn: () => {},
+        spawnFn: () => ({ unref() {} }),
+      });
+      const { prevPath } = await up._internals.performInstall('9.9.9', assetPath);
+
+      assert.equal(fs.readFileSync(currentPath, 'utf8'), 'NEW IMAGE');
+      assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
+      assert.equal(fs.readFileSync(prevPath, 'utf8'), 'RUNNING IMAGE');
+
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+      assert.equal(marker.prevBinaryPath, prevPath);
+    } finally {
+      Object.defineProperty(process, 'platform', realPlatform);
+    }
+  });
+
+  it('surfaces an actionable error when Windows blocks the rename-away (EPERM)', async () => {
+    const dir = tempDir('winswap');
+    const currentPath = path.join(dir, 'hs.exe');
+    const assetPath = path.join(dir, 'asset.exe');
+    fs.writeFileSync(currentPath, 'RUNNING IMAGE', { mode: 0o755 });
+    fs.writeFileSync(assetPath, 'NEW IMAGE', { mode: 0o755 });
+    const markerPath = path.join(tempDir('marker'), 'update-pending.json');
+
+    const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const realRename = fs.renameSync;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    // Simulate Windows refusing to rename the running image away.
+    fs.renameSync = (from, to) => {
+      if (from === currentPath) {
+        const e = new Error('EPERM: operation not permitted, rename');
+        e.code = 'EPERM';
+        throw e;
+      }
+      return realRename(from, to);
+    };
+    try {
+      const up = createUpdater({
+        currentVersion: '0.4.6',
+        pubkeyPem: PUBKEY_PEM,
+        httpsAgent: new https.Agent({ keepAlive: true }),
+        isSeaBinary: () => true,
+        markerPath,
+        getExecPath: () => currentPath,
+        getArgv: () => [],
+        exitFn: () => {},
+        spawnFn: () => ({ unref() {} }),
+      });
+      await assert.rejects(
+        up._internals.performInstall('9.9.9', assetPath),
+        (err) => {
+          assert.match(err.message, /not supported|external updater|installer manually/i);
+          assert.match(err.message, /EPERM/);
+          return true;
+        }
+      );
+      // No marker written on a failed install — the daemon stays on the
+      // current version.
+      assert.equal(fs.existsSync(markerPath), false);
+    } finally {
+      fs.renameSync = realRename;
+      Object.defineProperty(process, 'platform', realPlatform);
+    }
   });
 });
 
