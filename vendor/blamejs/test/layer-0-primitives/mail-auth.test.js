@@ -108,6 +108,190 @@ async function testDmarcEvaluateUnaligned() {
         rv.result === "fail" && rv.recommendedAction === "quarantine");
 }
 
+// ---- b.mail.inbound.verify — receiver pipeline (RFC 7489 §6.6) ----
+
+function _inboundDns(records) {
+  return async function (host, type) {
+    if (records[host + "/" + type]) return records[host + "/" + type];
+    var err = new Error("ENOTFOUND"); err.code = "ENOTFOUND"; throw err;
+  };
+}
+
+async function testInboundVerifyAlignedPass() {
+  var dnsLookup = _inboundDns({
+    "example.com/TXT":        [["v=spf1 ip4:192.0.2.0/24 -all"]],
+    "_dmarc.example.com/TXT": [["v=DMARC1; p=reject"]],
+  });
+  var msg = "From: Alice <alice@example.com>\r\nSubject: hi\r\n\r\nhello\r\n";
+  var v = await b.mail.inbound.verify({
+    ip:         "192.0.2.5",
+    helo:       "mail.example.com",
+    mailFrom:   "alice@example.com",
+    message:    Buffer.from(msg),
+    dnsLookup:  dnsLookup,
+    authservId: "mx.local.test",
+  });
+  check("inbound.verify: aligned SPF → dmarc pass + deliver",
+        v.spf.result === "pass" && v.dmarc.result === "pass" &&
+        v.dmarc.recommendedAction === "deliver");
+  check("inbound.verify: From extracted from Buffer message",
+        v.from.count === 1 && v.from.address === "alice@example.com" &&
+        v.from.domain === "example.com");
+  check("inbound.verify: A-R header emitted with authserv-id first",
+        typeof v.authResults === "string" &&
+        v.authResults.indexOf("Authentication-Results: mx.local.test") === 0 &&
+        /spf=pass/.test(v.authResults) && /dmarc=pass/.test(v.authResults));
+  check("inbound.verify: unsigned message verifies dkim none",
+        Array.isArray(v.dkim) && v.dkim[0] && v.dkim[0].result === "none");
+}
+
+async function testInboundVerifySpoofRejected() {
+  var dnsLookup = _inboundDns({
+    "spoofed.example/TXT":        [["v=spf1 -all"]],
+    "_dmarc.spoofed.example/TXT": [["v=DMARC1; p=reject"]],
+  });
+  var msg = "From: ceo@spoofed.example\r\nSubject: urgent\r\n\r\nwire money\r\n";
+  var v = await b.mail.inbound.verify({
+    ip:        "203.0.113.9",
+    helo:      "evil.host",
+    mailFrom:  "ceo@spoofed.example",
+    message:   msg,
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: spoofed sender → spf fail + dmarc fail + reject",
+        v.spf.result === "fail" && v.dmarc.result === "fail" &&
+        v.dmarc.recommendedAction === "reject");
+  check("inbound.verify: no authservId → no A-R header", v.authResults === null);
+}
+
+async function testInboundVerifyFromHeaderDiscipline() {
+  var dnsLookup = _inboundDns({});
+  // Two From fields — the header-duplication spoofing shape.
+  var dup = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "safe@aligned.example",
+    message: "From: safe@aligned.example\r\nFrom: ceo@victim.example\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: duplicated From → permerror + reject (RFC 7489 §6.6.1)",
+        dup.from.count === 2 && dup.dmarc.result === "permerror" &&
+        dup.dmarc.recommendedAction === "reject");
+  // Two angle-addr authors inside one field.
+  var multi = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "safe@aligned.example",
+    message: "From: <safe@aligned.example> <ceo@victim.example>\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: two angle-addrs in one From → permerror + reject",
+        multi.from.count === 2 && multi.dmarc.recommendedAction === "reject");
+  // Bare address list (no angle-addrs) — unparsable rather than
+  // picking one of the authors.
+  var bareList = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "safe@aligned.example",
+    message: "From: a@aligned.example, b@victim.example\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: bare From address-list → no author domain picked + reject",
+        bareList.from.domain === null && bareList.dmarc.recommendedAction === "reject");
+  // No From header at all.
+  var none = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "safe@aligned.example",
+    message: "Subject: headless\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: missing From → permerror + reject",
+        none.from.count === 0 && none.dmarc.result === "permerror" &&
+        none.dmarc.recommendedAction === "reject");
+  // Folded From header unfolds before extraction.
+  var folded = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "x@folded.example",
+    message: "From: Folded Name\r\n <x@folded.example>\r\nSubject: f\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: folded From unfolds (RFC 5322 §2.2.3)",
+        folded.from.count === 1 && folded.from.domain === "folded.example");
+  // Quoted display-names: a literal `<` or comma inside a
+  // quoted-string is display-name text, not a second author — valid
+  // single-author mail must not false-positive into permerror.
+  var quotedLt = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "h.example", mailFrom: "u@quoted.example",
+    message: "From: \"John <Jr.> Smith\" <u@quoted.example>\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: quoted display-name with literal < is one author",
+        quotedLt.from.count === 1 && quotedLt.from.domain === "quoted.example");
+  var quotedComma = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "h.example", mailFrom: "j@comma.example",
+    message: "From: \"Doe, John\" <j@comma.example>\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: quoted display-name with comma is one author",
+        quotedComma.from.count === 1 && quotedComma.from.domain === "comma.example");
+  // Comma-separated angle-addr list — multiple authors refused.
+  var twoAngle = await b.mail.inbound.verify({
+    ip: "203.0.113.9", helo: "evil.host", mailFrom: "safe@aligned.example",
+    message: "From: <safe@aligned.example>, Boss <ceo@victim.example>\r\n\r\nbody\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: comma-separated angle-addr list → multiple authors refused",
+        twoAngle.from.count === 2 && twoAngle.dmarc.recommendedAction === "reject");
+}
+
+// RFC 7489 §6.6.2 — a fail verdict computed while SPF or DKIM returned
+// temperror must surface as temperror (the transiently-failed lookup
+// could have produced the aligned pass), so the MX gate defers with
+// 451 instead of permanently refusing a legitimate sender mid-DNS-blip.
+async function testInboundVerifyTemperrorPrecedence() {
+  // SPF TXT lookup fails transiently (SERVFAIL — no ENOTFOUND code);
+  // the DMARC policy lookup itself succeeds with p=reject.
+  var dnsLookup = async function (host, type) {
+    if (host === "_dmarc.blip.example" && type === "TXT") {
+      return [["v=DMARC1; p=reject"]];
+    }
+    throw new Error("SERVFAIL");
+  };
+  var v = await b.mail.inbound.verify({
+    ip:        "203.0.113.9",
+    helo:      "mail.blip.example",
+    mailFrom:  "news@blip.example",
+    message:   "From: news@blip.example\r\nSubject: hi\r\n\r\nhello\r\n",
+    dnsLookup: dnsLookup,
+  });
+  check("inbound.verify: SPF temperror under p=reject → dmarc temperror, not fail",
+        v.spf.result === "temperror" && v.dmarc.result === "temperror" &&
+        v.dmarc.recommendedAction !== "reject");
+  // A pass stands regardless of the other authenticator's temperror:
+  // aligned DKIM pass + SPF temperror is still a DMARC pass.
+  var dnsLookup2 = async function (host, type) {
+    if (host === "_dmarc.blip.example" && type === "TXT") {
+      return [["v=DMARC1; p=reject"]];
+    }
+    throw new Error("SERVFAIL");
+  };
+  var v2 = await b.mail.dmarc.evaluate({
+    from:      "news@blip.example",
+    spf:       { result: "temperror", domain: "blip.example" },
+    dkim:      [{ result: "pass", domain: "blip.example" }],
+    dnsLookup: dnsLookup2,
+  });
+  check("dmarc.evaluate: aligned DKIM pass beats SPF temperror (pass stands)",
+        v2.result === "pass" && v2.recommendedAction === "deliver");
+}
+
+async function testInboundVerifyValidation() {
+  var e1 = null;
+  try { await b.mail.inbound.verify({ message: "x" }); } catch (e) { e1 = e; }
+  check("inbound.verify: missing ip refused", e1 !== null);
+  var e2 = null;
+  try { await b.mail.inbound.verify({ ip: "203.0.113.9", message: "" }); } catch (e) { e2 = e; }
+  check("inbound.verify: empty message refused",
+        e2 && /inbound-bad-message/.test(e2.code || ""));
+  var e3 = null;
+  try {
+    await b.mail.inbound.verify({ ip: "203.0.113.9", message: "From: a@b.c\r\n\r\nx", bogus: 1 });
+  } catch (e) { e3 = e; }
+  check("inbound.verify: unknown opt refused (config-time)", e3 !== null);
+}
+
 async function testArcVerifyMissing() {
   var msg = "ARC-Seal: i=1; a=rsa-sha256; cv=none; d=example.com; s=arc; b=AAAA\r\n" +
             "From: alice@example.com\r\n\r\nbody\r\n";
@@ -682,6 +866,262 @@ function testDmarcRuaGunzipBombDistinguished() {
         threw && /dmarc-rua-gunzip-bomb/.test(threw.code || ""));
 }
 
+function testDmarcRuaBuildRoundTrip() {
+  // RFC 7489 Appendix C — buildAggregateReport is the inverse of
+  // parseAggregateReport; a shaped report serialized to XML and re-
+  // parsed MUST deep-equal the input (the parser adds a derived
+  // `totals` convenience field, removed before comparison).
+  var shaped = {
+    reportMetadata: {
+      orgName: "reporter.example",
+      email: "dmarc@reporter.example",
+      reportId: "rpt-12345",
+      extraContact: null,
+      dateRange: { begin: 1700000000, end: 1700086400 },
+    },
+    policyPublished: {
+      domain: "example.com", adkim: "r", aspf: "r",
+      p: "reject", sp: "quarantine", pct: 100, fo: null,
+    },
+    records: [
+      {
+        sourceIp: "192.0.2.10", count: 7,
+        dispositions: {
+          disposition: "none", dkim: "pass", spf: "fail",
+          reasons: [{ type: "forwarded", comment: "mailing list" }],
+        },
+        identifiers: { headerFrom: "example.com", envelopeFrom: "example.com", envelopeTo: null },
+        authResults: {
+          dkim: [{ domain: "example.com", selector: "sel1", result: "pass", humanResult: null }],
+          spf: [{ domain: "example.com", result: "fail", scope: "mfrom" }],
+        },
+      },
+      {
+        // header_from carries XML metacharacters (a spoofed identifier
+        // observed in the wild) — escaping MUST survive the round-trip.
+        sourceIp: "203.0.113.5", count: 3,
+        dispositions: { disposition: "quarantine", dkim: "fail", spf: "fail", reasons: [] },
+        identifiers: { headerFrom: "evil<&>\".example.com", envelopeFrom: null, envelopeTo: null },
+        authResults: { dkim: [], spf: [{ domain: "spoof.example", result: "fail", scope: "mfrom" }] },
+      },
+    ],
+  };
+  var xml = b.mail.dmarc.buildAggregateReport(shaped);
+  check("dmarc.buildAggregateReport returns an XML string with <feedback> root",
+        typeof xml === "string" && /^<\?xml/.test(xml) && xml.indexOf("<feedback>") !== -1);
+  // The injected metacharacters must be entity-escaped in the wire form.
+  check("dmarc.buildAggregateReport escapes XML metacharacters",
+        xml.indexOf("evil<&>") === -1 && xml.indexOf("&lt;&amp;&gt;") !== -1);
+
+  var back = b.mail.dmarc.parseAggregateReport(xml);
+  delete back.totals;
+  check("dmarc.buildAggregateReport round-trips through parseAggregateReport",
+        JSON.stringify(back) === JSON.stringify(shaped));
+
+  // Optional gzip path mirrors the parser's gzip auto-detect.
+  var gz = b.mail.dmarc.buildAggregateReport(shaped, { gzip: true });
+  check("dmarc.buildAggregateReport({gzip:true}) → gzip Buffer",
+        Buffer.isBuffer(gz) && gz[0] === 0x1f && gz[1] === 0x8b);
+  var back2 = b.mail.dmarc.parseAggregateReport(gz, { contentType: "application/gzip" });
+  delete back2.totals;
+  check("dmarc.buildAggregateReport(gzip) round-trips",
+        JSON.stringify(back2) === JSON.stringify(shaped));
+}
+
+function testDmarcRuaBuildBadInput() {
+  // Config-time tier — a malformed report shape THROWS so the operator
+  // catches it before mailing the report to a peer.
+  var cases = [
+    { arg: null,                                              re: /object/ },
+    { arg: { policyPublished: {}, records: [] },             re: /reportMetadata/ },
+    { arg: { reportMetadata: {}, records: [] },              re: /policyPublished/ },
+    { arg: { reportMetadata: {}, policyPublished: {} },      re: /records/ },
+    { arg: { reportMetadata: {}, policyPublished: {},
+             records: [{ sourceIp: "1.2.3.4", count: "notnum",
+                         dispositions: {}, identifiers: {}, authResults: {} }] },
+      re: /finite integer/ },
+  ];
+  for (var i = 0; i < cases.length; i += 1) {
+    var threw = null;
+    try { b.mail.dmarc.buildAggregateReport(cases[i].arg); }
+    catch (e) { threw = e; }
+    check("dmarc.buildAggregateReport rejects bad input #" + i,
+          threw && cases[i].re.test(threw.message || ""));
+  }
+}
+
+// RFC 6591 §4.1 / RFC 7489 §7.3 — a DMARC forensic (RUF) failure
+// report: multipart/report (report-type=feedback-report) whose
+// message/feedback-report part carries Feedback-Type: auth-failure plus
+// the forensic-specific fields (Auth-Failure, Delivery-Result,
+// Identity-Alignment, DKIM-*/SPF-*), and a message/rfc822 part with the
+// reported message.
+var DMARC_RUF_SAMPLE =
+  "From: <postmaster@example.com>\r\n" +
+  "Date: Fri, 15 May 2026 12:00:00 -0400\r\n" +
+  "Subject: FW: DMARC failure report\r\n" +
+  "To: <ruf@sender.example>\r\n" +
+  "MIME-Version: 1.0\r\n" +
+  "Content-Type: multipart/report; report-type=feedback-report;\r\n" +
+  '\tboundary="ruf_boundary_abc"\r\n' +
+  "\r\n" +
+  "--ruf_boundary_abc\r\n" +
+  "Content-Type: text/plain; charset=\"US-ASCII\"\r\n" +
+  "\r\n" +
+  "This is a DMARC authentication-failure report.\r\n" +
+  "\r\n" +
+  "--ruf_boundary_abc\r\n" +
+  "Content-Type: message/feedback-report\r\n" +
+  "\r\n" +
+  "Feedback-Type: auth-failure\r\n" +
+  "User-Agent: ExampleReporter/1.0\r\n" +
+  "Version: 1\r\n" +
+  "Original-Mail-From: <bounce@sender.example>\r\n" +
+  "Original-Rcpt-To: <victim@example.com>\r\n" +
+  "Arrival-Date: Fri, 15 May 2026 11:59:00 -0400\r\n" +
+  "Source-IP: 203.0.113.7\r\n" +
+  "Reported-Domain: sender.example\r\n" +
+  "Authentication-Results: mx.example.com; dmarc=fail header.from=sender.example\r\n" +
+  "Auth-Failure: dmarc\r\n" +
+  "Delivery-Result: reject\r\n" +
+  "Identity-Alignment: none\r\n" +
+  "DKIM-Domain: sender.example\r\n" +
+  "DKIM-Identity: @sender.example\r\n" +
+  "DKIM-Selector: sel2026\r\n" +
+  "DKIM-Canonicalized-Header: from:Sender <noreply@sender.example>\r\n" +
+  "SPF-DNS: txt sender.example \"v=spf1 ip4:198.51.100.0/24 -all\"\r\n" +
+  "\r\n" +
+  "--ruf_boundary_abc\r\n" +
+  "Content-Type: message/rfc822\r\n" +
+  "\r\n" +
+  "From: Sender <noreply@sender.example>\r\n" +
+  "To: <victim@example.com>\r\n" +
+  "Subject: You have won\r\n" +
+  "Message-ID: <forged-123@sender.example>\r\n" +
+  "\r\n" +
+  "Body of the reported message.\r\n" +
+  "--ruf_boundary_abc--\r\n";
+
+function testDmarcForensicSurface() {
+  check("dmarc.parseForensicReport is a function",
+        typeof b.mail.dmarc.parseForensicReport === "function");
+}
+
+function testDmarcForensicParse() {
+  var rv = b.mail.dmarc.parseForensicReport(DMARC_RUF_SAMPLE);
+  check("dmarc.parseForensicReport: ok envelope on a valid report",
+        rv && rv.ok === true && rv.report && typeof rv.report === "object");
+  var rep = rv.report;
+  check("dmarc.parseForensicReport: feedbackType=auth-failure",
+        rep.feedbackType === "auth-failure");
+  check("dmarc.parseForensicReport: authFailure=dmarc (RFC 6591 §3.1)",
+        rep.authFailure === "dmarc");
+  check("dmarc.parseForensicReport: deliveryResult=reject",
+        rep.deliveryResult === "reject");
+  check("dmarc.parseForensicReport: identityAlignment=none (RFC 7489 §7.3)",
+        rep.identityAlignment === "none");
+  check("dmarc.parseForensicReport: DKIM-* fields shaped",
+        rep.dkim && rep.dkim.domain === "sender.example" &&
+        rep.dkim.selector === "sel2026" &&
+        rep.dkim.identity === "@sender.example" &&
+        /noreply@sender\.example/.test(rep.dkim.canonicalizedHeader || ""));
+  check("dmarc.parseForensicReport: spf.dns captured",
+        rep.spf && /v=spf1/.test(rep.spf.dns || ""));
+  check("dmarc.parseForensicReport: base ARF fields carried through",
+        rep.sourceIp === "203.0.113.7" &&
+        rep.reportedDomain === "sender.example" &&
+        /dmarc=fail/.test(rep.authenticationResults || ""));
+  check("dmarc.parseForensicReport: reported message headers parsed",
+        Array.isArray(rep.reportedHeaders) &&
+        rep.reportedHeaderMap["message-id"] === "<forged-123@sender.example>" &&
+        rep.reportedHeaderMap.subject === "You have won");
+  check("dmarc.parseForensicReport: reportedHeaderMap is null-prototype",
+        Object.getPrototypeOf(rep.reportedHeaderMap) === null);
+}
+
+function testDmarcForensicNotAuthFailure() {
+  // An RFC 5965 abuse report is a valid ARF report but NOT a DMARC
+  // forensic report — Feedback-Type must be auth-failure (RFC 7489 §7.3).
+  var abuseReport = DMARC_RUF_SAMPLE.replace(
+    "Feedback-Type: auth-failure", "Feedback-Type: abuse");
+  var rv = b.mail.dmarc.parseForensicReport(abuseReport);
+  check("dmarc.parseForensicReport: non-auth-failure Feedback-Type → typed error (not a throw)",
+        rv && rv.ok === false &&
+        /dmarc-ruf-not-auth-failure/.test(rv.error.code || ""));
+}
+
+function testDmarcForensicMissingAuthFailure() {
+  // RFC 6591 §3.1 — Auth-Failure is required in an auth-failure report.
+  var noAuthFailure = DMARC_RUF_SAMPLE.replace("Auth-Failure: dmarc\r\n", "");
+  var rv = b.mail.dmarc.parseForensicReport(noAuthFailure);
+  check("dmarc.parseForensicReport: missing Auth-Failure → typed error",
+        rv && rv.ok === false &&
+        /dmarc-ruf-missing-auth-failure/.test(rv.error.code || ""));
+}
+
+function testDmarcForensicHostileInputDoesNotThrow() {
+  // Defensive reader — hostile / malformed input MUST return a typed
+  // error, never throw in the hot path that ingested the report.
+  var cases = [null, 12345, "", "not-a-multipart-report",
+               Buffer.from("garbage"),
+               "Content-Type: text/plain\r\n\r\nnope"];
+  for (var i = 0; i < cases.length; i += 1) {
+    var threw = null;
+    var rv = null;
+    try { rv = b.mail.dmarc.parseForensicReport(cases[i]); }
+    catch (e) { threw = e; }
+    check("dmarc.parseForensicReport: hostile input #" + i + " returns typed error, no throw",
+          threw === null && rv && rv.ok === false &&
+          rv.error && typeof rv.error.code === "string");
+  }
+}
+
+function testDmarcForensicReportedHeaderCap() {
+  // RFC 6591 §3.2 reported-header cap — a report whose reported message
+  // carries > the header cap clips the parsed list and flags it, while
+  // still surfacing the verbatim message. Build a reported message with
+  // many headers.
+  var lines = [];
+  for (var i = 0; i < 400; i += 1) lines.push("X-Pad-" + i + ": v" + i);
+  var bigReported = lines.join("\r\n") + "\r\n\r\nbody\r\n";
+  var sample = DMARC_RUF_SAMPLE.replace(
+    "From: Sender <noreply@sender.example>\r\n" +
+    "To: <victim@example.com>\r\n" +
+    "Subject: You have won\r\n" +
+    "Message-ID: <forged-123@sender.example>\r\n" +
+    "\r\n" +
+    "Body of the reported message.\r\n",
+    bigReported);
+  var rv = b.mail.dmarc.parseForensicReport(sample);
+  check("dmarc.parseForensicReport: over-cap reported headers are clipped + flagged",
+        rv && rv.ok === true &&
+        rv.report.reportedHeaders.length === 256 &&
+        rv.report.reportedHeadersTruncated === true);
+}
+
+function testDmarcForensicPrototypePollutionSafe() {
+  // A hostile report naming a feedback-report field or a reported-message
+  // header `__proto__` / `constructor` must not pollute Object.prototype.
+  var sample = DMARC_RUF_SAMPLE
+    // feedback-report field block — exercises the extraFields path.
+    .replace("Auth-Failure: dmarc\r\n",
+             "Auth-Failure: dmarc\r\n__proto__: fieldpoison\r\n")
+    // reported message header block — exercises the reportedHeaderMap path.
+    .replace("From: Sender <noreply@sender.example>\r\n",
+             "From: Sender <noreply@sender.example>\r\n__proto__: hdrpoison\r\n");
+  var rv = b.mail.dmarc.parseForensicReport(sample);
+  check("dmarc.parseForensicReport: __proto__ in feedback field → own data on null-prototype extraFields",
+        rv && rv.ok === true &&
+        Object.getPrototypeOf(rv.report.extraFields) === null &&
+        rv.report.extraFields["__proto__"] === "fieldpoison");
+  check("dmarc.parseForensicReport: __proto__ reported header → own data, no prototype pollution",
+        rv.report.reportedHeaderMap["__proto__"] === "hdrpoison" &&
+        ({}).fieldpoison === undefined &&
+        ({}).hdrpoison === undefined &&
+        Object.prototype.fieldpoison === undefined &&
+        Object.prototype.hdrpoison === undefined);
+}
+
 async function testIprevValidatesPtrShape() {
   // MAIL-50 — PTR result MUST be a valid DNS-name shape (LDH labels,
   // 1..63 octets, total 1..253 octets). Synthesize via a mocked
@@ -796,19 +1236,104 @@ async function testSpfMechanismMxOverLimit() {
         rv.result === "permerror" && /caps at 10/.test(rv.explanation || ""));
 }
 
-async function testSpfMechanismExistsRemainsDeferred() {
+async function testSpfMechanismExists() {
+  // RFC 7208 §5.7 + §7 — `exists:<macro-string>` resolves the expanded
+  // domain; a present A record matches. The macro `%{l}` expands to the
+  // sender local-part, so `exists:%{l}.spf.example.com` queries
+  // `alice.spf.example.com`.
+  var queried = [];
   var dnsLookup = async function (host, type) {
     if (host === "example.com" && type === "TXT") {
       return [["v=spf1 exists:%{l}.spf.example.com -all"]];
+    }
+    if (type === "A") {
+      queried.push(host);
+      if (host === "alice.spf.example.com") return ["127.0.0.2"];
     }
     var err = new Error("ENOTFOUND"); err.code = "ENOTFOUND"; throw err;
   };
   var rv = await b.mail.spf.verify({
     ip: "192.0.2.5", mailFrom: "alice@example.com", dnsLookup: dnsLookup,
   });
-  // exists deferred — surface as permerror with explicit explanation.
-  check("spf.verify(exists, deferred) → permerror with §5.7 cite",
-        rv.result === "permerror" && /5\.7/.test(rv.explanation || ""));
+  check("spf.verify(exists:%{l}..., A present) -> pass + expanded qname",
+        rv.result === "pass" && queried.some(function (q) { return q === "alice.spf.example.com"; }));
+
+  // No A record at the expanded target -> exists misses -> falls to -all.
+  var dnsMiss = async function (host, type) {
+    if (host === "example.com" && type === "TXT") {
+      return [["v=spf1 exists:%{l}.spf.example.com -all"]];
+    }
+    var err = new Error("ENOTFOUND"); err.code = "ENOTFOUND"; throw err;
+  };
+  var rv2 = await b.mail.spf.verify({
+    ip: "192.0.2.5", mailFrom: "alice@example.com", dnsLookup: dnsMiss,
+  });
+  check("spf.verify(exists, no A at target) -> fail (-all)", rv2.result === "fail");
+}
+
+async function testSpfMacroExpansionExistsIrV() {
+  // RFC 7208 §7.1-§7.4 — `%{ir}.%{v}._spf.%{d}` is the canonical per-IP
+  // exists query. For 192.0.2.10: %{ir} reverses the dotted IP to
+  // "10.2.0.192", %{v} -> "in-addr", %{d} -> the current domain.
+  // Expected qname: 10.2.0.192.in-addr._spf.example.com.
+  var queried = null;
+  var dnsLookup = async function (host, type) {
+    if (host === "example.com" && type === "TXT") {
+      return [["v=spf1 exists:%{ir}.%{v}._spf.%{d} -all"]];
+    }
+    if (type === "A") {
+      queried = host;
+      if (host === "10.2.0.192.in-addr._spf.example.com") return ["127.0.0.2"];
+    }
+    var err = new Error("ENOTFOUND"); err.code = "ENOTFOUND"; throw err;
+  };
+  var rv = await b.mail.spf.verify({
+    ip: "192.0.2.10", mailFrom: "alice@example.com",
+    helo: "mta.example.com", dnsLookup: dnsLookup,
+  });
+  check("spf macro %{ir}.%{v}._spf.%{d} expands correctly",
+        queried === "10.2.0.192.in-addr._spf.example.com" && rv.result === "pass");
+}
+
+async function testSpfMacroBadSyntaxPermerror() {
+  // RFC 7208 §7.1 — malformed macro syntax MUST permerror.
+  var shapes = [
+    { rec: "v=spf1 exists:%{z} -all",   re: /7\.2/ },     // unknown letter
+    { rec: "v=spf1 exists:%{i.x -all",  re: /closing/ },  // no closing brace
+    { rec: "v=spf1 exists:%q -all",     re: /invalid/ },  // bad escape
+    { rec: "v=spf1 exists:%{} -all",    re: /empty/ },    // empty macro
+  ];
+  for (var i = 0; i < shapes.length; i += 1) {
+    var rec = shapes[i].rec;
+    var dns = (function (r) {
+      return async function (host, type) {
+        if (host === "example.com" && type === "TXT") return [[r]];
+        var err = new Error("ENOTFOUND"); err.code = "ENOTFOUND"; throw err;
+      };
+    }(rec));
+    var rv = await b.mail.spf.verify({
+      ip: "192.0.2.1", mailFrom: "bob@example.com", dnsLookup: dns,
+    });
+    check("spf.verify(" + JSON.stringify(rec) + ") -> permerror (bad macro)",
+          rv.result === "permerror" && shapes[i].re.test(rv.explanation || ""));
+  }
+}
+
+async function testSpfExistsRespectsLookupLimit() {
+  // RFC 7208 §4.6.4 — exists A queries count toward the 10-lookup and
+  // 2-void ceilings; a chain of exists: misses MUST permerror rather
+  // than amplifying resolver work without bound.
+  var dns = async function (host, type) {
+    if (type === "TXT" && host === "example.com") {
+      return [["v=spf1 exists:a.%{d} exists:b.%{d} exists:c.%{d} -all"]];
+    }
+    var err = new Error("ENODATA"); err.code = "ENODATA"; throw err;
+  };
+  var rv = await b.mail.spf.verify({
+    ip: "192.0.2.1", mailFrom: "bob@example.com", dnsLookup: dns,
+  });
+  check("spf.verify(exists chain) -> permerror (RFC 7208 §4.6.4 void cap)",
+        rv.result === "permerror" && /void-lookup limit/.test(rv.explanation || ""));
 }
 
 async function testSpfMechanismEmptyDualCidrRefused() {
@@ -860,7 +1385,10 @@ async function run() {
   await testSpfMechanismADualCidr();
   await testSpfMechanismMx();
   await testSpfMechanismMxOverLimit();
-  await testSpfMechanismExistsRemainsDeferred();
+  await testSpfMechanismExists();
+  await testSpfMacroExpansionExistsIrV();
+  await testSpfMacroBadSyntaxPermerror();
+  await testSpfExistsRespectsLookupLimit();
   await testSpfMechanismEmptyDualCidrRefused();
   await testSpfMechanismPtrRemainsDeferred();
   testDmarcParse();
@@ -870,6 +1398,11 @@ async function run() {
   await testDmarcEvaluateUnaligned();
   await testDmarcEvaluateOrgDomainViaPsl();
   await testDmarcEvaluateNpPolicy();
+  await testInboundVerifyAlignedPass();
+  await testInboundVerifySpoofRejected();
+  await testInboundVerifyFromHeaderDiscipline();
+  await testInboundVerifyTemperrorPrecedence();
+  await testInboundVerifyValidation();
   await testArcVerifyMissing();
   await testArcVerifyNone();
   await testArcVerifyBadSignatures();
@@ -898,6 +1431,15 @@ async function run() {
   await testDmarcPctSamplingDeterministic();
   await testDmarcAlignmentUsesPsl();
   testDmarcRuaGunzipBombDistinguished();
+  testDmarcRuaBuildRoundTrip();
+  testDmarcRuaBuildBadInput();
+  testDmarcForensicSurface();
+  testDmarcForensicParse();
+  testDmarcForensicNotAuthFailure();
+  testDmarcForensicMissingAuthFailure();
+  testDmarcForensicHostileInputDoesNotThrow();
+  testDmarcForensicReportedHeaderCap();
+  testDmarcForensicPrototypePollutionSafe();
   await testIprevValidatesPtrShape();
   await testArcHeaderSourceOrder();
 }

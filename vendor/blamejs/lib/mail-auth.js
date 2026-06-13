@@ -13,21 +13,21 @@
  *   b.mail.dmarc.evaluate({ from, spf, dkim, dnsLookup })  → result
  *   b.mail.arc.verify(rfc822, opts)                        → chain status
  *
- * SPF (RFC 7208) — ip4 / ip6 / a / mx / include / all / redirect=
- *   mechanisms.
+ * SPF (RFC 7208) — ip4 / ip6 / a / mx / include / exists / all /
+ *   redirect= mechanisms, with macro-string expansion (§7).
  *   Mechanism limit: 10 DNS lookups per RFC 7208 §4.6.4 (with the
  *   void-lookup sub-limit at 2). The `a` and `mx` arms honor RFC
- *   §5.3 / §5.4 dual-cidr-length syntax (`a:foo.com/24//64`).
+ *   §5.3 / §5.4 dual-cidr-length syntax (`a:foo.com/24//64`). The
+ *   `exists` mechanism (§5.7) and include / redirect targets honor
+ *   §7 macro expansion (`%{i}` / `%{s}` / `%{l}` / `%{d}` / `%{o}` /
+ *   `%{h}` / `%{v}` / `%{p}` plus the digit / `r` / delimiter
+ *   transformers); the §4.6.4 lookup + void ceilings still bound the
+ *   macro-driven exists / a / mx queries.
  *
- *   Deferred mechanisms (each carries an explicit Re-open condition
- *   in the dispatch arm in this file):
- *     - exists: requires macro-string expansion (§7) to be useful;
- *               re-opens when macros land OR an operator surfaces a
- *               real macro-less `exists:` policy.
+ *   Deferred mechanism (carries an explicit Re-open condition in the
+ *   dispatch arm in this file):
  *     - ptr:    "strongly discouraged" by §5.5; re-opens when an
  *               operator surfaces a legitimate ptr-only sender.
- *     - macro-string expansion (§7) itself — separate slice tracked
- *               under blamejs-roadmap.md.
  *
  * DMARC (RFC 7489) — TXT record at _dmarc.<domain>; alignment check
  *   between From-header domain and DKIM-d / SPF-from-domain;
@@ -50,6 +50,7 @@ var validateOpts = require("./validate-opts");
 var bCrypto = require("./crypto");
 var C = require("./constants");
 var dkim = require("./mail-dkim");
+var mimeParse = require("./mime-parse");
 var safeXml = require("./parsers/safe-xml");
 var ipUtils = require("./ip-utils");
 var publicSuffix = require("./public-suffix");
@@ -308,6 +309,214 @@ function _ipv4InCidr(ip, cidr) {
   return (BigInt(ipInt) & maskInt) === (BigInt(netInt) & maskInt);
 }
 
+// ---- SPF macro-string expansion (RFC 7208 §7) ----
+//
+// A macro-string is `*( macro-expand / macro-literal )`. A macro-expand
+// is `"%{" macro-letter transformers *delimiter "}"` (RFC 7208 §7.1).
+// The legacy `%%`, `%_`, `%-` escapes expand to "%", " ", "%20".
+//
+// Macro letters (RFC 7208 §7.2):
+//   s = <sender>          (the MAIL FROM / HELO identity, localpart@domain)
+//   l = local-part of <sender>
+//   o = domain of <sender>
+//   d = <domain>          (the SPF record's current domain)
+//   i = <ip>              (dotted-decimal for IPv4; nibble-dotted-hex for IPv6)
+//   p = the validated domain name of <ip> (PTR — discouraged §5.5; "unknown"
+//       absent a validated name; the framework returns "unknown" rather
+//       than performing the discouraged reverse-lookup)
+//   v = "in-addr" for IPv4, "ip6" for IPv6
+//   h = HELO/EHLO domain
+//   c / r / t = SMTP-time-only macros (exp= text); not valid in a
+//       checked macro-string, so we expand them to empty in mechanism
+//       context per §7.3's split between "macro-string" and the
+//       exp-only letters.
+//
+// Transformers (RFC 7208 §7.1): an optional digit count limits the
+// number of right-hand parts kept after a split; an optional `r`
+// reverses the parts; an optional delimiter set (any of `.-+,/_=`)
+// replaces "." as the split delimiter. After transforms, the parts are
+// re-joined with ".".
+//
+// Length bound: the expanded macro-string is capped so a hostile policy
+// can't inflate a DNS qname past the RFC 1035 §3.1 255-octet ceiling
+// (the resulting name is used as a DNS query). RFC 7208 §7.1 mandates a
+// 253-octet limit on the constructed domain-name; we cap the assembled
+// string the same way.
+var SPF_MACRO_MAX_EXPANDED_BYTES = 253;                                          // RFC 1035 §3.1 / RFC 7208 §7.1 name ceiling
+var SPF_MACRO_DELIMS = ".-+,/_=";                                                // RFC 7208 §7.1 delimiter set
+
+// IPv6 nibble-dotted form for the `i` macro (RFC 7208 §7.3): each of the
+// 32 hex nibbles becomes its own "."-separated part. e.g.
+// 2001:db8::1 → "2.0.0.1.0.d.b.8.0.…0.0.0.1".
+function _ipv6Nibbles(ip) {
+  var groups = ipUtils.expandIpv6Groups(ip);
+  if (!groups) return null;
+  var nibbles = [];
+  for (var i = 0; i < groups.length; i += 1) {
+    var s = groups[i].toString(16);                                              // hex radix
+    while (s.length < 4) s = "0" + s;                                            // IPv6 group nibble count
+    for (var j = 0; j < 4; j += 1) nibbles.push(s.charAt(j));                    // IPv6 group nibble count
+  }
+  return nibbles;
+}
+
+// Resolve a single macro letter to its base string value (pre-transform).
+// `vars` carries { ip, isIpv6, sender, localPart, senderDomain, domain,
+// helo }. Letters not meaningful in mechanism context expand to "".
+function _spfMacroValue(letter, vars) {
+  var lower = letter.toLowerCase();
+  switch (lower) {
+    case "s": return vars.sender || "";
+    case "l": return vars.localPart || "";
+    case "o": return vars.senderDomain || "";
+    case "d": return vars.domain || "";
+    case "h": return vars.helo || "";
+    case "v": return vars.isIpv6 ? "ip6" : "in-addr";
+    case "i":
+      if (vars.isIpv6) {
+        var nib = _ipv6Nibbles(vars.ip);
+        return nib ? nib.join(".") : "";
+      }
+      return vars.ip || "";
+    // RFC 7208 §5.5 — `p` (validated domain name) is "strongly
+    // discouraged"; resolving it requires the reverse-DNS path the
+    // framework intentionally does not perform here. Expand to the
+    // RFC-mandated sentinel so an `exists:%{p}...` policy degrades to a
+    // deterministic miss rather than a forged match.
+    case "p": return "unknown";
+    // c / r / t are exp-text-only macros (RFC 7208 §7.3); empty in
+    // mechanism context.
+    default:  return "";
+  }
+}
+
+// Split `value` on the active delimiter chars, optionally reverse, keep
+// the rightmost `digits` parts, re-join with ".". RFC 7208 §7.1.
+function _spfApplyTransform(value, digits, reverse, delims) {
+  if (value.length === 0) return "";
+  // Build a character class from the (validated) delimiter set. Each
+  // delim char is one of `.-+,/_=` — all regex-safe except none need
+  // escaping inside a class except `-` which we place last; the set is
+  // a fixed allowlist so no untrusted metacharacter reaches the class.
+  var splitParts;
+  if (delims === ".") {
+    splitParts = value.split(".");
+  } else {
+    var out = [];
+    var cur = "";
+    for (var ci = 0; ci < value.length; ci += 1) {
+      var ch = value.charAt(ci);
+      if (delims.indexOf(ch) !== -1) { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur);
+    splitParts = out;
+  }
+  if (reverse) splitParts = splitParts.slice().reverse();
+  if (digits !== null && digits > 0 && digits < splitParts.length) {
+    splitParts = splitParts.slice(splitParts.length - digits);
+  }
+  return splitParts.join(".");
+}
+
+// Expand an SPF macro-string (RFC 7208 §7.1). `vars` is the macro
+// variable bag. Throws MailAuthError on malformed `%` syntax (a bare
+// `%` not followed by `{`, `%`, `_`, or `-` is a syntax error per
+// §7.1 — receivers MUST permerror, mirrored by the caller catching the
+// throw). The expanded result is byte-capped (§7.1 / RFC 1035 §3.1).
+//
+// The scanner is a single linear left-to-right pass (no backtracking
+// regex over untrusted input): each `%{...}` token is matched by an
+// index walk to the closing `}`, bounding work at O(n) in the macro
+// length.
+function _spfExpandMacros(macroString, vars) {
+  if (typeof macroString !== "string" || macroString.indexOf("%") === -1) {
+    return macroString;
+  }
+  var out = "";
+  var n = macroString.length;
+  var i = 0;
+  while (i < n) {
+    var ch = macroString.charAt(i);
+    if (ch !== "%") { out += ch; i += 1; continue; }
+    // ch === "%": peek the next char.
+    if (i + 1 >= n) {
+      throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+        "SPF macro-string ends with a bare '%' (RFC 7208 §7.1)");
+    }
+    var next = macroString.charAt(i + 1);
+    if (next === "%") { out += "%"; i += 2; continue; }
+    if (next === "_") { out += " "; i += 2; continue; }
+    if (next === "-") { out += "%20"; i += 2; continue; }
+    if (next !== "{") {
+      throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+        "SPF macro escape '%" + next + "' is invalid (RFC 7208 §7.1 allows %%, %_, %-, %{...})");
+    }
+    // next === "{": find the closing "}".
+    var close = macroString.indexOf("}", i + 2);
+    if (close === -1) {
+      throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+        "SPF macro '%{' has no closing '}' (RFC 7208 §7.1)");
+    }
+    var body = macroString.slice(i + 2, close);
+    // body = macro-letter [ digits ] [ "r" ] *delimiter   (RFC 7208 §7.1)
+    if (body.length === 0) {
+      throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+        "SPF macro '%{}' is empty (RFC 7208 §7.1)");
+    }
+    var letter = body.charAt(0);
+    if (!/^[slodiphcrtv]$/i.test(letter)) {
+      throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+        "SPF macro letter " + JSON.stringify(letter) + " is not a valid macro-letter (RFC 7208 §7.2)");
+    }
+    var rest = body.slice(1);
+    var digits = null;
+    var di = 0;
+    while (di < rest.length && rest.charAt(di) >= "0" && rest.charAt(di) <= "9") di += 1;
+    if (di > 0) {
+      digits = parseInt(rest.slice(0, di), 10);
+      if (!isFinite(digits) || digits < 1) {
+        throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+          "SPF macro transformer digit count must be >= 1 (RFC 7208 §7.1): " + JSON.stringify(body));
+      }
+    }
+    rest = rest.slice(di);
+    var reverse = false;
+    if (rest.length > 0 && (rest.charAt(0) === "r" || rest.charAt(0) === "R")) {
+      reverse = true;
+      rest = rest.slice(1);
+    }
+    // Remaining chars are the optional delimiter set; each MUST be one
+    // of the RFC 7208 §7.1 delimiters. Anything else is malformed.
+    var delims = "";
+    for (var ri = 0; ri < rest.length; ri += 1) {
+      var dch = rest.charAt(ri);
+      if (SPF_MACRO_DELIMS.indexOf(dch) === -1) {
+        throw new MailAuthError("mail-auth/spf-macro-bad-syntax",
+          "SPF macro delimiter " + JSON.stringify(dch) + " is not in the RFC 7208 §7.1 set " +
+          JSON.stringify(SPF_MACRO_DELIMS));
+      }
+      if (delims.indexOf(dch) === -1) delims += dch;
+    }
+    if (delims.length === 0) delims = ".";
+    var base = _spfMacroValue(letter, vars);
+    out += _spfApplyTransform(base, digits, reverse, delims);
+    i = close + 1;
+  }
+  if (out.length > SPF_MACRO_MAX_EXPANDED_BYTES) {
+    // RFC 7208 §7.1 — the constructed domain-name is left-truncated to
+    // fit the 253-octet ceiling: leading labels are discarded until the
+    // remainder fits. This keeps the trailing (more-significant) labels
+    // the policy author intends as the lookup target.
+    while (out.length > SPF_MACRO_MAX_EXPANDED_BYTES) {
+      var dot = out.indexOf(".");
+      if (dot === -1) { out = out.slice(out.length - SPF_MACRO_MAX_EXPANDED_BYTES); break; }
+      out = out.slice(dot + 1);
+    }
+  }
+  return out;
+}
+
 // Parse an SPF record into mechanisms.
 function _parseSpfRecord(text) {
   var trimmed = text.trim();
@@ -503,10 +712,24 @@ function _parseADualCidr(raw, mech, defaultDomain) {
 //   { match: false }                      — no IP matched / record absent
 //   { error: "temperror", reason: "..." } — transient DNS failure
 //   { error: "permerror", reason: "..." } — over-limit / bad CIDR / bad MX count
-async function _spfMatchAMx(mech, raw, ip, isIpv6, defaultDomain, dnsLookup, lookups) {
+async function _spfMatchAMx(mech, raw, ip, isIpv6, defaultDomain, dnsLookup, lookups, macroVars) {
   var parsed;
   try { parsed = _parseADualCidr(raw, mech, defaultDomain); }
   catch (e) { return { error: "permerror", reason: e.message }; }
+
+  // RFC 7208 §5.3 / §5.4 — the domain-spec after `a:` / `mx:` is a
+  // macro-string (§7). Expand it before resolving so policies like
+  // `a:%{i}._ah.example.com` evaluate correctly. The default-domain
+  // case (`a` / `mx` with no `:domain`) carries no `%` and passes
+  // through untouched.
+  if (macroVars && parsed.domain.indexOf("%") !== -1) {
+    try { parsed.domain = _spfExpandMacros(parsed.domain, macroVars).toLowerCase(); }
+    catch (e) { return { error: "permerror", reason: e.message }; }
+    if (!parsed.domain || parsed.domain.length === 0) {
+      return { error: "permerror",
+               reason: "SPF " + mech + ": domain-spec expanded to empty (RFC 7208 §7)" };
+    }
+  }
 
   var mask = isIpv6 ? parsed.v6Mask : parsed.v4Mask;
   var family = isIpv6 ? 6 : 4;                                                     // IP family marker
@@ -580,9 +803,9 @@ async function _spfMatchAMx(mech, raw, ip, isIpv6, defaultDomain, dnsLookup, loo
 }
 
 // SPF verify — recursive include resolution + ip4 / ip6 / a / mx /
-// include / all / redirect=. The `exists` and `ptr` mechanisms +
-// macro-string expansion remain deferred (see the mechanism dispatch
-// arm for the Re-open condition + operator escape hatch).
+// include / exists / all / redirect=, with RFC 7208 §7 macro expansion.
+// The `ptr` mechanism remains deferred (see the dispatch arm for the
+// Re-open condition + operator escape hatch via b.mail.iprev.verify).
 async function spfVerify(opts) {
   opts = opts || {};
   validateOpts(opts, ["ip", "mailFrom", "helo", "dnsLookup"], "mail.spf.verify");
@@ -599,6 +822,29 @@ async function spfVerify(opts) {
   }
 
   var lookups = { count: 0, limit: SPF_DNS_LOOKUP_LIMIT, void: 0 };
+  // RFC 7208 §7 macro variable bag. `<sender>` is the MAIL FROM identity
+  // when present, else `postmaster@<helo>` per §4.3 (the localpart
+  // defaults to "postmaster" when the reverse-path is empty / HELO is
+  // the checked identity). `<domain>` (%{d}) tracks the SPF record's
+  // current domain and is rebound at each include/redirect re-entry.
+  var senderIdentity = opts.mailFrom
+    ? String(opts.mailFrom)
+    : ("postmaster@" + String(opts.helo || domain));
+  var senderLocal = senderIdentity.indexOf("@") !== -1
+    ? senderIdentity.slice(0, senderIdentity.indexOf("@"))
+    : "postmaster";
+  var senderDomain = senderIdentity.indexOf("@") !== -1
+    ? senderIdentity.slice(senderIdentity.indexOf("@") + 1)
+    : String(opts.helo || domain);
+  var macroVars = {
+    ip:           opts.ip,
+    isIpv6:       opts.ip.indexOf(":") !== -1,
+    sender:       senderIdentity,
+    localPart:    senderLocal,
+    senderDomain: senderDomain,
+    domain:       domain.toLowerCase(),
+    helo:         typeof opts.helo === "string" ? opts.helo : "",
+  };
   // RFC 7208 §4.6.4 — the initial query for the sender domain's SPF
   // record itself does NOT count toward the 10-lookup limit. Only
   // include / a / mx / ptr / exists / redirect mechanisms count.
@@ -606,7 +852,7 @@ async function spfVerify(opts) {
   // got false permerror.
   var result = await _spfEvaluateDomain(domain.toLowerCase(), opts.ip,
                                           opts.dnsLookup, lookups,
-                                          { isInitial: true });
+                                          { isInitial: true, macroVars: macroVars });
   return {
     result: result.verdict,                                                      // pass | fail | softfail | neutral | none | temperror | permerror
     domain: domain,
@@ -660,6 +906,12 @@ async function _spfEvaluateDomain(domain, ip, dnsLookup, lookups, ctx) {
     return { verdict: "permerror", explanation: e.message };
   }
 
+  // RFC 7208 §7.2 — `%{d}` is the SPF record's CURRENT domain, which is
+  // rebound at each include / redirect re-entry. Clone the inherited
+  // macro bag with `domain` pinned to the domain we're evaluating now.
+  var baseMacroVars = ctx.macroVars || {};
+  var macroVars = Object.assign({}, baseMacroVars, { domain: domain });
+
   var isIpv6 = ip.indexOf(":") !== -1;
   for (var i = 0; i < mechanisms.length; i += 1) {
     var m = mechanisms[i];
@@ -671,7 +923,15 @@ async function _spfEvaluateDomain(domain, ip, dnsLookup, lookups, ctx) {
       if (m.arg && _ipv6InCidr(ip, m.arg)) match = true;
     } else if (m.mechanism === "include") {
       if (!m.arg) continue;
-      var inner = await _spfEvaluateDomain(m.arg.toLowerCase(), ip, dnsLookup, lookups);
+      // RFC 7208 §7 — the include target may itself be a macro-string
+      // (e.g. `include:%{d}.spf.example.net`). Expand against the
+      // current macro bag before recursing.
+      var includeTarget;
+      try { includeTarget = _spfExpandMacros(m.arg, macroVars); }
+      catch (e) { return { verdict: "permerror", explanation: e.message }; }
+      var inner = await _spfEvaluateDomain(includeTarget.toLowerCase(), ip,
+                                           dnsLookup, lookups,
+                                           { macroVars: macroVars });
       if (inner.verdict === "pass") match = true;
       else if (inner.verdict === "permerror" || inner.verdict === "temperror") {
         return inner;
@@ -701,7 +961,7 @@ async function _spfEvaluateDomain(domain, ip, dnsLookup, lookups, ctx) {
                               m.mechanism };
       }
       var amRes = await _spfMatchAMx(m.mechanism, m.raw, ip, isIpv6,
-                                      domain, dnsLookup, lookups);
+                                      domain, dnsLookup, lookups, macroVars);
       if (amRes.error === "permerror") {
         return { verdict: "permerror", explanation: amRes.reason };
       }
@@ -709,45 +969,69 @@ async function _spfEvaluateDomain(domain, ip, dnsLookup, lookups, ctx) {
         return { verdict: "temperror", explanation: amRes.reason };
       }
       if (amRes.match) match = true;
-    } else if (m.mechanism === "exists" || m.mechanism === "ptr") {
-      // RFC 7208 §5.7 (exists) + §5.5 (ptr) — deferred from v0.11.3.
+    } else if (m.mechanism === "exists") {
+      // RFC 7208 §5.7 — `exists:<domain-spec>`. The domain-spec is
+      // macro-expanded (§7) and an A query is performed; the mechanism
+      // matches when ANY A record exists (the address is irrelevant —
+      // existence alone is the signal, so an AAAA-only target does NOT
+      // match per the spec's "A query" wording). Published policies use
+      // it for per-IP / per-recipient lookups like
+      // `exists:%{ir}.%{v}._spf.example.com`.
+      if (!m.arg) continue;
+      var existsTarget;
+      try { existsTarget = _spfExpandMacros(m.arg, macroVars); }
+      catch (e) { return { verdict: "permerror", explanation: e.message }; }
+      if (!existsTarget || existsTarget.length === 0) {
+        return { verdict: "permerror",
+                 explanation: "SPF exists: expanded to an empty domain (RFC 7208 §5.7)" };
+      }
+      // §4.6.4 — the exists A query counts as one DNS-touching lookup.
+      lookups.count += 1;
+      if (lookups.count > lookups.limit) {
+        return { verdict: "permerror",
+                 explanation: "DNS lookup limit exceeded (RFC 7208 §4.6.4) at exists:" +
+                              existsTarget };
+      }
+      var existsHit = false;
+      try {
+        var existsIps = await _safeResolveA(existsTarget.toLowerCase(), 4, dnsLookup);
+        existsHit = Array.isArray(existsIps) && existsIps.length > 0;
+      } catch (e) {
+        var ecode = e && e.code;
+        if (ecode === "ENOTFOUND" || ecode === "ENODATA") {
+          // Void lookup — RFC 7208 §4.6.4 ceiling. A non-existent target
+          // is a miss, not an error, but charges the void slot so a
+          // chain of exists: misses can't amplify resolver work.
+          lookups.void = (lookups.void || 0) + 1;
+          if (lookups.void > SPF_VOID_LOOKUP_LIMIT) {
+            return { verdict: "permerror",
+                     explanation: "SPF void-lookup limit exceeded (RFC 7208 §4.6.4) during exists: evaluation" };
+          }
+          existsHit = false;
+        } else {
+          return { verdict: "temperror",
+                   explanation: "SPF exists:" + existsTarget + " lookup failed: " +
+                                ((e && e.message) || String(e)) };
+        }
+      }
+      if (existsHit) match = true;
+    } else if (m.mechanism === "ptr") {
+      // RFC 7208 §5.5 — `ptr` is "strongly discouraged": it ties the
+      // sender's authorization to whoever controls the connecting IP's
+      // PTR zone and doubles DNS load (reverse + forward-confirm per
+      // query). A small minority of legacy senders still publish
+      // `+ptr -all` as their only stance.
       //
-      // exists: requires macro-string expansion (RFC 7208 §7) to be
-      //   useful in practice; almost every published `exists:` policy
-      //   uses macros like `exists:%{l}.%{d}._spf.example.com` to do
-      //   per-recipient or per-IP lookups. A non-macro `exists:` is
-      //   technically valid but vanishingly rare in published policies.
+      // Re-open condition: an operator surfaces a legitimate sender
+      // whose ONLY SPF stance is `ptr` and needs the framework to
+      // evaluate it rather than the MTA already doing iprev.
       //
-      // ptr:    RFC 7208 §5.5 explicitly says "use of this mechanism
-      //   is strongly discouraged" — the receiver does reverse-DNS +
-      //   forward-confirm per query, doubling DNS load and tying the
-      //   sender's authz to whoever controls their PTR zone. Despite
-      //   this discouragement, a small minority of legacy senders
-      //   still publish `+ptr -all` policies as their only SPF stance.
-      //
-      // Re-open conditions:
-      //   - exists: macro-string expansion lands in the framework (a
-      //     standalone slice; tracked under blamejs-roadmap.md), OR an
-      //     operator surfaces a real `exists:` policy without macros
-      //     and asks for the simple A-existence form.
-      //   - ptr:    an operator surfaces a legitimate sender whose
-      //     ONLY SPF stance is `ptr` and needs the framework to
-      //     evaluate it (rather than the operator's MTA already doing
-      //     iprev via `b.mail.auth.iprev`).
-      //
-      // Operator escape hatch today:
-      //   - exists: senders almost universally have a non-`exists:`
-      //     mechanism alongside; the framework returns "permerror"
-      //     here, surfacing the gap, but legitimate mail flow that
-      //     ALSO carries a passing ip4/ip6/include path is unaffected.
-      //   - ptr: operators evaluating a ptr-only sender wire
-      //     `b.mail.auth.iprev(ip)` and treat fcrdns=true the same as
-      //     SPF pass for that domain.
+      // Operator escape hatch today: wire `b.mail.iprev.verify(ip)` and
+      // treat fcrdns=true the same as an SPF pass for that domain.
       return {
         verdict: "permerror",
-        explanation: "SPF mechanism '" + m.mechanism + "' is not yet implemented (RFC 7208 §" +
-                     (m.mechanism === "exists" ? "5.7 + §7 macros" : "5.5") +
-                     "); senders typically publish ip4 / ip6 / a / mx / include alongside",
+        explanation: "SPF mechanism 'ptr' is not implemented (RFC 7208 §5.5 — strongly " +
+                     "discouraged); use b.mail.iprev.verify for forward-confirmed reverse DNS",
       };
     }
     if (match) {
@@ -772,10 +1056,14 @@ async function _spfEvaluateDomain(domain, ip, dnsLookup, lookups, ctx) {
   var mods = mechanisms.modifiers || [];
   for (var rmi = 0; rmi < mods.length; rmi += 1) {
     if (mods[rmi].name === "redirect" && mods[rmi].value) {
-      // Redirect counts as one DNS-mechanism per §4.6.4.
+      // Redirect counts as one DNS-mechanism per §4.6.4. RFC 7208 §7 —
+      // the redirect target may be a macro-string; expand it first.
+      var redirectTarget;
+      try { redirectTarget = _spfExpandMacros(mods[rmi].value, macroVars); }
+      catch (e) { return { verdict: "permerror", explanation: e.message }; }
       var redirected = await _spfEvaluateDomain(
-        mods[rmi].value.toLowerCase(), ip, dnsLookup, lookups,
-        { redirectDepth: (ctx.redirectDepth || 0) + 1 });
+        redirectTarget.toLowerCase(), ip, dnsLookup, lookups,
+        { redirectDepth: (ctx.redirectDepth || 0) + 1, macroVars: macroVars });
       // RFC 7208 §6.1 — if the redirect target has no SPF record,
       // permerror (the operator's intent is unverifiable).
       if (redirected.verdict === "none") {
@@ -1802,6 +2090,239 @@ function authResultsEmit(opts) {
   return "Authentication-Results: " + head + ";\r\n  " + clauses.join(sep);
 }
 
+// ---- Inbound message-authentication pipeline (RFC 7489 §6.6) ----
+//
+// One call runs the receiver-side authentication set on a message as it
+// arrives: SPF (RFC 7208) on the envelope identity, DKIM (RFC 6376) on
+// the message bytes, DMARC (RFC 7489 / DMARCbis) policy + alignment on
+// the From-header domain, and — when an authserv-id is supplied — the
+// RFC 8601 Authentication-Results header the receiver prepends before
+// delivery. b.mail.server.mx composes this at DATA time via its
+// guardEnvelope opt; operators running their own listeners (or doing
+// post-delivery verification in an agent) call it directly:
+//
+//   var v = await b.mail.inbound.verify({
+//     ip:         "203.0.113.5",
+//     helo:       "mail.sender.example",
+//     mailFrom:   "bounce@sender.example",
+//     message:    rfc5322Bytes,                  // string or Buffer
+//     authservId: "mx.example.com",
+//   });
+//   // → { spf, dkim, from, dmarc, authResults }
+//   if (v.dmarc.recommendedAction === "reject") { /* refuse 550 5.7.1 */ }
+//
+// From-header discipline (RFC 7489 §6.6.1): DMARC evaluates exactly one
+// author domain. A message with zero From fields, several From fields,
+// or several author addresses in one field is the header-duplication
+// spoofing shape — an attacker pairs an aligned-but-hidden From with the
+// one the mail client displays (the CVE-2024-7208 / CVE-2024-7209
+// hosted-relay spoofing class rides on exactly this ambiguity). Those
+// messages return `dmarc.result: "permerror"` with
+// `recommendedAction: "reject"` instead of picking one of the Froms.
+
+// RFC 5322 §2.1 — the header block ends at the first empty line. SMTP
+// wire format is CRLF; bare-LF input is accepted defensively for
+// operator-fed strings that lost CRs in their own tooling.
+function _splitHeaderBlock(message) {
+  var idx = message.indexOf("\r\n\r\n");
+  if (idx !== -1) return { headers: message.slice(0, idx), body: message.slice(idx + 4) };
+  idx = message.indexOf("\n\n");
+  if (idx !== -1) return { headers: message.slice(0, idx), body: message.slice(idx + 2) };
+  return { headers: message, body: "" };
+}
+
+// Quote-aware single pass over a From field value (RFC 5322 phrase
+// quoting): counts angle-addr pairs that contain an `@` (a `<` inside
+// a quoted-string is display-name text — `"John <Jr.> Smith" <u@d>`
+// is one author, not two) and top-level commas (address-list
+// separators; a comma inside a quoted display-name like
+// `"Doe, John" <j@d>` does not count). Records the content of the
+// last @-bearing angle-addr for extraction.
+function _countFromAuthors(value) {
+  var inQuote = false, inAngle = false, escaped = false;
+  var angleAddrs = 0, topCommas = 0, angleStart = -1;
+  var lastAddr = null;
+  for (var i = 0; i < value.length; i += 1) {
+    var ch = value.charAt(i);
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (ch === "\"" && !inAngle) { inQuote = !inQuote; continue; }
+    if (inQuote) continue;
+    if (ch === "<" && !inAngle) { inAngle = true; angleStart = i; continue; }
+    if (ch === ">" && inAngle) {
+      inAngle = false;
+      var inner = value.slice(angleStart + 1, i).trim();
+      if (inner.indexOf("@") !== -1) { angleAddrs += 1; lastAddr = inner; }
+      continue;
+    }
+    if (ch === "," && !inAngle) topCommas += 1;
+  }
+  return { angleAddrs: angleAddrs, topCommas: topCommas, lastAddr: lastAddr };
+}
+
+// Unfold (RFC 5322 §2.2.3), collect every From: field, and extract the
+// author address. `count` is the number of From fields, widened by
+// multiple-author detection inside a single field: several @-bearing
+// angle-addrs, or a bare address-list separated by top-level commas
+// (RFC 7489 §6.6.1 — a multi-author From is the header-duplication
+// spoofing shape and must not have "one" author picked from it).
+function _extractFromHeaders(headerBlock) {
+  var unfolded = headerBlock.replace(/\r?\n[ \t]+/g, " ");
+  var lines = unfolded.split(/\r?\n/);
+  var fromValues = [];
+  for (var i = 0; i < lines.length; i += 1) {
+    var m = /^From[ \t]*:(.*)$/i.exec(lines[i]);
+    if (m) fromValues.push(m[1].trim());
+  }
+  if (fromValues.length === 0) return { count: 0, address: null, domain: null };
+  var count = fromValues.length;
+  var value = fromValues[0];
+  var authors = _countFromAuthors(value);
+  if (count === 1) {
+    if (authors.angleAddrs > 1) count = authors.angleAddrs;
+    else if (authors.topCommas > 0) count = authors.topCommas + 1;
+  }
+  var address;
+  if (authors.angleAddrs >= 1) {
+    // count > 1 is refused by the caller before the address is used;
+    // for the single-author case this is that author's angle-addr.
+    address = authors.lastAddr;
+  } else {
+    // Bare addr-spec form. An RFC 5322 addr-spec cannot contain
+    // whitespace or commas — their presence means an address list or
+    // display-name soup; extracting "the" domain from it would pick
+    // one of several authors (the §6.6.1 forbidden move), so the
+    // field is treated as unparsable instead.
+    address = value.trim();
+    if (/[\s,]/.test(address)) address = null;
+  }
+  var at = address ? address.lastIndexOf("@") : -1;
+  var domain = (at > 0 && address && at < address.length - 1)
+    ? address.slice(at + 1).toLowerCase()
+    : null;
+  return { count: count, address: address || null, domain: domain };
+}
+
+async function inboundVerify(opts) {
+  validateOpts.requireObject(opts, "inbound.verify", MailAuthError, "mail-auth/inbound-bad-input");
+  validateOpts(opts, ["ip", "helo", "mailFrom", "message", "dnsLookup", "domainExists",
+                       "maxSignatures", "clockSkewMs", "minRsaBits", "authservId"],
+               "mail.inbound.verify");
+  validateOpts.requireNonEmptyString(opts.ip, "inbound.verify: ip",
+    MailAuthError, "mail-auth/inbound-bad-ip");
+  if (opts.authservId !== undefined && opts.authservId !== null) {
+    validateOpts.requireNonEmptyString(opts.authservId, "inbound.verify: authservId",
+      MailAuthError, "mail-auth/inbound-bad-authserv-id");
+  }
+  var message = opts.message;
+  if (Buffer.isBuffer(message)) {
+    // DKIM canonicalization re-encodes the string form as UTF-8
+    // (lib/mail-dkim.js hashes Buffer.from(canonicalized, "utf8")), so
+    // the byte→string decode must be utf8 for valid-UTF-8 content to
+    // round-trip exactly. Non-UTF-8 8-bit content cannot survive any
+    // decode + utf8 re-encode; such messages verify as DKIM fail and
+    // DMARC falls back to the SPF identity (RFC 7489 §4.2 — one
+    // aligned authenticator is sufficient to pass).
+    message = message.toString("utf8");
+  }
+  if (typeof message !== "string" || message.length === 0) {
+    throw new MailAuthError("mail-auth/inbound-bad-message",
+      "inbound.verify: message must be a non-empty string or Buffer (the full RFC 5322 message)");
+  }
+  var mailFrom = (typeof opts.mailFrom === "string" && opts.mailFrom.length > 0) ? opts.mailFrom : null;
+  var helo     = (typeof opts.helo === "string" && opts.helo.length > 0) ? opts.helo : null;
+
+  // SPF — envelope identity: MAIL FROM, falling back to HELO for the
+  // null reverse-path (RFC 7208 §2.4). DNS failures surface as the
+  // RFC's temperror result, not as throws.
+  var spf;
+  if (mailFrom || helo) {
+    spf = await spfVerify({
+      ip:        opts.ip,
+      mailFrom:  mailFrom || undefined,
+      helo:      helo || undefined,
+      dnsLookup: opts.dnsLookup,
+    });
+  } else {
+    spf = { result: "none", domain: null,
+            explanation: "no MAIL FROM or HELO identity supplied", lookupCount: 0 };
+  }
+
+  // DKIM — every signature on the message (bounded by maxSignatures;
+  // a signature-less message verifies as a single `none` entry).
+  var dkimVerifyOpts = { dnsLookup: opts.dnsLookup };
+  if (opts.clockSkewMs !== undefined) dkimVerifyOpts.clockSkewMs = opts.clockSkewMs;
+  if (opts.maxSignatures !== undefined) dkimVerifyOpts.maxSignatures = opts.maxSignatures;
+  if (opts.minRsaBits !== undefined) dkimVerifyOpts.minRsaBits = opts.minRsaBits;
+  var dkimResults = await dkim.verify(message, dkimVerifyOpts);
+
+  // From header + DMARC policy/alignment.
+  var from = _extractFromHeaders(_splitHeaderBlock(message).headers);
+  var dmarc;
+  if (from.count === 1 && from.address && from.domain) {
+    dmarc = await dmarcEvaluate({
+      from:         from.address,
+      spf:          spf,
+      dkim:         dkimResults,
+      dnsLookup:    opts.dnsLookup,
+      domainExists: opts.domainExists,
+    });
+    // RFC 7489 §6.6.2 — a fail verdict computed while an authenticator
+    // returned temperror is not final: the very lookup that failed
+    // transiently could have produced the aligned pass. Surface
+    // temperror so the caller defers (the sender retries) instead of
+    // permanently refusing a legitimate sender during a DNS blip. A
+    // pass verdict stands — one aligned authenticator is sufficient
+    // regardless of the other's transient failure.
+    if (dmarc.result === "fail" &&
+        (spf.result === "temperror" ||
+         dkimResults.some(function (d) { return d.result === "temperror"; }))) {
+      dmarc.result            = "temperror";
+      dmarc.recommendedAction = null;
+      dmarc.explanation       = (dmarc.explanation ? dmarc.explanation + "; " : "") +
+        "fail computed while an authenticator returned temperror — transient, retry";
+    }
+  } else {
+    dmarc = {
+      result:            "permerror",
+      recommendedAction: "reject",
+      policy:            null,
+      alignment:         { spf: false, dkim: false },
+      orgDomain:         null,
+      explanation: from.count === 0
+        ? "message has no From header (RFC 7489 §6.6.1)"
+        : (from.count > 1
+            ? "message carries " + from.count + " From authors (RFC 7489 §6.6.1 — multi-From spoofing shape)"
+            : "From header has no parsable author domain"),
+    };
+  }
+
+  // RFC 8601 Authentication-Results — only when the caller identifies
+  // itself (the authserv-id is the receiver's own name; there is no
+  // sensible default the framework could invent).
+  var authResults = null;
+  if (opts.authservId) {
+    var arResults = [];
+    var spfEntry = { method: "spf", result: spf.result };
+    if (mailFrom) spfEntry.smtpMailfrom = mailFrom;
+    else if (helo) spfEntry.smtpHelo = helo;
+    arResults.push(spfEntry);
+    for (var di = 0; di < dkimResults.length; di += 1) {
+      var d = dkimResults[di];
+      var dkimEntry = { method: "dkim", result: d.result };
+      if (typeof d.d === "string" && d.d.length > 0) dkimEntry.domain = d.d;
+      if (typeof d.s === "string" && d.s.length > 0) dkimEntry.selector = d.s;
+      arResults.push(dkimEntry);
+    }
+    var dmarcEntry = { method: "dmarc", result: dmarc.result };
+    if (from.address) dmarcEntry.from = from.address;
+    arResults.push(dmarcEntry);
+    authResults = authResultsEmit({ authservId: opts.authservId, results: arResults });
+  }
+
+  return { spf: spf, dkim: dkimResults, from: from, dmarc: dmarc, authResults: authResults };
+}
+
 // ---- DMARC aggregate (RUA) report parser (RFC 7489 §7.2 / draft-ietf-dmarc-aggregate-reporting) ----
 //
 // MTAs that publish a DMARC `rua=` policy receive aggregate reports
@@ -1991,6 +2512,217 @@ function _shapeAggregateReport(parsed) {
   return shaped;
 }
 
+// ---- DMARC aggregate (RUA) report builder/serializer (RFC 7489 Appendix C) ----
+//
+// The inverse of dmarcParseAggregateReport: an MTA acting as the
+// REPORTING side (it received mail under another domain's DMARC policy
+// and now owes that domain an aggregate report) serializes its
+// observation rows into the RFC 7489 Appendix C `<feedback>` XML.
+//
+// The builder accepts the SAME shaped object dmarcParseAggregateReport
+// returns (reportMetadata / policyPublished / records[...]), so a parsed
+// report round-trips back to identical structure. Operators may also
+// hand-assemble the shape directly.
+//
+//   var xml = b.mail.dmarc.buildAggregateReport({
+//     reportMetadata: { orgName, email, reportId, dateRange: { begin, end } },
+//     policyPublished: { domain, adkim, aspf, p, sp, pct },
+//     records: [{ sourceIp, count,
+//                 dispositions: { disposition, dkim, spf, reasons },
+//                 identifiers:  { headerFrom, envelopeFrom, envelopeTo },
+//                 authResults:  { dkim: [...], spf: [...] } }],
+//   });
+//   // → "<?xml version=\"1.0\" ...?>\n<feedback>...</feedback>"
+//
+// Validation tier: config-time/entry-point — the report shape is
+// operator-assembled structured data, so a malformed shape (missing
+// reportMetadata / policyPublished / non-array records) THROWS so the
+// operator catches the mistake before the report is mailed to a peer.
+//
+// XML safety: every emitted text node and the (rare) attribute-free
+// element bodies are escaped through _xmlEscapeText, which neutralizes
+// `& < > " '`. Source IPs, domains, and identifiers can carry
+// attacker-influenced bytes (a spoofed envelope-from observed in the
+// wild); escaping prevents a crafted observation from injecting markup
+// into the report a peer will parse.
+
+// RFC 7489 Appendix C — the report is plain-element XML (no attributes
+// in the schema), so only the five XML text-content metacharacters need
+// neutralizing. Numeric / enum fields are coerced and range-checked
+// before they reach here, but escaping is applied uniformly so a future
+// caller can't bypass it.
+function _xmlEscapeText(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+// Emit `<tag>escaped-text</tag>` when value is non-null/defined; emit
+// nothing when the field is absent (RFC 7489 Appendix C marks many
+// child elements optional — omitting is correct, emitting an empty
+// element changes the parsed shape).
+function _xmlLeaf(tag, value) {
+  if (value === undefined || value === null || value === "") return "";
+  return "<" + tag + ">" + _xmlEscapeText(value) + "</" + tag + ">";
+}
+
+// Integer leaf — coerce, refuse non-finite (a NaN count would serialize
+// as the string "NaN" and corrupt the peer's parse).
+function _xmlIntLeaf(tag, value) {
+  if (value === undefined || value === null) return "";
+  var n = typeof value === "number" ? value : parseInt(value, 10);
+  if (!isFinite(n)) {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-bad-int",
+      "dmarc.buildAggregateReport: " + tag + " must be a finite integer, got " + JSON.stringify(value));
+  }
+  return "<" + tag + ">" + String(Math.trunc(n)) + "</" + tag + ">";
+}
+
+function _buildAuthResultsXml(authResults) {
+  var ar = authResults || {};
+  var parts = [];
+  var dkimRows = Array.isArray(ar.dkim) ? ar.dkim : [];
+  for (var i = 0; i < dkimRows.length; i += 1) {
+    var d = dkimRows[i] || {};
+    parts.push(
+      "<dkim>" +
+      _xmlLeaf("domain", d.domain) +
+      _xmlLeaf("selector", d.selector) +
+      _xmlLeaf("result", d.result) +
+      _xmlLeaf("human_result", d.humanResult) +
+      "</dkim>");
+  }
+  var spfRows = Array.isArray(ar.spf) ? ar.spf : [];
+  for (var j = 0; j < spfRows.length; j += 1) {
+    var s = spfRows[j] || {};
+    parts.push(
+      "<spf>" +
+      _xmlLeaf("domain", s.domain) +
+      _xmlLeaf("scope", s.scope) +
+      _xmlLeaf("result", s.result) +
+      "</spf>");
+  }
+  return "<auth_results>" + parts.join("") + "</auth_results>";
+}
+
+function dmarcBuildAggregateReport(report, opts) {
+  opts = opts || {};
+  if (!report || typeof report !== "object") {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-bad-input",
+      "dmarc.buildAggregateReport: report must be an object");
+  }
+  var rm = report.reportMetadata;
+  var pp = report.policyPublished;
+  if (!rm || typeof rm !== "object") {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-bad-input",
+      "dmarc.buildAggregateReport: report.reportMetadata is required (RFC 7489 Appendix C)");
+  }
+  if (!pp || typeof pp !== "object") {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-bad-input",
+      "dmarc.buildAggregateReport: report.policyPublished is required (RFC 7489 Appendix C)");
+  }
+  var records = report.records;
+  if (!Array.isArray(records)) {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-bad-input",
+      "dmarc.buildAggregateReport: report.records must be an array");
+  }
+  if (records.length > DMARC_RUA_MAX_RECORDS_PER_REPORT) {
+    throw new MailAuthError("mail-auth/dmarc-rua-build-too-many-records",
+      "dmarc.buildAggregateReport: " + records.length + " records exceeds cap " +
+      DMARC_RUA_MAX_RECORDS_PER_REPORT);
+  }
+
+  // report_metadata (RFC 7489 Appendix C). date_range is two epoch
+  // seconds; org_name + report_id are mandatory per the schema.
+  var dateRange = rm.dateRange || {};
+  var metaXml =
+    "<report_metadata>" +
+    _xmlLeaf("org_name", rm.orgName) +
+    _xmlLeaf("email", rm.email) +
+    _xmlLeaf("extra_contact_info", rm.extraContact) +
+    _xmlLeaf("report_id", rm.reportId) +
+    "<date_range>" +
+    _xmlIntLeaf("begin", dateRange.begin) +
+    _xmlIntLeaf("end", dateRange.end) +
+    "</date_range>" +
+    "</report_metadata>";
+
+  // policy_published (RFC 7489 Appendix C).
+  var policyXml =
+    "<policy_published>" +
+    _xmlLeaf("domain", pp.domain) +
+    _xmlLeaf("adkim", pp.adkim) +
+    _xmlLeaf("aspf", pp.aspf) +
+    _xmlLeaf("p", pp.p) +
+    _xmlLeaf("sp", pp.sp) +
+    (pp.pct === undefined || pp.pct === null ? "" : _xmlIntLeaf("pct", pp.pct)) +
+    _xmlLeaf("fo", pp.fo) +
+    "</policy_published>";
+
+  // record[] rows. Each row: source_ip + count + policy_evaluated +
+  // identifiers + auth_results.
+  var recordXml = "";
+  for (var i = 0; i < records.length; i += 1) {
+    var rec = records[i] || {};
+    var disp = rec.dispositions || {};
+    var ids = rec.identifiers || {};
+    var reasonRows = Array.isArray(disp.reasons) ? disp.reasons : [];
+    var reasonXml = "";
+    for (var ri = 0; ri < reasonRows.length; ri += 1) {
+      var rs = reasonRows[ri] || {};
+      reasonXml +=
+        "<reason>" +
+        _xmlLeaf("type", rs.type) +
+        _xmlLeaf("comment", rs.comment) +
+        "</reason>";
+    }
+    recordXml +=
+      "<record>" +
+      "<row>" +
+      _xmlLeaf("source_ip", rec.sourceIp) +
+      _xmlIntLeaf("count", rec.count) +
+      "<policy_evaluated>" +
+      _xmlLeaf("disposition", disp.disposition) +
+      _xmlLeaf("dkim", disp.dkim) +
+      _xmlLeaf("spf", disp.spf) +
+      reasonXml +
+      "</policy_evaluated>" +
+      "</row>" +
+      "<identifiers>" +
+      _xmlLeaf("envelope_to", ids.envelopeTo) +
+      _xmlLeaf("envelope_from", ids.envelopeFrom) +
+      _xmlLeaf("header_from", ids.headerFrom) +
+      "</identifiers>" +
+      _buildAuthResultsXml(rec.authResults) +
+      "</record>";
+  }
+
+  // RFC 7489 §7.2.1.1 — report-format version is "1.0" (the `version`
+  // element under <feedback>). Emit the XML declaration + a single
+  // <feedback> root so the output round-trips through safeXml.parse.
+  var version = _xmlLeaf("version", opts.version || "1.0");
+  var doc =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+    "<feedback>" +
+    version +
+    metaXml +
+    policyXml +
+    recordXml +
+    "</feedback>";
+
+  // Optional gzip per the same transport convention the parser accepts
+  // (RFC 1952). Default is raw XML; operators opt into compression for
+  // the mail attachment. Back-compat: default behavior is unchanged
+  // (raw string out) — gzip is strictly opt-in.
+  if (opts.gzip === true) {
+    return zlib.gzipSync(Buffer.from(doc, "utf8"));
+  }
+  return doc;
+}
+
 // ---- iprev (RFC 8601 §3) — Forward-Confirmed Reverse DNS verifier ----
 //
 // The receiving SMTP server reverse-resolves the connecting peer's IP
@@ -2117,6 +2849,337 @@ async function iprevVerify(ip) {
   };
 }
 
+// ---- DMARC forensic (RUF) failure-report parser (RFC 6591 + RFC 7489 §7.3) ----
+//
+// A domain publishing a DMARC `ruf=` policy receives per-message
+// failure reports when an authentication check fails. RFC 7489 §7.3
+// specifies the Authentication Failure Reporting Format (AFRF) of
+// RFC 6591 for these: a multipart/report (report-type=feedback-report)
+// carrying a `message/feedback-report` part whose header block adds the
+// DMARC-specific fields (Auth-Failure, Delivery-Result, Identity-
+// Alignment, DKIM-*/SPF-* result fields) on top of the RFC 5965 base
+// fields, plus a third part (message/rfc822 or text/rfc822-headers)
+// with the reported message (in full or headers-only).
+//
+// Composes the shared lib/mime-parse.js substrate (the same MIME walker
+// the RFC 5965 ARF ingest in lib/mail-arf.js uses) for the
+// multipart/report bisection + message/feedback-report extraction, then
+// shapes the full RFC 6591 §3.1 forensic field set (which the abuse-
+// report profile does not model) plus the reported message's headers.
+//
+//   var rv = b.mail.dmarc.parseForensicReport(rawMessageBytes);
+//   if (!rv.ok) { /* rv.error.code / rv.error.message */ }
+//   else        { /* rv.report.feedbackType / .authFailure / … */ }
+//
+// Validation tier: DEFENSIVE READER. The input is hostile-by-default
+// (a per-message failure report arrives at an operator endpoint from an
+// arbitrary reporting peer). The parser RETURNS a typed error object on
+// any malformed / over-cap / wrong-shape input — it does NOT throw in
+// the hot path, so a crafted report can't crash the request that
+// ingested it. Bytes + part-count + reported-header counts are bounded
+// (CWE-400 resource-exhaustion class) like the sibling aggregate-report
+// parser.
+//
+//   { ok: true,  report: { … } }
+//   { ok: false, error: { code: "<slug>", message: "<reason>" } }
+
+// RFC 6591 §3.2 — the report is small in practice; cap at 8 MiB to match
+// the sibling DMARC aggregate-report ceiling so operators have one
+// mental model for "what fits".
+var DMARC_RUF_MAX_REPORT_BYTES = C.BYTES.mib(8);
+
+// RFC 2046 §5.1 — a multipart/report failure report has a handful of
+// parts (text/plain + message/feedback-report + the reported message);
+// bound the part count so a hostile report with thousands of empty
+// boundary delimiters can't force unbounded walk work.
+var DMARC_RUF_MAX_PARTS = 64;                                                    // resource-exhaustion bound (CWE-400)
+
+// RFC 6591 §3.1 — required forensic fields. Feedback-Type and Auth-
+// Failure are the two that make an auth-failure report a DMARC forensic
+// report (RFC 7489 §7.3). User-Agent / Version are advisory in practice.
+var DMARC_RUF_REQUIRED_FIELDS = ["feedback-type", "auth-failure"];
+
+// RFC 6591 §3.1 — Auth-Failure registry values. Unknown values pass
+// through (the IANA "Authentication Failure" registry grows); this set
+// documents the launch vocabulary so operators can route on it.
+var DMARC_RUF_AUTH_FAILURE_TYPES = Object.freeze({
+  adsp:       1,                                                                 // RFC 6591 §3.1 (historic ADSP)
+  "bodyhash": 1,                                                                 // DKIM body-hash mismatch
+  dkim:       1,                                                                 // DKIM signature failure
+  dmarc:      1,                                                                 // RFC 7489 §7.3 — DMARC evaluation failure
+  revoked:    1,                                                                 // signing key revoked
+  signature:  1,                                                                 // DKIM signature syntactically invalid
+  spf:        1,                                                                 // SPF check failure
+});
+void DMARC_RUF_AUTH_FAILURE_TYPES;
+
+// RFC 6591 §3.2 — the reported message's header section can be large but
+// is bounded; cap the number of reported headers we normalize so a
+// crafted report can't force unbounded work. The full reported message
+// text is still surfaced verbatim under `reportedMessage` (bounded by
+// the overall byte cap), but the parsed `reportedHeaders` list is
+// header-count-capped.
+var DMARC_RUF_MAX_REPORTED_HEADERS = 256;                                       // resource-exhaustion bound (CWE-400)
+
+function _rufError(code, message) {
+  return { ok: false, error: { code: code, message: message } };
+}
+
+// Parse the reported message's headers (RFC 6591 §3.2 — the third part
+// of the report carries the message that failed authentication, in full
+// or headers-only). Returns an own-keys-only map (null-prototype) of
+// header-name → value (last-wins for duplicate single-valued lookups;
+// the full ordered list is also returned) so a header named
+// `__proto__` / `constructor` in a hostile report can't pollute the
+// prototype chain (prototype-pollution class).
+function _parseReportedHeaders(reportedMessage) {
+  var ordered = [];
+  var map = Object.create(null);
+  if (typeof reportedMessage !== "string" || reportedMessage.length === 0) {
+    return { headers: ordered, map: map, truncated: false };
+  }
+  var split;
+  try { split = mimeParse.splitHeadersAndBody(reportedMessage); }
+  catch (_e) { return { headers: ordered, map: map, truncated: false }; }
+  var hdrs = Array.isArray(split.headers) ? split.headers : [];
+  var truncated = false;
+  for (var i = 0; i < hdrs.length; i += 1) {
+    if (ordered.length >= DMARC_RUF_MAX_REPORTED_HEADERS) { truncated = true; break; }
+    var h = hdrs[i];
+    if (!h || typeof h.name !== "string") continue;
+    var name = h.name;
+    var value = typeof h.value === "string" ? h.value : "";
+    ordered.push({ name: name, value: value });
+    // Own-key assignment on a null-prototype object: a reported header
+    // named __proto__ / constructor / prototype is stored as data, not
+    // walked up the chain.
+    map[name.toLowerCase()] = value;
+  }
+  return { headers: ordered, map: map, truncated: truncated };
+}
+
+// Reassemble a MIME part's headers + body so a reported message that
+// ships as text/rfc822-headers (no separate body) still round-trips its
+// header bytes (RFC 6591 §3.2 permits headers-only).
+function _reassembleRufPart(part) {
+  var hdrs = "";
+  var ph = Array.isArray(part.headers) ? part.headers : [];
+  for (var i = 0; i < ph.length; i += 1) {
+    hdrs += ph[i].name + ": " + ph[i].value + "\r\n";
+  }
+  return hdrs + "\r\n" + (part.body || "");
+}
+
+function dmarcParseForensicReport(input, opts) {
+  opts = opts || {};
+
+  // ---- Coerce + byte-cap (defensive: typed error, never throw) ----
+  var asString;
+  if (typeof input === "string") asString = input;
+  else if (Buffer.isBuffer(input)) asString = input.toString("utf8");
+  else {
+    return _rufError("mail-auth/dmarc-ruf-bad-input",
+      "dmarc.parseForensicReport: input must be a string or Buffer");
+  }
+  var maxBytes = (typeof opts.maxBytes === "number" && isFinite(opts.maxBytes) && opts.maxBytes > 0)
+    ? opts.maxBytes
+    : DMARC_RUF_MAX_REPORT_BYTES;
+  if (asString.length > maxBytes) {
+    return _rufError("mail-auth/dmarc-ruf-too-large",
+      "dmarc.parseForensicReport: report exceeds " + maxBytes + " bytes (got " + asString.length + ")");
+  }
+
+  // ---- Bisect top-level headers / body; require multipart/report ----
+  var top;
+  try { top = mimeParse.splitHeadersAndBody(asString); }
+  catch (e) {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: header/body split failed: " + ((e && e.message) || String(e)));
+  }
+  var ct = mimeParse.parseContentType(mimeParse.findHeader(top.headers, "Content-Type") || "");
+  if (ct.type !== "multipart/report") {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: top-level Content-Type must be multipart/report (got '" + ct.type + "')");
+  }
+  // RFC 6591 §2 / RFC 5965 §2 — report-type=feedback-report. Tolerate an
+  // omitted report-type (shipping reporters sometimes drop it); refuse a
+  // mismatched value.
+  if (ct.params["report-type"] && ct.params["report-type"].toLowerCase() !== "feedback-report") {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: report-type must be feedback-report (got '" +
+      ct.params["report-type"] + "')");
+  }
+  if (!ct.params.boundary) {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: multipart/report Content-Type lacks boundary parameter");
+  }
+
+  // ---- Walk the parts; find message/feedback-report + reported msg ----
+  var parts = mimeParse.splitMimeParts(top.body, ct.params.boundary);
+  if (parts.length === 0) {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: multipart/report body contains no parts");
+  }
+  if (parts.length > DMARC_RUF_MAX_PARTS) {
+    return _rufError("mail-auth/dmarc-ruf-too-many-parts",
+      "dmarc.parseForensicReport: report has " + parts.length + " parts (cap " +
+      DMARC_RUF_MAX_PARTS + ")");
+  }
+
+  var feedbackPart = null;
+  var reportedPart = null;
+  for (var pi = 0; pi < parts.length; pi += 1) {
+    var split;
+    try { split = mimeParse.splitHeadersAndBody(parts[pi]); }
+    catch (_e) { continue; }
+    var partCt = mimeParse.parseContentType(
+      mimeParse.findHeader(split.headers, "Content-Type") || "");
+    if (partCt.type === "message/feedback-report" && !feedbackPart) {
+      feedbackPart = split;
+    } else if ((partCt.type === "message/rfc822" ||
+                partCt.type === "text/rfc822-headers") && !reportedPart) {
+      reportedPart = split;
+    }
+  }
+  if (!feedbackPart) {
+    return _rufError("mail-auth/dmarc-ruf-no-feedback-report",
+      "dmarc.parseForensicReport: missing message/feedback-report subpart (RFC 6591 §3)");
+  }
+
+  // ---- Parse the feedback-report header block (RFC 6591 §3.1) ----
+  // Field names are stored own-key on a null-prototype map so a hostile
+  // field named __proto__ / constructor can't pollute the prototype.
+  var fields;
+  try { fields = mimeParse.parseHeaderBlock(feedbackPart.body); }
+  catch (e) {
+    return _rufError("mail-auth/dmarc-ruf-bad-report",
+      "dmarc.parseForensicReport: feedback-report field parse failed: " + ((e && e.message) || String(e)));
+  }
+  var fieldMap = Object.create(null);
+  var rcptToList = [];
+  for (var fi = 0; fi < fields.length; fi += 1) {
+    var f = fields[fi];
+    if (!f || typeof f.name !== "string") continue;
+    var lc = f.name.toLowerCase();
+    var val = typeof f.value === "string" ? f.value : "";
+    fieldMap[lc] = val;
+    if (lc === "original-rcpt-to") rcptToList.push(val);
+  }
+  function _field(name) {
+    return Object.prototype.hasOwnProperty.call(fieldMap, name) ? fieldMap[name] : null;
+  }
+
+  // ---- Required fields (RFC 6591 §3.1 / RFC 7489 §7.3) ----
+  for (var ri = 0; ri < DMARC_RUF_REQUIRED_FIELDS.length; ri += 1) {
+    var req = DMARC_RUF_REQUIRED_FIELDS[ri];
+    var rv = _field(req);
+    if (typeof rv !== "string" || rv.length === 0) {
+      if (req === "auth-failure") {
+        return _rufError("mail-auth/dmarc-ruf-missing-auth-failure",
+          "dmarc.parseForensicReport: required field 'Auth-Failure' is missing (RFC 6591 §3.1)");
+      }
+      return _rufError("mail-auth/dmarc-ruf-missing-field",
+        "dmarc.parseForensicReport: required field '" + req + "' is missing (RFC 6591 §3.1)");
+    }
+  }
+
+  // RFC 7489 §7.3 — a DMARC forensic report carries Feedback-Type:
+  // auth-failure (the AFRF profile of RFC 6591). A report whose Feedback-
+  // Type is another ARF class (e.g. plain "abuse") is a valid feedback
+  // report but NOT a DMARC forensic report; surface the mismatch rather
+  // than mislabeling it. Field values are case-insensitive tokens.
+  var feedbackType = String(_field("feedback-type")).toLowerCase();
+  if (feedbackType !== "auth-failure") {
+    return _rufError("mail-auth/dmarc-ruf-not-auth-failure",
+      "dmarc.parseForensicReport: Feedback-Type must be 'auth-failure' for a " +
+      "DMARC forensic report (RFC 7489 §7.3 / RFC 6591), got " +
+      JSON.stringify(_field("feedback-type")));
+  }
+
+  // ---- RFC 6591 §3.2 reported message ----
+  var reportedMessage = null;
+  if (reportedPart) {
+    reportedMessage = (reportedPart.body && reportedPart.body.length > 0)
+      ? reportedPart.body
+      : _reassembleRufPart(reportedPart);
+  }
+  var reported = _parseReportedHeaders(reportedMessage);
+
+  // ---- Normalize Arrival-Date / Incidents (RFC 5965 §3.1) ----
+  var arrivalRaw = _field("arrival-date") || _field("received-date") || null;
+  var arrivalIso = null;
+  if (arrivalRaw) {
+    var d = new Date(arrivalRaw);
+    if (!isNaN(d.getTime())) arrivalIso = d.toISOString();
+  }
+  var incidentsRaw = _field("incidents");
+  var incidents = null;
+  if (typeof incidentsRaw === "string") {
+    var inc = parseInt(incidentsRaw, 10);
+    if (isFinite(inc) && inc >= 0) incidents = inc;
+  }
+
+  // Surface unmodeled fields under extraFields for operator visibility
+  // (vendor X-* tags). Own-key copy off the null-prototype fieldMap onto
+  // a null-prototype target so a field named __proto__ / constructor in a
+  // hostile report is stored as data, not as a prototype mutation.
+  var KNOWN = Object.create(null);
+  ["feedback-type", "user-agent", "version", "auth-failure",
+   "delivery-result", "identity-alignment", "dkim-domain",
+   "dkim-identity", "dkim-selector", "dkim-canonicalized-header",
+   "dkim-canonicalized-body", "spf-dns", "original-mail-from",
+   "original-rcpt-to", "arrival-date", "received-date",
+   "reported-domain", "source-ip", "authentication-results",
+   "reported-uri", "incidents", "original-envelope-id"
+  ].forEach(function (k) { KNOWN[k] = 1; });
+  var extraFields = Object.create(null);
+  Object.keys(fieldMap).forEach(function (k) {
+    if (!Object.prototype.hasOwnProperty.call(KNOWN, k)) extraFields[k] = fieldMap[k];
+  });
+
+  var report = {
+    // ---- RFC 5965 base fields ----
+    feedbackType:          _field("feedback-type"),
+    userAgent:             _field("user-agent"),
+    version:               _field("version") || "1",
+    arrivalDate:           arrivalIso || arrivalRaw,
+    reportedDomain:        _field("reported-domain"),
+    sourceIp:              _field("source-ip"),
+    originalFrom:          _field("original-mail-from"),
+    originalRcptTo:        rcptToList,
+    originalEnvelopeId:    _field("original-envelope-id"),
+    authenticationResults: _field("authentication-results"),
+    incidents:             incidents,
+    reportedUri:           _field("reported-uri"),
+
+    // ---- RFC 6591 §3.1 / RFC 7489 §7.3 forensic-specific fields ----
+    authFailure:           _field("auth-failure"),                              // RFC 6591 §3.1 — "dkim" | "spf" | "dmarc" | "bodyhash" | …
+    deliveryResult:        _field("delivery-result"),                           // RFC 6591 §3.1 — "delivered" | "spam" | "policy" | "reject" | "other"
+    identityAlignment:     _field("identity-alignment"),                        // RFC 7489 §7.3 — "none" | "spf" | "dkim" | "dkim spf"
+    dkim: {
+      domain:              _field("dkim-domain"),                               // RFC 6591 §3.1
+      identity:            _field("dkim-identity"),
+      selector:            _field("dkim-selector"),
+      canonicalizedHeader: _field("dkim-canonicalized-header"),
+      canonicalizedBody:   _field("dkim-canonicalized-body"),
+    },
+    spf: {
+      dns:                 _field("spf-dns"),                                    // RFC 6591 §3.1 — the SPF DNS record at evaluation time
+    },
+
+    // ---- RFC 6591 §3.2 reported message ----
+    reportedMessage:       reportedMessage,
+    reportedHeaders:       reported.headers,                                    // [ { name, value }, … ] — order preserved
+    reportedHeaderMap:     reported.map,                                        // null-prototype lower-cased-name → value
+    reportedHeadersTruncated: reported.truncated,                               // true when the §3.2 header cap clipped the list
+
+    // ---- operator-visible passthrough for unmodeled fields ----
+    extraFields:           extraFields,
+  };
+
+  return { ok: true, report: report };
+}
+
 module.exports = {
   spf: Object.freeze({
     verify:        spfVerify,
@@ -2126,6 +3189,8 @@ module.exports = {
     evaluate:                 dmarcEvaluate,
     parseRecord:              _parseDmarcRecord,
     parseAggregateReport:     dmarcParseAggregateReport,
+    buildAggregateReport:     dmarcBuildAggregateReport,
+    parseForensicReport:      dmarcParseForensicReport,
   }),
   arc: Object.freeze({
     verify:        arcVerify,
@@ -2138,6 +3203,9 @@ module.exports = {
   }),
   authResults: Object.freeze({
     emit:          authResultsEmit,
+  }),
+  inbound: Object.freeze({
+    verify:        inboundVerify,
   }),
   MailAuthError: MailAuthError,
   SPF_DNS_LOOKUP_LIMIT: SPF_DNS_LOOKUP_LIMIT,

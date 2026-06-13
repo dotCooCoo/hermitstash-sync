@@ -125,6 +125,11 @@ var QueueError            = defineClass("QueueError");
 // them and skips immediately rather than hammering a misconfig.
 var RedisError            = defineClass("RedisError");
 var ExternalDbError       = defineClass("ExternalDbError");
+// DbQueryError covers the local-SQLite query-builder refusal paths
+// (residency write gates, malformed-call shapes). Refusals pass the
+// permanent flag explicitly — a residency mismatch never becomes valid
+// on retry, while the class stays open for transient codes later.
+var DbQueryError          = defineClass("DbQueryError");
 var ClusterError          = defineClass("ClusterError");
 var ClusterProviderError  = defineClass("ClusterProviderError");
 var HandlerError          = defineClass("HandlerError",          { withCause: true });
@@ -210,6 +215,16 @@ var GuardSvgError         = defineClass("GuardSvgError",         { alwaysPermane
 // (Windows strips them silently), unicode bidi/RTLO file-name spoofing,
 // overlong UTF-8 encoding, length caps. alwaysPermanent.
 var GuardFilenameError    = defineClass("GuardFilenameError",    { alwaysPermanent: true });
+// GuardSqlError covers raw-SQL refusals from the b.guardSql guard: the
+// OS-reach floor (file / exec / FDW / extension / privilege-pivot
+// across Postgres / SQLite / MySQL), stacked statements, comment
+// smuggling, embedded string literals in a fragment, invalid UTF-8
+// (CVE-2025-1094 encoding-bypass class), time-based probes, schema
+// recon, and the migration DDL-verb allowlist. DOT-style codes
+// (sql.refuse / sql.stacked / sql.file-access / ...) so they don't
+// collide with SafeSqlError's slash codes (sql/bad-shape / ...).
+// alwaysPermanent.
+var GuardSqlError         = defineClass("GuardSqlError",         { alwaysPermanent: true });
 // GuardArchiveError covers archive-shape violations: zip-slip path
 // traversal, symlink + hardlink escape, decompression-ratio bombs,
 // nested-archive depth, file-count + total-size + per-entry-size caps,
@@ -552,7 +567,9 @@ var WatcherError          = defineClass("WatcherError",          { alwaysPermane
 // caller-shape misuse or an irrecoverable on-disk condition.
 var LocalDbThinError      = defineClass("LocalDbThinError",      { alwaysPermanent: true });
 // RouterError covers operator-shape violations on the router primitive:
-// invalid `allowedRedirectOrigins` opt at create time, and cross-origin
+// invalid `allowedRedirectOrigins` opt at create time, a malformed
+// `use()` mount (non-string / non-array prefix, a prefix not beginning
+// with "/", a missing or non-function middleware), and cross-origin
 // `res.redirect()` targets that are not on the allowlist. alwaysPermanent
 // — every case is config-time programming bug or an outbound-redirect
 // shape error that retry will not recover.
@@ -653,6 +670,7 @@ module.exports = {
   QueueError:             QueueError,
   RedisError:             RedisError,
   ExternalDbError:        ExternalDbError,
+  DbQueryError:           DbQueryError,
   ClusterError:           ClusterError,
   ClusterProviderError:   ClusterProviderError,
   HandlerError:           HandlerError,
@@ -679,6 +697,7 @@ module.exports = {
   GuardHtmlError:         GuardHtmlError,
   GuardSvgError:          GuardSvgError,
   GuardFilenameError:     GuardFilenameError,
+  GuardSqlError:          GuardSqlError,
   GuardArchiveError:      GuardArchiveError,
   GuardJsonError:         GuardJsonError,
   GuardYamlError:         GuardYamlError,

@@ -69,6 +69,11 @@
  *         document: { maxBytes: b.constants.BYTES.mib(25) },
  *       },
  *
+ *       // RFC 5987 filename* charsets to decode. utf-8 is always
+ *       // supported (RFC 8187 §3.2); add "iso-8859-1" (RFC 5987 §3.2)
+ *       // to accept legacy senders that encode filenames in Latin-1.
+ *       filenameCharsets: ["utf-8"],
+ *
  *       // When wired, fileFilter rejections emit body-parser.multipart.file_rejected
  *       // on the audit chain with the field, filename, mime, and reason.
  *       audit: b.audit,
@@ -121,6 +126,7 @@ var safeBuffer      = require("../safe-buffer");
 var safeJson        = require("../safe-json");
 var structuredFields = require("../structured-fields");
 var validateOpts    = require("../validate-opts");
+var codepointClass  = require("../codepoint-class");
 var C = require("../constants");
 var { defineClass } = require("../framework-error");
 
@@ -160,6 +166,29 @@ var BodyParserError = defineClass("BodyParserError", { withStatusCode: true });
 // in play — consistent prototype-pollution defense across the framework.
 var POISONED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
+// Materialize a header/parameter map from request-derived [key, value]
+// pairs WITHOUT a computed member write (`target[key] = value`). A
+// request-keyed computed write is the CWE-915 unsafe-reflection /
+// CWE-1321 prototype-pollution sink: an attacker who controls the key
+// (Content-Type parameter name, multipart part-header name,
+// Content-Disposition parameter name) can target `__proto__` /
+// `constructor` / `prototype` and corrupt the prototype chain. Poisoned
+// keys are dropped, the remaining pairs are funneled through
+// `Object.fromEntries`, and the result carries no prototype chain
+// (`Object.create(null)`) so even a key that slipped a future POISONED_KEYS
+// gap cannot reach Object.prototype. The returned map has plain-object
+// shape (string keys → values) so existing named-property reads
+// (`.boundary`, `.charset`, `["content-disposition"]`, `.name`,
+// `.filename`) are unchanged.
+function _mapFromPairs(pairs) {
+  var safe = [];
+  for (var i = 0; i < pairs.length; i++) {
+    if (POISONED_KEYS.has(pairs[i][0])) continue;
+    safe.push(pairs[i]);
+  }
+  return Object.assign(Object.create(null), Object.fromEntries(safe));
+}
+
 // ---- defaults ----
 
 var DEFAULTS = Object.freeze({
@@ -196,6 +225,7 @@ var DEFAULTS = Object.freeze({
     fileFilter:    null,             // fn({ field, filename, mimeType, partHeaders }) → bool | { reject, code, message }
     fields:        null,             // per-field overrides: { name: { maxBytes?, mimeTypes? } }
     audit:         null,             // when wired, file-rejection emits an audit event
+    filenameCharsets: ["utf-8"],     // RFC 5987 filename* charsets to decode; add "iso-8859-1" to opt that legacy charset in
     contentTypes:  ["multipart/form-data"],
   },
 });
@@ -214,7 +244,11 @@ function _contentType(req) {
   if (typeof ct !== "string") return { type: "", params: {} };
   var idx = ct.indexOf(";");
   var type = (idx === -1 ? ct : ct.slice(0, idx)).trim().toLowerCase();
-  var params = {};
+  // Collect [name, value] pairs, then materialize via _mapFromPairs so a
+  // request-controlled parameter name (e.g. `boundary` / `charset` / an
+  // attacker-supplied `__proto__`) is never used as a computed-write key
+  // (CWE-915 / CWE-1321). Poisoned names are dropped at materialization.
+  var paramPairs = [];
   if (idx !== -1) {
     var rest = ct.slice(idx + 1);
     // RFC 9110 §8.3 + §5.6.6 — parameter values may be quoted-string
@@ -231,10 +265,10 @@ function _contentType(req) {
       var v = p.slice(eq + 1).trim();
       var _unq = structuredFields.unquoteSfString(v);
       if (_unq !== null) v = _unq;
-      params[k] = v;
+      paramPairs.push([k, v]);
     }
   }
-  return { type: type, params: params };
+  return { type: type, params: _mapFromPairs(paramPairs) };
 }
 
 function _typeMatches(actual, allowed) {
@@ -344,9 +378,16 @@ function _detectSmuggling(req) {
 function _writeError(res, status, message, code) {
   if (res.headersSent) return;
   var body = JSON.stringify({ error: message, code: code });
+  // Connection: close on a body-parse rejection (malformed JSON, poisoned
+  // key, oversize payload) so an upstream proxy can't reuse a socket whose
+  // request stream we abandoned mid-body. Pairing the 4xx with a forced
+  // socket teardown closes the desync window a partially-consumed body
+  // would otherwise leave open (RFC 9112 §9.6 — a server MAY close after
+  // an error response; doing so here prevents request-smuggling reuse).
   res.writeHead(status, {
     "Content-Type":   "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
+    "Connection":     "close",
   });
   res.end(body);
 }
@@ -569,7 +610,13 @@ function _parseMultipartHeaders(rawHeaders) {
   // §5.5 — header field values MUST NOT contain CR, LF, or NUL bytes.
   // We refuse the part outright (caller surfaces the throw as 400 + drop).
   var lines = rawHeaders.split("\r\n");
-  var out = {};
+  // Collect [name, value] pairs; materialize via _mapFromPairs so the
+  // request-controlled header name is never a computed-write key
+  // (CWE-915 / CWE-1321 — a part header literally named `__proto__` would
+  // otherwise pollute the prototype chain). Later headers of the same
+  // name keep last-wins (the prior `out[k] = v` overwrite semantics:
+  // Object.fromEntries takes the last pair for a duplicate key).
+  var headerPairs = [];
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i];
     if (!line) continue;
@@ -595,47 +642,83 @@ function _parseMultipartHeaders(rawHeaders) {
         );
       }
     }
-    out[k] = v;
+    headerPairs.push([k, v]);
+  }
+  return _mapFromPairs(headerPairs);
+}
+
+// Percent-decode an RFC 5987 ext-value's value segment under iso-8859-1.
+// RFC 5987 §3.2 / RFC 2231 §7 define iso-8859-1 (Latin-1) as the only
+// non-utf-8 charset a recipient is expected to understand: each decoded
+// byte is itself the Latin-1 code point, so a byte b maps directly to
+// U+00bb. We percent-unescape to raw bytes, then map each byte to its
+// code point. Returns null on a malformed `%`-escape.
+function _percentDecodeLatin1(encoded) {
+  var out = "";
+  for (var i = 0; i < encoded.length; i += 1) {
+    var ch = encoded.charAt(i);
+    if (ch === "%") {
+      var hex = encoded.substr(i + 1, 2);
+      if (hex.length !== 2 || !codepointClass.HEX_PAIR_RE.test(hex)) return null;
+      out += String.fromCharCode(parseInt(hex, 16));
+      i += 2;
+    } else {
+      out += ch;
+    }
   }
   return out;
 }
 
 // RFC 5987 / 8187 — `filename*=UTF-8''percent%20encoded.txt` extended
-// parameter form for non-ASCII filenames. Charset MUST be `UTF-8`
-// (case-insensitive); we refuse other charsets to keep the decode
-// path single-encoding. Language tag (between the two `'`s) is
-// permitted but ignored.
-function _decodeRfc5987(raw) {
+// parameter form for non-ASCII filenames. utf-8 is always accepted
+// (RFC 8187 §3.2 mandates support); iso-8859-1 (RFC 5987 §3.2 / RFC 2231
+// §7) decodes only when the operator opts it in via
+// `multipart.filenameCharsets`. Any other charset is refused to keep the
+// decode path bounded to the two RFC-defined encodings. The language tag
+// (between the two `'`s) is permitted but ignored. `allowed` is a
+// lower-cased charset allowlist; it always includes "utf-8".
+function _decodeRfc5987(raw, allowed) {
   if (typeof raw !== "string") return null;
   var firstTick  = raw.indexOf("'");
   if (firstTick === -1) return null;
   var secondTick = raw.indexOf("'", firstTick + 1);
   if (secondTick === -1) return null;
   var charset = raw.slice(0, firstTick).toLowerCase();
-  if (charset !== "utf-8") return null;       // RFC 5987 mandated charset; refuse anything else
   var encoded = raw.slice(secondTick + 1);
-  try {
-    return decodeURIComponent(encoded);
-  } catch (_e) {
-    return null;
+  if (charset === "utf-8") {
+    try {
+      return decodeURIComponent(encoded);
+    } catch (_e) {
+      return null;
+    }
   }
+  if (charset === "iso-8859-1" && allowed && allowed.indexOf("iso-8859-1") !== -1) {
+    return _percentDecodeLatin1(encoded);
+  }
+  return null;                                // charset not enabled — refuse
 }
 
-function _parseHeaderParams(headerValue) {
+function _parseHeaderParams(headerValue, filenameCharsets) {
   // Content-Disposition: form-data; name="field"; filename="x.txt"
   // Returns { _value: "form-data", name: "field", filename: "x.txt" }
   // RFC 5987 / 8187 — when a `filename*=UTF-8''...` extended parameter
   // is present, it takes precedence over the legacy `filename=`
   // companion (RFC 6266 §4.3). We surface the decoded value at
   // `filename` so downstream consumers don't need parser-aware code.
-  var out = { _value: "" };
-  if (!headerValue) return out;
+  if (!headerValue) return _mapFromPairs([["_value", ""]]);
   // RFC 6266 §4.1 + RFC 9110 §5.6.6 — parameter values may be
   // quoted-string (e.g. `filename="weird;name.txt"`). Bare
   // `.split(";")` would slice through the quoted semicolon and
   // corrupt the filename. Quote-aware shared splitter.
   var parts = structuredFields.splitTopLevel(headerValue, ";");
-  out._value = parts[0].trim().toLowerCase();
+  // Collect [name, value] pairs, then materialize via _mapFromPairs so a
+  // request-controlled Content-Disposition parameter name (or its
+  // ext-value `name*` bare form) is never a computed-write key
+  // (CWE-915 / CWE-1321). `_value` carries the disposition type;
+  // `filename` (when an ext-value decoded) takes precedence over the
+  // legacy `filename=` companion (RFC 6266 §4.3), preserved by appending
+  // it last so Object.fromEntries' last-wins resolves it.
+  var paramPairs = [["_value", parts[0].trim().toLowerCase()]];
   var extName = null;
   for (var i = 1; i < parts.length; i++) {
     var p = parts[i].trim();
@@ -646,18 +729,18 @@ function _parseHeaderParams(headerValue) {
     var _unq = structuredFields.unquoteSfString(v);
     if (_unq !== null) v = _unq;
     if (k.charAt(k.length - 1) === "*") {
-      var decoded = _decodeRfc5987(v);
+      var decoded = _decodeRfc5987(v, filenameCharsets);
       if (decoded !== null) {
         var bareKey = k.slice(0, -1);
         if (bareKey === "filename") extName = decoded;
-        out[bareKey] = decoded;
+        paramPairs.push([bareKey, decoded]);
       }
       continue;
     }
-    out[k] = v;
+    paramPairs.push([k, v]);
   }
-  if (extName !== null) out.filename = extName;
-  return out;
+  if (extName !== null) paramPairs.push(["filename", extName]);
+  return _mapFromPairs(paramPairs);
 }
 
 async function _parseMultipart(req, opts, ctParams) {
@@ -681,6 +764,17 @@ async function _parseMultipart(req, opts, ctParams) {
       "multipart boundary violates RFC 2046 §5.1.1 (1-70 chars, bcharsnospace grammar)",
       true, HTTP_STATUS.BAD_REQUEST
     );
+  }
+  // RFC 5987 filename* charsets the operator opts into decoding. utf-8 is
+  // always present (RFC 8187 §3.2 mandates it); operators add "iso-8859-1"
+  // for legacy senders. Lower-cased once here so the per-part decode does
+  // a plain membership check.
+  var filenameCharsets = ["utf-8"];
+  if (Array.isArray(opts.filenameCharsets)) {
+    filenameCharsets = opts.filenameCharsets.map(function (c) {
+      return String(c).toLowerCase();
+    });
+    if (filenameCharsets.indexOf("utf-8") === -1) filenameCharsets.push("utf-8");
   }
   // storage: "memory" buffers file parts in RAM (capped by fileSize ×
   // fileCount, the same DoS bound as disk mode) and exposes each file as
@@ -870,7 +964,7 @@ async function _parseMultipart(req, opts, ctParams) {
             }
             pending = pending.slice(headEnd + 4);
             // Decode Content-Disposition.
-            var cd = _parseHeaderParams(currentHeaders["content-disposition"]);
+            var cd = _parseHeaderParams(currentHeaders["content-disposition"], filenameCharsets);
             if (cd._value !== "form-data" || typeof cd.name !== "string" || cd.name.length === 0) {
               done(new BodyParserError("body-parser/multipart-bad-disposition",
                 "multipart part missing form-data Content-Disposition", true, HTTP_STATUS.BAD_REQUEST));
@@ -1118,20 +1212,27 @@ async function _parseMultipart(req, opts, ctParams) {
               var fbuf = Buffer.concat(currentBuf);
               var text = fbuf.toString("utf8");
               // Repeated field name → array, matching urlencoded parser.
-              if (Object.prototype.hasOwnProperty.call(fields, currentField)) {
-                // lgtm[js/remote-property-injection] — `currentField` is gated
-                // upstream at lib/middleware/body-parser.js:867 by
-                // POISONED_KEYS (__proto__ / constructor / prototype) which
-                // refuses the multipart part with a 400 BodyParserError before
-                // `currentField` is ever assigned. Reachable values cannot
-                // pollute the prototype chain.
-                if (Array.isArray(fields[currentField])) fields[currentField].push(text);
-                else fields[currentField] = [fields[currentField], text];
+              // `currentField` is request-controlled, so the accumulation
+              // never uses it as a computed-write key (`fields[key] = v`),
+              // which is the CWE-915 / CWE-1321 sink: it is merged through
+              // Object.fromEntries + Object.assign instead. The upstream
+              // POISONED_KEYS gate (the multipart-poisoned-field check above)
+              // already rejects __proto__ / constructor / prototype field
+              // names with a 400 before reaching here; the entries-merge is
+              // the structural backstop.
+              var fieldName = currentField;
+              var prior = Object.prototype.hasOwnProperty.call(fields, fieldName)
+                            ? fields[fieldName] : undefined;
+              var nextValue;
+              if (prior === undefined) {
+                nextValue = text;
+              } else if (Array.isArray(prior)) {
+                prior.push(text);
+                nextValue = prior;
               } else {
-                // lgtm[js/remote-property-injection] — see upstream POISONED_KEYS
-                // gate at lib/middleware/body-parser.js:867.
-                fields[currentField] = text;
+                nextValue = [prior, text];
               }
+              Object.assign(fields, Object.fromEntries([[fieldName, nextValue]]));
             }
             currentHeaders = null;
             currentField = null;
@@ -1211,7 +1312,8 @@ async function _parseMultipart(req, opts, ctParams) {
  *     raw:         false | { limit, contentTypes },
  *     multipart:   false | {
  *       storage, tmpDir, fileSize, totalSize, fileCount, fieldCount,
- *       fieldSize, mimeAllowlist, fileFilter, fields, audit, contentTypes,
+ *       fieldSize, mimeAllowlist, fileFilter, fields, audit,
+ *       filenameCharsets, contentTypes,
  *     },
  *     keepRawBody: boolean,    // expose req.bodyRaw for webhook signing
  *   }

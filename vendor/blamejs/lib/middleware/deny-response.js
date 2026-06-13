@@ -34,17 +34,9 @@
  */
 
 var problemDetails = require("../problem-details");
+var validateOpts = require("../validate-opts");
 
 function _isFn(x) { return typeof x === "function"; }
-
-function _mergeInto(target, extra) {
-  if (!extra || typeof extra !== "object") return target;
-  var keys = Object.keys(extra);
-  for (var i = 0; i < keys.length; i += 1) {
-    target[keys[i]] = extra[keys[i]];
-  }
-  return target;
-}
 
 /**
  * Resolve a deny-path refusal through the uniform hook / problem+json
@@ -79,25 +71,40 @@ function denyResponse(req, res, ctx) {
   if (_isFn(ctx.onDeny)) {
     try {
       var returned = ctx.onDeny(req, res, info);
-      if (res.writableEnded) return returned;
-      // Hook ran but did not write — fall through to the default so
-      // the response can never hang on a no-op hook.
+      if (res.writableEnded || res.headersSent) return returned;
+      // Hook ran but did not commit the response — fall through to the
+      // default so the response can never hang on a no-op hook. A
+      // wrapping consumer that already sent headers (without flipping
+      // writableEnded) counts as committed: re-entering writeHead below
+      // would throw "headers already sent".
     } catch (e) {
       if (_isFn(ctx.onThrow)) {
         try { ctx.onThrow(e); } catch (_e) { /* drop-silent */ }
       }
-      if (res.writableEnded) return undefined;
-      // Hook threw before writing — fall through to the default.
+      if (res.writableEnded || res.headersSent) return undefined;
+      // Hook threw before committing the response — fall through to
+      // the default.
     }
   }
 
-  if (res.writableEnded || !_isFn(res.writeHead)) return undefined;
+  if (res.writableEnded || res.headersSent || !_isFn(res.writeHead)) return undefined;
 
   var extra = (ctx.headers && typeof ctx.headers === "object") ? ctx.headers : null;
 
   if (ctx.problem) {
     var fields = { status: ctx.status };
-    if (ctx.problemType)   fields.type   = ctx.problemType;
+    if (ctx.problemType) {
+      fields.type = ctx.problemType;
+    } else if (typeof ctx.problemCode === "string" && ctx.problemCode.length > 0) {
+      // No explicit type URI: derive one from problemCode using the
+      // same `<base>/<code>` convention as problemDetails.fromError, so
+      // a 429 carrying problemCode reads `<base>/rate-limit-exceeded`
+      // rather than defaulting to "about:blank". RFC 9457 §3.1.1 lets
+      // the type be any URI reference; sanitize the suffix into RFC
+      // 3986 unreserved + "/" path chars, matching fromError exactly.
+      fields.type = problemDetails.getBase() + "/" +
+        ctx.problemCode.replace(/[^A-Za-z0-9\-._/]/g, "-");
+    }
     if (ctx.problemTitle)  fields.title  = ctx.problemTitle;
     if (ctx.problemDetail) fields.detail = ctx.problemDetail;
     if (ctx.problemExt && typeof ctx.problemExt === "object") {
@@ -129,7 +136,7 @@ function denyResponse(req, res, ctx) {
     return undefined;
   }
 
-  var head = _mergeInto({ "Content-Type": ctx.contentType }, extra);
+  var head = validateOpts.assignOwnEnumerable({ "Content-Type": ctx.contentType }, extra);
   var denyOut = (ctx.body === undefined || ctx.body === null) ? ""
     : (typeof ctx.body === "string" ? ctx.body : JSON.stringify(ctx.body));
   if (ctx.body !== undefined && ctx.body !== null && req && typeof req.apiEncryptEncode === "function") {

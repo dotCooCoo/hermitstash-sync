@@ -6,7 +6,8 @@
  * quotas (cluster-shared via b.cache), Range support (RFC 7233 single-range),
  * the full conditional-request set (If-None-Match / If-Match /
  * If-Modified-Since / If-Unmodified-Since), MIME allowlist with magic-byte
- * verification (composes b.fileType), per-request operator hook, idle-stream
+ * verification (composes b.fileType), per-request operator hooks (onServe
+ * on the success path, onError on every refusal path), idle-stream
  * timeout, cancellation propagation, force-revoke, and compliance-retention
  * gating.
  *
@@ -15,6 +16,12 @@
  *   serve.stats();                                  // bytes / requests / etag-hits
  *   var mw = serve.middleware;                       // (req, res, next)
  *   await b.staticServe.integrity(absFilePath);      // SRI helper (SHA-384)
+ *
+ *   // onError mirrors onServe for the refusal paths (403 / 404 / 415 /
+ *   // 412 / 416 / 429 / 451 / 500): it receives
+ *   // { req, res, urlPath, absPath, status, code, actor } AFTER the
+ *   // refusal response is written. Observability-only — a throw is
+ *   // swallowed so a broken hook can't tear down the socket.
  *
  * Backwards compatible: every existing opt (root, mountPath,
  * hashedPathPattern, indexFile, defaultMaxAge, contentTypes) keeps its
@@ -119,12 +126,32 @@ var DEFAULTS = Object.freeze({
   // serve event is the audit-worthy act, not a precursor.
   auditSuccess:                     true,
   auditFailures:                    true,
+  // mountType — declares what KIND of content this mount serves, so
+  // the stored-XSS-relevant defaults follow the typing instead of being
+  // hand-flipped per mount (v0.15.0):
+  //   "curated"      (default) — operator-controlled assets (CSS / JS
+  //                  bundles / fonts / images). Inline render is required
+  //                  and safe because the operator authored the bytes;
+  //                  forceAttachmentForNonText defaults OFF.
+  //   "user-content" — files written by end users / untrusted uploaders.
+  //                  A served .html / .js / .svg here is a stored-XSS
+  //                  vector, so forceAttachmentForNonText defaults ON —
+  //                  risky inline MIMEs are forced to download unless a
+  //                  sanitizer gate vouches for them (see
+  //                  `_shouldForceAttachment`). This is the conditional
+  //                  flip: a curated asset dir is never blindly forced to
+  //                  download; only a mount the operator TYPED as
+  //                  user-content gets the strict default.
+  // An explicit forceAttachmentForNonText always overrides the
+  // mountType-derived default.
+  mountType:                        "curated",
   // forceAttachmentForNonText — stored-XSS defense for user-upload
-  // directories. Default OFF because operator-curated asset dirs
-  // (CSS / JS bundles / fonts) need inline render. Opt in for
-  // user-upload-backed mounts so HTML / JS / SVG without sanitizer
-  // / PDF / archives are forced to download. See
-  // `_shouldForceAttachment` below for the safe-render allowlist.
+  // directories. Default follows mountType: OFF for "curated" mounts
+  // (operator-curated CSS / JS bundles / fonts need inline render), ON for
+  // "user-content" mounts so HTML / JS / SVG without a sanitizer / PDF /
+  // archives are forced to download. Set explicitly to override the
+  // mountType-derived default either way. See `_shouldForceAttachment`
+  // below for the safe-render allowlist.
   forceAttachmentForNonText:        false,
   // Companion knobs — when forceAttachmentForNonText is on, allow
   // image/svg+xml inline render IF an SVG sanitizer gate is wired
@@ -135,12 +162,68 @@ var DEFAULTS = Object.freeze({
   safeRenderPdf:                    false,
 });
 
+// _assertInsideRoot — the path-confinement barrier (CWE-22 path
+// traversal). Every filesystem sink in this module takes the path
+// through this helper so the value handed to fs is built by
+// `nodePath.join(root, rel)` where `rel` is a normalized, root-relative
+// path with every leading `..` segment stripped — the canonical
+// path-traversal sanitizer: normalize collapses interior `.`/`..`, the
+// leading-`..` strip removes upward navigation, and joining a constant
+// root with a sanitized relative segment yields a path that provably
+// stays inside the served root. The barrier is intentionally re-applied
+// at each sink (not just once at request entry) so the relationship
+// between the sanitizer and the fs call is local + explicit.
+//
+// Returns the joined, confined absolute path on success, or `null` when
+// the candidate is not a string, carries a NUL byte, or — after the
+// leading-`..` strip — still carries a `..` segment or an absolute /
+// drive-letter / UNC prefix that would smuggle outside root. A leading
+// `..` escape is clamped into root by the strip (the file then 404s);
+// any residual escape that survives normalization is refused. Callers
+// MUST treat `null` as a refusal.
+function _assertInsideRoot(root, candidate) {
+  if (typeof root !== "string" || root.length === 0) return null;
+  if (typeof candidate !== "string" || candidate.length === 0) return null;
+  if (candidate.indexOf("\0") !== -1) return null;
+  var rootResolved = nodePath.resolve(root);
+  // Reduce the candidate to a root-relative request, then run the
+  // recognized traversal sanitizer: normalize() collapses `.`/`..`
+  // segments; the replace strips every leading `..` so no upward
+  // navigation survives into the join below.
+  var requested = nodePath.isAbsolute(candidate)
+    ? nodePath.relative(rootResolved, candidate)
+    : candidate;
+  var rel = nodePath.normalize(requested).replace(/^(\.\.(\/|\\|$))+/, "");
+  if (rel.indexOf("\0") !== -1) return null;
+  // After the leading-`..` strip, a surviving `..` segment or an
+  // absolute / drive-letter / UNC residue would re-introduce an escape.
+  if (rel === ".." ||
+      rel.indexOf(".." + nodePath.sep) !== -1 ||
+      rel.indexOf(".." + (nodePath.sep === "/" ? "\\" : "/")) !== -1 ||
+      nodePath.isAbsolute(rel)) return null;
+  var safe = nodePath.join(rootResolved, rel);
+  // Defense-in-depth lexical containment alongside the join sanitizer.
+  if (safe !== rootResolved &&
+      !safe.startsWith(rootResolved + nodePath.sep)) return null;
+  return safe;
+}
+
 // Module-level metadata cache. Entries hold:
 //   { mtimeMs, size, etag, integrity, lastModified, sha3Hex, absPath }
 // Invalidated on mtime / size change.
 var _metaCache = new Map();
 
-async function _readMeta(absPath) {
+// _readMeta — stat + hash a file for the conditional-request + SRI
+// surface. `root` is passed alongside the candidate so the
+// path-traversal barrier (CWE-22) is re-asserted at THIS sink: the
+// value handed to fs.stat / fs.createReadStream is the confined return
+// of `_assertInsideRoot`, not the request-derived candidate. Returns
+// null when the candidate escapes root, is not a regular file, or
+// cannot be read.
+async function _readMeta(root, candidate) {
+  var absPath = _assertInsideRoot(root, candidate);
+  if (!absPath) return null;
+
   var stat;
   try { stat = await fsp.stat(absPath); }
   catch (_e) { return null; }
@@ -157,10 +240,9 @@ async function _readMeta(absPath) {
   var sri = nodeCrypto.createHash("sha384");
   var sha3 = nodeCrypto.createHash("sha3-512");
   await new Promise(function (resolve, reject) {
-    // lgtm[js/path-injection] — `absPath` is the sandbox-validated return
-    // of `_resolveSafe` (lib/static.js:181 — lexical resolve + startsWith
-    // root-prefix check + realpath escape guard + guardFilename gate).
-    // Callers cannot reach `_readMeta` with an unvalidated path.
+    // The path handed to createReadStream is the confined output of
+    // `_assertInsideRoot(root, candidate)` above (lexical resolve +
+    // root-prefix containment), not the request-derived candidate.
     var s = nodeFs.createReadStream(absPath);
     s.on("data", function (chunk) { sri.update(chunk); sha3.update(chunk); });
     s.on("end", resolve);
@@ -185,10 +267,16 @@ async function _readMeta(absPath) {
 function _resolveSafe(root, requestedPath) {
   if (typeof requestedPath !== "string" || requestedPath.length === 0) return null;
   if (requestedPath.indexOf("\0") !== -1) return null;
-  var resolved = nodePath.resolve(root, "." + requestedPath);
+  // Anchor the request path inside root with a leading "." so an
+  // absolute request (`/c:/windows`, `//host/share`, `/etc/passwd`)
+  // resolves as a same-named child of root rather than smuggling a
+  // fresh root; the containment barrier then proves the result stays
+  // inside root, refusing any `..`-driven escape. Drive-letter / UNC /
+  // reserved-name shapes that survive the resolve are caught by the
+  // guardFilename basename gate below.
+  var resolved = _assertInsideRoot(root, nodePath.resolve(root, "." + requestedPath));
+  if (!resolved) return null;
   var rootResolved = nodePath.resolve(root);
-  if (resolved !== rootResolved &&
-      !resolved.startsWith(rootResolved + nodePath.sep)) return null;
 
   // Symlink-escape defense — the lexical resolve above only sees the
   // requested path tokens; a symlink anywhere along `resolved` can
@@ -450,6 +538,7 @@ function _validateCreateOpts(opts) {
   validateOpts.auditShape(opts.audit, "staticServe.create", StaticServeError);
   validateOpts.observabilityShape(opts.observability, "staticServe.create", StaticServeError);
   validateOpts.optionalFunction(opts.onServe, "staticServe.create: onServe", StaticServeError);
+  validateOpts.optionalFunction(opts.onError, "staticServe.create: onError", StaticServeError);
   // contentSafety — extension-keyed gate map. Default behaviour: when
   // undefined, the framework wires b.guardAll.byExtension({ profile:
   // "strict" }) automatically so every shipped guard is ON by default.
@@ -478,6 +567,15 @@ function _validateCreateOpts(opts) {
   validateOpts.optionalBoolean(opts.auditFailures, "staticServe.create: auditFailures", StaticServeError);
   validateOpts.optionalBoolean(opts.safeAttachmentForRiskyMimes,
     "staticServe.create: safeAttachmentForRiskyMimes", StaticServeError);
+  // mountType — config-time enum. A typo ("usercontent", "uploads")
+  // would silently fall back to the curated default and serve untrusted
+  // HTML inline, so THROW at boot rather than mis-type the mount.
+  if (opts.mountType !== undefined &&
+      opts.mountType !== "curated" && opts.mountType !== "user-content") {
+    throw _err("BAD_OPT",
+      "staticServe.create: mountType must be 'curated' (default) or " +
+      "'user-content'; got " + JSON.stringify(opts.mountType));
+  }
   validateOpts.optionalBoolean(opts.forceAttachmentForNonText,
     "staticServe.create: forceAttachmentForNonText", StaticServeError);
   validateOpts.optionalBoolean(opts.safeRenderSvg,
@@ -585,12 +683,18 @@ function _writeError(res, status, code, message, headers) {
   void code;
 }
 
-// integrity() — module-level helper, kept for compat with the v0.6 SRI use.
+// integrity() — module-level helper, kept for compat with the v0.6 SRI
+// use. Operates on an operator-supplied absolute path (a config/library
+// call, not the request path): the file's own resolved path is both the
+// confinement root and the candidate, so `_readMeta` re-applies the same
+// barrier shape every other sink uses without narrowing the legitimate
+// surface (any single file the operator names).
 async function integrity(absPath) {
   if (typeof absPath !== "string" || absPath.length === 0) {
     throw _err("BAD_OPT", "staticServe.integrity: absPath must be a non-empty string");
   }
-  var meta = await _readMeta(nodePath.resolve(absPath));
+  var resolved = nodePath.resolve(absPath);
+  var meta = await _readMeta(resolved, resolved);
   if (!meta) throw _err("NOT_FOUND", "staticServe.integrity: file not found: " + absPath);
   return meta.integrity;
 }
@@ -604,12 +708,12 @@ function create(opts) {
     "root", "mountPath", "hashedPathPattern",
     "indexFile", "defaultMaxAge", "contentTypes",
     "permissions", "cache", "fileType", "retention", "revokeStore",
-    "allowedFileTypes", "audit", "observability", "onServe",
+    "allowedFileTypes", "audit", "observability", "onServe", "onError",
     "acceptRanges", "auditSuccess", "auditFailures",
     "maxBytesPerActorPerWindowMs", "maxBytesAllActorsPerWindowMs",
     "bandwidthWindowMs", "maxConcurrentDownloadsPerActor", "maxIdleMs",
     "contentSafety", "contentSafetyDisabledReason",
-    "forceAttachmentForNonText", "safeRenderSvg", "safeRenderPdf",
+    "mountType", "forceAttachmentForNonText", "safeRenderSvg", "safeRenderPdf",
   ], "staticServe.create");
   _validateCreateOpts(opts);
   var cfg = validateOpts.applyDefaults(opts, DEFAULTS);
@@ -657,12 +761,22 @@ function create(opts) {
     contentSafety = opts.contentSafety;
   }
   var onServe         = opts.onServe || null;
+  var onError         = opts.onError || null;
   var audit           = opts.audit || null;
   var auditSuccess    = cfg.auditSuccess;
   var auditFailures   = cfg.auditFailures;
   var acceptRanges    = cfg.acceptRanges;
   var safeAttachment  = !!cfg.safeAttachmentForRiskyMimes;
-  var forceAttachmentForNonText = !!cfg.forceAttachmentForNonText;
+  // forceAttachmentForNonText default follows mountType (v0.15.0): a
+  // mount TYPED "user-content" forces risky inline MIMEs to download by
+  // default (stored-XSS defense for untrusted uploads); a "curated" mount
+  // keeps inline render. An explicit forceAttachmentForNonText overrides
+  // the mountType-derived default either way. The conditional flip never
+  // blindly force-attaches a curated asset dir.
+  var mountType       = opts.mountType || "curated";
+  var forceAttachmentForNonText = opts.forceAttachmentForNonText !== undefined
+    ? !!opts.forceAttachmentForNonText
+    : (mountType === "user-content");
   var allowSvgRender  = cfg.safeRenderSvg !== false;
   var allowPdfRender  = !!cfg.safeRenderPdf;
   var perActorCap     = cfg.maxBytesPerActorPerWindowMs;
@@ -727,8 +841,13 @@ function create(opts) {
 
   async function _checkMimeAllowlist(absPath, meta) {
     if (allowedFileTypes.length === 0 || !fileType) return { ok: true };
+    // Re-assert the root-confinement barrier at this fs read sink
+    // (CWE-22): the path passed to readFile is the confined return of
+    // `_assertInsideRoot`, not the request-derived candidate.
+    var confined = _assertInsideRoot(root, absPath);
+    if (!confined) return { ok: false, reason: "read-failed" };
     var sample;
-    try { sample = await fsp.readFile(absPath, { flag: "r" }); }
+    try { sample = await fsp.readFile(confined, { flag: "r" }); }
     catch (_e) { return { ok: false, reason: "read-failed" }; }
     var detected = fileType.detect(sample.slice(0, C.BYTES.kib(64))) || {};
     if (!detected.mime) return { ok: false, reason: "indeterminate" };
@@ -756,6 +875,26 @@ function create(opts) {
     var actorCtx = requestHelpers.extractActorContext(req);
     var actorKey = _actorKeyFromContext(actorCtx);
 
+    // Request-scoped error writer. Wraps the module-level _writeError so
+    // every refusal path (403 / 404 / 415 / 412 / 416 / 429 / 451 / 500)
+    // also invokes the operator's onError hook — the success-path mirror
+    // of onServe. The signature matches _writeError exactly; the `code`
+    // argument routes through to the hook so operators can branch on the
+    // refusal reason. The hook is observability-only: it runs AFTER the
+    // response is written and a throw is swallowed so a broken sink can't
+    // turn a 4xx into a torn-down socket.
+    function writeErr(r, status, code, message, headers) {
+      _writeError(r, status, code, message, headers);
+      if (onError) {
+        try {
+          onError({
+            req: req, res: r, urlPath: urlPath, absPath: absPath,
+            status: status, code: code, actor: actorCtx,
+          });
+        } catch (_he) { /* hook best-effort */ }
+      }
+    }
+
     // Permission gate (403)
     var perm = await _checkPermission(req);
     if (!perm.ok) {
@@ -766,17 +905,26 @@ function create(opts) {
           outcome: "failure", reason: "permission_denied", resource: urlPath,
         }, actorCtx));
       }
-      return _writeError(res, HTTP.FORBIDDEN, "permission_denied",
+      return writeErr(res, HTTP.FORBIDDEN, "permission_denied",
         "Forbidden");
     }
 
-    // Stat first to discover directory → index file.
+    // Stat first to discover directory → index file. The path handed to
+    // stat is the confined return of `_resolveSafe` above; re-assert the
+    // barrier so CodeQL sees the confinement local to this sink (CWE-22).
+    var statTarget = _assertInsideRoot(root, absPath);
+    if (!statTarget) return next();
     var stat;
-    try { stat = await fsp.stat(absPath); }
+    try { stat = await fsp.stat(statTarget); }
     catch (_e) { return next(); }
     if (stat.isDirectory()) {
       if (!indexFile) return next();
-      absPath = nodePath.join(absPath, indexFile);
+      // Re-confine after appending the index file — keeps every
+      // downstream sink (read-meta, content-safety open, serve stream)
+      // anchored inside root even if indexFile were ever made operator-
+      // overridable per request.
+      absPath = _assertInsideRoot(root, nodePath.join(absPath, indexFile));
+      if (!absPath) return next();
     }
 
     // Force-revoke (404 — opaque to clients)
@@ -788,7 +936,7 @@ function create(opts) {
           outcome: "failure", reason: "revoked", resource: urlPath,
         }, actorCtx));
       }
-      return _writeError(res, HTTP.NOT_FOUND, "not_found", "Not Found");
+      return writeErr(res, HTTP.NOT_FOUND, "not_found", "Not Found");
     }
 
     // Compliance retention (451)
@@ -800,11 +948,11 @@ function create(opts) {
           outcome: "failure", reason: "retention_blocked", resource: urlPath,
         }, actorCtx));
       }
-      return _writeError(res, HTTP.UNAVAILABLE_FOR_LEGAL_REASONS,
+      return writeErr(res, HTTP.UNAVAILABLE_FOR_LEGAL_REASONS,
         "retention_blocked", "Unavailable For Legal Reasons");
     }
 
-    var meta = await _readMeta(absPath);
+    var meta = await _readMeta(root, absPath);
     if (!meta) return next();
 
     // MIME allowlist (415) — checked before sending bytes so a misnamed
@@ -820,7 +968,7 @@ function create(opts) {
             detectedMime: mimeCheck.detected || null,
           }, actorCtx));
         }
-        return _writeError(res, HTTP.UNSUPPORTED_MEDIA_TYPE,
+        return writeErr(res, HTTP.UNSUPPORTED_MEDIA_TYPE,
           "mime_rejected", "Unsupported Media Type");
       }
     }
@@ -838,16 +986,32 @@ function create(opts) {
       var ext = nodePath.extname(absPath).toLowerCase();
       var safetyGate = contentSafety[ext];
       if (safetyGate && typeof safetyGate.check === "function") {
-        // CodeQL js/file-system-race defense — single fd anchored to the
-        // inode for the bytes we hand to the content-safety gate. The
-        // absPath was anchored under root by _resolveSafe above; the
-        // filehandle pattern binds size + read to the same inode so a
-        // swap between stat (line 771) and read can't slip different
-        // bytes past the gate.
+        // Single-fd read for the content-safety gate. Two defenses on
+        // one open:
+        //   - CWE-22 path traversal: the open path is the confined
+        //     return of `_assertInsideRoot(root, absPath)`, freshly
+        //     re-derived from `nodePath.resolve(root, ...)`, not the
+        //     request-derived candidate.
+        //   - CWE-367 TOCTOU file-system race: the bytes the gate
+        //     inspects come from THIS file descriptor — size and reads
+        //     are taken from the same inode the open returned, so a path
+        //     swap between the earlier directory stat and this read can't
+        //     slip different bytes past the gate. O_NOFOLLOW (when the
+        //     platform defines it) additionally refuses to open the path
+        //     if its final component became a symlink after confinement.
+        var gateConfined = _assertInsideRoot(root, absPath);
+        if (!gateConfined) return next();
         var gateBuf;
         var gateHandle = null;
+        var gateOpenFlags = nodeFs.constants.O_RDONLY |
+          (nodeFs.constants.O_NOFOLLOW || 0);
         try {
-          gateHandle = await fsp.open(absPath, "r");
+          // Explicit owner-only mode (0o600). The flags are read-only
+          // (O_RDONLY, no O_CREAT) so the mode is inert on disk, but
+          // pinning it owner-only keeps this open out of the insecure-
+          // temp-file class (CWE-377): no world/group-accessible
+          // creation can ever ride this code path.
+          gateHandle = await fsp.open(gateConfined, gateOpenFlags, 0o600);
           var gateStat = await gateHandle.stat();
           gateBuf = Buffer.alloc(gateStat.size);
           var gateRead = 0;
@@ -861,7 +1025,7 @@ function create(opts) {
         catch (_e) {
           stats.failures += 1;
           if (gateHandle) { try { await gateHandle.close(); } catch (_ce) { /* close best-effort */ } }
-          return _writeError(res, HTTP.INTERNAL_SERVER_ERROR,
+          return writeErr(res, HTTP.INTERNAL_SERVER_ERROR,
             "read_failed", "Internal Server Error");
         }
         try { await gateHandle.close(); } catch (_ce) { /* close best-effort */ }
@@ -885,7 +1049,7 @@ function create(opts) {
               error: gateErr && gateErr.message,
             }, actorCtx));
           }
-          return _writeError(res, HTTP.INTERNAL_SERVER_ERROR,
+          return writeErr(res, HTTP.INTERNAL_SERVER_ERROR,
             "content_safety_threw", "Internal Server Error");
         }
         if (!gateDecision.ok || gateDecision.action === "refuse") {
@@ -898,7 +1062,7 @@ function create(opts) {
               issues: gateContract.summarizeIssues(gateDecision.issues),
             }, actorCtx));
           }
-          return _writeError(res, HTTP.UNSUPPORTED_MEDIA_TYPE,
+          return writeErr(res, HTTP.UNSUPPORTED_MEDIA_TYPE,
             "content_safety_refused", "Unsupported Media Type");
         }
         if (gateDecision.action === "sanitize" && gateDecision.sanitized) {
@@ -929,7 +1093,7 @@ function create(opts) {
     if (ifMatch && ifMatch !== "*" && ifMatch !== meta.etag) {
       stats.failures += 1;
       _emitObs("staticServe.precondition_failed", 1, { route: urlPath, header: "if-match" });
-      return _writeError(res, HTTP.PRECONDITION_FAILED || 412,
+      return writeErr(res, HTTP.PRECONDITION_FAILED || 412,
         "precondition_failed", "Precondition Failed");
     }
 
@@ -956,7 +1120,7 @@ function create(opts) {
       if (isFinite(ius) && Math.floor(meta.mtimeMs / C.TIME.seconds(1)) > Math.floor(ius / C.TIME.seconds(1))) {
         stats.failures += 1;
         _emitObs("staticServe.precondition_failed", 1, { route: urlPath, header: "if-unmodified-since" });
-        return _writeError(res, HTTP.PRECONDITION_FAILED,
+        return writeErr(res, HTTP.PRECONDITION_FAILED,
           "precondition_failed", "Precondition Failed");
       }
     }
@@ -970,19 +1134,19 @@ function create(opts) {
         if (range && (range.malformed || range.multi)) {
           stats.failures += 1;
           _emitObs("staticServe.range_invalid", 1, { route: urlPath });
-          return _writeError(res, HTTP.RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
+          return writeErr(res, HTTP.RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
             "Range Not Satisfiable", { "Content-Range": "bytes */" + meta.size });
         }
         if (range && range.unsatisfiable) {
           stats.failures += 1;
           _emitObs("staticServe.range_invalid", 1, { route: urlPath });
-          return _writeError(res, HTTP.RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
+          return writeErr(res, HTTP.RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
             "Range Not Satisfiable", { "Content-Range": "bytes */" + meta.size });
         }
         if (range && cfg.maxRangeBytes !== Infinity && range.length > cfg.maxRangeBytes) {
           stats.failures += 1;
           _emitObs("staticServe.range_too_large", 1, { route: urlPath });
-          return _writeError(res, HTTP.RANGE_NOT_SATISFIABLE, "range_too_large",
+          return writeErr(res, HTTP.RANGE_NOT_SATISFIABLE, "range_too_large",
             "Range Not Satisfiable", { "Content-Range": "bytes */" + meta.size });
         }
         if (range) {
@@ -1005,7 +1169,7 @@ function create(opts) {
           current: concCheck.current, cap: concCheck.cap,
         }, actorCtx));
       }
-      return _writeError(res, HTTP.TOO_MANY_REQUESTS,
+      return writeErr(res, HTTP.TOO_MANY_REQUESTS,
         "concurrency_cap", "Too Many Requests",
         { "Retry-After": "5" });
     }
@@ -1021,7 +1185,7 @@ function create(opts) {
           scope: bwCheck.scope, used: bwCheck.used, cap: bwCheck.cap,
         }, actorCtx));
       }
-      return _writeError(res, HTTP.TOO_MANY_REQUESTS,
+      return writeErr(res, HTTP.TOO_MANY_REQUESTS,
         "bandwidth_quota", "Too Many Requests",
         { "Retry-After": String(bwCheck.retryAfter) });
     }
@@ -1077,7 +1241,7 @@ function create(opts) {
             error: e && e.message,
           }, actorCtx));
         }
-        return _writeError(res, HTTP.INTERNAL_SERVER_ERROR, "onServe_threw",
+        return writeErr(res, HTTP.INTERNAL_SERVER_ERROR, "onServe_threw",
           "Internal Server Error");
       }
     }
@@ -1122,6 +1286,18 @@ function create(opts) {
       return;
     }
 
+    // Re-assert the root-confinement barrier at the serve sink (CWE-22)
+    // BEFORE any 200/206 headers go on the wire: the path handed to
+    // createReadStream is the confined return of `_assertInsideRoot`,
+    // freshly re-derived from `nodePath.resolve(root, ...)`, not the
+    // request-derived candidate. A candidate that escapes root refuses
+    // opaquely (404) — it cannot reach the stream.
+    var streamTarget = _assertInsideRoot(root, absPath);
+    if (!streamTarget) {
+      stats.failures += 1;
+      return writeErr(res, HTTP.NOT_FOUND, "not_found", "Not Found");
+    }
+
     res.writeHead(status, headers);
 
     // Acquire concurrency slot (released on stream end / error / abort).
@@ -1134,11 +1310,7 @@ function create(opts) {
     }
 
     var streamOpts = range ? { start: range.start, end: range.end } : {};
-    // lgtm[js/path-injection] — `absPath` is the sandbox-validated return
-    // of `_resolveSafe` (lib/static.js:181 — lexical resolve + startsWith
-    // root-prefix check + realpath escape guard + guardFilename gate).
-    // The request-serve path rejects with 404 before reaching this stream.
-    var fileStream = nodeFs.createReadStream(absPath, streamOpts);
+    var fileStream = nodeFs.createReadStream(streamTarget, streamOpts);
 
     // Idle timeout — close the connection if the client stalls. Pattern is
     // a deadline-style debounce (clearTimeout + setTimeout) tied directly

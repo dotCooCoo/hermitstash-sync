@@ -6,8 +6,9 @@
  *
  * @intro
  *   RFC 822 / 5322 single-address validator + RFC 5322 message gate
- *   with header-injection defense, EAI / SMTPUTF8 support, label
- *   length caps, IP-literal denial, and sub-address handling.
+ *   with header-injection defense, domain-side IDN / Punycode
+ *   handling, mixed-script confusable detection, label length caps,
+ *   IP-literal denial, and sub-address handling.
  *
  *   Two entry shapes:
  *     - `validateAddress(addr, opts)` — single mailbox (RFC 5321
@@ -15,6 +16,20 @@
  *       domain 255 / address 320. Flags multi-`@`, IP literals,
  *       Punycode, mixed-script confusables, and codepoint-class
  *       threats (BIDI / control / null / zero-width).
+ *
+ *   Scope of Unicode handling: the DOMAIN side recognizes IDN /
+ *   Punycode (`xn--`) labels and mixed-script confusables, gated by
+ *   `allowedScripts` (RFC 5890 / RFC 5891). The LOCAL part is
+ *   ASCII atext only (RFC 5321 §4.1.2 / RFC 5322 §3.2.3) — a unicode
+ *   mailbox (RFC 6531 SMTPUTF8 / EAI) is NOT accepted and surfaces as
+ *   an `address-syntax` issue. This is deliberate: a unicode
+ *   local-part widens the homograph / confusable attack surface
+ *   beyond the domain (where registry IDN policy and Punycode
+ *   normalization apply) into the unregulated mailbox name, where no
+ *   equivalent normalization authority exists. RFC 6531 local-part
+ *   acceptance re-opens behind an explicit `allowUnicodeLocalPart`
+ *   opt-in when operator demand for genuine EAI mailboxes lands;
+ *   until then the conservative ASCII contract holds by default.
  *     - `validateMessage(rfc822, opts)` — full RFC 5322 message.
  *       Splits header section, unfolds folded headers, walks every
  *       single-line header for embedded CR/LF, drives address checks
@@ -32,7 +47,7 @@
  *   sanitization is safe.
  *
  * @card
- *   RFC 822 / 5322 single-address validator + RFC 5322 message gate with header-injection defense, EAI / SMTPUTF8 support, label length caps, IP-literal denial, and sub-address handling.
+ *   RFC 822 / 5322 single-address validator + RFC 5322 message gate with header-injection defense, domain-side IDN / Punycode and mixed-script confusable detection (ASCII-only local-part), label length caps, IP-literal denial, and sub-address handling.
  */
 
 var codepointClass = require("./codepoint-class");
@@ -99,6 +114,15 @@ function _hasCrlfInHeaderValue(value) {
 // can produce a useful local-part-cap issue (instead of failing the
 // regex first and surfacing address-syntax). RFC 5321 cap is enforced
 // downstream via opts.maxLocalPartBytes.
+//
+// The local-part class is ASCII atext only — the printable-ASCII set
+// of RFC 5321 §4.1.2 / RFC 5322 §3.2.3. A unicode (non-ASCII)
+// local-part per RFC 6531 (SMTPUTF8 / EAI) is intentionally NOT
+// matched: it fails this regex and surfaces as an `address-syntax`
+// issue. Domain-side Unicode is handled separately (Punycode + mixed-
+// script detection, gated by allowedScripts). Keeping the local-part
+// ASCII avoids extending homograph / confusable exposure into the
+// mailbox name, which has no registry-level normalization authority.
 var _LOCAL = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+";
 var _LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
 var _DOMAIN = "(?:" + _LABEL + "(?:\\." + _LABEL + ")+)";
@@ -444,6 +468,15 @@ function _detectAddressIssues(input, opts) {
  * caps, Punycode (`xn--`) labels, mixed-script confusables (Latin /
  * Cyrillic / Greek / Armenian / Cherokee), strict-ASCII regex shape,
  * and codepoint-class threats (BIDI / null / control / zero-width).
+ *
+ * The local-part is validated as ASCII atext only (RFC 5321 §4.1.2 /
+ * RFC 5322 §3.2.3). A unicode local-part (RFC 6531 SMTPUTF8 / EAI)
+ * is rejected as an `address-syntax` issue — keeping the mailbox name
+ * ASCII bounds homograph / confusable exposure to the domain side,
+ * where Punycode normalization and `allowedScripts` gating apply.
+ * RFC 6531 local-part acceptance re-opens behind a future explicit
+ * `allowUnicodeLocalPart` opt-in on operator demand. Domain-side
+ * IDN / Punycode and mixed-script handling are already supported.
  *
  * @opts
  *   profile:                 "strict" | "balanced" | "permissive",
@@ -824,12 +857,8 @@ function sanitize(input, opts) {
   // Critical shapes have no safe sanitization in email — throw on
   // smuggling / CRLF injection / multi-@ / mixed-script.
   var issues = _detectMessageIssues(input, opts);
-  for (var i = 0; i < issues.length; i += 1) {
-    if (issues[i].severity === "critical") {
-      throw _err(issues[i].ruleId || "email.refused",
-        "guardEmail.sanitize: " + issues[i].snippet);
-    }
-  }
+  gateContract.throwOnRefusalSeverity(issues,
+    { errorClass: GuardEmailError, codePrefix: "email", severities: ["critical"] });
   return codepointClass.applyCharStripPolicies(input, opts);
 }
 
@@ -886,67 +915,49 @@ function gate(opts) {
     });
 }
 
-var buildProfile = gateContract.makeProfileBuilder(PROFILES);
+// buildProfile / compliancePosture / loadRulePack are assembled by
+// gateContract.defineGuard below; their wiki sections render from the
+// single-sourced @abiTemplate (defineGuard) blocks in gate-contract.js,
+// instantiated per guard by the page generator.
 
-/**
- * @primitive b.guardEmail.compliancePosture
- * @signature b.guardEmail.compliancePosture(name)
- * @since     0.7.17
- * @status    stable
- * @compliance hipaa, pci-dss, gdpr, soc2
- * @related   b.guardEmail.gate, b.guardEmail.validateMessage
- *
- * Look up a compliance posture by name and return its frozen opts
- * bundle. Throws `GuardEmailError` (`email.unknown-posture`) for
- * names outside `hipaa` / `pci-dss` / `gdpr` / `soc2`. The returned
- * opts can be merged into a `gate()` / `validateMessage()` call to
- * apply the posture's defaults (forensic-snippet length included).
- *
- * @example
- *   var guardEmail = require("./lib/guard-email");
- *   var posture = guardEmail.compliancePosture("hipaa");
- *   posture.bareCrPolicy;             // → "reject"
- *   posture.forensicSnippetBytes;     // → 256
- */
-function compliancePosture(name) {
-  return gateContract.lookupCompliancePosture(name, COMPLIANCE_POSTURES, _err, "email");
-}
+var INTEGRATION_FIXTURES = Object.freeze({
+  kind:         "content",
+  contentType:  "message/rfc822",
+  extension:    ".eml",
+  benignBytes:  Buffer.from(
+    "From: alice@example.com\r\nTo: bob@example.com\r\n" +
+    "Subject: hello\r\nDate: Mon, 5 May 2026 10:00:00 +0000\r\n\r\n" +
+    "Hello.\r\n", "utf8"),
+  // Hostile: SMTP-smuggling pattern — bare LF followed by SMTP verb
+  // (CVE-2023-51764 / 51765 / 51766 class).
+  hostileBytes: Buffer.from(
+    "From: alice@example.com\r\nTo: bob@example.com\r\n" +
+    "Subject: hi\r\n\r\n" +
+    "body line 1\n.\nMAIL FROM: <evil@attacker>\r\n", "utf8"),
+});
 
-var _emailRulePacks = gateContract.makeRulePackLoader(GuardEmailError, "email");
-var loadRulePack = _emailRulePacks.load;
-
-module.exports = {
-  // ---- guard-* family registry exports ----
-  NAME:                "email",
-  KIND:                "content",
-  MIME_TYPES:          Object.freeze(["message/rfc822", "message/global"]),
-  EXTENSIONS:          Object.freeze([".eml", ".mbox", ".msg"]),
-  INTEGRATION_FIXTURES: Object.freeze({
-    kind:         "content",
-    contentType:  "message/rfc822",
-    extension:    ".eml",
-    benignBytes:  Buffer.from(
-      "From: alice@example.com\r\nTo: bob@example.com\r\n" +
-      "Subject: hello\r\nDate: Mon, 5 May 2026 10:00:00 +0000\r\n\r\n" +
-      "Hello.\r\n", "utf8"),
-    // Hostile: SMTP-smuggling pattern — bare LF followed by SMTP verb
-    // (CVE-2023-51764 / 51765 / 51766 class).
-    hostileBytes: Buffer.from(
-      "From: alice@example.com\r\nTo: bob@example.com\r\n" +
-      "Subject: hi\r\n\r\n" +
-      "body line 1\n.\nMAIL FROM: <evil@attacker>\r\n", "utf8"),
-  }),
-  // ---- primitive surface ----
-  validate:            validate,
-  validateAddress:     validateAddress,
-  validateMessage:     validateMessage,
-  sanitize:            sanitize,
-  gate:                gate,
-  buildProfile:        buildProfile,
-  compliancePosture:   compliancePosture,
-  loadRulePack:        loadRulePack,
-  PROFILES:            PROFILES,
-  DEFAULTS:            DEFAULTS,
-  COMPLIANCE_POSTURES: COMPLIANCE_POSTURES,
-  GuardEmailError:     GuardEmailError,
-};
+// Assembled from the gate-contract guard factory: error class, registry
+// exports (NAME / KIND / MIME_TYPES / EXTENSIONS / INTEGRATION_FIXTURES),
+// buildProfile / compliancePosture / loadRulePack wiring, plus the
+// per-guard inspection surface (validate / sanitize / bespoke gate) and
+// the address/message entries (validateAddress / validateMessage) passed
+// through verbatim. The bespoke `gate` validates via validateMessage and
+// carries the serve->audit-only->refuse chain unchanged.
+module.exports = gateContract.defineGuard({
+  name:        "email",
+  kind:        "content",
+  errorClass:  GuardEmailError,
+  profiles:    PROFILES,
+  defaults:    DEFAULTS,
+  postures:    COMPLIANCE_POSTURES,
+  mimeTypes:   ["message/rfc822", "message/global"],
+  extensions:  [".eml", ".mbox", ".msg"],
+  integrationFixtures: INTEGRATION_FIXTURES,
+  validate:    validate,
+  sanitize:    sanitize,
+  gate:        gate,
+  extra: {
+    validateAddress: validateAddress,
+    validateMessage: validateMessage,
+  },
+});

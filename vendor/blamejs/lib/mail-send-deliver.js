@@ -256,10 +256,10 @@ async function _applyMtaStsPolicy(domain, mxs, policyMode, auditEmit) {
 // The primitive composes the lookup; per-cert chain verification is
 // the operator's responsibility (or future b.network.smtp.policy.dane.
 // verifyChain extension).
-async function _fetchDaneTlsa(mxHost, daneMode, auditEmit) {
+async function _fetchDaneTlsa(mxHost, port, daneMode, auditEmit) {
   if (daneMode === "off") return null;
   try {
-    var tlsa = await smtpPolicy().dane.tlsa(mxHost, DEFAULT_PORT_SMTP);
+    var tlsa = await smtpPolicy().dane.tlsa(mxHost, port || DEFAULT_PORT_SMTP);
     return tlsa && tlsa.length > 0 ? tlsa : null;
   } catch (e) {
     auditEmit("mail.send.deliver.dane.skip", "warn",
@@ -281,7 +281,7 @@ async function _tryHost(envelope, mxHost, hostnameLocal, opts) {
   var factory = opts.transportFactory || mailModule().smtpTransport;
   var transport = factory({
     host:         mxHost,
-    port:         DEFAULT_PORT_SMTP,
+    port:         opts.port || DEFAULT_PORT_SMTP,
     ehloName:     hostnameLocal,
     timeoutMs:    opts.perHostTimeoutMs || DEFAULT_PER_HOST_TIMEOUT_MS,
     requireTls:   envelope.requireTls === true,
@@ -327,7 +327,7 @@ async function _deliverOne(envelope, recipient, ctx) {
     // composes directly into smtpTransport.dane); this branch carries
     // the discovery so the audit chain records the policy posture
     // applied to each delivery attempt.
-    await _fetchDaneTlsa(mx.exchange, ctx.policy.dane, ctx.auditEmit);
+    await _fetchDaneTlsa(mx.exchange, ctx.port, ctx.policy.dane, ctx.auditEmit);
     try {
       var rv = await _tryHost({
         from:       envelope.from,
@@ -396,6 +396,7 @@ async function _deliverOne(envelope, recipient, ctx) {
  *
  * @opts
  *   hostname:   string,                    // required — local hostname for HELO/EHLO + DSN Reporting-MTA
+ *   port:       number,                    // default 25 (IANA SMTP, RFC 5321) — set 587 (RFC 6409 submission) or 465 (RFC 8314 implicit-TLS) for a smarthost relay
  *   resolver:   object | null,             // optional — b.network.dns.resolver handle; falls back to node:dns when omitted
  *   policy: {
  *     mtaSts:   "enforce" | "testing" | "off",  // default "enforce" — RFC 8461 posture
@@ -438,11 +439,19 @@ function create(opts) {
     throw new DeliverError("deliver/bad-opts", "mail.send.deliver.create: opts is required");
   }
   validateOpts(opts,
-    ["hostname", "resolver", "policy", "retry", "dsn", "timeouts", "audit", "transportFactory"],
+    ["hostname", "resolver", "policy", "retry", "dsn", "timeouts", "audit", "transportFactory", "port"],
     "mail.send.deliver.create");
   validateOpts.requireNonEmptyString(opts.hostname,
     "mail.send.deliver.create: hostname (local HELO/EHLO + DSN Reporting-MTA)",
     DeliverError, "deliver/bad-hostname");
+  // Submission/smarthost relays listen on 587 (RFC 6409) or implicit-TLS
+  // 465 (RFC 8314) rather than the IANA SMTP port 25 (RFC 5321 §2.3.4)
+  // that direct MX delivery uses. Operators routing through such a relay
+  // set opts.port; the value is range-checked here (RFC 6335 §6) so a
+  // typo fails at config time, not on the first connect attempt.
+  validateOpts.optionalPort(opts.port,
+    "mail.send.deliver.create: port", DeliverError, "deliver/bad-port");
+  var port = opts.port || DEFAULT_PORT_SMTP;
 
   var policy = opts.policy || {};
   validateOpts(policy, ["mtaSts", "dane"], "mail.send.deliver.create.policy");
@@ -459,16 +468,25 @@ function create(opts) {
 
   var retryOpts = opts.retry || {};
   validateOpts(retryOpts, ["maxAttempts", "backoffMs"], "mail.send.deliver.create.retry");
-  var maxAttempts = typeof retryOpts.maxAttempts === "number" && retryOpts.maxAttempts > 0
-    ? Math.floor(retryOpts.maxAttempts) : DEFAULT_RETRY_BACKOFF_MS.length;
+  // Config-time entry-point opts: a typo (maxAttempts:"5", mxLookupMs:-1)
+  // must fail at create(), not silently fall back to the default. Absent
+  // keeps the default; present-but-bad throws. Matches opts.port above.
+  validateOpts.optionalPositiveInt(retryOpts.maxAttempts,
+    "mail.send.deliver.create.retry.maxAttempts", DeliverError, "deliver/bad-retry-maxAttempts");
+  var maxAttempts = retryOpts.maxAttempts !== undefined
+    ? retryOpts.maxAttempts : DEFAULT_RETRY_BACKOFF_MS.length;
   var backoffMs = Array.isArray(retryOpts.backoffMs) && retryOpts.backoffMs.length > 0
     ? retryOpts.backoffMs.slice() : DEFAULT_RETRY_BACKOFF_MS.slice();
 
   var timeouts = opts.timeouts || {};
   validateOpts(timeouts, ["mxLookupMs", "perHostMs"], "mail.send.deliver.create.timeouts");
-  var mxLookupTimeoutMs = typeof timeouts.mxLookupMs === "number" && timeouts.mxLookupMs > 0
+  validateOpts.optionalPositiveInt(timeouts.mxLookupMs,
+    "mail.send.deliver.create.timeouts.mxLookupMs", DeliverError, "deliver/bad-timeout-mxLookupMs");
+  validateOpts.optionalPositiveInt(timeouts.perHostMs,
+    "mail.send.deliver.create.timeouts.perHostMs", DeliverError, "deliver/bad-timeout-perHostMs");
+  var mxLookupTimeoutMs = timeouts.mxLookupMs !== undefined
     ? timeouts.mxLookupMs : DEFAULT_MX_LOOKUP_TIMEOUT_MS;
-  var perHostTimeoutMs = typeof timeouts.perHostMs === "number" && timeouts.perHostMs > 0
+  var perHostTimeoutMs = timeouts.perHostMs !== undefined
     ? timeouts.perHostMs : DEFAULT_PER_HOST_TIMEOUT_MS;
 
   var dsnOpts = opts.dsn || null;
@@ -516,6 +534,7 @@ function create(opts) {
       resolver:           opts.resolver || null,
       policy:             { mtaSts: policyMtaSts, dane: policyDane },
       hostname:           opts.hostname,
+      port:               port,
       mxLookupTimeoutMs:  mxLookupTimeoutMs,
       perHostTimeoutMs:   perHostTimeoutMs,
       transportFactory:   opts.transportFactory || null,

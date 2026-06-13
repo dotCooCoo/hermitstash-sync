@@ -60,6 +60,106 @@ function testFactoryRefusesBadOpts() {
   });
   check("dsn without onPermanentFailure → DeliverError",
     e5 && e5.code === "deliver/bad-dsn-callback");
+
+  var e6 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", port: 70000 }); // out of [1,65535]
+  });
+  check("out-of-range port → DeliverError",
+    e6 && e6.code === "deliver/bad-port");
+
+  var e7 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", port: 0 });     // 0 is not a connect port
+  });
+  check("port 0 → DeliverError (connect port must be >=1)",
+    e7 && e7.code === "deliver/bad-port");
+
+  // retry.maxAttempts / timeouts.mxLookupMs / timeouts.perHostMs are
+  // config-time entry-point opts: a typo must throw at create(), not be
+  // swallowed by a valid-or-default fallback. Absent keeps the default.
+  var e8 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", retry: { maxAttempts: "5" } });
+  });
+  check("retry.maxAttempts as string → DeliverError",
+    e8 && e8.code === "deliver/bad-retry-maxAttempts");
+
+  var e9 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", retry: { maxAttempts: -1 } });
+  });
+  check("retry.maxAttempts negative → DeliverError",
+    e9 && e9.code === "deliver/bad-retry-maxAttempts");
+
+  var e10 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", retry: { maxAttempts: 0 } });
+  });
+  check("retry.maxAttempts 0 → DeliverError (must be >= 1)",
+    e10 && e10.code === "deliver/bad-retry-maxAttempts");
+
+  var e11 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", timeouts: { mxLookupMs: -1 } });
+  });
+  check("timeouts.mxLookupMs negative → DeliverError",
+    e11 && e11.code === "deliver/bad-timeout-mxLookupMs");
+
+  var e12 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", timeouts: { mxLookupMs: "10000" } });
+  });
+  check("timeouts.mxLookupMs as string → DeliverError",
+    e12 && e12.code === "deliver/bad-timeout-mxLookupMs");
+
+  var e13 = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", timeouts: { perHostMs: 0 } });
+  });
+  check("timeouts.perHostMs 0 → DeliverError (must be >= 1)",
+    e13 && e13.code === "deliver/bad-timeout-perHostMs");
+
+  // Absent retry / timeouts keys keep the defaults — create() succeeds.
+  var okDefault = threw(function () {
+    b.mail.send.deliver({ hostname: "m.example", retry: {}, timeouts: {}, audit: false });
+  });
+  check("absent retry/timeouts keys keep defaults (create succeeds)", okDefault === null);
+
+  // Valid integer values are accepted unchanged.
+  var okValid = threw(function () {
+    b.mail.send.deliver({
+      hostname: "m.example",
+      retry:    { maxAttempts: 3 },
+      timeouts: { mxLookupMs: 2000, perHostMs: 30000 },
+      audit:    false,
+    });
+  });
+  check("valid retry/timeouts values accepted (create succeeds)", okValid === null);
+}
+
+// ---- Submission/smarthost port ----
+
+// The default is IANA SMTP 25; an operator routing through a submission
+// relay sets port 587 (RFC 6409) / 465 (RFC 8314). The configured port
+// must reach the transport factory.
+async function testPortReachesTransport() {
+  var ports = [];
+  var fakeResolver = {
+    queryMx: async function (domain) {
+      return [{ exchange: "mx1." + domain, priority: 10 }];
+    },
+  };
+  var fakeTransport = function (opts) {
+    ports.push(opts.port);
+    return { send: async function () { return { ok: true, code: 250 }; } };
+  };
+
+  var deliverDefault = b.mail.send.deliver({
+    hostname: "mta1.example.com", resolver: fakeResolver,
+    policy: { mtaSts: "off", dane: "off" }, transportFactory: fakeTransport, audit: false,
+  });
+  await deliverDefault({ from: "ops@example.com", to: ["a@recipient.com"], rfc822: Buffer.from("hi") });
+  check("port: default is 25 when unset", ports[ports.length - 1] === 25);
+
+  var deliver587 = b.mail.send.deliver({
+    hostname: "mta1.example.com", resolver: fakeResolver, port: 587,
+    policy: { mtaSts: "off", dane: "off" }, transportFactory: fakeTransport, audit: false,
+  });
+  await deliver587({ from: "ops@example.com", to: ["b@recipient.com"], rfc822: Buffer.from("hi") });
+  check("port: configured 587 reaches the transport", ports[ports.length - 1] === 587);
 }
 
 // ---- Envelope shape validation ----
@@ -244,6 +344,57 @@ async function testTransientDefersPermanentFails() {
     dsnInvocations[0].dsnHasReport === true);
 }
 
+// ---- retry.maxAttempts value flows through to the retry budget ----
+
+// A valid maxAttempts must reach the deferred-vs-failed routing, not just
+// pass validation. With maxAttempts:1, the first transient failure exhausts
+// the budget (attempts 1 >= 1) and converts transient → permanent → failed[]
+// rather than landing in deferred[]. The default (5) keeps it deferred.
+async function testMaxAttemptsFlowsThrough() {
+  var fakeResolver = {
+    queryMx: async function (domain) {
+      return [{ exchange: "mx1." + domain, priority: 10 }];
+    },
+  };
+  var transientTransport = function () {
+    return {
+      send: async function () {
+        var err = new Error("temporary failure");
+        err.smtpResponse = { code: 451 };
+        throw err;
+      },
+    };
+  };
+  var envelope = {
+    from:   "ops@example.com",
+    to:     ["transient@example.com"],
+    rfc822: Buffer.from("hi"),
+  };
+
+  var deliverBudget1 = b.mail.send.deliver({
+    hostname:         "mta1.example.com",
+    resolver:         fakeResolver,
+    policy:           { mtaSts: "off", dane: "off" },
+    transportFactory: transientTransport,
+    retry:            { maxAttempts: 1 },
+    audit:            false,
+  });
+  var r1 = await deliverBudget1(envelope);
+  check("maxAttempts:1 exhausts budget on first transient → failed",
+    r1.failed.length === 1 && r1.deferred.length === 0);
+
+  var deliverDefault = b.mail.send.deliver({
+    hostname:         "mta1.example.com",
+    resolver:         fakeResolver,
+    policy:           { mtaSts: "off", dane: "off" },
+    transportFactory: transientTransport,
+    audit:            false,
+  });
+  var r2 = await deliverDefault(envelope);
+  check("default maxAttempts keeps a single transient deferred",
+    r2.deferred.length === 1 && r2.failed.length === 0);
+}
+
 // ---- No-MX (RFC 7505 null MX) ----
 
 async function testNullMx() {
@@ -324,6 +475,8 @@ async function run() {
   await testTransientDefersPermanentFails();
   await testNullMx();
   await testMxFailover();
+  await testPortReachesTransport();
+  await testMaxAttemptsFlowsThrough();
 }
 
 module.exports = { run: run };

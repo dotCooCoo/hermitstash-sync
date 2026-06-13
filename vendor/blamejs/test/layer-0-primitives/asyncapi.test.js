@@ -495,7 +495,63 @@ function run() {
           function () {});
   check("asyncapiServe: same-origin omits CORS", sentSO.headers["Access-Control-Allow-Origin"] == null);
 
+  // accessControl={ allowOrigin } echoes one validated origin + Vary: Origin
+  var serveAO = b.middleware.asyncapiServe({
+    document: realApi, accessControl: { allowOrigin: "https://docs.example.com" }, audit: false,
+  });
+  var sentAO = { headers: null };
+  serveAO({ method: "GET", url: "/asyncapi.json", pathname: "/asyncapi.json", headers: {} },
+          { writeHead: function (s, h) { sentAO.headers = h; }, end: function () {} },
+          function () {});
+  check("asyncapiServe: allowOrigin echoed",     sentAO.headers["Access-Control-Allow-Origin"] === "https://docs.example.com");
+  check("asyncapiServe: allowOrigin sets Vary",  sentAO.headers["Vary"] === "Origin");
+
+  // A bad allowOrigin throws at config time
+  rejects("asyncapiServe: allowOrigin with path rejected",
+    function () { b.middleware.asyncapiServe({ document: realApi, accessControl: { allowOrigin: "https://x.example.com/docs" } }); },
+    /bare origin/);
+  rejects("asyncapiServe: allowOrigin CRLF rejected",
+    function () { b.middleware.asyncapiServe({ document: realApi, accessControl: { allowOrigin: "https://x.example.com\r\nX-Evil: 1" } }); },
+    /valid|bare origin/);
+
   check("asyncapiServe.forceRebuild is fn",      typeof serve.forceRebuild === "function");
+
+  // HEAD carries the GET response headers (incl. Content-Length) with an
+  // EMPTY body (RFC 9110 §9.3.2). GET unchanged: it still returns the
+  // body. Asserts the head-suppression against both JSON and YAML mounts.
+  var sentHeadJson = { status: null, headers: null, body: undefined, ended: false };
+  serve({ method: "HEAD", url: "/asyncapi.json", pathname: "/asyncapi.json", headers: {} },
+        { writeHead: function (s, h) { sentHeadJson.status = s; sentHeadJson.headers = h; },
+          end:       function (bdy) { sentHeadJson.body = bdy; sentHeadJson.ended = true; } },
+        function () {});
+  check("asyncapiServe HEAD JSON: 200",          sentHeadJson.status === 200);
+  check("asyncapiServe HEAD JSON: Content-Length set like GET",
+        sentHeadJson.headers["Content-Length"] === sentJson.headers["Content-Length"]);
+  check("asyncapiServe HEAD JSON: Content-Type set like GET",
+        sentHeadJson.headers["Content-Type"] === sentJson.headers["Content-Type"]);
+  check("asyncapiServe HEAD JSON: empty body",
+        sentHeadJson.ended === true && (sentHeadJson.body === undefined || sentHeadJson.body == null));
+
+  var sentHeadYaml = { status: null, headers: null, body: undefined, ended: false };
+  serve({ method: "HEAD", url: "/asyncapi.yaml", pathname: "/asyncapi.yaml", headers: {} },
+        { writeHead: function (s, h) { sentHeadYaml.status = s; sentHeadYaml.headers = h; },
+          end:       function (bdy) { sentHeadYaml.body = bdy; sentHeadYaml.ended = true; } },
+        function () {});
+  check("asyncapiServe HEAD YAML: 200",          sentHeadYaml.status === 200);
+  check("asyncapiServe HEAD YAML: Content-Length set like GET",
+        sentHeadYaml.headers["Content-Length"] === sentYaml.headers["Content-Length"]);
+  check("asyncapiServe HEAD YAML: empty body",
+        sentHeadYaml.ended === true && (sentHeadYaml.body === undefined || sentHeadYaml.body == null));
+
+  // GET still returns the body after the HEAD path was added.
+  var sentGetAfter = { status: null, headers: null, body: null };
+  serve({ method: "GET", url: "/asyncapi.json", pathname: "/asyncapi.json", headers: {} },
+        { writeHead: function (s, h) { sentGetAfter.status = s; sentGetAfter.headers = h; },
+          end:       function (bdy) { sentGetAfter.body = bdy; } },
+        function () {});
+  check("asyncapiServe GET still returns body",
+        sentGetAfter.status === 200 && typeof sentGetAfter.body === "string" &&
+        sentGetAfter.body.length > 0);
 
   // ---- operation messages with $ref form ----
   aapi.operation("publishWithRef", {

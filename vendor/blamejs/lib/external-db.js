@@ -44,6 +44,7 @@ var lazyRequire = require("./lazy-require");
 var { boot } = require("./log");
 var safeAsync = require("./safe-async");
 var safeSql = require("./safe-sql");
+var validateOpts = require("./validate-opts");
 var { ExternalDbError } = require("./framework-error");
 
 var log = boot("external-db");
@@ -51,36 +52,356 @@ var log = boot("external-db");
 var audit         = lazyRequire(function () { return require("./audit"); });
 var db            = lazyRequire(function () { return require("./db"); });
 var observability = lazyRequire(function () { return require("./observability"); });
+// b.sql composes the framework's own internal queries against a backend
+// (e.g. the pg_roles hardening scan). Lazy because b.sql -> framework-schema
+// -> external-db would cycle at module load; resolved when a query runs.
+var sql    = lazyRequire(function () { return require("./sql"); });
 
 function _emitMetric(name, value, labels) {
   try { observability().event(name, value, labels || {}); }
   catch (_e) { /* hot-path observability sink — drop silent by design */ }
 }
 
-// Statement-class classifier for auth-failure forensics. Inspects
-// the leading keyword only so an attacker-controlled trailing fragment
-// can't smuggle a false classification. Skips leading whitespace plus
-// SQL line / block comments before reading the keyword.
-var _STATEMENT_CLASS_RE = /^\s*(?:\/\*[\s\S]*?\*\/\s*|--[^\n]*\n\s*)*([A-Za-z]+)/;
+// Statement-class classifier for auth-failure forensics AND the
+// residency write gate. Reads the leading keyword — but a leading
+// keyword is not the whole story: `WITH ... INSERT`, `EXPLAIN ANALYZE
+// INSERT`, `CALL`/`EXECUTE`/`DO`, `COPY ... FROM`, and `REPLACE` all
+// place rows while their leading (or only) keyword reads as harmless.
+// _classifyStatement unwraps WITH (CTE) and EXPLAIN [ANALYZE] prefixes
+// to the effective verb so the gate sees the real statement class; an
+// attacker-controlled trailing fragment still can't smuggle a false
+// class because the multi-statement form is refused upstream
+// (_hasTrailingStatement) and an unresolvable prefix classifies
+// UNKNOWN (fail-closed on the gate's enforced path).
+//
+// Skips leading whitespace plus SQL line / block comments before
+// reading the keyword. Linear (non-backtracking) comment/whitespace
+// skip: each iteration of the outer group consumes exactly one
+// whitespace char, one complete block comment (star-not-slash form,
+// never a lazy `[\s\S]*?`), or one complete line comment — disjoint by
+// first char, so a crafted SQL string of nested `/**/` or `*/--` runs
+// cannot backtrack polynomially (CWE-1333 ReDoS).
+var _STATEMENT_CLASS_RE = /^(?:\s|\/\*(?:[^*]|\*(?!\/))*\*\/|--[^\n]*\n)*([A-Za-z]+)/;
 var _STATEMENT_CLASS_MAP = Object.freeze({
-  SELECT: "SELECT", WITH: "SELECT", VALUES: "SELECT", TABLE: "SELECT",
-  INSERT: "DML", UPDATE: "DML", DELETE: "DML", MERGE: "DML", UPSERT: "DML",
+  SELECT: "SELECT", VALUES: "SELECT", TABLE: "SELECT",   // allow:hand-rolled-sql — leading-keyword classifier table, not composed SQL
+  SHOW: "READ_INFO", DESCRIBE: "READ_INFO", DESC: "READ_INFO",
+  PRAGMA: "READ_INFO", USE: "READ_INFO",
+  INSERT: "DML", UPDATE: "DML", DELETE: "DML", MERGE: "DML",
+  UPSERT: "DML", REPLACE: "DML",
   CREATE: "DDL", DROP: "DDL", ALTER: "DDL", TRUNCATE: "DDL",
   RENAME: "DDL", COMMENT: "DDL",
   GRANT: "DCL", REVOKE: "DCL",
   SET: "SESSION", RESET: "SESSION",
   BEGIN: "TX", START: "TX", COMMIT: "TX", ROLLBACK: "TX",
   SAVEPOINT: "TX", RELEASE: "TX",
-  CALL: "ROUTINE", EXECUTE: "ROUTINE",
+  CALL: "ROUTINE", EXECUTE: "ROUTINE", DO: "ROUTINE",
   COPY: "BULK",
   EXPLAIN: "META", ANALYZE: "META", VACUUM: "META",
 });
 
+// Main-statement keywords that may follow a WITH (CTE) clause list —
+// the verb that decides the statement's effect. `WITH src AS (...)
+// INSERT INTO ...` is a write; classifying it by its leading keyword
+// would label it a read and wave it past the residency write gate.
+var _CTE_MAIN_VERBS = Object.freeze({
+  SELECT: true, VALUES: true, TABLE: true,
+  INSERT: true, UPDATE: true, DELETE: true,
+  MERGE: true, UPSERT: true, REPLACE: true,
+});
+
+// SQL identifier character classes, as char-range predicates rather
+// than `_isIdentChar(ch)` regex literals — faster per-char in
+// the tight statement-scan loops and keeps the trivial word-char class
+// out of the cross-file duplicate-regex catalog.
+function _isIdentStart(ch) {
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_";
+}
+function _isIdentChar(ch) {
+  return _isIdentStart(ch) || (ch >= "0" && ch <= "9");
+}
+
+// If sql[i] begins an opaque span — a string literal ('...' with
+// doubled-quote escapes), a quoted identifier ("..." / `...` / [...]),
+// a Postgres dollar-quoted body ($tag$...$tag$), or a SQL line / block
+// comment — return the index just past its close; -1 if the span is
+// unterminated; i unchanged if sql[i] does not begin a span. One
+// linear scan per call, no backtracking regex (CWE-1333). Shared by
+// every SQL leading-/effective-verb scanner below so the multi-
+// statement, CTE, EXPLAIN, and COPY walkers all agree on what counts
+// as data vs. structure across the Postgres / MySQL / SQLite dialects
+// external-db targets. A doubled closing quote ('it''s') re-enters as
+// a fresh empty span on the caller's next iteration, staying opaque.
+function _skipOpaqueSpan(sql, i) {
+  var n = sql.length;
+  var ch = sql.charAt(i);
+  if (ch === "'" || ch === "\"" || ch === "`") {
+    var close = sql.indexOf(ch, i + 1);
+    return close === -1 ? -1 : close + 1;
+  }
+  if (ch === "[") {                              // SQLite / MSSQL bracket identifier
+    var rb = sql.indexOf("]", i + 1);
+    return rb === -1 ? -1 : rb + 1;
+  }
+  if (ch === "$") {
+    // $tag$ ... $tag$ dollar-quoted body; a bare $n placeholder has no
+    // second `$` after the run of word chars and is not a span.
+    var tagEnd = i + 1;
+    while (tagEnd < n && _isIdentChar(sql.charAt(tagEnd))) tagEnd += 1;
+    if (tagEnd < n && sql.charAt(tagEnd) === "$") {
+      var tag = sql.slice(i, tagEnd + 1);
+      var closeTag = sql.indexOf(tag, tagEnd + 1);
+      return closeTag === -1 ? -1 : closeTag + tag.length;
+    }
+    return i;
+  }
+  if (ch === "-" && sql.charAt(i + 1) === "-") {
+    var nl = sql.indexOf("\n", i + 2);
+    return nl === -1 ? -1 : nl + 1;
+  }
+  if (ch === "/" && sql.charAt(i + 1) === "*") {
+    var ce = sql.indexOf("*/", i + 2);
+    return ce === -1 ? -1 : ce + 2;
+  }
+  return i;
+}
+
+// Resolve the main-statement keyword of a WITH-prefixed (CTE)
+// statement: walk past the CTE definition list to the first top-level
+// main verb (opaque spans skipped via _skipOpaqueSpan, parens tracked
+// by depth). `WITH src AS (...) INSERT INTO ...` is a write; the
+// leading keyword would label it a read and wave it past the residency
+// write gate. Returns the uppercased verb, or null when unresolvable
+// (unterminated span, parenthesized main statement, stray close-paren,
+// no verb found) — the gate REFUSES unresolvable statements on its
+// enforced path, so a parse miss fails closed.
+function _cteMainKeyword(sql, start) {
+  var n = sql.length;
+  var depth = 0;
+  var i = start;
+  while (i < n) {
+    var ch = sql.charAt(i);
+    var skipped = _skipOpaqueSpan(sql, i);
+    if (skipped === -1) return null;
+    if (skipped !== i) { i = skipped; continue; }
+    if (ch === "(") { depth += 1; i += 1; continue; }
+    if (ch === ")") { depth -= 1; i += 1; continue; }
+    if (_isIdentStart(ch)) {
+      var we = i + 1;
+      while (we < n && _isIdentChar(sql.charAt(we))) we += 1;
+      if (depth === 0) {
+        var word = sql.slice(i, we).toUpperCase();
+        if (_CTE_MAIN_VERBS[word] === true) return word;
+        // Top-level word that is not a main verb: CTE name, AS,
+        // RECURSIVE, [NOT] MATERIALIZED, or a SEARCH / CYCLE clause
+        // word — keep walking.
+      }
+      i = we;
+      continue;
+    }
+    i += 1;
+  }
+  return null;
+}
+
+// EXPLAIN option words (Postgres parenthesized + legacy bare; MySQL
+// bare). These precede the inner statement and never terminate the
+// option list, so the verb scanner skips them; only ANALYZE flips the
+// "this EXPLAIN actually executes the statement" bit.
+var _EXPLAIN_OPTION_WORDS = Object.freeze({
+  ANALYZE: true, VERBOSE: true, COSTS: true, BUFFERS: true,
+  SETTINGS: true, WAL: true, TIMING: true, SUMMARY: true,
+  SERIALIZE: true, MEMORY: true, GENERIC_PLAN: true, FORMAT: true,
+  TEXT: true, JSON: true, YAML: true, XML: true, TREE: true,
+  EXTENDED: true, PARTITIONS: true,
+  ON: true, OFF: true, TRUE: true, FALSE: true,
+});
+
+// Resolve an EXPLAIN prefix: skip the option list (a parenthesized
+// `( ANALYZE, FORMAT JSON )` group and/or bare option words), noting
+// whether ANALYZE is present, and return { hasAnalyze, innerStart }
+// pointing at the wrapped statement's leading keyword. null when
+// unresolvable (unterminated span, unbalanced option parens, no inner
+// statement). EXPLAIN ANALYZE EXECUTES the wrapped statement, so an
+// `EXPLAIN ANALYZE INSERT ...` is a real write the gate must see.
+function _explainResolve(sql, start) {
+  var n = sql.length;
+  var hasAnalyze = false;
+  var i = start;
+  while (i < n) {
+    var ch = sql.charAt(i);
+    var skipped = _skipOpaqueSpan(sql, i);
+    if (skipped === -1) return null;
+    if (skipped !== i) { i = skipped; continue; }
+    if (ch === "(") {
+      var depth = 0;
+      var j = i;
+      while (j < n) {
+        var c2 = sql.charAt(j);
+        var s2 = _skipOpaqueSpan(sql, j);
+        if (s2 === -1) return null;
+        if (s2 !== j) { j = s2; continue; }
+        if (c2 === "(") { depth += 1; j += 1; continue; }
+        if (c2 === ")") { depth -= 1; j += 1; if (depth === 0) break; continue; }
+        if (_isIdentStart(c2)) {
+          var oe = j + 1;
+          while (oe < n && _isIdentChar(sql.charAt(oe))) oe += 1;
+          if (sql.slice(j, oe).toUpperCase() === "ANALYZE") hasAnalyze = true;
+          j = oe;
+          continue;
+        }
+        j += 1;
+      }
+      if (depth !== 0) return null;
+      i = j;
+      continue;
+    }
+    if (_isIdentStart(ch)) {
+      var we = i + 1;
+      while (we < n && _isIdentChar(sql.charAt(we))) we += 1;
+      var word = sql.slice(i, we).toUpperCase();
+      if (word === "ANALYZE") { hasAnalyze = true; i = we; continue; }
+      if (_EXPLAIN_OPTION_WORDS[word] === true) { i = we; continue; }
+      return { hasAnalyze: hasAnalyze, innerStart: i };
+    }
+    i += 1;
+  }
+  return null;
+}
+
+// COPY <target> FROM <source> LOADS rows (a write); COPY <target> /
+// COPY (query) TO <dest> EXPORTS rows (a read). Find the first
+// top-level FROM / TO keyword after COPY, skipping a parenthesized
+// source query and opaque spans. FROM → true (load); TO → false
+// (export); unresolvable or neither → true (fail-closed write).
+function _copyLoadsRows(sql) {
+  var m = _STATEMENT_CLASS_RE.exec(sql);
+  if (!m) return true;
+  var n = sql.length;
+  var i = m.index + m[0].length;
+  while (i < n) {
+    var ch = sql.charAt(i);
+    var skipped = _skipOpaqueSpan(sql, i);
+    if (skipped === -1) return true;
+    if (skipped !== i) { i = skipped; continue; }
+    if (ch === "(") {
+      var depth = 0;
+      var j = i;
+      while (j < n) {
+        var c2 = sql.charAt(j);
+        var s2 = _skipOpaqueSpan(sql, j);
+        if (s2 === -1) return true;
+        if (s2 !== j) { j = s2; continue; }
+        if (c2 === "(") { depth += 1; j += 1; continue; }
+        if (c2 === ")") { depth -= 1; j += 1; if (depth === 0) break; continue; }
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    if (_isIdentStart(ch)) {
+      var we = i + 1;
+      while (we < n && _isIdentChar(sql.charAt(we))) we += 1;
+      var word = sql.slice(i, we).toUpperCase();
+      if (word === "FROM") return true;
+      if (word === "TO") return false;
+      i = we;
+      continue;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// Forensic / gate statement class. Resolves WITH (CTE) and EXPLAIN
+// [ANALYZE] prefixes to the effective verb so a write wearing a
+// harmless leading keyword classifies as the write it is; unresolvable
+// prefixes classify UNKNOWN (fail-closed at the gate).
 function _classifyStatement(sql) {
   if (typeof sql !== "string" || sql.length === 0) return "UNKNOWN";
   var m = _STATEMENT_CLASS_RE.exec(sql);
   if (!m) return "UNKNOWN";
-  return _STATEMENT_CLASS_MAP[m[1].toUpperCase()] || "OTHER";
+  var kw = m[1].toUpperCase();
+  if (kw === "WITH") {
+    var main = _cteMainKeyword(sql, m.index + m[0].length);
+    return main === null ? "UNKNOWN" : (_STATEMENT_CLASS_MAP[main] || "OTHER");
+  }
+  if (kw === "EXPLAIN") {
+    // Plan-only EXPLAIN reads (META). EXPLAIN ANALYZE executes the
+    // wrapped statement, so its effective class is the inner one's.
+    var ex = _explainResolve(sql, m.index + m[0].length);
+    if (ex === null) return "UNKNOWN";
+    if (!ex.hasAnalyze) return "META";
+    return _classifyStatement(sql.slice(ex.innerStart));
+  }
+  return _STATEMENT_CLASS_MAP[kw] || "OTHER";
+}
+
+// Statement classes that place no rows on the backend, so the cross-
+// border residency write gate lets them pass without a row tag. Every
+// other class — DML, ROUTINE (CALL / EXECUTE / DO), a COPY ... FROM
+// load, or an unmapped/unresolved statement — is treated as a write
+// and must carry a residency tag on the enforced path. DDL (schema
+// changes) and DCL (grants) move no row data across a border; the one
+// edge they don't cover, CREATE TABLE AS SELECT / SELECT INTO, is a
+// documented residency limitation rather than a silent bypass.
+var _RESIDENCY_READ_CLASS = Object.freeze({
+  SELECT: true, READ_INFO: true, SESSION: true,
+  TX: true, DCL: true, DDL: true, META: true,
+});
+
+// ---- OpenTelemetry database-client semantic conventions ----
+//
+// db.* span / metric attributes on the query / transaction / read emit
+// paths, so dashboards built on the OTel semconv correlate external-db
+// activity without a per-framework adapter. The DDL-audit side already
+// stamps these on db.ddl.executed; this mirrors the shape on the data
+// path. Reference: OpenTelemetry semantic conventions for database
+// client calls (db.system / db.operation / db.statement / db.name).
+//
+// db.system is the OTel-registered identifier for the DBMS — it is NOT
+// the framework's dialect string (Postgres is "postgresql" in the
+// registry, not "postgres"). Unknown dialects fall through to the
+// "other_sql" registry value.
+var _OTEL_DB_SYSTEM = Object.freeze({
+  postgres: "postgresql",
+  mysql:    "mysql",
+  sqlite:   "sqlite",
+  mongodb:  "mongodb",
+  other:    "other_sql",
+});
+
+// db.operation is the leading SQL keyword (SELECT / INSERT / BEGIN /
+// ...), uppercased — the OTel-conventional operation name, distinct
+// from the coarser forensic statement CLASS (_classifyStatement).
+// Reuses the comment-skipping leading-keyword regex; defensive reader,
+// returns null on anything unparseable so the attribute is simply
+// omitted rather than carrying a partial fragment.
+function _otelOperation(sql) {
+  if (typeof sql !== "string" || sql.length === 0) return null;
+  var m = _STATEMENT_CLASS_RE.exec(sql);
+  if (!m) return null;
+  return m[1].toUpperCase();
+}
+
+// db.system / db.operation / db.name carry no statement text and are
+// always emitted. db.statement is the SQL text — bound parameter values
+// are passed out-of-band to the driver (never folded in), but a caller
+// that inlines literals can still embed PII / secrets in the statement.
+// So db.statement is gated behind the SAME opts.includeSqlInAudit
+// opt-out that governs the raw `sql` audit field: the OTel attribute
+// must never re-expose statement text the operator opted out of. When
+// included it is truncated to the framework's 256-char log length.
+function _otelDbAttributes(b, sql, includeStatement) {
+  var attrs = {
+    "db.system":    _OTEL_DB_SYSTEM[b.dialect] || "other_sql",
+    "db.name":      b.name,
+  };
+  var op = _otelOperation(sql);
+  if (op !== null) attrs["db.operation"] = op;
+  if (includeStatement) {
+    attrs["db.statement"] = String(sql == null ? "" : sql).slice(0, 256);   // log-truncation length, not bytes
+  }
+  return attrs;
 }
 
 // Best-effort target-relation extractor for auth-failure forensics: the
@@ -321,6 +642,16 @@ class Pool {
  * `residencyTag` in the allowed-region list — refused with
  * `RESIDENCY_VIOLATION` when not.
  *
+ * Opt-in transport posture: set `requireTls: true` on a backend to
+ * refuse it at config time (`TLS_REQUIRED`) unless its declared
+ * transport is encrypted (`tls: true`, an `ssl` object, or
+ * `sslmode: "require" | "verify-ca" | "verify-full"`). `sslmode` values
+ * that permit a plaintext fallback (`prefer` / `allow` / `disable`) are
+ * refused. The gate is OFF by default — a backend that omits
+ * `requireTls` is used exactly as supplied, with no transport check.
+ * Mandated for cardholder data by PCI-DSS v4.0 Req 4 and for ePHI by
+ * HIPAA §164.312(e).
+ *
  * @opts
  *   backends:        { [name]: BackendConfig },   // required; one or more named backends
  *   defaultBackend?: string,                      // pool used when no opts.backend / classification / role match (defaults to first)
@@ -333,6 +664,8 @@ class Pool {
  *   //   ping(client):         async → void                             (optional; default `SELECT 1`)
  *   //   beginTx / commit / rollback(client):  async → void             (optional; default `BEGIN`/`COMMIT`/`ROLLBACK`)
  *   //   dialect:              "postgres" | "mysql" | "sqlite" | "mongodb" | "other"  (default "postgres")
+ *   //   requireTls:           boolean                                  (opt-in TLS posture gate; default off — see below)
+ *   //   tls / ssl / sslmode:  transport-TLS declaration consulted by requireTls (tls:true | ssl:<obj> | sslmode:"require"|"verify-ca"|"verify-full")
  *   //   applicationName:      string ≤ 63 bytes, no CR/LF/NUL          (Postgres pg_stat_activity tag; default null)
  *   //   pool:                 { min, max, idleTimeoutMs }              (defaults: 1 / 10 / C.TIME.minutes(1))
  *   //   classifications:      string[]                                 (defaults to ["*"])
@@ -387,6 +720,8 @@ function init(opts) {
         "backend '" + name + "': dialect must be one of " +
         "'postgres' | 'mysql' | 'sqlite' | 'mongodb' | 'other', got '" + dialect + "'", true);
     }
+    // requireTls posture gate (opt-in; default OFF → no behavior change).
+    _assertConnectionTls(name, cfg);
     // OWASP-3 — application_name normalization for Postgres backends.
     // Always set on every fresh connection (not just connectAs branch)
     // so pg_stat_activity / log_line_prefix / audit log surfaces show
@@ -431,7 +766,7 @@ function init(opts) {
         return async function () {
           var client = await cn();
           try {
-            await qn(client, "SET application_name TO " + quotedAppName, []);
+            await qn(client, "SET application_name TO " + quotedAppName, []);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
           } catch (_e) {
             // Best-effort. Real Postgres always supports SET
             // application_name; a driver that refuses it is a shim
@@ -504,6 +839,76 @@ function init(opts) {
 
   _validateResidency();
   initialized = true;
+}
+
+// ---- requireTls posture gate (opt-in) ----
+//
+// PCI-DSS v4.0 Requirement 4 (protect cardholder data with strong
+// cryptography during transmission over open networks) and HIPAA
+// §164.312(e)(1) (transmission security — encrypt ePHI in transit)
+// both require that the connection between the app and an external
+// database is encrypted. The framework does not open the connection
+// itself — the operator supplies the driver via connect() — so the
+// posture is declared on the backend config and enforced at config
+// time.
+//
+// Default: OFF. A backend that does not set requireTls behaves exactly
+// as before — the operator-supplied connection is used as-is with no
+// gate. When requireTls is true, init() refuses the backend unless its
+// declared transport is TLS, surfacing the misconfiguration at boot
+// rather than letting plaintext credentials/PHI ride an open network.
+//
+// TLS posture is declared via any of (mirroring libpq SSLMODE / common
+// driver shapes):
+//   - tls: true                         — explicit boolean
+//   - ssl: <truthy>                      — node-postgres / mysql2 ssl object
+//   - sslmode: "require" | "verify-ca" | "verify-full"
+//
+// libpq SSLMODE semantics: only require / verify-ca / verify-full
+// GUARANTEE an encrypted channel. "prefer" and "allow" fall back to
+// plaintext when the server declines TLS, and "disable" never
+// encrypts — none of those satisfy a "must be encrypted" posture, so
+// they are refused under requireTls.
+var _TLS_GUARANTEED_SSLMODES = Object.freeze({
+  require:       true,
+  "verify-ca":   true,
+  "verify-full": true,
+});
+var _TLS_PLAINTEXT_SSLMODES = Object.freeze({
+  disable: true,
+  allow:   true,
+  prefer:  true,
+});
+
+function _declaresTls(cfg) {
+  if (cfg.tls === true) return true;
+  if (cfg.ssl !== undefined && cfg.ssl !== null && cfg.ssl !== false) return true;
+  if (typeof cfg.sslmode === "string") {
+    return _TLS_GUARANTEED_SSLMODES[cfg.sslmode.toLowerCase()] === true;
+  }
+  return false;
+}
+
+function _assertConnectionTls(name, cfg) {
+  // Opt-in: absent requireTls → no gate, no behavior change.
+  if (cfg.requireTls === undefined || cfg.requireTls === null) return;
+  validateOpts.optionalBoolean(cfg.requireTls,
+    "backend '" + name + "': requireTls", ExternalDbError, "INVALID_CONFIG");
+  if (cfg.requireTls !== true) return;
+  if (_declaresTls(cfg)) return;
+  var declared;
+  if (typeof cfg.sslmode === "string" && _TLS_PLAINTEXT_SSLMODES[cfg.sslmode.toLowerCase()]) {
+    declared = "sslmode '" + cfg.sslmode +
+      "' permits a plaintext fallback (only 'require' / 'verify-ca' / 'verify-full' guarantee encryption)";
+  } else if (cfg.tls === false || cfg.ssl === false) {
+    declared = "transport is declared non-TLS (tls/ssl is false)";
+  } else {
+    declared = "no TLS transport is declared (set tls: true, an ssl object, or sslmode: 'require' / 'verify-ca' / 'verify-full')";
+  }
+  throw _err("TLS_REQUIRED",
+    "backend '" + name + "': requireTls is set but " + declared +
+    ". PCI-DSS v4.0 Req 4 / HIPAA §164.312(e) require an encrypted channel " +
+    "for cardholder data / ePHI in transit.", true);
 }
 
 function _validateResidency() {
@@ -592,6 +997,7 @@ function _servesClassification(b, cls) {
  *   backend?:           string,   // explicit backend name; bypasses classification + role pick
  *   classification?:    string,   // route to first backend whose classifications include this value
  *   includeSqlInAudit?: boolean,  // emit SQL text in audit metadata (off by default — may carry literal PII)
+ *   rowResidencyTag?:   string,   // the row's residency region tag; required for a write (DML, CALL/EXECUTE/DO, COPY ... FROM, REPLACE, or a WITH/EXPLAIN-ANALYZE wrapping one) to a residency-tagged backend under a cross-border regulated posture (pass "global"/"unrestricted" for region-neutral rows)
  *
  * @example
  *   var res = await b.externalDb.query(
@@ -607,6 +1013,14 @@ async function query(sql, params, opts) {
   opts = opts || {};
   var b = _pickBackend(opts);
   var role = dbRoleContext.getRole();
+
+  // Per-row residency write gate — refuses a cross-border write before
+  // the statement reaches the wire (see _assertRowResidency).
+  var _resRefusal = _assertRowResidency(sql, opts, b);
+  if (_resRefusal) {
+    _emit("db.residency.gate.rejected", "denied", _resRefusal.metadata, _resRefusal.code);
+    throw _err(_resRefusal.code, _resRefusal.message, true);
+  }
 
   var t0 = Date.now();
   try {
@@ -634,7 +1048,7 @@ async function query(sql, params, opts) {
     }, b.retryConfig);
 
     var durationMs = Date.now() - t0;
-    _emit("system.externaldb.query", "success", {
+    _emit("system.externaldb.query", "success", Object.assign({
       backend:        b.name,
       role:           role,
       durationMs:     durationMs,
@@ -645,7 +1059,7 @@ async function query(sql, params, opts) {
       // metadata pass opts.includeSqlInAudit: true (then sealed via
       // field-crypto on the audit row).
       sql:            opts.includeSqlInAudit ? sql : null,
-    });
+    }, _otelDbAttributes(b, sql, opts.includeSqlInAudit)));
     _emitMetric("externaldb.query.success", 1,
       { backend: b.name, role: role || "(none)" });
     _emitMetric("externaldb.query.duration_ms", durationMs,
@@ -654,13 +1068,13 @@ async function query(sql, params, opts) {
     return result;
   } catch (e) {
     var failureMs = Date.now() - t0;
-    _emit("system.externaldb.query", "failure", {
+    _emit("system.externaldb.query", "failure", Object.assign({
       backend:        b.name,
       role:           role,
       durationMs:     failureMs,
       classification: opts.classification || null,
       errorCode:      e.code || null,
-    }, (e && e.message) || String(e));
+    }, _otelDbAttributes(b, sql, opts.includeSqlInAudit)), (e && e.message) || String(e));
     _emitMetric("externaldb.query.failure", 1,
       { backend: b.name, role: role || "(none)", errorCode: e.code || "(none)" });
     _emitSlowQuery(b.name, role, failureMs, _classifyStatement(sql));
@@ -708,6 +1122,7 @@ async function query(sql, params, opts) {
  *   statementTimeoutMs?:         number,                       // SET LOCAL statement_timeout
  *   idleInTransactionTimeoutMs?: number,                       // SET LOCAL idle_in_transaction_session_timeout
  *   deadlockRetries?:            number,                       // retries for 40P01 / 40001 (default 3)
+ *   rowResidencyTag?:            string,                       // residency tag applied to every statement; a per-call tx.query(sql, params, { rowResidencyTag }) overrides it for that statement
  *
  * @example
  *   var summary = await b.externalDb.transaction(async function (tx) {
@@ -761,10 +1176,34 @@ async function transaction(fn, opts) {
   }
   var maxRetries = (typeof opts.deadlockRetries === "number")
     ? Math.floor(opts.deadlockRetries) : 3;                                       // allow:numeric-opt-Infinity
+  // Validate the transaction-level residency tag shape at entry (the
+  // sessionGucs / deadlockRetries discipline) so an empty-string tag
+  // fails before BEGIN rather than at the first statement.
+  if (opts.rowResidencyTag !== undefined && opts.rowResidencyTag !== null &&
+      (typeof opts.rowResidencyTag !== "string" || opts.rowResidencyTag.length === 0)) {
+    throw _err("INVALID_OPT",
+      "transaction: opts.rowResidencyTag must be a non-empty string when supplied", true);
+  }
   return await b.breaker.wrap(async function () {
     var client = await b.pool.acquire();
     var txClient = {
-      query: function (sql, params) { return b.query(client, sql, params || []); },
+      // Per-statement residency gate inside the transaction: a
+      // transaction-level opts.rowResidencyTag applies to every
+      // statement; an optional per-call third argument overrides it
+      // for that statement. A refusal throws into the operator's tx
+      // body, which rolls the transaction back — no partial commit of
+      // a cross-border write.
+      query: function (sql, params, perCallOpts) {
+        var effOpts = (perCallOpts && perCallOpts.rowResidencyTag !== undefined)
+          ? perCallOpts
+          : { rowResidencyTag: opts.rowResidencyTag };
+        var refusal = _assertRowResidency(sql, effOpts, b);
+        if (refusal) {
+          _emit("db.residency.gate.rejected", "denied", refusal.metadata, refusal.code);
+          throw _err(refusal.code, refusal.message, true);
+        }
+        return b.query(client, sql, params || []);
+      },
     };
     var committed = false;
     var attempt = 0;
@@ -775,10 +1214,10 @@ async function transaction(fn, opts) {
         try {
           await b.beginTx(client);
           if (typeof stmtTimeoutMs === "number" && isFinite(stmtTimeoutMs) && stmtTimeoutMs > 0) {
-            await b.query(client, "SET LOCAL statement_timeout = " + Math.floor(stmtTimeoutMs), []);
+            await b.query(client, "SET LOCAL statement_timeout = " + Math.floor(stmtTimeoutMs), []);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
           }
           if (typeof idleTimeoutMs === "number" && isFinite(idleTimeoutMs) && idleTimeoutMs > 0) {
-            await b.query(client, "SET LOCAL idle_in_transaction_session_timeout = " + Math.floor(idleTimeoutMs), []);
+            await b.query(client, "SET LOCAL idle_in_transaction_session_timeout = " + Math.floor(idleTimeoutMs), []);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
           }
           for (var gi = 0; gi < prebuiltGucs.length; gi++) {
             await b.query(client, prebuiltGucs[gi], []);
@@ -787,10 +1226,15 @@ async function transaction(fn, opts) {
           await b.commit(client);
           committed = true;
           var durationMs = Date.now() - t0;
-          _emit("system.externaldb.transaction", "success", {
+          // OTel db.* semconv on the transaction span. The body runs N
+          // statements via tx.query; the span describes the unit of work,
+          // so db.operation reads "BEGIN" (the OTel-conventional marker
+          // for a transaction-scoped span) rather than any one inner
+          // statement.
+          _emit("system.externaldb.transaction", "success", Object.assign({
             backend: b.name, role: role, durationMs: durationMs,
             classification: opts.classification || null,
-          });
+          }, _otelDbAttributes(b, "BEGIN", opts.includeSqlInAudit)));
           _emitMetric("externaldb.transaction.success", 1,
             { backend: b.name, role: role || "(none)" });
           _emitMetric("externaldb.transaction.duration_ms", durationMs,
@@ -807,11 +1251,11 @@ async function transaction(fn, opts) {
             continue;
           }
           var failureMs = Date.now() - t0;
-          _emit("system.externaldb.transaction", "failure", {
+          _emit("system.externaldb.transaction", "failure", Object.assign({
             backend: b.name, role: role, durationMs: failureMs,
             classification: opts.classification || null,
             errorCode: txErr.code || null,
-          }, (txErr && txErr.message) || String(txErr));
+          }, _otelDbAttributes(b, "BEGIN", opts.includeSqlInAudit)), (txErr && txErr.message) || String(txErr));
           _emitMetric("externaldb.transaction.failure", 1,
             { backend: b.name, role: role || "(none)", errorCode: txErr.code || "(none)" });
           if (txErr && txErr.code === "42501") {
@@ -872,7 +1316,7 @@ async function _pingBackend(b) {
     var client = await b.pool.acquire();
     try {
       if (b.ping) await b.ping(client);
-      else        await b.query(client, "SELECT 1", []);
+      else        await b.query(client, "SELECT 1", []);   // allow:hand-rolled-sql — fixed connectivity ping (no table / b.sql verb)
       b.pool.release(client);
       return { ok: true, breakerState: b.breaker.getState(), pool: b.pool.stats() };
     } catch (e) {
@@ -1011,7 +1455,7 @@ function _buildSessionGucsStatements(sessionGucs) {
         "sessionGucs['" + name + "']: value must be a string, finite number, or boolean (got " +
         typeof value + ")", true);
     }
-    out.push("SET LOCAL " + qName + " = " + literal);
+    out.push("SET LOCAL " + qName + " = " + literal);   // allow:hand-rolled-sql — Postgres session GUC SET (no table; not a b.sql verb)
   }
   return out;
 }
@@ -1078,9 +1522,17 @@ var REPLICA_UNHEALTHY_COOLDOWN_MS = C.TIME.seconds(30);
 //   - "unrestricted" tag on either side: compatible (operator
 //     declared no constraint).
 //   - Different tags: compatible only when allowCrossBorder is true.
-var CROSS_BORDER_REGULATED_POSTURES = Object.freeze([
-  "gdpr", "uk-gdpr", "dpdp", "pipl-cn", "lgpd-br", "appi-jp", "pdpa-sg",
-]);
+//
+// The regulated-posture set itself lives on b.compliance
+// (CROSS_BORDER_REGULATED_POSTURES) — one vocabulary shared with the
+// local db-query residency gate.
+function _crossBorderRegulated(posture) {
+  if (posture === null || posture === undefined) return false;
+  try {
+    var compliance = require("./compliance");                                                    // allow:inline-require — defensive against optional load
+    return compliance.isCrossBorderRegulated(posture);
+  } catch (_e) { return false; }
+}
 
 function _residencyCompatible(primaryTag, replicaTag) {
   if (!primaryTag || !replicaTag) return true;
@@ -1089,11 +1541,168 @@ function _residencyCompatible(primaryTag, replicaTag) {
   return false;
 }
 
+// True when `sql` carries a non-comment, non-whitespace statement after
+// the first top-level semicolon — the multi-statement shape that would
+// let a trailing DML hide behind a harmless leading keyword. A `;`
+// inside any opaque span (string literal, quoted identifier, dollar-
+// quoted body, comment) is data, not a separator: the main scan skips
+// every span via _skipOpaqueSpan, so a `;` inside `$$ ... ; ... $$` or
+// a doubled-quote run can't be mistaken for a top-level separator (and
+// can't desync the scanner into missing a real one). Single linear
+// pass, no backtracking regex (CWE-1333).
+function _hasTrailingStatement(sql) {
+  if (typeof sql !== "string") return false;
+  var n = sql.length;
+  var i = 0;
+  while (i < n) {
+    var ch = sql.charAt(i);
+    var skipped = _skipOpaqueSpan(sql, i);
+    if (skipped === -1) return false;            // unterminated span — no top-level content beyond it
+    if (skipped !== i) { i = skipped; continue; }
+    if (ch !== ";") { i += 1; continue; }
+    // First top-level `;` decides: if everything after it is only
+    // whitespace and SQL comments there is no second statement (a
+    // single statement may end with `;`); any other character is one.
+    // Comments-only skip here (not _skipOpaqueSpan) — a string / ident
+    // after the `;` IS trailing content, so it must count, not be
+    // skipped as a span.
+    var j = i + 1;
+    while (j < n) {
+      var c = sql.charAt(j);
+      if (c === " " || c === "\t" || c === "\r" || c === "\n") { j += 1; continue; }
+      if (c === "/" && sql.charAt(j + 1) === "*") {
+        var end = sql.indexOf("*/", j + 2);
+        if (end === -1) return false;            // unterminated comment — no content
+        j = end + 2;
+        continue;
+      }
+      if (c === "-" && sql.charAt(j + 1) === "-") {
+        var nl = sql.indexOf("\n", j + 2);
+        if (nl === -1) return false;             // line comment to EOF — no content
+        j = nl + 1;
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
 function _activePosture() {
   try {
     var compliance = require("./compliance");                                                    // allow:inline-require — defensive against optional load
     return compliance.current();
   } catch (_e) { return null; }
+}
+
+// Per-row residency write gate (GDPR Art 44-46 / PIPL Art 38 / DPDP
+// §16 cross-border transfer restrictions). External-db takes raw SQL,
+// not row objects, so the row's residency tag travels as
+// `opts.rowResidencyTag` — the operator computes it from app logic
+// (session / declared user region), never inferred from request
+// metadata. Under a cross-border regulated posture, DML to a
+// residency-tagged backend REQUIRES the tag and refuses a mismatch;
+// untagged backends, unregulated postures, and non-DML statements
+// pass (with an advisory audit when a tag was supplied anyway).
+// Returns null on pass or { code, message, metadata } — the caller
+// throws via _err so the refusal carries permanent=true.
+function _assertRowResidency(sql, opts, backend) {
+  var tag = opts && opts.rowResidencyTag;
+  if (tag !== undefined && tag !== null &&
+      (typeof tag !== "string" || tag.length === 0)) {
+    return {
+      code:     "INVALID_OPT",
+      message:  "rowResidencyTag must be a non-empty string when supplied",
+      metadata: { backend: backend.name, statementClass: _classifyStatement(sql) },
+    };
+  }
+  var backendTag = backend.residencyTag || "unrestricted";
+  var posture = _activePosture();
+  var regulated = _crossBorderRegulated(posture);
+  // The gate only enforces on the cross-border-regulated + residency-
+  // tagged-backend path. Everywhere else (unregulated posture,
+  // unrestricted backend — including the framework's own coordination
+  // stores) statements pass untouched; multi-statement SQL stays the
+  // operator's business there.
+  if (regulated && backendTag !== "unrestricted") {
+    // A trailing statement after a top-level `;` could hide a write
+    // behind a harmless prefix — refuse multi-statement SQL on the
+    // enforced path so a residency-bound write cannot ride a SELECT.
+    if (_hasTrailingStatement(sql)) {
+      return {
+        code:     "MULTI_STATEMENT_REFUSED",
+        message:  "multi-statement SQL is not supported on the residency-gated " +
+                  "write path; pass one statement per query()",
+        metadata: { backend: backend.name, backendTag: backendTag, posture: posture,
+                    statementClass: _classifyStatement(sql), scope: "external" },
+      };
+    }
+    var cls = _classifyStatement(sql);
+    // Fail-closed: a statement whose effective class can't be resolved
+    // (an unparseable WITH / EXPLAIN prefix or pathological quoting)
+    // could be hiding a write, so refuse it rather than wave it through
+    // as a read.
+    if (cls === "UNKNOWN") {
+      return {
+        code:     "STATEMENT_UNRESOLVED_REFUSED",
+        message:  "could not resolve the effective statement class on the " +
+                  "residency-gated write path; pass one plain statement per " +
+                  "query() (an unparseable WITH/EXPLAIN prefix or quoting)",
+        metadata: { backend: backend.name, backendTag: backendTag, posture: posture,
+                    statementClass: cls, scope: "external" },
+      };
+    }
+    // The gate enforces on writes, not just DML: ROUTINE (CALL /
+    // EXECUTE / DO), a COPY ... FROM load, and an unmapped (OTHER)
+    // verb all place rows and must carry a tag. Recognized pure reads
+    // (and a COPY ... TO export) place none and pass untagged.
+    var isWrite = !(_RESIDENCY_READ_CLASS[cls] === true ||
+                    (cls === "BULK" && !_copyLoadsRows(sql)));
+    if (!isWrite) return null;
+    if (!tag) {
+      return {
+        code: "RESIDENCY_GATE_REQUIRED",
+        message: "write to backend '" + backend.name + "' (residencyTag='" +
+          backendTag + "') under '" + posture + "' posture requires " +
+          "opts.rowResidencyTag. Pass { rowResidencyTag: \"" + backendTag +
+          "\" } for rows belonging to this region, or declare per-row " +
+          "residency via b.cryptoField.declarePerRowResidency for local tables",
+        metadata: { backend: backend.name, backendTag: backendTag,
+                    rowTag: null, posture: posture, statementClass: cls,
+                    scope: "external" },
+      };
+    }
+    if (tag !== "global" && tag !== "unrestricted" &&
+        !_residencyCompatible(tag, backendTag)) {
+      return {
+        code: "RESIDENCY_TAG_MISMATCH",
+        message: "row residencyTag '" + tag + "' is not compatible with backend '" +
+          backend.name + "' residencyTag '" + backendTag + "' under '" + posture +
+          "' posture (cross-border transfer refused)",
+        metadata: { backend: backend.name, backendTag: backendTag,
+                    rowTag: tag, posture: posture, statementClass: cls,
+                    scope: "external" },
+      };
+    }
+    return null;
+  }
+  if (tag) {
+    // Unregulated posture or untagged backend with a tag supplied on a
+    // write — pass, but surface the advisory so operators staging a
+    // posture flip can see what WOULD be evaluated.
+    var advisoryCls = _classifyStatement(sql);
+    var advisoryWrite = advisoryCls !== "UNKNOWN" &&
+      !(_RESIDENCY_READ_CLASS[advisoryCls] === true ||
+        (advisoryCls === "BULK" && !_copyLoadsRows(sql)));
+    if (advisoryWrite) {
+      _emit("db.residency.gate.advisory", "info", {
+        backend: backend.name, backendTag: backendTag, rowTag: tag,
+        posture: posture || null, statementClass: advisoryCls, scope: "external",
+      });
+    }
+  }
+  return null;
 }
 
 function _buildReplicas(backendName, cfg) {
@@ -1124,7 +1733,7 @@ function _buildReplicas(backendName, cfg) {
     var replicaTag = r.residencyTag || "unrestricted";
     var allowCrossBorder = r.allowCrossBorder === true;
     if (!_residencyCompatible(primaryTag, replicaTag) && !allowCrossBorder) {
-      var underPosture = posture && CROSS_BORDER_REGULATED_POSTURES.indexOf(posture) !== -1;
+      var underPosture = _crossBorderRegulated(posture);
       throw _err("RESIDENCY_MISMATCH",
         "backend '" + backendName + "': replica[" + i +
         "] residencyTag '" + replicaTag +
@@ -1135,7 +1744,12 @@ function _buildReplicas(backendName, cfg) {
         "documented legal basis (SCCs / BCRs / adequacy decision) to suppress.", true);
     }
     if (!_residencyCompatible(primaryTag, replicaTag) && allowCrossBorder) {
-      _emit("externalDb.replica.cross_border_allowed", "warning",
+      // The action name MUST stay in the registered `db.` namespace and
+      // lowercase — the audit validator refuses "externalDb.*" (the old
+      // name silently dropped every cross-border-allowed event through
+      // safeEmit, leaving no audit-chain record of the operator's
+      // conscious opt-in). Mirrors the read-path event name below.
+      _emit("db.residency.replica.cross_border_allowed", "warning",
         { backend: backendName, replicaIndex: i,
           primaryTag: primaryTag, replicaTag: replicaTag,
           legalBasis: r.legalBasis || null,
@@ -1193,6 +1807,52 @@ async function _readQuery(sql, params, opts) {
     throw _err("ALL_REPLICAS_UNHEALTHY",
       "backend '" + b.name + "': all replicas unhealthy and fallback disabled", true);
   }
+  // Replica residency check — when the caller identifies the row's
+  // region (opts.rowResidencyTag) under a regulated posture, a read
+  // routed to an incompatible replica is refused unless the replica
+  // was explicitly configured allowCrossBorder (which is audited).
+  var _readPosture = _activePosture();
+  var _tagPresent = opts.rowResidencyTag && typeof opts.rowResidencyTag === "string";
+  // Fail CLOSED when the row's region is not identified: a regulated read to a
+  // residency-tagged replica without opts.rowResidencyTag would otherwise route
+  // residency-restricted rows to an arbitrary-region replica with no check at
+  // all (symmetric with the write gate's RESIDENCY_GATE_REQUIRED).
+  if (!_tagPresent && _crossBorderRegulated(_readPosture) &&
+      replica.residencyTag && !replica.allowCrossBorder) {
+    _emit("db.residency.replica.tag_required", "denied", {
+      backend: b.name, replicaIdx: replica.index,
+      replicaTag: replica.residencyTag, posture: _readPosture,
+    });
+    throw _err("REPLICA_RESIDENCY_TAG_REQUIRED",
+      "read routed to residency-tagged replica " + replica.index + " of backend '" +
+      b.name + "' (residencyTag='" + replica.residencyTag + "') under '" + _readPosture +
+      "' posture without opts.rowResidencyTag - identify the row's region or set " +
+      "allowCrossBorder on the replica (audited)", true);
+  }
+  if (_tagPresent) {
+    if (_crossBorderRegulated(_readPosture) &&
+        opts.rowResidencyTag !== "global" && opts.rowResidencyTag !== "unrestricted" &&
+        !_residencyCompatible(opts.rowResidencyTag, replica.residencyTag)) {
+      if (replica.allowCrossBorder) {
+        _emit("db.residency.replica.cross_border", "warning", {
+          backend: b.name, replicaIdx: replica.index,
+          rowTag: opts.rowResidencyTag, replicaTag: replica.residencyTag,
+          posture: _readPosture,
+        });
+      } else {
+        _emit("db.residency.replica.incompatible", "denied", {
+          backend: b.name, replicaIdx: replica.index,
+          rowTag: opts.rowResidencyTag, replicaTag: replica.residencyTag,
+          posture: _readPosture,
+        });
+        throw _err("REPLICA_RESIDENCY_INCOMPATIBLE",
+          "read for row residencyTag '" + opts.rowResidencyTag + "' routed to replica " +
+          replica.index + " of backend '" + b.name + "' (residencyTag='" +
+          replica.residencyTag + "') under '" + _readPosture +
+          "' posture; set allowCrossBorder on the replica to permit (audited)", true);
+      }
+    }
+  }
   var role = dbRoleContext.getRole();
   var t0 = Date.now();
   try {
@@ -1202,13 +1862,13 @@ async function _readQuery(sql, params, opts) {
       replica.pool.release(client);
       replica.consecutiveFailures = 0;
       var durationMs = Date.now() - t0;
-      _emit("system.externaldb.read", "success", {
+      _emit("system.externaldb.read", "success", Object.assign({
         backend:    b.name,
         role:       role,
         replicaIdx: replica.index,
         durationMs: durationMs,
         rowCount:   res && res.rowCount,
-      });
+      }, _otelDbAttributes(b, sql, opts.includeSqlInAudit)));
       _emitMetric("externaldb.read.success", 1,
         { backend: b.name, role: role || "(none)", replicaIdx: replica.index });
       _emitMetric("externaldb.read.duration_ms", durationMs,
@@ -1228,13 +1888,13 @@ async function _readQuery(sql, params, opts) {
       throw e;
     }
   } catch (e) {
-    _emit("system.externaldb.read", "failure", {
+    _emit("system.externaldb.read", "failure", Object.assign({
       backend:    b.name,
       role:       role,
       replicaIdx: replica.index,
       durationMs: Date.now() - t0,
       errorCode:  e.code || null,
-    }, (e && e.message) || String(e));
+    }, _otelDbAttributes(b, sql, opts.includeSqlInAudit)), (e && e.message) || String(e));
     _emitMetric("externaldb.read.failure", 1,
       { backend: b.name, role: role || "(none)", errorCode: e.code || "(none)" });
     if (e && e.code === "42501") {
@@ -1504,22 +2164,27 @@ function _connectAs(rawConnect, query, opts) {
 
   // Pre-compute the SET statements once — every fresh client runs the
   // same list, so building it per-connect would burn microbenchmarks.
+  // Postgres session-config statements (SET ROLE / search_path /
+  // application_name / statement_timeout / GUCs). These are session-state
+  // commands, not table DML — b.sql has no SET verb, so they stay
+  // hand-composed (identifiers double-quoted, string values single-quote
+  // escaped, numerics rendered after a finite-check below).
   var stmts = [];
   if (opts.role) {
-    stmts.push('SET ROLE "' + opts.role + '"');
+    stmts.push('SET ROLE "' + opts.role + '"');   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
   }
   if (pathSegments) {
     var pathSql = pathSegments.map(function (s) { return '"' + s + '"'; }).join(", ");
-    stmts.push("SET search_path TO " + pathSql);
+    stmts.push("SET search_path TO " + pathSql);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
   }
   if (opts.applicationName !== undefined) {
     // Single-quoted string literal — SQL-standard escape doubles embedded
     // single quotes.
     var an = String(opts.applicationName).replace(/'/g, "''");
-    stmts.push("SET application_name TO '" + an + "'");
+    stmts.push("SET application_name TO '" + an + "'");   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
   }
   if (opts.statementTimeoutMs !== undefined) {
-    stmts.push("SET statement_timeout TO " + opts.statementTimeoutMs);
+    stmts.push("SET statement_timeout TO " + opts.statementTimeoutMs);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
   }
   if (opts.gucs) {
     for (var gn in opts.gucs) {
@@ -1828,11 +2493,12 @@ async function assertRoleHardening(opts) {
   var ignoreSystem = opts.ignoreSystem !== false;   // default true
   var rows;
   try {
-    var res = await query(
-      "SELECT rolname FROM pg_roles ORDER BY rolname",
-      [],
-      { backend: backendName }
-    );
+    // pg_roles is a Postgres system catalog (this path is Postgres-only —
+    // guarded above), so b.sql emits the bare unquoted catalog name with a
+    // quoted projection. No params, no `?`, so no placeholder translation.
+    var rolesBuilt = sql().select("pg_roles", { dialect: "postgres" })
+      .columns(["rolname"]).orderBy("rolname", "asc").toSql();
+    var res = await query(rolesBuilt.sql, rolesBuilt.params, { backend: backendName });
     rows = (res && res.rows) || [];
   } catch (e) {
     audit().safeEmit({
