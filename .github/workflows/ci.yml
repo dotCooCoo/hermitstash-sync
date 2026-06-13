@@ -26,7 +26,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@main
         with:
-          node-version: '>=24.14.1'
+          node-version: '>=24.16.0'
 
       - name: Install ESLint
         run: npm install --no-save eslint@^10 eslint-plugin-security@^4

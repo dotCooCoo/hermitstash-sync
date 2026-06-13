@@ -16,7 +16,7 @@
 # certs, state.db, logs). /data is the sync folder.
 
 ARG VERSION
-ARG NODE_VERSION=24.14.1-slim
+ARG NODE_VERSION=24.16.0-slim
 # Runtime base: Chainguard wolfi-base — glibc-dynamic, apk-based, rebuilt
 # continuously by Chainguard when upstream CVE fixes land. Typical CVE
 # count at any given digest is near zero; chosen over debian-slim to avoid

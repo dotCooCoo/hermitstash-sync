@@ -18,7 +18,7 @@
   "author": "dotCooCoo",
   "license": "AGPL-3.0-or-later",
   "engines": {
-    "node": ">=24.14.1"
+    "node": ">=24.16.0"
   },
   "dependencies": {},
   "devDependencies": {}
