@@ -1,0 +1,20 @@
+{
+  "version": "0.9.5",
+  "date": "2026-06-13",
+  "headline": "Vendored blamejs advances to v0.15.8",
+  "summary": "A currency refresh of the vendored framework to v0.15.8; the surfaces this client consumes are unchanged in behavior, so the update carries upstream security and correctness fixes without altering client behavior.",
+  "sections": [
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored blamejs advances to v0.15.8",
+          "body": "The bundled framework moves from v0.15.7 to v0.15.8. The transport, crypto, atomic-file, and validation surfaces this client consumes carry no behavioral change; the update brings upstream security and correctness fixes (an OTLP log-attribute redaction, a reproducible published tarball, and audited server-side correctness gaps) and keeps the vendored tree current."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "blamejs framework", "url": "https://github.com/blamejs/blamejs" }
+  ]
+}
