@@ -3,7 +3,9 @@
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const b = require('../vendor/blamejs');
+const WsClient = require('../lib/ws-client');
 const {
   MSG, newTestWsClient, waitFor, connectWsClient, expectWsRejectClient,
   uploadFile, sleep, httpRequest, createBundleViaDb, createSnapshotBundleViaDb,
@@ -287,6 +289,154 @@ describe('WebSocket Sync Channel', { timeout: 30000 }, () => {
     assert.equal(fileEvents.length, 0,
       'Should get no catch-up file events when since equals current seq, got ' + fileEvents.length);
     ws.close();
+  });
+
+});
+
+/**
+ * Reconnect terminality — locks the boundary between errors that should
+ * permanently disable the wrapper's since-aware reconnect loop and those
+ * that should fall through to a fresh dial.
+ *
+ * blamejs constructs every WsClientError as `alwaysPermanent`, so its
+ * `err.permanent` flag can't distinguish a dead-peer pong-timeout (which
+ * MUST reconnect) from a 4xx handshake rejection (which must not). These
+ * cases drive the production WsClient's real 'error'/'close' handlers
+ * through a stubbed transport — only `b.wsClient.connect` is swapped for a
+ * peer-contract emitter, so the wrapper's own classifier is exercised
+ * end-to-end without needing a live server or a real timed-out heartbeat.
+ *
+ * Reconnect is ENABLED here (no `reconnect: false`), unlike the helper-built
+ * clients above, so a transient drop actually schedules a redial.
+ */
+describe('WsClient reconnect terminality', () => {
+  const WsClientError = b.wsClient.WsClientError;
+
+  // Stand up a production WsClient whose underlying b.wsClient.connect is
+  // replaced by a controllable peer-contract emitter. Returns the wrapper,
+  // the stub transport, and a restore() to undo the monkeypatch.
+  function withStubbedTransport() {
+    const realConnect = b.wsClient.connect;
+    const stub = new EventEmitter();
+    stub.readyState = 'connecting';
+    stub.send = () => {};
+    stub.close = () => {};
+    stub.cancelReconnect = () => {};
+    b.wsClient.connect = () => stub;
+
+    // reconnect enabled (omit reconnect:false) so _scheduleReconnect arms.
+    // Server URL is the https form the wrapper expects — _dial derives the
+    // wss:// dial URL from it. The host is never contacted: b.wsClient.connect
+    // is stubbed out, so the dial is fully synthetic.
+    const ws = new WsClient({ server: 'https://stub.invalid:443', reconnect: true }, 'hs_stub_key');
+    ws.connect('stub-bundle', 0);
+
+    return {
+      ws,
+      stub,
+      restore() { b.wsClient.connect = realConnect; },
+    };
+  }
+
+  // blamejs emits 'error' then 'close' on a socket failure; the wrapper
+  // decides terminality on 'error' and acts on 'close'. Replay that order.
+  function driveError(stub, err) {
+    stub.emit('error', err);
+    stub.emit('close', 1006, err.message || 'error');
+  }
+
+  it('pong-timeout reconnects instead of wedging offline', async () => {
+    const { ws, stub, restore } = withStubbedTransport();
+    try {
+      const reconnectingP = waitFor(ws, 'reconnecting', () => true, 3000);
+      // Swallow the wrapper's re-emitted transient 'error' so it doesn't
+      // surface as an unhandled 'error' on the EventEmitter.
+      ws.on('error', () => {});
+
+      driveError(stub, new WsClientError('ws-client/pong-timeout',
+        'no pong received within 90000ms'));
+
+      const attempt = await reconnectingP;
+      assert.ok(attempt >= 1, 'reconnecting should fire with an attempt number');
+      assert.equal(ws._closing, false,
+        'pong-timeout is transient — _closing must stay false so reconnect proceeds');
+    } finally {
+      ws.close();
+      restore();
+    }
+  });
+
+  it('handshake-timeout reconnects instead of wedging offline', async () => {
+    const { ws, stub, restore } = withStubbedTransport();
+    try {
+      const reconnectingP = waitFor(ws, 'reconnecting', () => true, 3000);
+      ws.on('error', () => {});
+
+      driveError(stub, new WsClientError('ws-client/handshake-timeout',
+        'handshake did not complete within timeout'));
+
+      const attempt = await reconnectingP;
+      assert.ok(attempt >= 1, 'reconnecting should fire with an attempt number');
+      assert.equal(ws._closing, false,
+        'handshake-timeout is transient — _closing must stay false so reconnect proceeds');
+    } finally {
+      ws.close();
+      restore();
+    }
+  });
+
+  it('4xx bad-status is terminal — sets _closing, emits upgrade_rejected/auth_error, no reconnect', async () => {
+    const { ws, stub, restore } = withStubbedTransport();
+    try {
+      const rejectedP = waitFor(ws, 'upgrade_rejected', info => info.status === 403, 3000);
+      const authP = waitFor(ws, 'auth_error', info => info.status === 403, 3000);
+      let reconnected = false;
+      ws.on('reconnecting', () => { reconnected = true; });
+
+      const err = new WsClientError('ws-client/bad-status',
+        'handshake response status was 403 (expected 101 Switching Protocols)');
+      err.status = 403;
+      err.body = 'forbidden';
+      driveError(stub, err);
+
+      const rejected = await rejectedP;
+      const authErr = await authP;
+      assert.equal(rejected.status, 403, 'upgrade_rejected carries the parsed HTTP status');
+      assert.equal(authErr.status, 403, 'auth_error fires for a 403 handshake rejection');
+      assert.equal(ws._closing, true,
+        '4xx bad-status is terminal — _closing must be set so reconnect is suppressed');
+
+      // Give any erroneously-scheduled reconnect a beat to fire.
+      await sleep(50);
+      assert.equal(reconnected, false, 'a terminal 4xx must NOT schedule a reconnect');
+    } finally {
+      ws.close();
+      restore();
+    }
+  });
+
+  it('5xx bad-status is transient — reconnects rather than wedging', async () => {
+    const { ws, stub, restore } = withStubbedTransport();
+    try {
+      const reconnectingP = waitFor(ws, 'reconnecting', () => true, 3000);
+      // A 5xx still routes through the upgrade_rejected path (it's a
+      // non-101 handshake response) but must NOT mark the client terminal.
+      ws.on('upgrade_rejected', () => {});
+
+      const err = new WsClientError('ws-client/bad-status',
+        'handshake response status was 503 (expected 101 Switching Protocols)');
+      err.status = 503;
+      err.body = 'service unavailable';
+      driveError(stub, err);
+
+      const attempt = await reconnectingP;
+      assert.ok(attempt >= 1, 'reconnecting should fire for a transient 5xx');
+      assert.equal(ws._closing, false,
+        '5xx bad-status is a server blip — _closing must stay false so reconnect proceeds');
+    } finally {
+      ws.close();
+      restore();
+    }
   });
 
 });
