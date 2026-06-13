@@ -9,7 +9,9 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
 const { ApiClient, httpRequest } = require('./test-helpers');
+const config = require('../lib/config');
 
 const ctx = {
   url: process.env.HERMITSTASH_TEST_URL,
@@ -19,9 +21,65 @@ const ctx = {
   caCert: process.env.HERMITSTASH_TEST_CA_CERT,
 };
 
+// Client-side config.validate() cases run without a server — they exercise the
+// production lib/config validator directly. Server-backed admin-settings cases
+// below require HERMITSTASH_TEST_URL.
+
+// A minimal valid base config (syncFolder must exist for validate()).
+function baseCfg(extra) {
+  return Object.assign({
+    server: 'https://example.com',
+    syncFolder: os.tmpdir(),
+    bundleId: 'b1',
+  }, extra || {});
+}
+
+// Attach an _envSources map the way _applyEnvOverlay does, so the validator's
+// env-var attribution path is exercised.
+function withEnvSources(cfg, sources) {
+  Object.defineProperty(cfg, '_envSources', { value: sources, enumerable: false, configurable: true });
+  return cfg;
+}
+
+describe('Client config.validate(): numeric + enum bounds', () => {
+  it('accepts a valid base config', () => {
+    assert.deepEqual(config.validate(baseCfg()), []);
+  });
+
+  it('rejects negative uploadConcurrency', () => {
+    const errs = config.validate(baseCfg({ uploadConcurrency: -1 }));
+    assert.ok(errs.some(e => /uploadConcurrency/.test(e) && /non-negative integer/.test(e)), JSON.stringify(errs));
+  });
+
+  it('rejects non-stable/beta autoUpdateChannel', () => {
+    const errs = config.validate(baseCfg({ autoUpdateChannel: 'nightly' }));
+    assert.ok(errs.some(e => /autoUpdateChannel/.test(e)), JSON.stringify(errs));
+  });
+
+  it('rejects an unknown logLevel', () => {
+    const errs = config.validate(baseCfg({ logLevel: 'verbose' }));
+    assert.ok(errs.some(e => /logLevel/.test(e)), JSON.stringify(errs));
+  });
+
+  it('rejects a malformed SPKI pin', () => {
+    const errs = config.validate(baseCfg({ pinnedServerSpki: ['not-a-pin'] }));
+    assert.ok(errs.some(e => /pinnedServerSpki/.test(e)), JSON.stringify(errs));
+  });
+
+  it('blames the env var, not the config field, when the value came from env', () => {
+    const cfg = withEnvSources(
+      baseCfg({ uploadConcurrency: -5 }),
+      { uploadConcurrency: 'HERMITSTASH_UPLOAD_CONCURRENCY' },
+    );
+    const errs = config.validate(cfg);
+    assert.ok(errs.some(e => e.startsWith('HERMITSTASH_UPLOAD_CONCURRENCY')), JSON.stringify(errs));
+    assert.ok(!errs.some(e => e.startsWith('uploadConcurrency ')), 'config-field name should not be used when env is the source');
+  });
+});
+
 if (!ctx.url) {
-  console.error('Missing HERMITSTASH_TEST_URL');
-  process.exit(1);
+  console.error('Missing HERMITSTASH_TEST_URL — running client-side config cases only.');
+  return;
 }
 
 // Shared ApiClient for encrypted settings requests (lazy-init)

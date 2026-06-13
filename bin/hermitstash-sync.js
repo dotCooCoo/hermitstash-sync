@@ -149,4 +149,11 @@
 })();
 
 const { run } = require('../lib/cli');
-run(process.argv.slice(2));
+// Backstop any async command path that rejects before it installs its own
+// handlers (e.g. a corrupt config.json read deep in a command). Without this
+// such a rejection escapes as a raw stack + unhandledRejection. Surface the
+// message and preserve exit code 1.
+run(process.argv.slice(2)).catch((err) => {
+  process.stderr.write((err && err.message ? err.message : String(err)) + '\n');
+  process.exit(1);                                                              // allow:process-exit — top-level rejection backstop; exit 1 mirrors die()
+});
