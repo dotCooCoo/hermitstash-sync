@@ -42,7 +42,7 @@ If you're already running HermitStash and you want your files to show up on the 
 
 HermitStash Sync vendors [**blamejs**](https://github.com/blamejs/blamejs) — a single, audit-able framework that bundles its own crypto, transports, validation, and process-lifecycle primitives instead of pulling them from forty transitive npm packages. That's how this client ships with **zero npm runtime dependencies** while still getting:
 
-- **PQC TLS 1.3 agent** (`b.pqcAgent`) — `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` posture pinned for both the mTLS sync transport and the auto-update GitHub-release downloader
+- **PQC TLS 1.3 agent** (`b.pqcAgent`) — `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` posture (post-quantum hybrids preferred, `X25519` classical last-resort) pinned for both the mTLS sync transport and the auto-update GitHub-release downloader
 - **Hardened HTTP client** (`b.httpClient.request`) — SSRF gate with DNS pinning that closes the resolve-vs-connect TOCTOU window, AbortSignal, idle-vs-wall-clock timeout split, permanent-vs-transient classifier, h2 via ALPN
 - **Hardened WebSocket client** (`b.wsClient`) — RFC 6455 with decompression-bomb defence, UTF-8 fatal validation, ≤125-byte control-frame cap, RSV1-on-continuation rejection, permanent-error classifier
 - **Per-session encryption envelope** (`b.middleware.apiEncrypt` / `b.httpClient.encrypted`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, identity-agile 4-byte version header
@@ -347,7 +347,7 @@ Every release attaches the GPG `.asc`, the SLSA L3 `.intoto.jsonl`, the ML-DSA-6
 
 1. On startup, if an mTLS client certificate is configured and within 60 days of expiring, the daemon silently calls `POST /sync/renew-cert` to rotate it using the current API key. No admin action needed unless the cert has already been revoked (use `repair` for that).
 2. On first connection with a `shareId` configured, the client fetches the bundle manifest and downloads all existing files from the server, then uploads any local files not yet on the server. Existing local files are verified against server checksums using parallel SHA3-512 hashing across the worker thread pool.
-3. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`, `file_renamed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. All checksum computations are dispatched to the worker pool to keep the main thread responsive.
+3. After initial sync, the client enters a real-time loop: a WebSocket receives change events (`file_added`, `file_replaced`, `file_removed`, `file_renamed`) and a file watcher detects local changes. Changes are debounced (500 ms) to avoid redundant uploads during active writes. Checksums run through the vendored framework's SHA3-512 hashing — streaming for single files, parallel for batches — to keep the main thread responsive.
 4. If the connection drops, the client reconnects with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, 60s, 120s, 300s). On reconnect, it sends the last known sequence number so the server can replay missed events.
 5. The server sends a heartbeat every 30 seconds. If no message arrives within 90 seconds, the client treats the connection as dead and reconnects.
 6. Failed uploads are retried up to 3 times with full-jitter exponential backoff (base 5s). After 5 consecutive uploads exhaust their retries, a per-target circuit breaker opens for 30 seconds and new uploads fast-fail without dialling the server. The breaker probes after the cooldown; 2 consecutive successful probes close it. This keeps the daemon from hammering a flapping server while the retry loop would otherwise happily keep firing.
@@ -378,7 +378,7 @@ The `status` command shows which state the daemon is in:
 
 ## Security
 
-- **PQC TLS** on every connection — three-tier hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768` (NIST Level 5 preferred, Level 3 and Level 1 fallback for broad server compatibility). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds.
+- **PQC TLS** on every connection — hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` (NIST Level 5 preferred, Level 3 and Level 1 hybrids next, then an `X25519` classical last-resort that matches the server's group preference). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds; the post-quantum hybrids stay preferred and a classical negotiation is surfaced by the framework's downgrade audit.
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
 - **mTLS** client certificates for server authentication (optional, certs cached in memory). Certificates auto-renew on startup when within 60 days of expiry — no admin intervention required.
 - **Per-session PQC envelope** on encryption-grade JSON POSTs (`/drop/init`, `/drop/finalize/:bundleId`, `/sync/rename`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, server keypair fetched once from `/.well-known/blamejs-pubkey` and cached. Strict-monotonic counter on the wire blocks replay. Other Bearer-authed sync calls send plain JSON over the PQC TLS + mTLS layer — transport encryption is the floor; no Bearer-authed sync call ever sends plaintext on the wire.
@@ -491,7 +491,7 @@ bin/hermitstash-sync.js       CLI entry point
 lib/cli.js                    Command parser and dispatcher
 lib/config.js                 Config file management
 lib/constants.js              All constants, message types, defaults
-lib/checksum.js               SHA3-512 hashing (single + worker pool)
+lib/checksum.js               SHA3-512 hashing via blamejs (streaming + parallel batch)
 lib/daemon.js                 Daemonization, PID file, signal handlers
 lib/diagnose.js               `diagnose` bundle builder
 lib/http-client.js            HTTP client with PQC agent + blamejs apiEncrypt for write paths
@@ -502,9 +502,7 @@ lib/path-filter.js            Shared include/ignore pattern matcher
 lib/state-db.js               Local SQLite state database (node:sqlite)
 lib/sync-engine.js            Core sync loop orchestrator
 lib/watcher.js                fs.watch with debounce and ignore patterns
-lib/worker-pool.js            Generic worker thread pool
-lib/workers/checksum-worker.js  SHA3-512 hashing worker thread
-lib/ws-client.js              Minimal WebSocket client with PQC TLS
+lib/ws-client.js              Thin wrapper around b.wsClient (RFC 6455 + PQC TLS)
 ```
 
 ## Deployment
@@ -520,7 +518,7 @@ The sync client ships as a standalone binary — no Node.js installation require
 | **Platforms** | Windows x64, Linux x64, Linux ARM64, macOS ARM64 (Intel Macs: use the ARM64 binary under Rosetta 2) |
 | **Artifacts** | `hermitstash-sync-vX.Y.Z-{win,linux,macos}-{x64,arm64}[.exe]` + SHA3-512 checksum + GPG signature, per platform |
 | **Signing** | GPG (P-384) for humans + P-384 ECDSA (DER) over the binary bytes for the auto-update channel (verified via `b.selfUpdate.verify`). No Authenticode — see Windows note below. |
-| **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) |
+| **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) > `X25519` classical last-resort |
 | **Dependencies** | Zero npm runtime packages — all vendored |
 
 ### Release workflow
