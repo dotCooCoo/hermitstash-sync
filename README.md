@@ -42,7 +42,7 @@ If you're already running HermitStash and you want your files to show up on the 
 
 HermitStash Sync vendors [**blamejs**](https://github.com/blamejs/blamejs) — a single, audit-able framework that bundles its own crypto, transports, validation, and process-lifecycle primitives instead of pulling them from forty transitive npm packages. That's how this client ships with **zero npm runtime dependencies** while still getting:
 
-- **PQC TLS 1.3 agent** (`b.pqcAgent`) — `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` posture (post-quantum hybrids preferred, `X25519` classical last-resort) pinned for both the mTLS sync transport and the auto-update GitHub-release downloader
+- **PQC TLS 1.3 agent** (`b.pqcAgent`) — `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` posture (post-quantum hybrids preferred, `X25519` classical last-resort) pinned for both the mTLS sync transport and the auto-update GitHub-release downloader. On HermitStash-server connections the client verifies post-handshake that the *negotiated* group is a post-quantum hybrid and refuses a classical fallback (the auto-update downloader, which talks to a non-PQC CDN, warns instead of failing)
 - **Hardened HTTP client** (`b.httpClient.request`) — SSRF gate with DNS pinning that closes the resolve-vs-connect TOCTOU window, AbortSignal, idle-vs-wall-clock timeout split, permanent-vs-transient classifier, h2 via ALPN
 - **Hardened WebSocket client** (`b.wsClient`) — RFC 6455 with decompression-bomb defence, UTF-8 fatal validation, ≤125-byte control-frame cap, RSV1-on-continuation rejection, permanent-error classifier
 - **Per-session encryption envelope** (`b.middleware.apiEncrypt` / `b.httpClient.encrypted`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, identity-agile 4-byte version header
@@ -69,7 +69,7 @@ Watches a local folder and keeps it in sync with a HermitStash server:
 - **Server-side changes** are downloaded in real-time via WebSocket
 - **Conflict resolution** is last-write-wins — if both sides change a file, the most recent write takes priority
 
-All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP384r1MLKEM1024` → `X25519MLKEM768` → `SecP256r1MLKEM768`, Level 5 preferred) with an `X25519` classical last-resort that matches the server's group preference, plus optional mTLS client certificates. The post-quantum hybrids stay preferred; a classical negotiation is surfaced by the framework's downgrade audit. Client certs auto-renew on startup when within 60 days of expiry — no admin action needed.
+All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP384r1MLKEM1024` → `X25519MLKEM768` → `SecP256r1MLKEM768`, Level 5 preferred) with an `X25519` classical last-resort that matches the server's group preference, plus optional mTLS client certificates. The post-quantum hybrids stay preferred, and after each HermitStash-server handshake the client verifies the *negotiated* group is a post-quantum hybrid — a classical fallback is logged and the connection is refused (set `HERMITSTASH_ALLOW_CLASSICAL_TLS=1` to permit it deliberately). Client certs auto-renew on startup when within 60 days of expiry — no admin action needed.
 
 ## Requirements
 
@@ -378,7 +378,8 @@ The `status` command shows which state the daemon is in:
 
 ## Security
 
-- **PQC TLS** on every connection — hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` (NIST Level 5 preferred, Level 3 and Level 1 hybrids next, then an `X25519` classical last-resort that matches the server's group preference). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds; the post-quantum hybrids stay preferred and a classical negotiation is surfaced by the framework's downgrade audit.
+- **PQC TLS** on every connection — hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` (NIST Level 5 preferred, Level 3 and Level 1 hybrids next, then an `X25519` classical last-resort that matches the server's group preference). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds.
+- **Post-quantum floor enforced at negotiation time** — after each handshake to a HermitStash server (the mTLS sync transport and the WebSocket control channel), the client reads the *negotiated* key-exchange group and refuses the connection if it is classical rather than a post-quantum hybrid, naming the group and host in the error. This closes a downgrade/MITM path where a hostile or out-of-date server selects `X25519` even though the hybrids are offered first. The negotiated group is logged either way. Set `HERMITSTASH_ALLOW_CLASSICAL_TLS=1` to relax the hard-fail to a warning for an endpoint you must reach over classical TLS deliberately. The auto-update GitHub-release downloader is observe-only — it warns on a classical negotiation but never fails, since the release CDN offers no post-quantum group.
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
 - **mTLS** client certificates for server authentication (optional, certs cached in memory). Certificates auto-renew on startup when within 60 days of expiry — no admin intervention required.
 - **Per-session PQC envelope** on encryption-grade JSON POSTs (`/drop/init`, `/drop/finalize/:bundleId`, `/sync/rename`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, server keypair fetched once from `/.well-known/blamejs-pubkey` and cached. Strict-monotonic counter on the wire blocks replay. Other Bearer-authed sync calls send plain JSON over the PQC TLS + mTLS layer — transport encryption is the floor; no Bearer-authed sync call ever sends plaintext on the wire.
@@ -518,7 +519,7 @@ The sync client ships as a standalone binary — no Node.js installation require
 | **Platforms** | Windows x64, Linux x64, Linux ARM64, macOS ARM64 (Intel Macs: use the ARM64 binary under Rosetta 2) |
 | **Artifacts** | `hermitstash-sync-vX.Y.Z-{win,linux,macos}-{x64,arm64}[.exe]` + SHA3-512 checksum + GPG signature, per platform |
 | **Signing** | GPG (P-384) for humans + P-384 ECDSA (DER) over the binary bytes for the auto-update channel (verified via `b.selfUpdate.verify`). No Authenticode — see Windows note below. |
-| **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) > `X25519` classical last-resort |
+| **TLS** | PQC hybrid: `SecP384r1MLKEM1024 > X25519MLKEM768 > SecP256r1MLKEM768` (Level 5 preferred) > `X25519` classical last-resort; the negotiated group is verified post-handshake against HermitStash servers and a classical fallback is refused (override with `HERMITSTASH_ALLOW_CLASSICAL_TLS=1`) |
 | **Dependencies** | Zero npm runtime packages — all vendored |
 
 ### Release workflow
