@@ -69,7 +69,7 @@ Watches a local folder and keeps it in sync with a HermitStash server:
 - **Server-side changes** are downloaded in real-time via WebSocket
 - **Conflict resolution** is last-write-wins — if both sides change a file, the most recent write takes priority
 
-All connections use PQC TLS with TLS 1.3 minimum and a three-tier hybrid group list (`SecP384r1MLKEM1024` → `X25519MLKEM768` → `SecP256r1MLKEM768`, Level 5 preferred) plus optional mTLS client certificates. Client certs auto-renew on startup when within 60 days of expiry — no admin action needed.
+All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP384r1MLKEM1024` → `X25519MLKEM768` → `SecP256r1MLKEM768`, Level 5 preferred) with an `X25519` classical last-resort that matches the server's group preference, plus optional mTLS client certificates. The post-quantum hybrids stay preferred; a classical negotiation is surfaced by the framework's downgrade audit. Client certs auto-renew on startup when within 60 days of expiry — no admin action needed.
 
 ## Requirements
 

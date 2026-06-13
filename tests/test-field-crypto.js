@@ -35,10 +35,13 @@ function isSealed(value) {
 }
 
 /**
- * Helper: check if a value is a valid SHA3-512 hex string (128 hex chars).
+ * Helper: check if a value is a keyed-MAC blind-index digest — a 64-char hex
+ * string. The server's derived indexes (shareIdHash, emailHash, ...) are a
+ * keyed MAC, not an unkeyed SHA3-512, so an exfiltrated database cannot
+ * recompute them from a guessed plaintext.
  */
 function isSha3Hex(value) {
-  return typeof value === 'string' && /^[0-9a-f]{128}$/.test(value);
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
 
 /**
