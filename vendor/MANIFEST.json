@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. Zero npm runtime packages. blamejs is the single upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.15.5",
+      "version": "0.15.6",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.15.5",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.5:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.15.5",
+      "tag": "v0.15.6",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.6:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.15.6",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -40,7 +40,7 @@
       "hashes": {
         "index": "sha256:0bf260b19faafe1d4e9aa2997ac3645cb9740ea4bd723fb971a641a403781731",
         "safe-json": "sha256:1551c9a9fcd87cded411de77ba71c2f7904d0f7dacae8aacffc7ad667222efb1",
-        "safe-url": "sha256:d41886582abea6280cc7f87933e2c08b0dd917eee1f1fa881f5008b078f454d2",
+        "safe-url": "sha256:8224a3a15ca2a09fe96f05ff463e385b775d539342c28dcce34072542c71b781",
         "pqc-agent": "sha256:ed7245f4bb351b66f7637e981f95756871babc5ee51575e29cc2577459dd709a",
         "pqc-software": "sha256:755f04c0d672b5e0d52fc95622f805a5a8b78a93165fb08291e8557778057993",
         "http-client": "sha256:7d05092c392706e94fad752853bc15c2322cce41de9831664f37a7987e0a2d2e",
