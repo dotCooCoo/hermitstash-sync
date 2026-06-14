@@ -1,0 +1,12 @@
+name: hermitstash-sync CodeQL config
+
+# Scope CodeQL to this client's own maintained code. The vendored blamejs
+# tree is an upstream dependency (its examples/tests/lib are not run or
+# maintained here), and tests/ carries intentional test-CA fixtures
+# (rejectUnauthorized:false) — both are excluded from ESLint for the same
+# reason, so they are excluded here too. CodeQL then analyzes lib/, bin/,
+# and scripts/ only.
+paths-ignore:
+  - vendor/**
+  - tests/**
+  - build/**

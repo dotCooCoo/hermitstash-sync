@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Advanced CodeQL setup (replaces default setup) so the scan can be scoped to
+# this client's own code via .github/codeql/codeql-config.yml — the vendored
+# blamejs tree and test fixtures are excluded there. Read-only: it writes only
+# code-scanning results, so action refs are SHA-pinned like every other
+# workflow but the job's blast radius is the analysis run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '30 5 * * 1'  # weekly, Monday 05:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write  # upload CodeQL results to the Security tab
+      actions: read           # read workflow run metadata for the actions analysis
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          category: "/language:${{ matrix.language }}"
