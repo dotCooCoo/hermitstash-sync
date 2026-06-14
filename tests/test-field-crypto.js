@@ -160,7 +160,10 @@ describe('Field Crypto: User Fields', { timeout: 30000 }, function () {
 
   it('admin user email is sealed in the raw DB', function () {
     var script = [
-      'var rows = db.prepare("SELECT email, emailHash, displayName FROM users LIMIT 1").all();',
+      // Deterministic: the first user created is the server-registered admin
+      // (keyed 64-hex index). A bare LIMIT 1 can pick a user another parallel
+      // test seeded via direct DB insert with a legacy unkeyed 128-hex hash.
+      'var rows = db.prepare("SELECT email, emailHash, displayName FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'process.stdout.write(JSON.stringify(rows));',
     ].join('\n');
     var rows = JSON.parse(runDbScript(dbPath, script));
@@ -181,7 +184,9 @@ describe('Field Crypto: User Fields', { timeout: 30000 }, function () {
 
   it('user emailHash is a SHA3-512 hex string', function () {
     var script = [
-      'var rows = db.prepare("SELECT emailHash FROM users LIMIT 1").all();',
+      // Deterministic: the server-registered admin (first user, keyed 64-hex),
+      // not an arbitrary parallel-test-seeded user with a legacy 128-hex hash.
+      'var rows = db.prepare("SELECT emailHash FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'process.stdout.write(JSON.stringify(rows));',
     ].join('\n');
     var rows = JSON.parse(runDbScript(dbPath, script));
