@@ -1,6 +1,6 @@
 name: Docker
 
-on:
+on:  # zizmor: ignore[dangerous-triggers] workflow_run is required (runs after Release) and is guarded by the head-repository check on every privileged job below
   # Runs after the Release workflow completes successfully on a tag push.
   # Release workflow publishes the signed SEA binaries first; this one then
   # pulls those binaries inside the Dockerfile's verify stage.
@@ -19,10 +19,9 @@ on:
         type: boolean
         default: true
 
+# Workflow-level is read-only; the publishing jobs elevate what they need.
 permissions:
   contents: read
-  packages: write
-  id-token: write  # cosign keyless signing via GitHub OIDC
 
 env:
   IMAGE: ghcr.io/dotcoocoo/hermitstash-sync
@@ -33,7 +32,15 @@ jobs:
   # lint job (same rules, same pins) so a red ci.yml always implies a red
   # docker-publish. No PR comment here — tag pushes aren't PR events.
   lint:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # This workflow_run pipeline runs with the privileges of the default
+    # branch but is triggered by any completed run of "Release". Each job
+    # below checks out github.event.workflow_run.head_sha and executes it
+    # (npm install, docker build, smoke). Guard every privileged job so it
+    # only proceeds when the triggering run came from THIS repository — a
+    # fork-originated run can never have its code checked out + executed here.
+    # Release only fires on upstream tag pushes, so this is always true for a
+    # real release; the guard just closes the untrusted-checkout class.
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -41,6 +48,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
@@ -147,8 +155,14 @@ jobs:
 
   build-and-push:
     needs: lint
+    # Only build + publish from a run triggered by this repository (see lint).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write    # push the multi-arch image to GHCR
+      id-token: write    # cosign keyless signing via GitHub OIDC
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.version.outputs.version }}
@@ -157,9 +171,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
+        # zizmor: ignore[cache-poisoning] no cache input set (zero npm deps).
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '>=24.16.0'
@@ -174,9 +190,11 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
           else
             VERSION=$(node -e "console.log(require('./lib/constants').VERSION)")
           fi
@@ -303,14 +321,19 @@ jobs:
   # actually boots end-to-end, not just the intermediate local build.
   smoke-test:
     needs: build-and-push
-    if: ${{ !inputs.dry_run && needs.build-and-push.outputs.digest }}
+    # Trusted-origin guard (see lint) AND the existing dry-run / digest gates.
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && !inputs.dry_run && needs.build-and-push.outputs.digest }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read     # pull the just-published image by digest
 
     steps:
       - name: Checkout (for scripts/docker-smoke.sh)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Log in to GHCR (image may be private until first public pull)
