@@ -84,9 +84,11 @@ jobs:
         # was downloaded from. Skip on dry-run / branch push.
         if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          PKG_VERSION="${{ steps.version.outputs.version }}"
+          PKG_VERSION="${VERSION_OUTPUT}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::lib/constants.js VERSION ($PKG_VERSION) does not match pushed tag (v$TAG_VERSION)"
             exit 1
@@ -98,20 +100,24 @@ jobs:
 
       - name: Verify binary
         shell: bash
+        env:
+          EXE_NAME: ${{ steps.version.outputs.exe_name }}
         run: |
-          EXE="build/${{ steps.version.outputs.exe_name }}"
+          EXE="build/${EXE_NAME}"
           "${EXE}" version
 
       # ---- Security scans ----
 
       - name: Windows Defender scan
         if: runner.os == 'Windows'
-        shell: cmd
+        shell: cmd # zizmor: ignore[misfeature] shell: cmd is required — MpCmdRun.exe is invoked with native Windows paths on the windows-latest matrix leg (default pwsh)
+        env:
+          EXE_NAME: ${{ steps.version.outputs.exe_name }}
         run: |
           echo Updating virus definitions...
           "C:\Program Files\Windows Defender\MpCmdRun.exe" -SignatureUpdate
           echo Running full scan...
-          "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\${{ steps.version.outputs.exe_name }}" -DisableRemediation
+          "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "%CD%\build\%EXE_NAME%" -DisableRemediation
 
       # ---- GPG signing ----
 
@@ -130,9 +136,10 @@ jobs:
         if: env.GPG_KEY_ID != ''
         env:
           GPG_PASS: ${{ secrets.GPG_PASSPHRASE }}
+          EXE_NAME: ${{ steps.version.outputs.exe_name }}
         shell: bash
         run: |
-          EXE="build/${{ steps.version.outputs.exe_name }}"
+          EXE="build/${EXE_NAME}"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha256"
           gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASS}" --default-key "${GPG_KEY_ID}" --armor --detach-sign "${EXE}.sha3-512"
@@ -149,10 +156,11 @@ jobs:
       - name: ECDSA sign binary for auto-update
         env:
           SIGNING_KEY: ${{ secrets.AUTOUPDATE_SIGNING_KEY }}
+          EXE_NAME: ${{ steps.version.outputs.exe_name }}
         if: env.SIGNING_KEY != ''
         shell: bash
         run: |
-          EXE="build/${{ steps.version.outputs.exe_name }}"
+          EXE="build/${EXE_NAME}"
           KEY_FILE="$(mktemp)"
           trap 'rm -f "$KEY_FILE"' EXIT
           printf '%s' "${SIGNING_KEY}" > "$KEY_FILE"
@@ -229,15 +237,19 @@ jobs:
 
       - name: Build CycloneDX 1.6 SBOM
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           node scripts/build-sbom.js --out artifacts
-          ls -l artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}.cdx.json
+          ls -l "artifacts/hermitstash-sync-v${VERSION_OUTPUT}.cdx.json"
 
       - name: Build CSAF 2.1 VEX document (when vex/statements.json has entries)
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           node scripts/build-vex.js --out artifacts
-          if [ -f artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}.vex.json ]; then
+          if [ -f "artifacts/hermitstash-sync-v${VERSION_OUTPUT}.vex.json" ]; then
             echo "VEX document attached."
           else
             echo "No VEX statements pending — skipping VEX attachment."
@@ -262,6 +274,7 @@ jobs:
         id: pqc-sig
         env:
           RELEASE_PQC_SIGNING_KEY: ${{ secrets.RELEASE_PQC_SIGNING_KEY }}
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -278,7 +291,7 @@ jobs:
             exit 0
           fi
           shopt -s nullglob
-          BINS=(artifacts/hermitstash-sync-v${{ steps.version.outputs.version }}-*)
+          BINS=(artifacts/hermitstash-sync-v${VERSION_OUTPUT}-*)
           # Filter out sidecars (.sha256, .sha3-512, .sig, .asc, .mldsa.sig, etc.)
           PLAIN_BINS=()
           for f in "${BINS[@]}"; do
@@ -309,9 +322,11 @@ jobs:
 
       - name: Cosign sign-blob SBOM + VEX
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${VERSION_OUTPUT}"
           SBOM="artifacts/hermitstash-sync-v${VERSION}.cdx.json"
           VEX="artifacts/hermitstash-sync-v${VERSION}.vex.json"
           if [ -f "$SBOM" ]; then
@@ -332,9 +347,11 @@ jobs:
       - name: Compute SLSA subjects (base64-encoded sha256 manifest)
         id: subjects
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${VERSION_OUTPUT}"
           shopt -s nullglob
           BINS=(artifacts/hermitstash-sync-v${VERSION}-*)
           # Drop sidecars from the subject list.
@@ -372,15 +389,17 @@ jobs:
 
       - name: Build GitHub-release-page markdown from release-notes JSON
         shell: bash
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           node scripts/generate-changelog-entry.js --release-page > release-notes.md
           BYTES=$(wc -c < release-notes.md | tr -d ' ')
           if [ "$BYTES" -lt 64 ]; then
             echo "::error::generate-changelog-entry produced an unexpectedly small release-page markdown ($BYTES bytes)."
-            echo "::error::Inspect release-notes/v${{ steps.version.outputs.version }}.json — every section may have rendered empty."
+            echo "::error::Inspect release-notes/v${VERSION_OUTPUT}.json — every section may have rendered empty."
             exit 1
           fi
-          echo "[release-notes] rendered $BYTES bytes for v${{ steps.version.outputs.version }}"
+          echo "[release-notes] rendered $BYTES bytes for v${VERSION_OUTPUT}"
           head -20 release-notes.md
 
       - name: Upload release bundle
@@ -452,16 +471,18 @@ jobs:
 
       - name: Move provenance into artifacts/
         shell: bash
+        env:
+          PREPARE_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           set -euo pipefail
-          INTOTO="hermitstash-sync-v${{ needs.prepare-release.outputs.version }}.intoto.jsonl"
+          INTOTO="hermitstash-sync-v${PREPARE_RELEASE_VERSION}.intoto.jsonl"
           if [ -f "$INTOTO" ]; then
             mv "$INTOTO" artifacts/
           fi
           ls -l artifacts/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0 # zizmor: ignore[superfluous-actions] deliberate: atomic multi-asset gh release create with provenance attach
         with:
           body_path: release-notes.md
           files: artifacts/*

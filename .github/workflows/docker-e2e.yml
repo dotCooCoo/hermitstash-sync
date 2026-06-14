@@ -98,12 +98,14 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          VERSION_OUTPUT: ${{ steps.version.outputs.version }}
         run: |
           {
             echo "### Docker e2e smoke"
             echo ""
             echo "Image: \`$IMAGE\` (linux/amd64)"
-            echo "Release base: v${{ steps.version.outputs.version }}"
+            echo "Release base: v${VERSION_OUTPUT}"
             echo ""
             echo "- Codebase patterns (23 grep gates)"
             echo "- OCI labels present"

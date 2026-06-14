@@ -136,11 +136,15 @@ jobs:
 
       - name: Lint summary
         if: always()
+        env:
+          ESLINT_OUTCOME: ${{ steps.eslint.outcome }}
+          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
+          SHELLCHECK_OUTCOME: ${{ steps.shellcheck.outcome }}
         run: |
           pass='✅'; fail='❌'
-          eslint_icon=$( [ "${{ steps.eslint.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
-          hadolint_icon=$( [ "${{ steps.hadolint.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
-          shellcheck_icon=$( [ "${{ steps.shellcheck.outcome }}" = "success" ] && echo "$pass" || echo "$fail" )
+          eslint_icon=$( [ "$ESLINT_OUTCOME" = "success" ] && echo "$pass" || echo "$fail" )
+          hadolint_icon=$( [ "$HADOLINT_OUTCOME" = "success" ] && echo "$pass" || echo "$fail" )
+          shellcheck_icon=$( [ "$SHELLCHECK_OUTCOME" = "success" ] && echo "$pass" || echo "$fail" )
           {
             echo "### Lint Results"
             echo ""
@@ -286,10 +290,12 @@ jobs:
         if: ${{ !inputs.dry_run && steps.build.outputs.digest }}
         id: sha3
         shell: bash
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          docker pull "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
-          HASH=$(docker save "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" | openssl dgst -sha3-512 | awk '{print $NF}')
+          docker pull "${{ env.IMAGE }}@${BUILD_DIGEST}"
+          HASH=$(docker save "${{ env.IMAGE }}@${BUILD_DIGEST}" | openssl dgst -sha3-512 | awk '{print $NF}')
           echo "sha3=${HASH}" >> "$GITHUB_OUTPUT"
           {
             echo ""
@@ -301,6 +307,10 @@ jobs:
 
       - name: Build summary
         if: always()
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          BUILD_DIGEST_OR_NA: ${{ steps.build.outputs.digest || 'n/a' }}
         run: |
           {
             echo "### Docker publish"
@@ -308,9 +318,9 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Image | \`${{ env.IMAGE }}\` |"
-            echo "| Version | v${{ steps.version.outputs.version }} |"
-            echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |"
-            echo "| Digest | \`${{ steps.build.outputs.digest || 'n/a' }}\` |"
+            echo "| Version | v${BUILD_VERSION} |"
+            echo "| Tags | \`${META_TAGS}\` |"
+            echo "| Digest | \`${BUILD_DIGEST_OR_NA}\` |"
             echo "| Pushed | ${{ !inputs.dry_run && '✅' || '⏭️ dry run' }} |"
             echo "| Signed | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ cosign keyless' || '⏭️' }} |"
             echo "| Trivy  | ${{ !inputs.dry_run && steps.build.outputs.digest && '✅ full scan + gated on CRITICAL/HIGH fixable' || '⏭️' }} |"
@@ -344,30 +354,40 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull published image by digest
-        run: docker pull "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}"
+        env:
+          BUILD_DIGEST: ${{ needs.build-and-push.outputs.digest }}
+        run: docker pull "${{ env.IMAGE }}@${BUILD_DIGEST}"
 
       - name: Run packaging smoke checks
-        run: bash scripts/docker-smoke.sh "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}"
+        env:
+          BUILD_DIGEST: ${{ needs.build-and-push.outputs.digest }}
+        run: bash scripts/docker-smoke.sh "${{ env.IMAGE }}@${BUILD_DIGEST}"
 
       - name: Verify reported version matches the tag
         shell: bash
+        env:
+          BUILD_DIGEST: ${{ needs.build-and-push.outputs.digest }}
+          BUILD_VERSION: ${{ needs.build-and-push.outputs.version }}
         run: |
           set -euo pipefail
           OUT=$(docker run --rm --entrypoint /usr/local/bin/hermitstash-sync \
-            "${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}" version)
+            "${{ env.IMAGE }}@${BUILD_DIGEST}" version)
           echo "$OUT"
-          EXPECT="hermitstash-sync v${{ needs.build-and-push.outputs.version }}"
+          EXPECT="hermitstash-sync v${BUILD_VERSION}"
           echo "$OUT" | grep -qF "$EXPECT" || { echo "::error::image reports wrong version"; exit 1; }
 
       - name: Smoke-test summary
         if: always()
+        env:
+          BUILD_DIGEST: ${{ needs.build-and-push.outputs.digest }}
+          BUILD_VERSION: ${{ needs.build-and-push.outputs.version }}
         run: |
           {
             echo "### Published-image smoke test"
             echo ""
-            echo "Image: \`${{ env.IMAGE }}@${{ needs.build-and-push.outputs.digest }}\`"
+            echo "Image: \`${{ env.IMAGE }}@${BUILD_DIGEST}\`"
             echo ""
             echo "- Pulled by digest (immutable ref)"
             echo "- Packaging checks via scripts/docker-smoke.sh"
-            echo "- Version matches tag v${{ needs.build-and-push.outputs.version }}"
+            echo "- Version matches tag v${BUILD_VERSION}"
           } >> "$GITHUB_STEP_SUMMARY"

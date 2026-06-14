@@ -258,11 +258,15 @@ jobs:
           HADOLINT_OUTPUT: ${{ steps.hadolint_result.outputs.output }}
           HADOLINT_STATUS: ${{ steps.hadolint_result.outputs.status }}
           SHELLCHECK_OUTPUT: ${{ steps.shellcheck.outputs.output }}
+          ESLINT_OUTCOME_OK: ${{ steps.eslint.outcome == 'success' }}
+          CBP_OUTCOME_OK: ${{ steps.codebase_patterns.outcome == 'success' }}
+          CHG_OUTCOME_OK: ${{ steps.changelog_gate.outcome == 'success' }}
+          SHELLCHECK_OUTCOME_OK: ${{ steps.shellcheck.outcome == 'success' }}
         run: |
-          ESLINT_OK=${{ steps.eslint.outcome == 'success' }}
-          CBP_OK=${{ steps.codebase_patterns.outcome == 'success' }}
-          CHG_OK=${{ steps.changelog_gate.outcome == 'success' }}
-          SHELLCHECK_OK=${{ steps.shellcheck.outcome == 'success' }}
+          ESLINT_OK="$ESLINT_OUTCOME_OK"
+          CBP_OK="$CBP_OUTCOME_OK"
+          CHG_OK="$CHG_OUTCOME_OK"
+          SHELLCHECK_OK="$SHELLCHECK_OUTCOME_OK"
 
           PASS="✅"
           FAIL="❌"
@@ -401,8 +405,10 @@ jobs:
 
       - name: Fail if any linter failed
         if: always()
+        env:
+          SUMMARY_ALL_OK: ${{ steps.summary.outputs.all_ok }}
         run: |
-          if [ "${{ steps.summary.outputs.all_ok }}" != "true" ]; then
+          if [ "$SUMMARY_ALL_OK" != "true" ]; then
             echo "One or more linters failed"
             exit 1
           fi
