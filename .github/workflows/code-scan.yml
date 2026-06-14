@@ -1,0 +1,147 @@
+name: Code Scan
+
+# Read-only security scanners that complement CodeQL. Each tool's findings
+# are uploaded as SARIF into the GitHub Security tab (code scanning), so they
+# sit alongside CodeQL and are reviewed together as a release gate. The SARIF
+# scanners (zizmor / semgrep / osv-scanner) report into the Security tab
+# rather than blocking a PR on a pre-existing finding; gitleaks is a hard gate
+# (test fixtures + in-tree public keys allowlisted) and actionlint reports
+# until its baseline is clean.
+#
+# Action refs float (read-only workflow class, like ci.yml) — these jobs
+# neither publish a release nor push an image, so their blast radius is the
+# CI run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # upload SARIF into the Security tab (code scanning)
+
+jobs:
+  # ── actionlint: GitHub Actions workflow correctness (gate) ──────────
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+      - name: Run actionlint
+        # Report-only on introduction so a pre-existing finding in another
+        # workflow doesn't block PRs; flip to a hard gate once the baseline
+        # is clean.
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:latest -color || true
+
+  # ── zizmor: GitHub Actions security audit (SARIF → Security tab) ────
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+      - name: Set up Python
+        uses: actions/setup-python@main
+        with:
+          python-version: '3.x'
+      - name: Install zizmor
+        run: pipx install zizmor
+      - name: Run zizmor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: zizmor --format sarif . > zizmor.sarif || true
+      - name: Upload SARIF
+        if: ${{ always() && hashFiles('zizmor.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@main
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+  # ── Semgrep: SAST + Actions/secret rules (SARIF → Security tab) ─────
+  semgrep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+      - name: Set up Python
+        uses: actions/setup-python@main
+        with:
+          python-version: '3.x'
+      - name: Install Semgrep
+        run: pipx install semgrep
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config p/default \
+            --config p/github-actions \
+            --config p/secrets \
+            --sarif --output semgrep.sarif \
+            --exclude vendor --exclude tests --exclude build || true
+      - name: Upload SARIF
+        if: ${{ always() && hashFiles('semgrep.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@main
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ── OSV-Scanner: known CVEs across the vendored surface (SARIF) ─────
+  # The vendored deps have no lockfile, so build the CycloneDX SBOM (the same
+  # one shipped on each release) and scan that — every leaf bundle (blamejs +
+  # noble-*) carries a purl/CPE for advisory mapping.
+  osv-scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+      - name: Set up Node.js
+        uses: actions/setup-node@main
+        with:
+          node-version: '>=24.16.0'
+      - name: Build CycloneDX SBOM
+        run: node scripts/build-sbom.js --out build
+      - name: Install OSV-Scanner
+        id: osv_install
+        run: |
+          if curl -sSfL "https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64" -o "${RUNNER_TEMP}/osv-scanner"; then
+            chmod +x "${RUNNER_TEMP}/osv-scanner"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::osv-scanner download failed; skipping scan"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Scan SBOM
+        if: ${{ steps.osv_install.outputs.ok == 'true' }}
+        run: |
+          SBOM=$(ls build/*.cdx.json | head -1)
+          echo "Scanning ${SBOM}"
+          "${RUNNER_TEMP}/osv-scanner" scan --format sarif --output osv.sarif --sbom "${SBOM}" || true
+      - name: Upload SARIF
+        if: ${{ always() && hashFiles('osv.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@main
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
+
+  # ── Gitleaks: committed-secret scan (gate; tests/ allowlisted) ─────
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0  # full history so a secret added then removed is still caught
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

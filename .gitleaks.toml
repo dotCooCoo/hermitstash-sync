@@ -1,0 +1,24 @@
+# Gitleaks configuration for hermitstash-sync.
+#
+# Extends the upstream default ruleset and allowlists paths that are
+# intentionally in-tree and are NOT secrets, so a real leak still fails the
+# scan while expected fixtures / public keys don't raise false positives.
+
+title = "hermitstash-sync"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and in-tree PUBLIC keys are not secrets"
+paths = [
+  # Test suite. Tracked test files carry mock tokens, sample keys, and the
+  # rogue-signer fixtures the suite uses to assert REJECTION — none are real
+  # credentials. The live test secrets (tests/.env, tests/autoupdate-signing.key,
+  # tests/certs/) are gitignored and never reach the repo.
+  '''^tests/''',
+  # In-tree PUBLIC keys — companions to private keys that live only in GitHub
+  # Actions secrets. Public by design.
+  '''^keys/release-pqc-pub\.json$''',
+  '''^lib/autoupdate-pubkey\.js$''',
+]
