@@ -4,14 +4,14 @@
 // codebase-patterns:allow-file process-exit — boot-time gates terminate via process.exit() to surface fail-fast diagnostics before any side effects.
 // codebase-patterns:allow-file inline-require — each IIFE gate cold-loads the blamejs vendor lazily; hoisting would run unrelated boot code before the Node-floor check.
 
-// Node version gate. Floor is 24.14.1 — npm engines is advisory only, so
+// Node version gate. Floor is 24.16.0 — npm engines is advisory only, so
 // check at runtime to fail fast with an actionable error instead of leaking
-// a cryptic stack from a 24.14+ API call deep in vendored blamejs (or one of
-// the security backports between 24.4 and 24.14.1 we now rely on). SEA users
+// a cryptic stack from a 24.16+ API call deep in vendored blamejs (or one of
+// the security backports between 24.4 and 24.16.0 we now rely on). SEA users
 // carry the embedded Node with them so this only fires for from-source
 // installs on a stale runtime.
 (function _enforceNodeFloor() {
-  var FLOOR = { major: 24, minor: 14, patch: 1 }; // allow:raw-byte-literal — semver triple (Node 24.14.1), not byte sizes
+  var FLOOR = { major: 24, minor: 16, patch: 0 }; // allow:raw-byte-literal — semver triple (Node 24.16.0), not byte sizes
   var m = /^v(\d+)\.(\d+)\.(\d+)/.exec(process.versions.node);
   if (!m) return;                                   // unparseable — let it through
   var major = parseInt(m[1], 10);
@@ -25,7 +25,7 @@
     if (minor === FLOOR.minor && patch >= FLOOR.patch) return;
   }
   process.stderr.write(
-    'hermitstash-sync requires Node.js 24.14.1 or newer (current: ' +
+    'hermitstash-sync requires Node.js 24.16.0 or newer (current: ' +
     process.version + ').\n' +
     'Upgrade Node, then re-run. The SEA binary releases ship with their own\n' +
     'embedded Node and are not affected by your system Node version.\n'
