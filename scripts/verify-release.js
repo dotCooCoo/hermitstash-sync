@@ -10,9 +10,9 @@
 // into the install pipeline. The pubkey at `lib/autoupdate-pubkey.js`
 // is operator-owned (this repo's release key).
 //
-// Algorithm + format auto-detected by the standalone verifier:
-//   - ECDSA P-384 (IEEE-P1363 r||s, 96 bytes) — what release.yml emits
-//   - ECDSA P-384 (DER) — accepted for compatibility
+// Algorithm + format auto-detected by the standalone verifier (by length):
+//   - ECDSA P-384 (DER, ~100-104 bytes, SHA3-512) — what release.yml emits
+//   - ECDSA P-384 (IEEE-P1363 r||s, 96 bytes) — also accepted
 //   - Ed25519, ML-DSA-87 — accepted if the pubkey SPKI matches
 //
 // The .sha3-512 sidecar argument is preserved for backward compat with

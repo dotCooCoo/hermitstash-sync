@@ -361,6 +361,47 @@ describe('Auto-update — signature verification', { timeout: 20000 }, () => {
     });
   });
 
+  it('multi-platform release: selects THIS platform .sig, not a foreign or .mldsa.sig sidecar', async () => {
+    // A real release attaches, per platform, BOTH <binary>.sig (P-384 ECDSA)
+    // and <binary>.mldsa.sig (ML-DSA-65, ~3309 bytes). A loose /\.sig$/ picker
+    // matched both AND every other platform's .sig, and b.selfUpdate.poll
+    // claims the first feed match — so every platform fetched the wrong
+    // signature and self-update silently failed. Insert decoys (incl. this
+    // platform's own .mldsa.sig) BEFORE the correct .sig so a first-match
+    // picker grabs a decoy; the platform-anchored pattern must skip them.
+    const version = '9.9.9';
+    const binary = Buffer.from('fake binary payload v9.9.9');
+    const name = makeAssetName(version);
+    const goodSig = signBinary(binary, SIGNING_KEY_PEM);
+
+    const foreignTuples = [
+      ['win', 'x64', '.exe'], ['macos', 'arm64', ''],
+      ['linux', 'x64', ''], ['linux', 'arm64', ''],
+    ].filter(([t, a, e]) => `hermitstash-sync-v${version}-${t}-${a}${e}` !== name);
+
+    const assets = {};
+    // Decoys first — these all end in ".sig" and would be first-matched by /\.sig$/.
+    assets[`${name}.mldsa.sig`] = { body: crypto.randomBytes(3309) }; // this platform, wrong ALGO
+    for (const [t, a, e] of foreignTuples) {
+      const other = `hermitstash-sync-v${version}-${t}-${a}${e}`;
+      assets[other] = { body: Buffer.from(`foreign binary ${other}`) };
+      assets[`${other}.sig`] = { body: crypto.randomBytes(102) };     // foreign platform P-384
+      assets[`${other}.mldsa.sig`] = { body: crypto.randomBytes(3309) };
+    }
+    // Correct platform binary + its valid signature LAST in the feed.
+    assets[name] = { body: binary };
+    assets[`${name}.sig`] = { body: goodSig };
+
+    await swapState({ version, assets }, async () => {
+      let installed = false;
+      const up = mkUpdater();
+      const result = await up.checkOnce(async (install) => { installed = true; await install(); });
+      assert.equal(result.status, 'ready',
+        `expected the platform-anchored .sig to be selected + verified; got ${result.status}${result.error ? ': ' + result.error.message : ''}`);
+      assert.ok(installed, 'install hand-off should have fired with the correct signature selected');
+    });
+  });
+
   async function swapState(newState, fn) {
     const saved = { version: state.version, assets: state.assets };
     state.version = newState.version;
