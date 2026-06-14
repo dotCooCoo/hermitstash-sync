@@ -33,7 +33,15 @@ jobs:
   # lint job (same rules, same pins) so a red ci.yml always implies a red
   # docker-publish. No PR comment here — tag pushes aren't PR events.
   lint:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # This workflow_run pipeline runs with the privileges of the default
+    # branch but is triggered by any completed run of "Release". Each job
+    # below checks out github.event.workflow_run.head_sha and executes it
+    # (npm install, docker build, smoke). Guard every privileged job so it
+    # only proceeds when the triggering run came from THIS repository — a
+    # fork-originated run can never have its code checked out + executed here.
+    # Release only fires on upstream tag pushes, so this is always true for a
+    # real release; the guard just closes the untrusted-checkout class.
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -147,6 +155,8 @@ jobs:
 
   build-and-push:
     needs: lint
+    # Only build + publish from a run triggered by this repository (see lint).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -303,7 +313,8 @@ jobs:
   # actually boots end-to-end, not just the intermediate local build.
   smoke-test:
     needs: build-and-push
-    if: ${{ !inputs.dry_run && needs.build-and-push.outputs.digest }}
+    # Trusted-origin guard (see lint) AND the existing dry-run / digest gates.
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && !inputs.dry_run && needs.build-and-push.outputs.digest }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
