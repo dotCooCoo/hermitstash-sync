@@ -47,10 +47,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@main
+        # zizmor: ignore[cache-poisoning] this smoke job builds with load:true
+        # (no push) and the project has zero npm deps, so there is no cached
+        # toolchain or published image for a poisoned cache to reach.
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '>=24.16.0'
 
@@ -63,7 +68,7 @@ jobs:
         run: node --test scripts/test-codebase-patterns.js
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@master
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Resolve latest published release tag
         id: version
@@ -76,7 +81,7 @@ jobs:
           echo "Latest released version: v${VERSION}"
 
       - name: Build image (amd64 only for CI speed)
-        uses: docker/build-push-action@master
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           platforms: linux/amd64
@@ -84,8 +89,6 @@ jobs:
           tags: ${{ env.IMAGE }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # --- Packaging checks (shared with docker-publish smoke-test) ---
 
