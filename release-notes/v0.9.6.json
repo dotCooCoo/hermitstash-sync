@@ -1,0 +1,101 @@
+{
+  "version": "0.9.6",
+  "date": "2026-06-14",
+  "headline": "Restores in-binary auto-update and hardens the daemon, transfers, and release pipeline",
+  "summary": "The in-binary auto-update path was silently failing signature verification on every platform; this release fixes it and hardens the daemon's shutdown and self-replace, file hashing, the file watcher, and the encrypted/throttled transfer paths. It also adopts the framework's transient-lock-resilient rename, pins and audits the release pipeline, and advances the vendored framework to v0.15.11.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Auto-update verifies the correct signature again",
+          "body": "The in-binary updater selected the wrong signature asset — any release file ending in .sig, including another platform's signature and the larger ML-DSA sidecar — and failed verification on every platform, silently disabling self-update for bare-binary installs. The updater now pins the running platform's own P-384 signature and refuses any mismatched asset/signature pairing."
+        },
+        {
+          "title": "Graceful shutdown is no longer cut short by stop",
+          "body": "The stop command escalated to SIGKILL after five seconds, interrupting the daemon's own orderly drain, which is budgeted up to about thirty seconds. The stop timeout now matches that budget, and a forced kill is reported plainly instead of being shown as a clean shutdown."
+        },
+        {
+          "title": "Auto-update no longer races itself to a dead state",
+          "body": "On a successful self-replace the new daemon could exit with an already-running error because the previous process still held the pidfile, leaving the host with no daemon. The handoff now waits for the predecessor to release the pidfile before the replacement starts."
+        },
+        {
+          "title": "A special file in the sync folder can no longer stall hashing",
+          "body": "The single-file checksum path lacked the symlink, FIFO, device, and size-cap guards the parallel path applies, so a non-regular file could hang the hash or escape the size ceiling. Both paths now share the same hardened hashing primitive."
+        },
+        {
+          "title": "Non-ASCII ignore and include patterns match live edits",
+          "body": "The watcher evaluated ignore and include patterns against a non-normalized path while emitting a normalized one, so a pattern with non-ASCII characters could match during a full rescan but not on live edits. Both paths now normalize identically before filtering."
+        },
+        {
+          "title": "The watcher recovers from a failed pattern reload",
+          "body": "If reloading ignore patterns failed because the sync root was momentarily inaccessible, the watcher could be left silently inactive behind a success-shaped log line. The failure now routes into the watcher's recovery path and surfaces a degraded signal."
+        },
+        {
+          "title": "A transient server error no longer reports a permanent failure",
+          "body": "A transient 5xx during the WebSocket handshake was reported to the sync engine as a permanent rejection asking the operator to restart the daemon, even while the client was already reconnecting on its own. Only terminal rejections now surface that way."
+        },
+        {
+          "title": "Encrypted requests recover from a server key rotation",
+          "body": "After the server rotated its api-encrypt keypair, an encrypted request such as a file rename failed without rebuilding the session. It now rebuilds the session and retries once, matching the existing recovery for an expired session."
+        },
+        {
+          "title": "Bandwidth-throttled transfers are not aborted by the idle timeout",
+          "body": "A low configured upload or download rate limit could make a single chunk's throttle wait exceed the fixed thirty-second idle timeout and abort an otherwise-healthy transfer. The idle timeout now scales to the configured rate."
+        },
+        {
+          "title": "Diagnose bundles drop the OS username and home-directory layout",
+          "body": "The support-bundle info file embedded the absolute working directory and config directory, leaking the OS username and home-directory layout the bundle documents as out of scope. Both are now reduced to a basename."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Final file renames ride out transient locks",
+          "body": "Config saves, certificate rotation, the verified-download commit, and server-driven moves now use the framework's retry-on-transient-lock rename, so an antivirus scanner, search indexer, or file-sync client briefly holding a destination no longer fails the operation. This especially helps a sync folder that another client also watches."
+        },
+        {
+          "title": "Console log output is redacted like the log file",
+          "body": "The colored terminal and stdout log output now passes through the same redactor as the rotated log file, so a secret in a log record's metadata is masked on the console — journald, container logs, a terminal — exactly as it already was on disk."
+        },
+        {
+          "title": "The from-source runtime gate matches the declared floor",
+          "body": "The startup version check now requires Node.js 24.16.0, matching the engines floor, CI, and the runtime embedded in the release binaries. Release binaries carry their own runtime and are unaffected."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "The release and image-publish pipeline is pinned and audited",
+          "body": "Every GitHub Actions reference in the release, image-publish, and continuous-integration workflows is pinned to a commit SHA, the privileged image-publish pipeline is guarded so it cannot check out and run untrusted code, and the repository now runs additional static security analysis over its own workflows and source on every change."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored blamejs advances to v0.15.11",
+          "body": "The bundled framework moves to v0.15.11. The transport, crypto, atomic-file, and validation surfaces this client consumes are unchanged in behavior; the update supplies the transient-lock-resilient rename now adopted on the data path and carries upstream security and correctness fixes."
+        }
+      ]
+    },
+    {
+      "heading": "Migration",
+      "items": [
+        {
+          "title": "Bare-binary installs on v0.9.5 must update to v0.9.6 by hand",
+          "body": "Because in-binary auto-update could not complete on v0.9.5, a bare-binary install on that version cannot pull v0.9.6 automatically and must download it from the releases page once. After updating to v0.9.6, auto-update resumes for later versions. Installs managed by systemd, Docker, Podman, or Kubernetes use the external updater or an image pull and need no manual step."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "Release verification + signatures", "url": "https://github.com/dotCooCoo/hermitstash-sync/blob/main/SECURITY.md" },
+    { "label": "blamejs framework", "url": "https://github.com/blamejs/blamejs" }
+  ]
+}
