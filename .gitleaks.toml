@@ -17,6 +17,15 @@ paths = [
   # credentials. The live test secrets (tests/.env, tests/autoupdate-signing.key,
   # tests/certs/) are gitignored and never reach the repo.
   '''^tests/''',
+  # Vendored upstream tree (blamejs + the noble-* bundles it vendors). This is
+  # third-party code checked in verbatim and integrity-verified by the SHA-256
+  # hashes in vendor/MANIFEST.json (the boot gate refuses to start on a
+  # mismatch) — it holds no hermitstash-sync credentials, and its own test
+  # fixtures + doc prose carry mock tokens / "api-key:" descriptions that trip
+  # generic rules. Excluded from secret scanning to match the vendor exclusion
+  # the other scanners already apply (semgrep --exclude vendor, CodeQL
+  # paths-ignore vendor/**, ESLint), so a real leak in our own code still fails.
+  '''^vendor/''',
   # In-tree PUBLIC keys — companions to private keys that live only in GitHub
   # Actions secrets. Public by design.
   '''^keys/release-pqc-pub\.json$''',
