@@ -273,11 +273,13 @@ describe('Empty and Edge Cases', { timeout: 30000 }, () => {
     assert.equal(res.statusCode, 200);
   });
 
-  it('upload endpoint handles requests without API key', async () => {
+  it('upload endpoint rejects an anonymous write to an owner-bound bundle', async () => {
     var bundle = createBundleViaDb(ctx.dbPath, { bundleType: 'sync' });
     var res = await uploadFile(ctx.url, bundle.bundleId, 'noauth.txt', 'test content', null);
-    // Public uploads are allowed by design (/drop endpoints skip auth via requireScope).
-    // Anonymous requests pass through scope-policy when req.apiKey is absent.
-    assert.strictEqual(res.statusCode, 200, 'Anonymous upload should succeed with 200, got ' + res.statusCode);
+    // A sync bundle is owner-bound. An upload carrying no API key (and no owner
+    // session) must not be able to write into another user's bundle — the owner
+    // check on /drop/file rejects it. (A public drop bundle carries no owner and
+    // is still uploadable anonymously; this case is the owner-bound one.)
+    assert.strictEqual(res.statusCode, 403, 'Anonymous upload to an owner-bound bundle should be rejected with 403, got ' + res.statusCode);
   });
 });
