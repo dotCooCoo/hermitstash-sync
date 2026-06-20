@@ -1,0 +1,66 @@
+{
+  "version": "0.9.7",
+  "date": "2026-06-20",
+  "headline": "Closes silent local data loss on server renames, stops a status command from resetting sync state, and prevents a healthy auto-update from being rolled back",
+  "summary": "Two server-driven rename paths could mark a file fully synced when its bytes never reached disk, leaving it permanently missing locally while reported as synced; this release closes both. A read-only status or stats command could trigger destructive recovery on the running daemon's state database, and auto-update could downgrade a healthy build after an unrelated restart — both are fixed. The release also adds a tamper-resistant read of the stored credential and advances the vendored framework to v0.15.13.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A server rename no longer loses a file locally",
+          "body": "If a file's download had not yet landed and the server then renamed it, the client recorded the new name as fully synced even though no bytes existed on disk, and nothing ever re-fetched them — the file was permanently missing while reported as synced. A rename now records a synced state only once the bytes are present and match the server; otherwise it re-downloads the file."
+        },
+        {
+          "title": "Case-only renames no longer drop a not-yet-downloaded file",
+          "body": "On case-folding filesystems, a case-variant server event for a file whose download had failed could mark it synced from the server's checksum alone, with no local bytes — the same unrecoverable missing-file state. The client now requires the local content to be present and matching before recording a synced state."
+        },
+        {
+          "title": "A status or stats command can no longer reset the running daemon's state",
+          "body": "Reading sync status or stats opened the local state database with destructive recovery enabled, so a transient integrity hiccup while the daemon was writing could rename the live database aside and start an empty one, forcing a full resync. These read-only commands now refuse recovery and leave the database untouched."
+        },
+        {
+          "title": "Auto-update no longer downgrades a healthy build after a restart",
+          "body": "A restart for any unrelated reason — a reboot, a service restart, an operator stop and start — during the post-update probation window could be mistaken for a crash and roll the healthy new build back to its predecessor. The daemon now records reaching a running engine durably, so a restart across the window is recognized as a healthy restart and not rolled back; a marker with no valid install time is cleared instead of forcing a downgrade."
+        },
+        {
+          "title": "Machine-readable stats output is indented again",
+          "body": "The stats command with --json emitted a single minified line instead of the intended indented object. It now prints two-space-indented JSON."
+        },
+        {
+          "title": "A state-database migration failure now surfaces instead of corrupting later writes",
+          "body": "A one-time column migration on the local state database swallowed every error, so a transient failure could leave the column missing and make later writes throw partway through a sync. The migration now ignores only the already-present case and surfaces any real failure when the database is opened."
+        },
+        {
+          "title": "Ignore and include warnings match actual behavior for wildcard path patterns",
+          "body": "A path pattern containing a wildcard was warned as matching nothing while the matcher actually applied it to a directory whose name contained a literal wildcard character. The matcher and the warning now agree — such a pattern matches nothing."
+        },
+        {
+          "title": "The support bundle no longer includes the PID file as a log",
+          "body": "The diagnostics bundle swept the PID file into its log directory by prefix match. It now collects only the active log file and its rotated copies."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Tamper-resistant read of the stored credential",
+          "body": "When the API key is held in the on-disk fallback rather than the OS keychain, the client now reads it in a way that binds the returned bytes to the opened file and refuses a symlinked or swapped source, closing a check-then-read race on the credential file."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored framework advanced to v0.15.13",
+          "body": "The vendored blamejs framework moves to v0.15.13, which routes file reads, injected-dependency and numeric-option validation, and markup escaping through shared hardened primitives and adds a time-of-check/time-of-use-safe file read used here for the credential fallback."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "blamejs v0.15.13 release", "url": "https://github.com/blamejs/blamejs/releases/tag/v0.15.13" }
+  ]
+}

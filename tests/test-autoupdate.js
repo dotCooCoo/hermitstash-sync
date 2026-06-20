@@ -785,6 +785,101 @@ describe('Auto-update — rollback & probation', { timeout: 10000 }, () => {
     assert.deepEqual(exits, [0]);
   });
 
+  it('healthy restart past probation window: completes probation, does NOT downgrade a healthy binary', async () => {
+    const dir = tempDir('rb');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    fs.writeFileSync(execPath, 'HEALTHY NEW', { mode: 0o755 });
+    fs.writeFileSync(prevPath, 'OLD', { mode: 0o755 });
+    // A prior boot reached a running engine (confirmHealthy stamped healthyAt);
+    // the daemon was then restarted for an unrelated reason (systemd Restart=,
+    // reboot, operator stop/start) past the probation window. This on-disk
+    // state used to be indistinguishable from a crash and forced a downgrade.
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9',
+      prevBinaryPath: prevPath,
+      installedAt: Date.now() - 60_000,
+      healthyAt: Date.now() - 55_000,
+    }));
+
+    const spawns = []; const exits = [];
+    const up = mkRollbackUpdater({
+      currentVersion: '9.9.9',
+      markerPath,
+      execPath,
+      spawnCapture: spawns,
+      exitCapture: exits,
+    });
+    assert.equal(await up.checkRollback(), 'probation-complete');
+    // The healthy binary stays in place — no downgrade, no restart.
+    assert.equal(fs.readFileSync(execPath, 'utf8'), 'HEALTHY NEW');
+    assert.equal(fs.existsSync(markerPath), false);
+    assert.equal(fs.existsSync(prevPath), false, 'prev cleaned up once probation completes');
+    assert.equal(spawns.length, 0);
+    assert.equal(exits.length, 0);
+  });
+
+  it('confirmHealthy stamps healthyAt into an in-probation marker, preserving installedAt', async () => {
+    const dir = tempDir('rb');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const installedAt = Date.now();
+    fs.writeFileSync(execPath, 'new', { mode: 0o755 });
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9',
+      prevBinaryPath: path.join(dir, 'hs.prev'),
+      installedAt,
+    }));
+
+    const up = mkRollbackUpdater({
+      currentVersion: '9.9.9',
+      markerPath,
+      execPath,
+      spawnCapture: [],
+      exitCapture: [],
+    });
+    up.confirmHealthy();
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    assert.equal(marker.installedAt, installedAt, 'installedAt preserved');
+    assert.ok(marker.healthyAt > 0, 'healthyAt stamped');
+
+    // No-op for a marker belonging to a different version.
+    fs.writeFileSync(markerPath, JSON.stringify({ newVersion: '1.2.3', installedAt }));
+    up.confirmHealthy();
+    const foreign = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    assert.equal(foreign.healthyAt, undefined, 'foreign-version marker left untouched');
+  });
+
+  it('marker with no valid installedAt: clears without rollback (no spurious downgrade)', async () => {
+    const dir = tempDir('rb');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    fs.writeFileSync(execPath, 'NEW', { mode: 0o755 });
+    fs.writeFileSync(prevPath, 'OLD', { mode: 0o755 });
+    // Missing installedAt (a torn or legacy marker). The old age math treated
+    // it as 0, forcing an immediate rollback; now it is cleared instead.
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9',
+      prevBinaryPath: prevPath,
+    }));
+
+    const spawns = []; const exits = [];
+    const up = mkRollbackUpdater({
+      currentVersion: '9.9.9',
+      markerPath,
+      execPath,
+      spawnCapture: spawns,
+      exitCapture: exits,
+    });
+    assert.equal(await up.checkRollback(), 'stale-cleared');
+    assert.equal(fs.readFileSync(execPath, 'utf8'), 'NEW', 'no downgrade');
+    assert.equal(fs.existsSync(markerPath), false);
+    assert.equal(spawns.length, 0);
+    assert.equal(exits.length, 0);
+  });
+
   it('stale marker (version mismatch): clears marker without rollback', async () => {
     const dir = tempDir('rb');
     const markerPath = path.join(dir, 'update-pending.json');
