@@ -61,16 +61,34 @@ function licenseBlock(entry) {
   return [{ license: { name: entry.license } }];
 }
 
-function hashesBlock(entry) {
-  const out = [];
-  if (!entry || !entry.hashes) return out;
-  for (const slot of Object.keys(entry.hashes)) {
-    const v = entry.hashes[slot];
-    if (typeof v !== 'string') continue;
-    const m = /^sha256:([a-f0-9]{64})$/i.exec(v);
-    if (m) out.push({ alg: 'SHA-256', content: m[1] });
+// Translate a manifest entry's hash map into CycloneDX integrity data.
+// `component.hashes[]` is a set of digests of the SAME artifact under DIFFERENT
+// algorithms — so a single-artifact entry (one hash slot) maps cleanly there.
+// A vendored DIRECTORY/manifest entry instead carries a per-FILE hash map (many
+// slots, all SHA-256 of different files); emitting those as component.hashes
+// would assert that one component simultaneously hashes to many contradictory
+// SHA-256 values, which breaks hash-keyed SBOM consumers (Dependency-Track,
+// Dependency-Check, Snyk). For those, surface each file digest as a namespaced
+// property, where multiple values are valid.
+function integrityBlocks(entry) {
+  const hashes = [];
+  const properties = [];
+  if (!entry || !entry.hashes) return { hashes, properties };
+  const sha256 = (slot) => {
+    const m = /^sha256:([a-f0-9]{64})$/i.exec(entry.hashes[slot]);
+    return m ? m[1] : null;
+  };
+  const slots = Object.keys(entry.hashes).filter((s) => typeof entry.hashes[s] === 'string');
+  if (slots.length === 1) {
+    const h = sha256(slots[0]);
+    if (h) hashes.push({ alg: 'SHA-256', content: h });
+  } else {
+    for (const slot of slots) {
+      const h = sha256(slot);
+      if (h) properties.push({ name: `hermitstash:fileHash:${slot}`, value: `sha256:${h}` });
+    }
   }
-  return out;
+  return { hashes, properties };
 }
 
 function purlFor(entry, fallbackPkg) {
@@ -104,11 +122,11 @@ function buildComponent(key, entry) {
   const extRefs = [];
   if (entry.source) extRefs.push({ type: 'vcs', url: entry.source });
   if (extRefs.length) c.externalReferences = extRefs;
-  const hashes = hashesBlock(entry);
+  const { hashes, properties: hashProps } = integrityBlocks(entry);
   if (hashes.length) c.hashes = hashes;
-  if (entry.bundledAt) {
-    c.properties = [{ name: 'hermitstash:bundledAt', value: entry.bundledAt }];
-  }
+  const props = hashProps.slice();
+  if (entry.bundledAt) props.push({ name: 'hermitstash:bundledAt', value: entry.bundledAt });
+  if (props.length) c.properties = props;
   return c;
 }
 

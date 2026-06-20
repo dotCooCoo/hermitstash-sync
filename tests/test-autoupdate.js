@@ -785,22 +785,22 @@ describe('Auto-update — rollback & probation', { timeout: 10000 }, () => {
     assert.deepEqual(exits, [0]);
   });
 
-  it('healthy restart past probation window: completes probation, does NOT downgrade a healthy binary', async () => {
+  it('clean restart past probation window: completes probation, does NOT downgrade a healthy binary', async () => {
     const dir = tempDir('rb');
     const markerPath = path.join(dir, 'update-pending.json');
     const execPath = path.join(dir, 'hs');
     const prevPath = path.join(dir, 'hs.prev');
     fs.writeFileSync(execPath, 'HEALTHY NEW', { mode: 0o755 });
     fs.writeFileSync(prevPath, 'OLD', { mode: 0o755 });
-    // A prior boot reached a running engine (confirmHealthy stamped healthyAt);
-    // the daemon was then restarted for an unrelated reason (systemd Restart=,
-    // reboot, operator stop/start) past the probation window. This on-disk
-    // state used to be indistinguishable from a crash and forced a downgrade.
+    // A prior boot ran then exited cleanly during probation (the shutdown
+    // handler stamped gracefulAt); the daemon was restarted for an unrelated
+    // reason (systemd Restart=, reboot, operator stop/start) past the window.
+    // A clean exit is proof the binary ran — distinguishing it from a crash.
     fs.writeFileSync(markerPath, JSON.stringify({
       newVersion: '9.9.9',
       prevBinaryPath: prevPath,
       installedAt: Date.now() - 60_000,
-      healthyAt: Date.now() - 55_000,
+      gracefulAt: Date.now() - 55_000,
     }));
 
     const spawns = []; const exits = [];
@@ -820,7 +820,37 @@ describe('Auto-update — rollback & probation', { timeout: 10000 }, () => {
     assert.equal(exits.length, 0);
   });
 
-  it('confirmHealthy stamps healthyAt into an in-probation marker, preserving installedAt', async () => {
+  it('crash-loop past probation window (no clean exit) rolls back even after reaching a run once', async () => {
+    const dir = tempDir('rb');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    fs.writeFileSync(execPath, 'BROKEN NEW', { mode: 0o755 });
+    fs.writeFileSync(prevPath, 'GOOD OLD', { mode: 0o755 });
+    // Past the window, same version, but NO gracefulAt — the binary never
+    // survived to a clean stop (it crashed each boot). This must roll back; a
+    // single successful start is NOT recorded as health, so it can't escape.
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9',
+      prevBinaryPath: prevPath,
+      installedAt: Date.now() - 60_000,
+    }));
+
+    const spawns = []; const exits = [];
+    const up = mkRollbackUpdater({
+      currentVersion: '9.9.9',
+      markerPath,
+      execPath,
+      spawnCapture: spawns,
+      exitCapture: exits,
+    });
+    assert.equal(await up.checkRollback(), 'rolled-back');
+    assert.equal(fs.readFileSync(execPath, 'utf8'), 'GOOD OLD');
+    assert.equal(fs.existsSync(markerPath), false);
+    assert.deepEqual(exits, [0]);
+  });
+
+  it('markGracefulShutdown stamps gracefulAt into an in-probation marker, preserving installedAt', async () => {
     const dir = tempDir('rb');
     const markerPath = path.join(dir, 'update-pending.json');
     const execPath = path.join(dir, 'hs');
@@ -839,16 +869,16 @@ describe('Auto-update — rollback & probation', { timeout: 10000 }, () => {
       spawnCapture: [],
       exitCapture: [],
     });
-    up.confirmHealthy();
+    up.markGracefulShutdown();
     const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
     assert.equal(marker.installedAt, installedAt, 'installedAt preserved');
-    assert.ok(marker.healthyAt > 0, 'healthyAt stamped');
+    assert.ok(marker.gracefulAt > 0, 'gracefulAt stamped');
 
     // No-op for a marker belonging to a different version.
     fs.writeFileSync(markerPath, JSON.stringify({ newVersion: '1.2.3', installedAt }));
-    up.confirmHealthy();
+    up.markGracefulShutdown();
     const foreign = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-    assert.equal(foreign.healthyAt, undefined, 'foreign-version marker left untouched');
+    assert.equal(foreign.gracefulAt, undefined, 'foreign-version marker left untouched');
   });
 
   it('marker with no valid installedAt: clears without rollback (no spurious downgrade)', async () => {

@@ -1,0 +1,51 @@
+{
+  "version": "0.9.8",
+  "date": "2026-06-20",
+  "headline": "Corrects a rename data-integrity bug and an auto-update rollback gap in 0.9.7, and hardens uploads, catch-up status, the release SBOM, and from-source boot",
+  "summary": "Two changes in 0.9.7 were incomplete: a server-driven rename could record an unrelated local file as synced and later upload its bytes, and the auto-update health check could let a build that crashes shortly after starting avoid rollback while deleting the build it would roll back to. Both are corrected. This release also refuses an upload whose path carries a control character, stops sync status from briefly reporting synced mid-catch-up, removes contradictory hashes from the release SBOM, keeps the reconnect position from regressing, and verifies the vendored bundle before loading it on from-source installs. Operators on 0.9.7 should upgrade promptly.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A server rename can no longer mark an unrelated local file as synced",
+          "body": "When a file's local copy was absent and an unrelated file already occupied the rename destination, the client could record that unrelated file as fully synced and later upload its bytes to the server under the renamed path. A synced state is now recorded only when the client actually moved the file and its bytes match the server; otherwise the file is re-downloaded."
+        },
+        {
+          "title": "Auto-update reliably rolls back a build that does not stay up",
+          "body": "The post-update health check treated the new build merely reaching a running engine once as proof of health, so a build that started then crashed repeatedly could be recorded as healthy, skip the rollback, and delete the previous build it would have restored. Health is now recorded only on a clean, signal-handled shutdown, so a crashing build rolls back to its predecessor while a reboot or operator restart during the probation window is correctly treated as healthy."
+        },
+        {
+          "title": "An upload no longer lets a control character in a path break the request framing",
+          "body": "A file whose path contained a control character (legal on some platforms) could break out of the multipart upload body and reframe the request the server parses. Such a path is now refused at upload with an actionable error."
+        },
+        {
+          "title": "Sync status no longer briefly reports synced during catch-up",
+          "body": "While catching up after connecting, a finishing transfer could flip the reported state to synced even though catch-up events were still pending. Catch-up now completes only when the server signals it and all queued work has drained."
+        },
+        {
+          "title": "The reconnect position no longer regresses on an out-of-order event",
+          "body": "An out-of-order or replayed event could push the reconnect cursor below the last applied position, making the server resend already-applied events after a reconnect. The reconnect cursor now tracks the persisted, monotonic position."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "From-source boot verifies the vendored bundle before loading it",
+          "body": "From-source startup now re-hashes every vendored framework file against the recorded checksums before any of that code is loaded, so a tampered vendored file is refused before it can execute rather than after. Single-executable release binaries carry their own signed integrity check and are unaffected."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Release SBOM no longer emits contradictory hashes for the vendored framework",
+          "body": "The CycloneDX SBOM recorded the vendored framework's per-file digests as many same-algorithm hashes on one component, asserting that a single component hashes to several different values and confusing hash-keyed SBOM consumers. Per-file digests are now recorded as component properties, leaving a single valid hash where one applies."
+        }
+      ]
+    }
+  ]
+}

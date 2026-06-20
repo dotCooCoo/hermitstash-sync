@@ -191,8 +191,11 @@ describe('Server-event serialization + durable seq cursor', { timeout: 30000 }, 
     });
 
     try {
-      // Pretend we're connected and catching up so SYNCED is reachable.
-      h.engine._setState(SYNC_STATE.CATCHING_UP);
+      // Steady state (post-catch-up): a normal download must show DOWNLOADING
+      // while in flight and only return to SYNCED once it commits. Catch-up
+      // downloads intentionally stay CATCHING_UP and complete only on the
+      // trailing heartbeat — that path is covered by the heartbeat tests below.
+      h.engine._setState(SYNC_STATE.SYNCED);
 
       const states = [];
       h.engine.on('state', (s) => states.push(s));
@@ -245,6 +248,34 @@ describe('Server-event serialization + durable seq cursor', { timeout: 30000 }, 
       h.engine._setState(SYNC_STATE.CATCHING_UP);
       h.engine._handleHeartbeat({ seq: 7 });
       assert.equal(h.engine.state, SYNC_STATE.SYNCED, 'genuine caught-up heartbeat completes catch-up once work drained');
+    } finally {
+      cleanup(h);
+    }
+  });
+
+  it('a catch-up download completing stays CATCHING_UP until the trailing heartbeat', async () => {
+    const content = 'catchup-bytes';
+    const checksum = sha3(content);
+    const h = makeEngine({
+      downloads: { 'file-cu': { content, delayMs: 40 } },
+    });
+    try {
+      h.engine._setState(SYNC_STATE.CATCHING_UP);
+
+      // A catch-up file_added download runs to completion.
+      h.engine._onServerMessage({ type: MSG.FILE_ADDED, fileId: 'file-cu', relativePath: 'cu2.txt', checksum, size: content.length, seq: 9 });
+      await h.engine._applyChain;
+
+      // The download committed and no transfer remains, but NO caught-up
+      // heartbeat has arrived. The engine must stay CATCHING_UP rather than let
+      // the finishing transfer flip it to SYNCED — that premature flip both
+      // reports SYNCED with catch-up events possibly still queued and destroys
+      // the CATCHING_UP state the heartbeat's completion guard depends on.
+      assert.equal(h.engine.state, SYNC_STATE.CATCHING_UP, 'stays CATCHING_UP until the heartbeat, not SYNCED');
+
+      // The genuine caught-up-at-seq heartbeat now owns the completion.
+      h.engine._handleHeartbeat({ seq: 9 });
+      assert.equal(h.engine.state, SYNC_STATE.SYNCED, 'heartbeat completes catch-up -> SYNCED');
     } finally {
       cleanup(h);
     }

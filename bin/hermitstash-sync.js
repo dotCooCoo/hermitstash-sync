@@ -33,6 +33,79 @@
   process.exit(78); // EX_CONFIG (sysexits)
 })();
 
+// Vendor-tree integrity PRECHECK — must run before any vendored code is
+// loaded. The PQC self-test below require()s vendor/blamejs, which executes the
+// vendored bundle's import-time code (including noble-post-quantum.cjs); the
+// configDrift-based integrity gate further down is itself part of blamejs, so
+// by the time it runs the very modules it validates have already executed. A
+// tampered *.cjs would therefore get one boot-time arbitrary-code execution
+// before the after-the-fact check could refuse it. This pass uses ONLY node:fs
+// + node:crypto + node:path — no vendored code — to re-hash every consumed file
+// against the recorded SHA256s FIRST, making the integrity check a true
+// precondition for loading the bundle. SEA bypass mirrors the gate below (the
+// vendor tree is embedded in the binary, not on disk to re-hash).
+(function _verifyVendorIntegrityPreload() {
+  try {
+    var sea;
+    try { sea = require('node:sea'); } catch (_e) { sea = null; }
+    if (sea && typeof sea.isSea === 'function' && sea.isSea()) return;
+
+    var nodeFs = require('node:fs');
+    var nodeCrypto = require('node:crypto');
+    var nodePath = require('node:path');
+    var root = nodePath.join(__dirname, '..');
+    // The manifest is a trusted in-repo file; cap the read defensively anyway,
+    // mirroring b.safeJson's ceiling (which isn't loadable this early).
+    var manifestRaw = nodeFs.readFileSync(nodePath.join(root, 'vendor', 'MANIFEST.json'), 'utf8');
+    if (manifestRaw.length > 1048576) {                                          // allow:raw-byte-literal — 1 MiB manifest ceiling
+      process.stderr.write('hermitstash-sync: vendor/MANIFEST.json is implausibly large — refusing.\n');
+      process.exit(70);
+    }
+    // b.safeJson is unavailable before the vendored bundle is loaded + verified;
+    // JSON.parse on this trusted, size-capped in-repo manifest is the bootstrap
+    // exception this whole precheck exists to enable.
+    var manifest = JSON.parse(manifestRaw);                                      // allow:bare-json-parse — pre-vendor-load precheck; b.safeJson not yet loadable; trusted size-capped in-repo manifest
+    var pkgs = (manifest && manifest.packages) || {};
+    var mismatches = [];
+    for (var name in pkgs) {
+      if (!Object.prototype.hasOwnProperty.call(pkgs, name)) continue;
+      var pkg = pkgs[name];
+      if (!pkg || !pkg.files || !pkg.hashes) continue;
+      for (var kind in pkg.files) {
+        if (!Object.prototype.hasOwnProperty.call(pkg.files, kind)) continue;
+        var rel = pkg.files[kind];
+        var expected = pkg.hashes[kind];
+        if (typeof rel !== 'string' || typeof expected !== 'string') continue;
+        var actual;
+        try {
+          actual = 'sha256:' + nodeCrypto.createHash('sha256').update(nodeFs.readFileSync(nodePath.join(root, rel))).digest('hex');
+        } catch (_e) {
+          actual = '<read-failed>';
+        }
+        if (actual !== expected) mismatches.push(rel);
+      }
+    }
+    if (mismatches.length > 0) {
+      process.stderr.write(
+        'hermitstash-sync: vendor integrity precheck failed.\n' +
+        '  ' + mismatches.length + ' file(s) do not match the recorded SHA256 in\n' +
+        '  vendor/MANIFEST.json. Mismatches:\n'
+      );
+      for (var i = 0; i < mismatches.length && i < 5; i += 1) {
+        process.stderr.write('    - ' + mismatches[i] + '\n');
+      }
+      process.stderr.write(
+        '  Re-clone the repository or run `node scripts/vendor-hash.js`\n' +
+        '  if the vendor was deliberately refreshed.\n'
+      );
+      process.exit(70); // EX_SOFTWARE
+    }
+  } catch (e) {
+    process.stderr.write('hermitstash-sync: vendor integrity precheck threw (' + e.message + ').\n');
+    process.exit(70);
+  }
+})();
+
 // Boot-time PQC Known-Answer Test. Validates the vendored ML-KEM-1024
 // keygen → encapsulate → decapsulate round-trip produces matching 32-byte
 // shared secrets before the daemon performs any real crypto. If the
