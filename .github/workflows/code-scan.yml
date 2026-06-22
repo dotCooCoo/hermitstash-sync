@@ -64,7 +64,12 @@ jobs:
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: zizmor --format sarif . > zizmor.sarif || true
+        # Scope to first-party workflows. Passing `.` also descends into
+        # vendored dependencies' own `.github/workflows/` (e.g. vendor/blamejs),
+        # whose pipelines never run in this repo, surfacing findings about
+        # third-party CI we don't control. Mirrors the semgrep job's vendor
+        # exclusion — both keep the scan to code that executes here.
+        run: zizmor --format sarif .github/workflows/ > zizmor.sarif || true
       - name: Upload SARIF
         if: ${{ always() && hashFiles('zizmor.sarif') != '' }}
         continue-on-error: true
