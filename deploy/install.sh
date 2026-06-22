@@ -12,7 +12,8 @@
 #   1. Detects arch (x64/arm64), resolves the latest GitHub Release
 #   2. Downloads the signed SEA binary + its SHA3-512 + its P-384 ECDSA .sig
 #   3. Verifies both against the pubkey embedded in lib/autoupdate-pubkey.js
-#      for that release (requires node; falls back to sha3sum-only with warning)
+#      for that release (requires node; refuses to install without it unless
+#      HERMITSTASH_ALLOW_UNVERIFIED=1 forces a weaker checksum-only path)
 #   4. Creates a 'hermit' system user + /var/lib/hermitstash-sync
 #   5. Installs checked-in systemd units (from the same release) — hardened
 #      daemon unit + opt-in update timer + matching env files
@@ -30,6 +31,9 @@
 #   SERVICE_USER             daemon user             (default: hermit)
 #   REPO                     repo slug               (default: dotCooCoo/hermitstash-sync)
 #   HERMITSTASH_AUTO_UPDATE  "yes" to enable timer   (default: unset = off)
+#   HERMITSTASH_ALLOW_UNVERIFIED  "1" to install without the ECDSA signature
+#                            gate when node is absent (checksum-only, weaker;
+#                            default refuses)
 #
 # Uninstall:
 #   curl -fsSL https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/deploy/uninstall.sh | sudo bash
@@ -132,10 +136,17 @@ log "Verifying SHA3-512 + P-384 ECDSA signature"
 if command -v node >/dev/null 2>&1; then
   ( cd "$WORK" && node scripts/verify-release.js bin bin.sha3-512 bin.sig )
   log "Verification OK"
-else
-  warn "node not installed — falling back to sha3sum-only verification (signature NOT checked)."
+elif [ "${HERMITSTASH_ALLOW_UNVERIFIED:-0}" = "1" ]; then
+  # Explicit operator opt-out of the signature gate. The .sha3-512 sidecar
+  # travels over the same channel as the binary, so a checksum match is NOT
+  # an integrity substitute for the detached ECDSA signature — an attacker
+  # who can serve a modified binary can serve a matching checksum too. This
+  # path exists only for hosts that genuinely cannot run Node; it is never
+  # the default.
+  warn "HERMITSTASH_ALLOW_UNVERIFIED=1 — skipping ECDSA signature, checksum-only."
   if ! command -v sha3sum >/dev/null 2>&1; then
-    err "Neither node nor sha3sum is available. Install one: apt install nodejs  (or libdigest-sha3-perl)."
+    err "Neither node nor sha3sum is available. Install Node.js (apt install nodejs) for full"
+    err "signature verification, or sha3sum (libdigest-sha3-perl) for the checksum-only path."
     exit 1
   fi
   EXPECTED=$(awk '{print $1}' "${WORK}/bin.sha3-512")
@@ -144,7 +155,15 @@ else
     err "SHA3-512 mismatch. Refusing to install."
     exit 1
   fi
-  warn "Checksum OK, but ECDSA signature was NOT verified. Install node and re-run for full verification."
+  warn "Checksum matched, but the ECDSA signature was NOT verified. This is weaker than the"
+  warn "default install — install Node.js and re-run for the full signature gate."
+else
+  err "node is required to verify the release signature before installing."
+  err "Install Node.js 20+ and re-run (apt install nodejs / dnf install nodejs / brew install node),"
+  err "or use the signed container image (ghcr.io/dotcoocoo/hermitstash-sync)."
+  err "To install without the signature gate (checksum-only, weaker — same-channel checksum is"
+  err "not an integrity substitute), re-run with HERMITSTASH_ALLOW_UNVERIFIED=1."
+  exit 1
 fi
 
 # ─── Install binary + lib cache ─────────────────────────────────────────

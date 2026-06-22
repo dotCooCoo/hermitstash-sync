@@ -36,6 +36,7 @@
 var fs = require('node:fs');
 var path = require('node:path');
 var childProcess = require('node:child_process');
+var b = require('../vendor/blamejs');
 
 var ROOT = path.resolve(__dirname, '..');
 var CONSTANTS_PATH = path.join(ROOT, 'lib', 'constants.js');
@@ -137,6 +138,15 @@ function _readVersion() {
 // Rewrite the version in BOTH files and assert each write changed content. A
 // silent regex miss on either file would ship a tag whose VERSION constant
 // diverges from package.json — the single highest-risk release footgun.
+//
+// Both replacement buffers are computed (and validated to differ) BEFORE
+// either file is touched, so a regex miss aborts with neither file changed.
+// Each write goes through b.atomicFile.writeSync (temp + fsync + atomic
+// rename), so a single file is never left half-written. The remaining
+// failure mode — package.json renamed to the new version, then the
+// constants.js write throws (ENOSPC, an AV lock on Windows, a kill) — is
+// made self-healing: the first file is restored from its in-memory
+// original before the error propagates, so the two never diverge.
 function _writeVersion(next) {
   var pkgSrc = fs.readFileSync(PACKAGE_PATH, 'utf8');
   var pkgNext = pkgSrc.replace(/"version":\s*"[^"]+"/, '"version": "' + next + '"');
@@ -148,8 +158,27 @@ function _writeVersion(next) {
   if (constNext === constSrc) {
     throw new Error('release: failed to rewrite lib/constants.js VERSION line');
   }
-  fs.writeFileSync(PACKAGE_PATH, pkgNext);
-  fs.writeFileSync(CONSTANTS_PATH, constNext);
+  // 0o644: package.json and lib/constants.js are world-readable tracked
+  // source; the atomic primitive defaults to 0o600, which would silently
+  // tighten their mode on every release.
+  b.atomicFile.writeSync(PACKAGE_PATH, pkgNext, { fileMode: 0o644 });
+  try {
+    b.atomicFile.writeSync(CONSTANTS_PATH, constNext, { fileMode: 0o644 });
+  } catch (e) {
+    // Second write failed AFTER the first landed — roll package.json back to
+    // its pre-bump content so the two version sources never diverge. The
+    // restore is itself atomic; if it also fails, surface both faults.
+    try {
+      b.atomicFile.writeSync(PACKAGE_PATH, pkgSrc, { fileMode: 0o644 });
+    } catch (restoreErr) {
+      throw new Error('release: lib/constants.js write failed (' + (e && e.message || e) +
+        ') AND the package.json rollback ALSO failed (' + (restoreErr && restoreErr.message || restoreErr) +
+        ') — package.json now advertises ' + next + ' while lib/constants.js does not; ' +
+        'restore package.json by hand before re-running.');
+    }
+    throw new Error('release: lib/constants.js version write failed (' + (e && e.message || e) +
+      '); rolled package.json back to ' + JSON.parse(pkgSrc).version + ' so the two stay in lockstep — re-run prepare.');
+  }
 }
 
 function _releaseNotesPath(version) {
@@ -326,7 +355,45 @@ function cmdCommit() {
   try { fs.mkdirSync(path.dirname(msgPath), { recursive: true }); } catch (_e) { /* ignore */ }
   fs.writeFileSync(msgPath, lines.join('\n') + '\n');
 
-  _run('git', ['add', '-A']);
+  // Stage ONLY the files a release produces — never `git add -A`. `commit` is
+  // an independently-dispatchable subcommand, so an operator can reach it with
+  // unrelated edits in the tree; a broad add would fold those into the signed,
+  // pushed release commit silently (the signature is over whatever happened to
+  // be staged). The version bump touches package.json + lib/constants.js; the
+  // regen rewrites CHANGELOG.md; and the whole release-notes/ tree is release
+  // output (the per-patch v<next>.json plus, on a minor rotation, the deleted
+  // per-patch files and the new/extended consolidated rollup). Stage that exact
+  // set with -A pathspecs so deletions from the rollup are captured too.
+  _run('git', ['add', '--',
+    'package.json',
+    'lib/constants.js',
+    'CHANGELOG.md',
+    'release-notes',
+  ]);
+
+  // Refuse to proceed if anything OUTSIDE that set is still dirty. A surviving
+  // unstaged/untracked change means the tree carried edits the release doesn't
+  // own — surface it as an error rather than committing a partial or sweeping
+  // it in on a later broad add. Ignored paths (e.g. .scratch/) never appear in
+  // --porcelain, so the commit-message file is not flagged.
+  var stray = _capture('git', ['status', '--porcelain', '--untracked-files=all']).stdout
+    .split('\n')
+    .filter(function (l) { return l.length > 0; })
+    .filter(function (l) {
+      // --porcelain line: XY<space>path. A staged-and-clean release file shows
+      // as e.g. "M  package.json" (no worktree-side flag); anything with a
+      // worktree change (second column non-space) or an unstaged/untracked file
+      // is outside the release set.
+      var worktreeFlag = l.charAt(1);
+      return worktreeFlag !== ' ';
+    });
+  if (stray.length > 0) {
+    throw new Error('release: working tree has changes outside the release set after staging ' +
+      'package.json / lib/constants.js / CHANGELOG.md / release-notes/:\n' +
+      stray.join('\n') +
+      '\nStash or revert those before committing — the release commit must contain only release output.');
+  }
+
   _run('git', ['commit', '-F', msgPath]);
   _ok('signed release commit');
 

@@ -36,7 +36,12 @@ jobs:
         # Report-only on introduction so a pre-existing finding in another
         # workflow doesn't block PRs; flip to a hard gate once the baseline
         # is clean.
-        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:latest -color || true
+        #
+        # The actionlint image is digest-pinned (not :latest) so a tag-
+        # republish or registry compromise cannot swap the linter bytes
+        # and emit a fake-clean result that masks a genuine workflow defect.
+        # Refresh the digest on the same cadence as the other action pins.
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color || true  # v1.7.12
 
   # ── zizmor: GitHub Actions security audit (SARIF → Security tab) ────
   zizmor:

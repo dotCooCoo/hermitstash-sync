@@ -10,8 +10,10 @@
 #   2. Fetches the newest release from GitHub that matches UPDATE_CHANNEL
 #      and stays within the current major
 #   3. Downloads the signed SEA binary + its SHA3-512 digest + its P-384
-#      ECDSA signature; verifies both against the pubkey embedded in the
-#      release's lib/autoupdate-pubkey.js via scripts/verify-release.js
+#      ECDSA signature; verifies them against the install-time pinned
+#      verify trio cached under LIB_DIR (autoupdate-pubkey.js +
+#      standalone-verifier.js + verify-release.js) — never a key fetched
+#      from the release being installed
 #   4. Captures a rollback copy of the current binary
 #   5. Atomically replaces the binary, restarts the systemd service
 #   6. Waits for the daemon to report RUNNING status; on failure, restores
@@ -92,18 +94,16 @@ if ! command -v node >/dev/null 2>&1; then
   exit 20
 fi
 
-# v0.7.3 renamed lib/constants.js -> lib/autoupdate-pubkey.js in the
-# updater's cache layout. Accept either layout so an operator who
-# installed at v0.7.2 (which staged constants.js) can still run this
-# update.sh — we'll replace the stale cache with the new shape below.
-if [ ! -f "${LIB_DIR}/verify-release.js" ]; then
-  err "verify-release.js not found under ${LIB_DIR}. Re-run deploy/install.sh."
-  exit 20
-fi
-if [ ! -f "${LIB_DIR}/autoupdate-pubkey.js" ] && [ ! -f "${LIB_DIR}/constants.js" ]; then
-  err "neither autoupdate-pubkey.js nor constants.js found under ${LIB_DIR}. Re-run deploy/install.sh."
-  exit 20
-fi
+# The pinned verify trio is the install-time trust root: the binary is
+# verified against THESE files, not a copy fetched from the release. All
+# three must be present, or we cannot establish that the new binary was
+# signed by the operator-trusted key.
+for pinned in verify-release.js standalone-verifier.js autoupdate-pubkey.js; do
+  if [ ! -f "${LIB_DIR}/${pinned}" ]; then
+    err "${pinned} not found under ${LIB_DIR}. Re-run deploy/install.sh to restore the pinned verify key."
+    exit 20
+  fi
+done
 
 # ─── Concurrency guard ──────────────────────────────────────────────────
 
@@ -141,17 +141,43 @@ version_gt() {
 major_of() { echo "${1%%.*}"; }
 
 fetch_latest_stable_tag() {
+  # Select the HIGHEST-semver stable release whose major matches the running
+  # binary. The /releases feed returns prereleases and drafts too, and it is
+  # ordered newest-PUBLISHED-first, not highest-version-first — so a backport
+  # patch to an older minor can be published after a newer minor. Parse the
+  # JSON properly (node is already a hard dependency of this script): drop
+  # prerelease + draft entries, keep clean X.Y.Z tags on the current major,
+  # and fold to the maximum version rather than the first one seen.
   local current_major="$1"
   curl -fsSL -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${GITHUB_REPO}/releases" \
-    | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-    | sed -E 's/.*"v?([^"]+)"$/\1/' \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-    | while read -r ver; do
-        if [ "$(major_of "$ver")" = "$current_major" ]; then
-          echo "$ver"; break
-        fi
-      done
+    "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100" \
+    | HS_CURRENT_MAJOR="$current_major" node -e '
+      const major = process.env.HS_CURRENT_MAJOR;
+      let raw = "";
+      process.stdin.on("data", (c) => { raw += c; });
+      process.stdin.on("end", () => {
+        let releases;
+        try { releases = JSON.parse(raw); } catch { process.exit(0); }
+        if (!Array.isArray(releases)) process.exit(0);
+        const cmp = (a, b) => {
+          const x = a.split("."), y = b.split(".");
+          for (let i = 0; i < 3; i++) {
+            const d = (Number(x[i]) || 0) - (Number(y[i]) || 0);
+            if (d) return d;
+          }
+          return 0;
+        };
+        let best = null;
+        for (const r of releases) {
+          if (!r || r.prerelease || r.draft) continue;
+          const tag = String(r.tag_name || "").replace(/^v/, "");
+          if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(tag)) continue;
+          if (tag.split(".")[0] !== major) continue;
+          if (best === null || cmp(tag, best) > 0) best = tag;
+        }
+        if (best) process.stdout.write(best + "\n");
+      });
+    '
 }
 
 # ─── Arch detection ─────────────────────────────────────────────────────
@@ -206,17 +232,25 @@ curl -fsSL --retry 3 -o "${WORK}/bin.sha3-512"  "${BASE}/${NAME}.sha3-512"
 curl -fsSL --retry 3 -o "${WORK}/bin.sig"      "${BASE}/${NAME}.sig"
 
 log "Verifying SHA3-512 + P-384 ECDSA signature"
-# Pull the verify trio for the TARGET version so the pubkey + verifier
-# match what was in the repo at release time:
-#   lib/autoupdate-pubkey.js, scripts/standalone-verifier.js, scripts/verify-release.js
-RAW="https://raw.githubusercontent.com/${GITHUB_REPO}/v${TARGET}"
+# Verify the downloaded binary against the LOCALLY-PINNED verify trio that
+# install.sh wrote to ${LIB_DIR} — never against a copy fetched from the
+# release being installed. Downloading the pubkey alongside the binary it is
+# meant to authenticate is self-referential: whoever controls the release
+# controls both the binary and the key it would be checked against, so a
+# tampered or attacker-published release would verify trivially. Pinning to
+# the install-time key is the trust-on-first-use root.
+#
+# verify-release.js resolves its dependencies by relative path
+# (./standalone-verifier and ../lib/autoupdate-pubkey), so stage the pinned
+# files into the checkout-shaped layout it expects before invoking it.
 mkdir -p "${WORK}/lib" "${WORK}/scripts"
-curl -fsSL --retry 3 -o "${WORK}/lib/autoupdate-pubkey.js"       "${RAW}/lib/autoupdate-pubkey.js"
-curl -fsSL --retry 3 -o "${WORK}/scripts/standalone-verifier.js" "${RAW}/scripts/standalone-verifier.js"
-curl -fsSL --retry 3 -o "${WORK}/scripts/verify-release.js"      "${RAW}/scripts/verify-release.js"
+cp -f "${LIB_DIR}/verify-release.js"      "${WORK}/scripts/verify-release.js"
+cp -f "${LIB_DIR}/standalone-verifier.js" "${WORK}/scripts/standalone-verifier.js"
+cp -f "${LIB_DIR}/autoupdate-pubkey.js"   "${WORK}/lib/autoupdate-pubkey.js"
 
 if ! ( cd "$WORK" && node scripts/verify-release.js bin bin.sha3-512 bin.sig ); then
-  err "Signature verification failed — refusing to install."
+  err "Signature verification failed against the pinned release key — refusing to install."
+  err "If the project rotated its signing key, re-run deploy/install.sh to adopt the new pinned key."
   exit 40
 fi
 
@@ -231,14 +265,12 @@ cp -a "$BIN" "$ROLLBACK"
 log "Swapping ${BIN}"
 mv -f "${BIN}.new" "$BIN"
 
-# Update the verify trio cached under LIB_DIR so the NEXT update can
-# verify against the newer pubkey + verifier if either rotates. Also
-# evict any stale constants.js cached by a pre-v0.7.3 install so future
-# runs land on the new zero-dep layout.
-install -m 0644 "${WORK}/scripts/verify-release.js"      "${LIB_DIR}/verify-release.js"
-install -m 0644 "${WORK}/scripts/standalone-verifier.js" "${LIB_DIR}/standalone-verifier.js"
-install -m 0644 "${WORK}/lib/autoupdate-pubkey.js"       "${LIB_DIR}/autoupdate-pubkey.js"
-rm -f "${LIB_DIR}/constants.js"
+# The pinned verify trio under ${LIB_DIR} is the trust root and is left
+# untouched here. The updater never silently adopts a signing key shipped by
+# the release it just installed — that would defeat the install-time pin. Key
+# rotation is an explicit operator action: re-run deploy/install.sh to fetch
+# and pin the new key. Leaving the cache unchanged also keeps it consistent
+# with the running binary after a rollback.
 
 # ─── Restart + health probe ─────────────────────────────────────────────
 
@@ -246,14 +278,24 @@ log "Restarting ${SERVICE_NAME}"
 systemctl restart "$SERVICE_NAME"
 
 health_ok() {
-  # `status` returns RUNNING when the daemon's PID file + state DB confirm
-  # it's up and not in an ERROR state. We run it as the service user so
-  # it reads the same CONFIG_DIR.
-  if sudo -u "$SERVICE_USER" HERMITSTASH_SYNC_CONFIG_DIR="$CONFIG_DIR" \
-       "$BIN" status 2>/dev/null | grep -q "Status: RUNNING"; then
-    return 0
+  # `status` reports RUNNING when the daemon's PID file confirms it's up and
+  # not in an ERROR state. Run it AS THE SERVICE USER: cmdStatus opens the
+  # state DB read-write (it re-asserts journal_mode=WAL), so running it as root
+  # could, in a narrow restart-window race, leave root-owned WAL/SHM sidecars
+  # in the service user's CONFIG_DIR that the daemon then cannot write. runuser
+  # performs a privilege DROP (root -> service user), which NoNewPrivileges=yes
+  # permits — NNP blocks GAINING privileges, not dropping them — unlike `sudo`,
+  # which NNP refuses to run at all (a sudo probe would fail every healthy
+  # update and force a needless rollback). If runuser or the service user is
+  # unavailable, fall back to a direct probe so a missing tool never forces a
+  # rollback on its own.
+  if command -v runuser >/dev/null 2>&1 && id "$SERVICE_USER" >/dev/null 2>&1; then
+    runuser -u "$SERVICE_USER" -- env "HERMITSTASH_SYNC_CONFIG_DIR=$CONFIG_DIR" \
+      "$BIN" status 2>/dev/null | grep -q "Status: RUNNING"
+  else
+    HERMITSTASH_SYNC_CONFIG_DIR="$CONFIG_DIR" \
+      "$BIN" status 2>/dev/null | grep -q "Status: RUNNING"
   fi
-  return 1
 }
 
 DEADLINE=$(( $(date +%s) + HEALTH_TIMEOUT ))

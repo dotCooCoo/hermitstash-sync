@@ -21,7 +21,24 @@ ARG NODE_VERSION=24.16.0-slim
 # continuously by Chainguard when upstream CVE fixes land. Typical CVE
 # count at any given digest is near zero; chosen over debian-slim to avoid
 # the unfixed systemd/ncurses/util-linux base-image noise flagged by Trivy.
-ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base:latest
+#
+# Pinned to an immutable manifest-list digest (not the floating :latest
+# tag) so two builds of the same VERSION embed byte-identical base layers
+# and a tag-republish / registry compromise cannot inject a poisoned base
+# into a cosign-signed, SLSA-attested image. The digest is the multi-arch
+# OCI index, so linux/amd64 and linux/arm64 still resolve from one pin.
+#
+# Tradeoff: a digest pin freezes the base at the layer current when the
+# digest was captured, so it does NOT auto-pick-up newer Chainguard CVE
+# rebuilds. Refresh the digest deliberately on each base bump (resolve via
+#   docker buildx imagetools inspect cgr.dev/chainguard/wolfi-base:latest
+# and copy the index Digest) on the same cadence as the GitHub Action pins,
+# updating the trailing date comment. The release Trivy gate still blocks
+# any fixable CRITICAL/HIGH that ages into a stale pin, so a forgotten
+# refresh surfaces as a failed build rather than a silently-vulnerable
+# image. RUNTIME_BASE stays a build-arg so a refresh is visible in the diff
+# and an operator can override it for a local rebuild against a newer base.
+ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:e161445c05b19e668cb5cc44df2f0403329fd4f0ac892794255e328e760612a1  # wolfi-base 2026-06-21
 
 # ---------- Stage 1: download + verify the signed binary ----------
 FROM node:${NODE_VERSION} AS verify

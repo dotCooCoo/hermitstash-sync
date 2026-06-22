@@ -26,6 +26,14 @@
  * per-patch files after rollup (via `--prune`) keeps the generator
  * working for the historical line.
  *
+ * Writing a consolidated file MERGES the per-patch payloads on disk
+ * with any release entries already present in an existing
+ * `v<minor>.x.json`. Per-patch wins on a version collision; entries
+ * the rollup already holds but that no longer have a per-patch source
+ * are preserved, never overwritten. A single per-patch file
+ * reappearing on a historical line (a backport, a hand-restored note,
+ * a revert) therefore extends the rollup instead of replacing it.
+ *
  * Usage:
  *   node scripts/consolidate-release-notes.js              # preview — writes consolidated files but keeps per-patch
  *   node scripts/consolidate-release-notes.js --prune      # also delete per-patch files after writing consolidated
@@ -124,12 +132,39 @@ function main() {
       continue;
     }
 
+    // Merge, never clobber. Seed a version-keyed map from any existing
+    // consolidated rollup so release entries already collapsed into
+    // v<minor>.x.json (whose per-patch sources were pruned in a prior
+    // run) survive when a single per-patch file reappears on this line.
+    // Per-patch payloads then overlay the map — a per-patch file wins
+    // on a version collision (it is the live-edited source).
+    var byVersion = {};
+    var existingCount = 0;
+    if (scanned.consolidatedByMinor[minor]) {
+      var existing = _readJson(conPath, 'release-notes/' + conName);
+      if (!Array.isArray(existing.releases)) {
+        _exit('existing ' + conName + ' has no `releases` array — refusing to overwrite a malformed rollup');
+      }
+      for (var e = 0; e < existing.releases.length; e += 1) {
+        var rel = existing.releases[e];
+        if (!rel || typeof rel.version !== 'string') {
+          _exit('existing ' + conName + ' releases[' + e + '] has no string `version` — refusing to overwrite');
+        }
+        byVersion[rel.version] = rel;
+        existingCount += 1;
+      }
+    }
+    for (var p = 0; p < perPatch.length; p += 1) {
+      byVersion[perPatch[p].version] = perPatch[p].payload;
+    }
+    var mergedVersions = Object.keys(byVersion).sort(_compareVersionsDesc);
     var doc = {
       minor:    minor,
-      releases: perPatch.map(function (p) { return p.payload; }),
+      releases: mergedVersions.map(function (v) { return byVersion[v]; }),
     };
     fs.writeFileSync(conPath, JSON.stringify(doc, null, 2) + '\n');
-    summary.push('  ' + minor + '.x — wrote ' + conName + ' with ' + perPatch.length + ' release(s)');
+    summary.push('  ' + minor + '.x — wrote ' + conName + ' with ' + mergedVersions.length +
+      ' release(s) (' + perPatch.length + ' per-patch + ' + existingCount + ' already in rollup, merged)');
 
     if (pruneMode) {
       for (var j = 0; j < perPatch.length; j += 1) {

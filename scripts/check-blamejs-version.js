@@ -9,9 +9,11 @@
  * style `::error::` annotation when they diverge, so CI fails loudly the
  * moment blamejs ships a new version we haven't pulled in.
  *
- * Zero dependencies (node:https + node:fs + node:path only) so the check
- * runs identically in CI and locally — same code path the auto-updater
- * uses to talk to the GitHub API.
+ * Talks to the GitHub API through the same hardened transport the rest
+ * of the client uses — b.httpClient.request (SSRF guard, DNS pinning,
+ * response byte cap, PQC TLS 1.3 via b.pqcAgent) — and parses the body
+ * with b.safeJson.parse (size + depth + prototype-pollution caps). Runs
+ * identically in CI and locally.
  *
  * Run via:
  *   node scripts/check-blamejs-version.js
@@ -24,13 +26,17 @@
 
 const nodeFs = require('node:fs');
 const nodePath = require('node:path');
-const nodeHttps = require('node:https');
+const b = require('../vendor/blamejs');
 
 const MANIFEST_PATH = nodePath.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 const API_URL = 'https://api.github.com/repos/blamejs/blamejs/releases/latest';
+// The releases/latest payload is a few KiB; cap the response well above
+// that so a compromised / MITM'd transport can't stream an unbounded
+// body into memory.
+const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
 
 function readVendoredTag() {
-  const manifest = JSON.parse(nodeFs.readFileSync(MANIFEST_PATH, 'utf8'));
+  const manifest = b.safeJson.parse(nodeFs.readFileSync(MANIFEST_PATH, 'utf8'));
   if (!manifest || !manifest.packages || !manifest.packages.blamejs ||
       typeof manifest.packages.blamejs.tag !== 'string') {
     throw new Error('vendor/MANIFEST.json does not have packages.blamejs.tag');
@@ -38,43 +44,36 @@ function readVendoredTag() {
   return manifest.packages.blamejs.tag;
 }
 
-function fetchLatestTag() {
-  return new Promise((resolve, reject) => {
-    const opts = {
-      headers: {
-        'User-Agent': 'hermitstash-sync-vendor-check',
-        'Accept':     'application/vnd.github+json',
-      },
-    };
-    // GitHub Actions provides GITHUB_TOKEN as the standard auth handle;
-    // unauthenticated requests are rate-limited to 60/hour shared across
-    // the runner's IP. Use the token when present so the check survives
-    // a noisy CI day.
-    if (process.env.GITHUB_TOKEN) {
-      opts.headers['Authorization'] = 'Bearer ' + process.env.GITHUB_TOKEN;
-    }
-    const req = nodeHttps.get(API_URL, opts, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        if (res.statusCode !== 200) {
-          reject(new Error('GitHub API returned HTTP ' + res.statusCode));
-          return;
-        }
-        let parsed;
-        try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-        catch (e) { reject(new Error('GitHub API response not JSON: ' + e.message)); return; }
-        if (typeof parsed.tag_name !== 'string' || parsed.tag_name.length === 0) {
-          reject(new Error('GitHub API response missing tag_name'));
-          return;
-        }
-        resolve(parsed.tag_name);
-      });
-      res.on('error', reject);
-    });
-    req.on('error', reject);
-    req.setTimeout(15000, () => req.destroy(new Error('GitHub API request timed out')));
+async function fetchLatestTag() {
+  const headers = {
+    'User-Agent': 'hermitstash-sync-vendor-check',
+    'Accept':     'application/vnd.github+json',
+  };
+  // GitHub Actions provides GITHUB_TOKEN as the standard auth handle;
+  // unauthenticated requests are rate-limited to 60/hour shared across
+  // the runner's IP. Use the token when present so the check survives
+  // a noisy CI day.
+  if (process.env.GITHUB_TOKEN) {
+    headers['Authorization'] = 'Bearer ' + process.env.GITHUB_TOKEN;
+  }
+
+  const res = await b.httpClient.request({
+    method:           'GET',
+    url:              API_URL,
+    headers:          headers,
+    timeoutMs:        15000,
+    maxResponseBytes: MAX_RESPONSE_BYTES,
   });
+  if (res.statusCode !== 200) {
+    throw new Error('GitHub API returned HTTP ' + res.statusCode);
+  }
+  let parsed;
+  try { parsed = b.safeJson.parse(res.body, { maxBytes: MAX_RESPONSE_BYTES }); }
+  catch (e) { throw new Error('GitHub API response not JSON: ' + e.message); }
+  if (typeof parsed.tag_name !== 'string' || parsed.tag_name.length === 0) {
+    throw new Error('GitHub API response missing tag_name');
+  }
+  return parsed.tag_name;
 }
 
 (async function main() {

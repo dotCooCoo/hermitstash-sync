@@ -119,10 +119,27 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          # Liveness is driven by the `status` exit code: 0 when the daemon is
+          # RUNNING, 3 when STOPPED/not-running. A bare exec means the kubelet
+          # restarts the pod on any non-zero exit, so a crashed daemon (exit 3)
+          # is detected and the container is recreated. Do not wrap this in a
+          # shell that swallows the exit code.
           livenessProbe:
             exec:
               command: [hermitstash-sync, status]
             initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          # Readiness uses the same exit-code contract so a daemon that has
+          # stopped (but whose container is briefly still up before the
+          # liveness restart fires) is marked NotReady rather than appearing
+          # healthy. Outbound-only client has no Service, but NotReady still
+          # surfaces in `kubectl get pods` and downstream readiness gates.
+          readinessProbe:
+            exec:
+              command: [hermitstash-sync, status]
+            initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3

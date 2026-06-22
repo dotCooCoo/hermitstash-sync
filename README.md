@@ -74,7 +74,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP3
 ## Requirements
 
 - Node.js 24.16.0+ (vendored blamejs's effective floor; also covers `node:sqlite` and OpenSSL 3.5+ PQC support)
-- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.15.13) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
+- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.15.14) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 - The encrypted control-plane routes — file rename and public-uploader bundle init/finalize — additionally require a server built on a matching v0.15.x blamejs. Its per-session api-encrypt envelope binds the request fields into the AEAD, and a server on an older framework rejects the request. Upload, download, metadata, delete, and the WebSocket sync stream are unaffected by this requirement.
 
 ## Install
@@ -375,6 +375,8 @@ The `status` command shows which state the daemon is in:
 | `DOWNLOADING` | Actively downloading files |
 | `RECONNECTING` | Connection lost, waiting to retry |
 | `ERROR` | Something went wrong (check logs) |
+
+`status` exits `0` when the daemon is running and `3` when it is not (the init-script "not running" convention), so a health probe — a container `HEALTHCHECK`, a Kubernetes liveness/readiness exec, a systemd check, or a plain `hermitstash-sync status && …` — can detect a stopped daemon by exit code. The printed lines above are unchanged for text-based checks.
 
 ## Security
 

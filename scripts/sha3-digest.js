@@ -35,25 +35,54 @@ function fail(msg) {
   process.exit(1);
 }
 
-function _writeDigest(artifactPath, algorithm, sidecarExt) {
-  var bytes;
-  try { bytes = fs.readFileSync(artifactPath); }
-  catch (e) { fail('cannot read ' + artifactPath + ': ' + (e && e.message || e)); }
-  var digest = crypto.createHash(algorithm).update(bytes).digest('hex');
-  var base = path.basename(artifactPath);
-  var sidecarPath = artifactPath + '.' + sidecarExt;
-  fs.writeFileSync(sidecarPath, digest + '  ' + base + '\n');
-  process.stderr.write('[release-digests] OK — wrote ' + sidecarPath + '\n');
-  process.stderr.write('[release-digests] ' + algorithm + ':  ' + digest + '  ' + base + '\n');
+// Algorithms emitted, in sidecar order. SHA-256 is the conventional
+// release checksum operators run with `sha256sum -c`; SHA3-512 is the
+// PQC-first hash the auto-update verifier checks against. The classical
+// SHA-256 sidecar must stay, so the file is streamed through node:crypto
+// hashers directly — the framework's b.crypto.hashFile only emits the
+// SHA-3 family + SHA-512, not SHA-256.
+var ALGORITHMS = [
+  { name: 'sha256',   ext: 'sha256' },
+  { name: 'sha3-512', ext: 'sha3-512' },
+];
+
+// Stream the artifact through every hasher in a single pass rather than
+// reading the whole binary into memory — SEA bundles are hundreds of MB
+// and the workflow runner has a bounded heap. One read stream feeds all
+// hashers so the file is read from disk exactly once.
+function computeDigests(artifactPath) {
+  return new Promise(function (resolve, reject) {
+    var hashers = ALGORITHMS.map(function (a) { return crypto.createHash(a.name); });
+    var rs = fs.createReadStream(artifactPath);
+    rs.on('error', function (e) { reject(e); });
+    rs.on('data', function (chunk) {
+      for (var i = 0; i < hashers.length; i++) hashers[i].update(chunk);
+    });
+    rs.on('end', function () {
+      resolve(hashers.map(function (h) { return h.digest('hex'); }));
+    });
+  });
 }
 
 function main() {
   var artifactPath = process.argv[2];
   if (!artifactPath) fail('usage: node scripts/sha3-digest.js <artifact-path>');
-  // Emit BOTH sidecars in one pass so the workflow only has to
-  // invoke one script per artifact.
-  _writeDigest(artifactPath, 'sha256',   'sha256');
-  _writeDigest(artifactPath, 'sha3-512', 'sha3-512');
+  try { fs.accessSync(artifactPath, fs.constants.R_OK); }
+  catch (e) { fail('cannot read ' + artifactPath + ': ' + (e && e.message || e)); }
+  var base = path.basename(artifactPath);
+  // Emit BOTH sidecars from one streamed pass so the workflow only has
+  // to invoke one script per artifact.
+  computeDigests(artifactPath).then(function (digests) {
+    for (var i = 0; i < ALGORITHMS.length; i++) {
+      var digest = digests[i];
+      var sidecarPath = artifactPath + '.' + ALGORITHMS[i].ext;
+      fs.writeFileSync(sidecarPath, digest + '  ' + base + '\n');
+      process.stderr.write('[release-digests] OK — wrote ' + sidecarPath + '\n');
+      process.stderr.write('[release-digests] ' + ALGORITHMS[i].name + ':  ' + digest + '  ' + base + '\n');
+    }
+  }).catch(function (e) { fail('digest failed: ' + (e && e.message || e)); });
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { computeDigests: computeDigests, ALGORITHMS: ALGORITHMS };

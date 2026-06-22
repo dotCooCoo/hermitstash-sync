@@ -1,0 +1,105 @@
+{
+  "version": "0.9.9",
+  "date": "2026-06-21",
+  "headline": "Refreshes the vendored framework to v0.15.14 and hardens uploads, secret-file reads, disconnected-window recovery, the status exit code, and the release supply chain",
+  "summary": "This release advances the vendored framework to v0.15.14, which closes a WebSocket reconnect gap where a redial whose address resolved to a private, loopback, or cloud-metadata host could connect without being re-validated. It also reads the mTLS certificate, private key, CA bundle, and the auto-update marker without following a symlink and bound to the opened file, creates the credential and state directories private, recovers local edits and deletions made while the connection was down, keeps the server from being stranded on stale bytes when a file is edited during its own upload, makes the status command report a stopped daemon by exit code, and pins the published image base and a workflow scanner by digest.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "WebSocket reconnect re-validates the server address before connecting",
+          "body": "On each redial the outbound-address check is now completed before the socket opens, so a server address that resolves to — or is rebound to — a private, loopback, link-local, reserved, or cloud-metadata host is refused on every reconnect instead of being connected without validation. This comes from the framework refresh and applies to the live sync channel."
+        },
+        {
+          "title": "The certificate, private key, CA bundle, and update marker are read without following a symlink",
+          "body": "These files are now read bound to the file that was opened, refusing a symlink at the path, so a symlink planted in the configuration directory cannot redirect the daemon to read key material or rollback metadata from an attacker-chosen file. The reads are byte-identical to before on a regular file."
+        },
+        {
+          "title": "The credential and state directories are created private",
+          "body": "The directory holding the API credentials, mTLS material, state database, and configuration is now created mode 0700, and an existing one created world-traversable by an older version is tightened on start, so other local users cannot traverse into the secrets directory."
+        },
+        {
+          "title": "The diagnostic bundle is written atomically and refuses a symlink target",
+          "body": "The support bundle is written to a fresh file that refuses to follow a symlink at the destination and is renamed into place, so it cannot be redirected through a pre-planted link and never leaves a half-written archive on a crash."
+        },
+        {
+          "title": "A dial refused by the outbound-address guard stops reconnecting",
+          "body": "A WebSocket connection rejected because its destination resolves to a blocked address now surfaces an actionable error and stops, instead of retrying the same unreachable target indefinitely; fix the server URL and restart."
+        }
+      ]
+    },
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A file edited during its own upload no longer strands the server on stale bytes",
+          "body": "If a file changed on disk while it was being uploaded, the client could record the newer content as synced while the server still held the older bytes, so the change was never re-sent. The client now records what the server received and re-checks the file after the upload, re-queuing it when the two differ."
+        },
+        {
+          "title": "An upload of a file that changes size mid-transfer is retried instead of corrupting or stalling the connection",
+          "body": "A file that grew or shrank between the time its length was measured and the time it finished streaming could overrun or under-fill the declared upload length, poisoning the next request or stalling the socket. Such an upload is now aborted and retried once the file settles."
+        },
+        {
+          "title": "Local changes made while the connection was down are re-detected on reconnect",
+          "body": "A file modified or deleted while the sync connection was in an error or reconnecting state was dropped because change detection was paused. On reconnect the synced folder is now re-walked so a missed edit is re-uploaded and a missed deletion is propagated, mirroring the recovery already done after a file-watcher restart."
+        },
+        {
+          "title": "A rename whose source is missing no longer creates an empty directory",
+          "body": "A server rename event for a file the client did not have locally created the destination directory before falling through to re-download, leaving an empty folder the user never had. The destination directory is now created only when the file is actually moved into it."
+        },
+        {
+          "title": "Rename detection works when the file watcher does not report a size",
+          "body": "Some watcher backends deliver a change without a numeric size, which silently disabled rename detection for that path and stored a null size that mismatched later comparisons. The size is now recovered from the file so rename detection and the stored size no longer depend on the backend populating it."
+        },
+        {
+          "title": "Reading status or collecting diagnostics no longer writes to the running daemon's database",
+          "body": "The status, stats, and diagnose commands opened the state database in a mode that could issue a schema-changing write against the database the live daemon holds open, risking a write conflict and, for diagnostics, mutating the data being collected. These read-only commands no longer perform that write."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "The status command reports a stopped daemon by exit code",
+          "body": "hermitstash-sync status now exits 0 when the daemon is running and 3 when it is not, following the init-script convention, so a health probe or orchestrator can detect a dead daemon by exit code. The printed output is unchanged for text-based checks."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored framework advanced to v0.15.14",
+          "body": "The bundled framework moves from v0.15.13 to v0.15.14, bringing the reconnect address re-validation noted above along with the symlink-refusing and bounded file-read primitives the client now uses for its secret material."
+        },
+        {
+          "title": "The published image base and the workflow-lint scanner are pinned by digest",
+          "body": "The container runtime base and the GitHub Actions workflow linter are now referenced by immutable digest rather than a moving tag, so a republished upstream tag cannot change what a release build pulls."
+        },
+        {
+          "title": "The native-install updater verifies against the install-time key and probes as the service user",
+          "body": "The system updater verifies a downloaded binary against the signing key pinned when it was installed rather than re-fetching the key from the release it is installing, and runs its post-update health check as the service user so the daemon's data directory keeps consistent ownership."
+        },
+        {
+          "title": "The native installer refuses to install an unverified binary",
+          "body": "When the signature verifier is unavailable, the installer now stops instead of falling back to installing a binary whose signature was never checked."
+        },
+        {
+          "title": "Release and image workflows build the released tag by a resolved reference",
+          "body": "The image-publish workflow now checks out the released tag through a validated, resolved reference and keeps its same-repository origin guard, so it builds exactly the published commit without consuming an unvalidated event field as a checkout reference."
+        }
+      ]
+    },
+    {
+      "heading": "Migration",
+      "items": [
+        {
+          "title": "A health check that reads the status exit code now sees 3 when the daemon is stopped",
+          "body": "If you check the daemon purely by the status command's exit code, note that a stopped daemon now exits 3 instead of 0; checks that grep the printed output need no change. The shipped Kubernetes liveness probe and the native updater's health check already use the new code."
+        }
+      ]
+    }
+  ]
+}

@@ -7,7 +7,6 @@ on:  # zizmor: ignore[dangerous-triggers] workflow_run is required (runs after R
   workflow_run:
     workflows: ["Release"]
     types: [completed]
-    branches-ignore: []
   workflow_dispatch:
     inputs:
       version:
@@ -28,18 +27,68 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Resolve the immutable release tag ONCE, in a run step, and hand it to
+  # every job below as a job output. No checkout in this pipeline ever binds
+  # its `ref:` to github.event.workflow_run.head_* — the triggering run's head
+  # is consumed only here, validated, and never executed. That both removes
+  # the untrusted-ref pattern from every checkout and makes the build provably
+  # use the released tag commit rather than a moving branch tip.
+  resolve-tag:
+    # Trust guard: only proceed for a successful Release run that originated
+    # from THIS repository. A fork-originated run can never reach the
+    # privileged jobs below because they all `needs: resolve-tag`, and a
+    # skipped guarded job skips its dependents. workflow_dispatch resolves
+    # the tag from its version input instead.
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve released tag
+        id: resolve
+        env:
+          # A Release run is fired by a tag push, so its head_branch is the
+          # tag short name (vX.Y.Z). Passed through env and never interpolated
+          # into the script body, so a hostile value cannot inject shell.
+          WR_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            TAG="v${INPUT_VERSION#v}"
+          else
+            TAG="${WR_TAG:-}"
+          fi
+          # Hard-validate shape: only an immutable vX.Y.Z release tag is built.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::resolved tag '${TAG}' is not a vX.Y.Z release tag"; exit 1
+          fi
+          # Confirm the tag exists upstream and resolve the commit it points to
+          # (annotated/signed tags need ^{} to peel to the commit; a lightweight
+          # tag has no peel, so fall back to the ref SHA).
+          REMOTE="https://github.com/${REPO}.git"
+          SHA=$(git ls-remote "$REMOTE" "refs/tags/${TAG}^{}" | awk '{print $1}')
+          if [ -z "$SHA" ]; then
+            SHA=$(git ls-remote "$REMOTE" "refs/tags/${TAG}" | awk '{print $1}')
+          fi
+          if [ -z "$SHA" ]; then
+            echo "::error::tag ${TAG} not found in ${REPO}"; exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${TAG} -> ${SHA}"
+
   # Lint must pass before a release image is published. Mirrors ci.yml's
   # lint job (same rules, same pins) so a red ci.yml always implies a red
   # docker-publish. No PR comment here — tag pushes aren't PR events.
   lint:
-    # This workflow_run pipeline runs with the privileges of the default
-    # branch but is triggered by any completed run of "Release". Each job
-    # below checks out github.event.workflow_run.head_sha and executes it
-    # (npm install, docker build, smoke). Guard every privileged job so it
-    # only proceeds when the triggering run came from THIS repository — a
-    # fork-originated run can never have its code checked out + executed here.
-    # Release only fires on upstream tag pushes, so this is always true for a
-    # real release; the guard just closes the untrusted-checkout class.
+    needs: resolve-tag
+    # Belt-and-suspenders: resolve-tag already enforced the trusted-origin
+    # guard (and gates this job by being a `needs` dependency), but keep the
+    # explicit guard so the job's trust precondition is readable in place.
     if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -49,7 +98,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -158,7 +207,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
-    needs: lint
+    needs: [lint, resolve-tag]
     # Only build + publish from a run triggered by this repository (see lint).
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-latest
@@ -176,7 +225,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Set up Node.js
         # zizmor: ignore[cache-poisoning] no cache input set (zero npm deps).
@@ -229,6 +278,11 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.version }}
             type=semver,pattern={{major}},value=v${{ steps.version.outputs.version }}
             type=raw,value=latest
+          # Pin the revision label to the released tag commit. Left to its
+          # default the action stamps github.sha, which for a workflow_run is
+          # the default-branch tip — not the commit this image was built from.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve-tag.outputs.sha }}
 
       - name: Install cosign
         if: ${{ !inputs.dry_run }}
@@ -245,7 +299,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
-            COMMIT_SHA=${{ github.sha }}
+            COMMIT_SHA=${{ needs.resolve-tag.outputs.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -330,7 +384,7 @@ jobs:
   # smoke checks against it. Proves the signed/attested artifact on GHCR
   # actually boots end-to-end, not just the intermediate local build.
   smoke-test:
-    needs: build-and-push
+    needs: [build-and-push, resolve-tag]
     # Trusted-origin guard (see lint) AND the existing dry-run / digest gates.
     if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && !inputs.dry_run && needs.build-and-push.outputs.digest }}
     runs-on: ubuntu-latest
@@ -344,7 +398,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Log in to GHCR (image may be private until first public pull)
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0

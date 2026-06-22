@@ -50,7 +50,19 @@ if (!result || !result.ok) die('ECDSA signature verification failed');
 if (sumPath !== '-' && fs.existsSync(sumPath)) {
   const sumText = fs.readFileSync(sumPath, 'utf8');
   const expected = (sumText.trim().match(/^([0-9a-f]+)/i) || [])[1];
-  if (expected && expected.toLowerCase() !== result.sha3_512.toLowerCase()) {
+  // The caller named a checksum file (it is not the `-` sentinel) and the
+  // file exists, so it MUST yield a hex digest to compare against. A sidecar
+  // that parses to nothing — corrupted, BOM-prefixed, an error page saved by
+  // a failed download, a leading-whitespace line — is a fail-closed error,
+  // not a silent skip; collapsing it into the no-checksum path would tell the
+  // operator the digest was cross-checked when it never was. The signature is
+  // still the primary gate, but a malformed sidecar means the artifact set is
+  // not what was published — refuse it.
+  if (!expected) {
+    die(`SHA3-512 sidecar ${sumPath} contains no parseable hex digest — ` +
+        `re-download the .sha3-512 file or pass '-' if no checksum is available`);
+  }
+  if (expected.toLowerCase() !== result.sha3_512.toLowerCase()) {
     die(`SHA3-512 cross-check mismatch: expected ${expected}, got ${result.sha3_512}`);
   }
 }

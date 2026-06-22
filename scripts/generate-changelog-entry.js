@@ -40,10 +40,18 @@ var NOTES_DIR     = path.join(ROOT, 'release-notes');
 // preferences (phase/pass/slice/batch/sweep/tier numbering,
 // AI-tooling vocabulary, conversation residue, audit-attribution
 // shorthand).
+// Kept byte-identical to the `docs-leak-vocab` mirror in
+// scripts/test-codebase-patterns.js so freehand prose in the adjacent
+// docs holds the same discipline the structured JSON tree enforces.
+// When you add a pattern here, add the same one there (the
+// codebase-patterns gate fails if the two lists drift).
 function _leakPatterns() {
   return [
     // Phase / sweep / tier numbering — internal sequencing the
-    // operator doesn't share.
+    // operator doesn't share. The digit-anchored forms catch
+    // "phase 9", "slice 4"; the noun-anchored forms below catch
+    // un-numbered sequencing like "the cleanup sweep" / "across the
+    // slice" / "a second drift-audit pass".
     /\bphase\s+\d/i,
     /\bsweep\s+\d/i,
     /\btier[- ]?[abc]\b/i,
@@ -51,11 +59,27 @@ function _leakPatterns() {
     /\bgroup\s+[a-h]\s+remainder\b/i,
     /\bslice\s+\d/i,
     /\bpass\s+\d/i,
+    // Un-numbered internal-sequencing phrasings. "sweep" is anchored to the
+    // drift-audit qualifier (the unambiguous internal-process sense) so
+    // everyday technical English — "the startup sweep that removes temp
+    // files", "a compliance audit sweep", "a single pass over the file" — is
+    // not flagged.
+    /\bdrift[- ]?audit\s+sweep\b/i,
+    /\bacross\s+the\s+slice\b/i,
+    /\bdrift[- ]audit\s+pass\b/i,
+    /\b\d+[- ]gap\s+closure\b/i,
     // "audit-derived" / "post-audit" — internal-process attribution.
     /\baudit[- ]derived\b/i,
     /\bpost[- ]audit\b/i,
+    // Pre-merge / review residue — how a change arrived, not what it is.
+    /\bfolded in pre-merge\b/i,
+    /\bcaught by (?:the )?reviewer\b/i,
+    // Multi-agent tooling narrative.
+    /\b(?:multi-agent|agent)\s+fan-?out\b/i,
     // AI-tooling vocabulary that should never reach operator-facing.
     /\b(?:anthropic|chatgpt|openai|copilot|claude|sonnet|opus|haiku|gemini|co[- ]authored[- ]by|llm[- ]generated|ai[- ]generated)\b/i,
+    // AI-process adjectives — "AI-assisted", "AI-discovered", "AI-derived".
+    /\bai[- ](?:assisted|discovered|derived)\b/i,
     // Conversation residue.
     /\bas\s+discussed\b/i,
     /\bper\s+(?:your|the)\s+earlier\s+note\b/i,
@@ -338,8 +362,15 @@ function _readProjectVersion() {
   var raw;
   try { raw = fs.readFileSync(CONSTANTS_JS, 'utf8'); }
   catch (e) { _exit('cannot read ' + CONSTANTS_JS + ': ' + (e && e.message || e)); }
-  var m = raw.match(/VERSION\s*[:=]\s*['"]([^'"]+)['"]/);
-  if (!m) _exit('could not find VERSION literal in lib/constants.js');
+  // Anchor to the exact `const VERSION = '...'` declaration and capture
+  // only a semver triple. An unanchored `VERSION[:=]...` also matches an
+  // unrelated `*_VERSION` constant (e.g. `const TLS_MIN_VERSION = 'TLSv1.3'`)
+  // and `.match()` returns the FIRST hit — declaration order would then
+  // decide which string is extracted. The semver-shaped capture refuses a
+  // non-version literal at the boundary rather than relying on a later
+  // _requireSemver to catch the mis-extraction.
+  var m = raw.match(/\bconst VERSION\s*=\s*'(\d+\.\d+\.\d+)'/);
+  if (!m) _exit('could not find `const VERSION = \'<semver>\'` literal in lib/constants.js');
   return m[1];
 }
 
@@ -403,12 +434,26 @@ function _loadReleaseNotes(version) {
 }
 
 // Walk `release-notes/`, load every release (both per-patch and
-// consolidated minor-line files), and return a flat array sorted
-// newest-first.
+// consolidated minor-line files), de-duplicate by version, and return a
+// flat array sorted newest-first.
+//
+// A version can legitimately appear in BOTH a per-patch `v<X>.<Y>.<Z>.json`
+// AND a consolidated `v<X>.<Y>.x.json` — the consolidate step's no-prune
+// preview is a supported mode that writes the rollup while leaving the
+// per-patch source on disk. Without de-dup that version's CHANGELOG line
+// would render twice. The per-patch file is authoritative (it is the
+// live-edited source); the consolidated copy is the shadow. If the two
+// copies of the same version DIFFER in content, the rollup is stale —
+// surface that loudly rather than silently picking one.
 function _loadAllReleases() {
   if (!fs.existsSync(NOTES_DIR)) return [];
   var entries = fs.readdirSync(NOTES_DIR);
-  var all = [];
+  // Collect into a version-keyed map. Per-patch entries are applied AFTER
+  // consolidated entries so per-patch wins the key; a content divergence
+  // between the two sources for the same version is a hard error.
+  var byVersion = Object.create(null);
+  var consolidated = [];
+  var perPatch = [];
   for (var i = 0; i < entries.length; i += 1) {
     var name = entries[i];
     if (!/\.json$/.test(name)) continue;
@@ -418,13 +463,31 @@ function _loadAllReleases() {
       if (!Array.isArray(con.releases)) {
         _exit('consolidated file release-notes/' + name + ' missing `releases` array');
       }
-      for (var r = 0; r < con.releases.length; r += 1) all.push(con.releases[r]);
+      for (var r = 0; r < con.releases.length; r += 1) {
+        consolidated.push({ rel: con.releases[r], from: name });
+      }
       continue;
     }
     var verMatch = name.match(/^v(\d+\.\d+\.\d+)\.json$/);
     if (!verMatch) continue;
-    all.push(_readJson(path.join(NOTES_DIR, name), 'release-notes/' + name));
+    perPatch.push({ rel: _readJson(path.join(NOTES_DIR, name), 'release-notes/' + name), from: name });
   }
+  for (var c = 0; c < consolidated.length; c += 1) {
+    var cv = String(consolidated[c].rel && consolidated[c].rel.version);
+    byVersion[cv] = consolidated[c];
+  }
+  for (var p = 0; p < perPatch.length; p += 1) {
+    var pv = String(perPatch[p].rel && perPatch[p].rel.version);
+    var prior = byVersion[pv];
+    if (prior && prior.from !== perPatch[p].from &&
+        JSON.stringify(prior.rel) !== JSON.stringify(perPatch[p].rel)) {
+      _exit('v' + pv + ' differs between ' + perPatch[p].from + ' and ' + prior.from +
+        ' — the consolidated rollup is stale. Re-run ' +
+        '`node scripts/consolidate-release-notes.js --prune` (or reconcile the two by hand) before rebuilding.');
+    }
+    byVersion[pv] = perPatch[p];
+  }
+  var all = Object.keys(byVersion).map(function (v) { return byVersion[v].rel; });
   all.sort(function (a, b) {
     var ap = String(a.version).split('.').map(Number);
     var bp = String(b.version).split('.').map(Number);

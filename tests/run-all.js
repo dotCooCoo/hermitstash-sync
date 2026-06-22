@@ -132,12 +132,18 @@ const DEFAULT_FILE_TIMEOUT_MS = 120000;
 /**
  * Spawn `node --test <file>` and buffer stdout+stderr until exit.
  * Returns { file, output, status, durationMs }. Never throws.
+ *
+ * The TAP reporter is requested explicitly so the tally reads node:test's
+ * canonical `# pass N` / `# fail N` summary block (emitted once per file)
+ * rather than counting per-test ✔/✖ glyphs anywhere in the stream — those
+ * glyphs also appear inside assertion diffs and unicode-filename payloads,
+ * which inflated the counts under the default reporter.
  */
 function runOne(file, env) {
   return new Promise(resolve => {
     const started = Date.now();
     const filePath = path.join(__dirname, file);
-    const child = spawn(process.execPath, ['--test', filePath], { env });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=tap', filePath], { env });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', c => { stdout += c.toString('utf8'); });
@@ -170,20 +176,66 @@ function runOne(file, env) {
   });
 }
 
+/**
+ * Read node:test's canonical TAP summary from a child's output.
+ *
+ * The TAP reporter prints exactly one `# pass N` and one `# fail N` line at
+ * the end of the run (anchored to start-of-line). Per-test result lines
+ * (`ok`/`not ok`) and any ✔/✖ glyph inside assertion diffs are ignored, so
+ * a test that asserts on unicode filenames or embeds JSON in a message can't
+ * skew the tally.
+ *
+ * Returns { pass, fail, hasSummary }. hasSummary is false when the child died
+ * before emitting the summary block (timeout SIGKILL, crash with no TAP tail);
+ * the caller treats that case as a failure regardless of the parsed numbers.
+ */
+function parseTapSummary(output) {
+  const passMatch = output.match(/^# pass (\d+)$/m);
+  const failMatch = output.match(/^# fail (\d+)$/m);
+  if (!passMatch || !failMatch) {
+    return { pass: 0, fail: 0, hasSummary: false };
+  }
+  return {
+    pass: parseInt(passMatch[1], 10),
+    fail: parseInt(failMatch[1], 10),
+    hasSummary: true,
+  };
+}
+
 function tallyAndPrint(result, totals) {
   const { file, output, status, durationMs } = result;
-  const passCount = (output.match(/✔|# pass/g) || []).length;
-  const failCount = (output.match(/✖|# fail [1-9][0-9]*/g) || []).length;
+  const summary = parseTapSummary(output);
 
   console.log('-'.repeat(60));
   console.log(`  ${file}   (${(durationMs / 1000).toFixed(2)}s)`);
   console.log('-'.repeat(60));
   console.log(output);
 
-  totals.pass += passCount;
-  totals.fail += failCount;
-  if (failCount > 0 || status !== 0) {
+  totals.pass += summary.pass;
+
+  // Exit code is the source of truth for whether the file passed. A child can
+  // crash after its first assertion (timeout SIGKILL, OOM, an unhandled
+  // rejection) and exit non-zero with no TAP summary at all — the parsed
+  // fail count would read 0 there, masking a real failure. Count from the
+  // summary when it exists; when the file exited non-zero but reported no
+  // failures (or printed no summary), record it as a single crash failure so
+  // the human-facing tally can never read green on a crash.
+  if (status === 0) {
+    totals.fail += summary.fail;
+    if (summary.fail > 0) {
+      totals.failures.push({ file, status });
+    }
+    return;
+  }
+
+  if (summary.hasSummary && summary.fail > 0) {
+    totals.fail += summary.fail;
     totals.failures.push({ file, status });
+  } else {
+    // Non-zero exit with no reported failures: crashed before/without a
+    // summary. Mark one failure so totals.fail and the exit code agree.
+    totals.fail += 1;
+    totals.failures.push({ file, status, crashed: true });
   }
 }
 
@@ -302,7 +354,10 @@ async function main() {
   if (totals.failures.length > 0) {
     console.log('  Failed files:');
     for (const f of totals.failures) {
-      console.log(`    - ${f.file}`);
+      const tag = f.crashed
+        ? ` (crashed before TAP summary, exit ${f.status})`
+        : '';
+      console.log(`    - ${f.file}${tag}`);
     }
     console.log('');
   }
@@ -324,7 +379,14 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error('[runner] Unhandled error:', err);
-  process.exit(1);
-});
+// Run the suite when invoked directly (`node tests/run-all.js`). When this
+// file is required as a module — the tally logic has its own unit test — only
+// the exported helpers load, so importing it doesn't start a server or exit.
+if (require.main === module) {
+  main().catch(err => {
+    console.error('[runner] Unhandled error:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { parseTapSummary, tallyAndPrint };

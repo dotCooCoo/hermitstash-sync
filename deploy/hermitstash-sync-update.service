@@ -26,8 +26,10 @@ EnvironmentFile=-/etc/default/hermitstash-sync-update
 ExecStart=/usr/local/lib/hermitstash-sync/update.sh
 
 # The updater shells out to curl, node (for verify-release.js), systemctl,
-# flock, and sudo -u hermit for the health check. No network namespace
-# isolation — we explicitly need to reach github.com and raw.githubusercontent.com.
+# and flock. The post-restart health check runs `hermitstash-sync status`
+# directly as root against the service user's CONFIG_DIR — it does not use
+# sudo, which NoNewPrivileges=yes would block. No network namespace
+# isolation — we explicitly need to reach github.com.
 #
 # MemoryDenyWriteExecute is not set because node's V8 allocates W+X pages
 # for its JIT when running verify-release.js.
