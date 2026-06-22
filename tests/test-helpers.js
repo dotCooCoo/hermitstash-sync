@@ -329,8 +329,6 @@ class ApiClient {
       json: resp.json,
     };
   }
-
-  get sessionCookie() { return this._client._sessionCookie; }
 }
 
 /**

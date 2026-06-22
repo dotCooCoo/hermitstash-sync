@@ -281,7 +281,7 @@ describe('Round-three sync-engine hardening', { timeout: 30000 }, () => {
 
       // A delete fires for the same path while the download is mid-stream.
       const delResult = await h.engine._executeDelete('gated.txt', { serverFileId: 'fid-del' });
-      assert.equal(delResult, false, 'the delete is refused while a same-path download is in flight');
+      assert.equal(delResult, 'skipped', 'the delete is refused (tri-state "skipped") while a same-path download is in flight');
       assert.equal(h.deleted.length, 0, 'no server DELETE was issued');
 
       await dlP;

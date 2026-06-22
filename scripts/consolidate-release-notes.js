@@ -66,9 +66,17 @@ function _currentMinor() {
   var raw;
   try { raw = fs.readFileSync(CONSTANTS_JS, 'utf8'); }
   catch (e) { _exit('cannot read ' + CONSTANTS_JS + ': ' + (e && e.message || e)); }
-  var m = raw.match(/VERSION\s*[:=]\s*['"](\d+\.\d+)\.\d+['"]/);
-  if (!m) _exit('could not parse VERSION from lib/constants.js');
-  return m[1];
+  // Anchor to the exact `const VERSION = '<semver>'` declaration. An
+  // unanchored `VERSION[:=]...` also matches an unrelated `*_VERSION`
+  // constant (e.g. `const TLS_MIN_VERSION = 'TLSv1.3'`) and `.match()`
+  // returns the FIRST hit, so declaration order would decide which string
+  // is extracted. Capturing major + minor from a single-quoted semver
+  // triple refuses a non-version literal at the boundary. Sibling
+  // generate-changelog-entry.js#_readProjectVersion hardened the identical
+  // pattern for the same reason.
+  var m = raw.match(/\bconst VERSION\s*=\s*'(\d+)\.(\d+)\.\d+'/);
+  if (!m) _exit('could not find `const VERSION = \'<semver>\'` literal in lib/constants.js');
+  return m[1] + '.' + m[2];
 }
 
 function _compareVersionsDesc(a, b) {

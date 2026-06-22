@@ -67,6 +67,19 @@ function _run(cmd, args, opts) {
   return rv;
 }
 
+// Synchronous bounded sleep without spawning a subprocess. Atomics.wait on a
+// throwaway shared buffer blocks the calling thread for `ms`; falls back to a
+// spin if SharedArrayBuffer is somehow unavailable (it is present on the Node
+// runtime floor, so the fallback is belt-and-suspenders). Mirrors blamejs's
+// internal idiom (vendor/blamejs/lib/atomic-file.js#_sleepSync) without
+// reaching into a non-exported symbol.
+function _sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); return; }
+  catch (_e) { /* fall through to spin */ }
+  var end = Date.now() + ms;
+  while (Date.now() < end) { /* spin */ }
+}
+
 function _capture(cmd, args, opts) {
   opts = opts || {};
   var rv = childProcess.spawnSync(cmd, args || [], {
@@ -444,7 +457,7 @@ function _pollForRun(workflow, branch) {
     var rv = _capture('gh', ['run', 'list', '--workflow=' + workflow, '--branch', branch,
       '--limit', '1', '--json', 'databaseId', '--jq', '.[0].databaseId']);
     if (rv.stdout) return rv.stdout;
-    _run('node', ['-e', 'setTimeout(function(){}, 10000)'], { stdio: 'ignore' });
+    _sleepSync(10000);
   }
   return null;
 }

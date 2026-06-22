@@ -290,3 +290,63 @@ describe('Sync cursor advances on dropped (path-traversal) server events', () =>
     nodeFs.rmSync(tmp, { recursive: true, force: true });
   });
 });
+
+// _validateMtlsTrio gates a server-pushed CA rotation before the new trio
+// touches the live mTLS identity. It routes the issuer test through
+// b.x509Chain.issuerValidlyIssued so a non-CA certificate (basicConstraints
+// cA:FALSE) can never be accepted as the trust anchor — node's raw
+// X509Certificate.verify()/checkIssued() do not enforce the cA bit
+// (CVE-2002-0862 class). These cases lock that behaviour and guard the
+// legitimate accept path against regression.
+describe('mTLS trio validation routes through b.x509Chain (CA-bit enforced)', () => {
+  const nodeCrypto = require('node:crypto');
+
+  async function makeCa() {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-x509-'));
+    const ca = b.mtlsCa.create({ dataDir: dir, caKeySealedMode: 'disabled', generation: 1 });
+    await ca.initCA();
+    const caPem = nodeFs.readFileSync(nodePath.join(dir, 'ca.crt'), 'utf8');
+    return { ca, caPem, dir };
+  }
+
+  it('accepts a real CA + its leaf, rejects non-CA issuer / wrong CA / mismatched key', async () => {
+    const a = await makeCa();
+    const b2 = await makeCa();
+    const leaf = await a.ca.generateClientCert({ cn: 'unit-client', usage: 'client', validityDays: 30 });
+    const otherLeaf = await a.ca.generateClientCert({ cn: 'unit-other', usage: 'client', validityDays: 30 });
+    const engine = new SyncEngine({ syncFolder: a.dir }, 'k');
+
+    // Legit trio: leaf issued by the CA, key matches → accepted.
+    assert.doesNotThrow(() => engine._validateMtlsTrio(leaf.cert, leaf.key, a.caPem),
+      'a CA-issued leaf with its matching key and the issuing CA must validate');
+
+    // A non-CA end-entity cert (cA:FALSE) presented as the CA → rejected by the
+    // cA-bit short-circuit, even though the key/cert pair itself is consistent.
+    assert.throws(() => engine._validateMtlsTrio(leaf.cert, leaf.key, leaf.cert),
+      /valid CA/, 'a non-CA cert must not be accepted as the trust anchor');
+
+    // Leaf does not chain to a different, unrelated CA → rejected.
+    assert.throws(() => engine._validateMtlsTrio(leaf.cert, leaf.key, b2.caPem),
+      /valid CA/, 'a leaf that did not chain to the supplied CA must be rejected');
+
+    // Key/cert mismatch → rejected before the issuer test.
+    assert.throws(() => engine._validateMtlsTrio(leaf.cert, otherLeaf.key, a.caPem),
+      /does not match/, 'a key that does not match the cert must be rejected');
+
+    // Unparseable PEM → throws (node:crypto X509Certificate ctor).
+    assert.throws(() => engine._validateMtlsTrio('not a cert', leaf.key, a.caPem),
+      'an unparseable leaf PEM must throw');
+
+    for (const d of [a.dir, b2.dir]) nodeFs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it('b.x509Chain.isCaCert distinguishes a CA from a leaf', async () => {
+    const a = await makeCa();
+    const leaf = await a.ca.generateClientCert({ cn: 'unit-leaf', usage: 'client', validityDays: 30 });
+    assert.equal(b.x509Chain.isCaCert(new nodeCrypto.X509Certificate(a.caPem)), true,
+      'the CA cert must report basicConstraints cA:TRUE');
+    assert.equal(b.x509Chain.isCaCert(new nodeCrypto.X509Certificate(leaf.cert)), false,
+      'an end-entity leaf must report cA:FALSE');
+    nodeFs.rmSync(a.dir, { recursive: true, force: true });
+  });
+});

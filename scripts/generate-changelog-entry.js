@@ -464,13 +464,32 @@ function _loadAllReleases() {
         _exit('consolidated file release-notes/' + name + ' missing `releases` array');
       }
       for (var r = 0; r < con.releases.length; r += 1) {
-        consolidated.push({ rel: con.releases[r], from: name });
+        // The consolidated filename only encodes the minor, so the in-file
+        // `version` is the sole semver source for each entry. Assert it is a
+        // strict triple at the load/trust boundary so the version-sort
+        // comparator below can never see a NaN-producing malformed string.
+        var crel = con.releases[r];
+        if (!crel || typeof crel.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(crel.version)) {
+          _exit('release-notes/' + name + ' releases[' + r + '] has a non-semver `version` ' +
+            JSON.stringify(crel && crel.version) + ' — fix it to a strict `\\d+.\\d+.\\d+` triple');
+        }
+        consolidated.push({ rel: crel, from: name });
       }
       continue;
     }
     var verMatch = name.match(/^v(\d+\.\d+\.\d+)\.json$/);
     if (!verMatch) continue;
-    perPatch.push({ rel: _readJson(path.join(NOTES_DIR, name), 'release-notes/' + name), from: name });
+    var prel = _readJson(path.join(NOTES_DIR, name), 'release-notes/' + name);
+    // The per-patch filename encodes the full triple; cross-check the in-file
+    // `version` against it so a correctly-named file carrying a malformed or
+    // mismatched in-file version (e.g. "0.9.12" inside v0.9.11.json, "0.8",
+    // "0.8.x") fails loud here instead of scrambling the sort/grouping.
+    if (!prel || typeof prel.version !== 'string' || prel.version !== verMatch[1]) {
+      _exit('release-notes/' + name + ' declares version ' + JSON.stringify(prel && prel.version) +
+        ' but the filename encodes ' + JSON.stringify(verMatch[1]) +
+        ' — fix the in-file `version` field to the strict semver matching the filename');
+    }
+    perPatch.push({ rel: prel, from: name });
   }
   for (var c = 0; c < consolidated.length; c += 1) {
     var cv = String(consolidated[c].rel && consolidated[c].rel.version);

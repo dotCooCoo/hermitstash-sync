@@ -15,8 +15,17 @@
 vendor/blamejs/** text eol=lf
 vendor/blamejs/lib/vendor/*.cjs text eol=lf
 
-# scripts/ are also size-sensitive (vendor-hash.js itself shouldn't drift).
-scripts/*.js text eol=lf
+# All JavaScript is LF on every platform. scripts/ + bin/ are size-sensitive
+# (vendor-hash.js and anything that hashes them must not drift), and a
+# Windows-authored lib/ or tests/ file picked up with CRLF otherwise lands a
+# whole-file EOL flip in the committed blob (a 2000-line spurious diff for a
+# one-line change). Pinning *.js to LF keeps every JS blob byte-identical
+# regardless of core.autocrlf.
+*.js text eol=lf
 
-# bin/ entry point — same reason; if anything ever hashes it.
-bin/*.js text eol=lf
+# Shell scripts must be LF on every platform. ShellCheck (SC1017) rejects a
+# literal carriage return, so a CRLF-committed script breaks the lint gate in
+# both ci.yml and docker-publish.yml — and a failed docker-publish lint skips
+# the image build entirely. Pin every *.sh to LF regardless of autocrlf so a
+# Windows-authored script can never land CRLF bytes in the committed blob.
+*.sh text eol=lf

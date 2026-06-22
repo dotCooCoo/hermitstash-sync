@@ -2,16 +2,16 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.15.14",
+      "version": "0.15.15",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.15.14",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.14:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.15.14",
+      "tag": "v0.15.15",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.15:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.15.15",
       "consumed": [
-        "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, permanent-error classifier, TLSv1.3 pin, custom handshakeGuid)",
+        "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
         "vendor/blamejs/lib/vendor/noble-ciphers.cjs#xchacha20poly1305 — symmetric AEAD for the HermitStash ECIES session key",
         "vendor/blamejs/lib/vendor/noble-post-quantum.cjs#ml_kem1024 — KEM leg of the HermitStash hybrid ECIES bootstrap"
@@ -38,13 +38,13 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:e2e227feecf5ad0e6870c4126387c8b0ee77ee5654e9a447042834a1dec84acd",
-        "safe-json": "sha256:d258f40648046ff2109d4d29bb0f5226f46879255e05ed0fc214b3fff6899642",
+        "index": "sha256:fe4c9ee864a5b7920e22c4f449bd07ba65ad8e035d20eff95a9b90fd287e05db",
+        "safe-json": "sha256:0f36bc670632a8eb5c63142c3d9dfb54b9d854a94b819cd58fd5376e6d83e4a5",
         "safe-url": "sha256:8224a3a15ca2a09fe96f05ff463e385b775d539342c28dcce34072542c71b781",
         "pqc-agent": "sha256:ed7245f4bb351b66f7637e981f95756871babc5ee51575e29cc2577459dd709a",
         "pqc-software": "sha256:755f04c0d672b5e0d52fc95622f805a5a8b78a93165fb08291e8557778057993",
         "http-client": "sha256:aab09c8459cd12b3a84b7c8b838fffa93991cabbb8ade9b5af2d7c0b82dc8b30",
-        "ws-client": "sha256:84537daa4dab12f2cd3caeeabcf45e0cc58a2101586873fec86fc6804f786e04",
+        "ws-client": "sha256:9216df399c1a512e0278530a09d40fa505cef48035599ff0326afbb53d3d6c4f",
         "log-stream": "sha256:cd4e01642b0e6909886973f2bfb6c70d803a2e628316d13ef25f1515cb4a3dbc",
         "log-stream-local": "sha256:f05cb83e0f852a554ddbeb9757b62ddf4a3840a682d88de5eee19bafdf68adc6",
         "atomic-file": "sha256:fb18029faa6240be00ebce24b4d2cb13fd5cb2f932a561014bb523ec7e12facf",

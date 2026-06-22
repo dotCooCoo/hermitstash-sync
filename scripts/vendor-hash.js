@@ -18,12 +18,16 @@
  * hash. Catches a half-applied vendor refresh, a corrupted clone, or
  * tampering with a vendored cjs after the manifest was committed.
  *
- * Uses only node:fs + node:crypto + node:path.
+ * Uses node:fs + node:crypto + node:path plus the vendored blamejs
+ * `b.safeJson.parse` to read the manifest under the same size/depth caps
+ * the sibling manifest readers (build-sbom.js, check-blamejs-version.js)
+ * apply to the very same file.
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const b = require('../vendor/blamejs');
 
 const MANIFEST_PATH = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -84,7 +88,7 @@ function refreshStandaloneVerifier() {
 
 (function main() {
   const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
-  const manifest = JSON.parse(raw);
+  const manifest = b.safeJson.parse(raw, { maxBytes: b.constants.BYTES.mib(1) });
   if (!manifest.packages || !manifest.packages.blamejs) {
     console.error('vendor/MANIFEST.json missing packages.blamejs');
     process.exit(1);

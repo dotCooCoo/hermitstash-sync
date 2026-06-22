@@ -146,7 +146,7 @@ function build() {
   const version = readVersion();
   const tag = `v${version}`;
   const top = readJson(TOP_MANIFEST);
-  if (!top || !top.packages || typeof top.packages !== 'object') {
+  if (!top || !top.packages || typeof top.packages !== 'object' || Array.isArray(top.packages)) {
     throw new Error('vendor/MANIFEST.json missing "packages" map');
   }
 
@@ -164,7 +164,17 @@ function build() {
       const transPath = nodePath.join(REPO_ROOT, entry.transitive_manifest);
       if (nodeFs.existsSync(transPath)) {
         const trans = readJson(transPath);
-        const transPkgs = (trans && trans.packages) || {};
+        // A transitive manifest present on disk but structurally broken
+        // (no `packages` map, or `packages` is null/an array) would
+        // otherwise collapse to an empty set and ship an SBOM with zero
+        // transitive (noble-*) components — the highest-CVE-value leaves —
+        // with no error. Mirror the top-level assert so a half-applied or
+        // hand-mangled refresh fails the release loud. A manifest that is
+        // simply absent stays a no-op via the existsSync guard above.
+        if (!trans || !trans.packages || typeof trans.packages !== 'object' || Array.isArray(trans.packages)) {
+          throw new Error(`transitive manifest ${entry.transitive_manifest} missing "packages" map`);
+        }
+        const transPkgs = trans.packages;
         for (const subKey of Object.keys(transPkgs)) {
           if (subKey.charAt(0) === '_') continue;
           const subEntry = transPkgs[subKey];
