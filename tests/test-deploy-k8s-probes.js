@@ -7,7 +7,7 @@
 // sees the non-zero exit and restarts the pod. A shell wrapper (sh -c ...,
 // grep, ||, ;) would swallow or mask the exit code and is rejected here.
 //
-// No YAML library is available (zero npm deps), so this parses the small,
+// No YAML library is bundled, so this parses the small,
 // well-known probe blocks structurally from the manifest text.
 
 const test = require('node:test');

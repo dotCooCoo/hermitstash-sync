@@ -216,9 +216,9 @@ var VALID_ALLOW_CLASSES = {
 
 // CVE-2026-25639 / 42033 / 42041 / 40175 — axios prototype-pollution.
 // CVE-2026-25922 / 23687 / 34840 — SAML XML signature wrapping (xml-crypto
-// class). This client carries zero npm runtime dependencies; the gate
-// refuses any require() against these packages so a careless edit or a
-// vendor refresh can't pull one in.
+// class). The shipped runtime is restricted to node: built-ins plus vendored
+// blamejs; the gate refuses any require() against these packages so a careless
+// edit or a vendor refresh can't pull one in.
 var VENDOR_DENY_NAMES = [
   { name: 'axios',      cve: 'CVE-2026-25639/42033/42041/40175 prototype-pollution' },
   { name: 'xml-crypto', cve: 'CVE-2026-25922/23687/34840 SAML XML signature wrapping' },
@@ -1032,8 +1032,8 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
 
   it('no require() of denied vendors (axios / xml-crypto / xml2js / samlify)', () => {
     // class: vendor-deny
-    // Zero npm runtime dependencies is a hard project invariant. These
-    // packages carry prototype-pollution (axios) and SAML XML
+    // Keeping the shipped runtime to node: built-ins plus vendored blamejs is a
+    // hard project invariant. These packages carry prototype-pollution (axios) and SAML XML
     // signature-wrapping (xml-crypto / xml2js / samlify) CVE classes; a
     // require() against any of them is refused outright.
     var files = _sourceFiles();

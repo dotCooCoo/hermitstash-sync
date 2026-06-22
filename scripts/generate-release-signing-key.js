@@ -30,7 +30,7 @@
  * (~192-bit classical, ~96-bit post-quantum). Independent of the
  * existing P-384 ECDSA auto-update signature — both sigs ship per
  * release; the daemon's in-binary auto-update verifier uses the
- * ECDSA sig (zero npm deps via node:crypto), while operators who
+ * ECDSA sig (verified with only node:crypto), while operators who
  * want a PQC-only verification posture use the .mldsa.sig sidecar.
  */
 

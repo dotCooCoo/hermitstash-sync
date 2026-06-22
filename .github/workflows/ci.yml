@@ -30,8 +30,11 @@ jobs:
         with:
           node-version: '>=24.16.0'
 
-      - name: Install ESLint
-        run: npm install --no-save eslint@^10 eslint-plugin-security@^4
+      - name: Install lint tools
+        # Install eslint + eslint-plugin-security from the committed
+        # package-lock.json (reproducible, lockfile-pinned) rather than
+        # resolving them ad-hoc at run time.
+        run: npm ci
 
       # ── Vendor freshness ───────────────────────────────────────
       # Fails CI when the pinned blamejs in vendor/MANIFEST.json doesn't

@@ -105,8 +105,11 @@ jobs:
         with:
           node-version: '>=24.16.0'
 
-      - name: Install ESLint
-        run: npm install --no-save eslint@^10 eslint-plugin-security@^4
+      - name: Install lint tools
+        # Install eslint + eslint-plugin-security from the committed
+        # package-lock.json (reproducible, lockfile-pinned) rather than
+        # resolving them ad-hoc at run time.
+        run: npm ci
 
       - name: Run ESLint
         id: eslint
@@ -228,7 +231,7 @@ jobs:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Set up Node.js
-        # zizmor: ignore[cache-poisoning] no cache input set (zero npm deps).
+        # zizmor: ignore[cache-poisoning] no cache input set, so setup-node caches nothing.
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '>=24.16.0'

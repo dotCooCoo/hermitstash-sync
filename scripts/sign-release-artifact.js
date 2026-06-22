@@ -19,7 +19,7 @@
  *
  * This sig is INDEPENDENT of the in-binary auto-update P-384 ECDSA
  * signature: the daemon's self-update verifier (lib/updater.js)
- * uses the ECDSA `.sig` (raw IEEE-P1363 r||s, zero npm deps via
+ * uses the ECDSA `.sig` (raw IEEE-P1363 r||s, via
  * node:crypto). The `.mldsa.sig` is an additional sidecar for
  * operators who want a PQC-only verification posture; verify with
  * `scripts/verify-release.js --mldsa`.

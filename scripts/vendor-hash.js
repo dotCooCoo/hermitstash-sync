@@ -18,7 +18,7 @@
  * hash. Catches a half-applied vendor refresh, a corrupted clone, or
  * tampering with a vendored cjs after the manifest was committed.
  *
- * Zero dependencies — pure node:fs + node:crypto + node:path.
+ * Uses only node:fs + node:crypto + node:path.
  */
 
 const fs = require('node:fs');
@@ -63,7 +63,7 @@ function sha256File(rel) {
   return 'sha256:' + crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-// Refresh the operator-shipped copy of blamejs's zero-dep standalone
+// Refresh the operator-shipped copy of blamejs's node:-builtins-only standalone
 // verifier. scripts/standalone-verifier.js is consumed by the Docker
 // verify stage + deploy/install.sh + deploy/update.sh — contexts that
 // don't have vendor/blamejs/ on disk yet. We carry a verbatim copy so

@@ -17,7 +17,7 @@
 #   4. Removes the npm package
 #   5. Shows git diff of changed vendor files
 #
-# Zero npm runtime dependencies — vendor/ contains bundled code only.
+# vendor/ contains bundled (vendored) code only.
 # After running, verify with: node bin/hermitstash-sync.js version
 # Then commit: git add vendor/ && git commit
 
@@ -29,7 +29,7 @@ DATE=$(date +%Y-%m-%d)
 
 # Create MANIFEST if it doesn't exist
 if [ ! -f "$MANIFEST" ]; then
-  echo '{"note":"Vendored dependencies for hermitstash-sync. Zero npm runtime packages.","packages":{}}' > "$MANIFEST"
+  echo '{"note":"Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream.","packages":{}}' > "$MANIFEST"
 fi
 
 # ---- Helper: get vendored version ----

@@ -1,6 +1,6 @@
 'use strict';
 
-// verify-release.js — release-asset CLI shim around blamejs's zero-dep
+// verify-release.js — release-asset CLI shim around blamejs's node:-builtins-only
 // `b.selfUpdate.standaloneVerifier`. Used by the Docker verify stage,
 // `deploy/install.sh`, and `deploy/update.sh` — all contexts that run
 // BEFORE vendor/blamejs is on disk. The verifier itself lives at

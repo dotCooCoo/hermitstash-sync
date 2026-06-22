@@ -113,7 +113,7 @@ curl -fsSL --retry 3 -o "${WORK}/bin.sig"       "${BASE}/${NAME}.sig"
 
 # Also pull the in-tree verify trio for this tag so the next update run
 # can re-verify against the same pubkey + verifier that were in the repo
-# at release time. The three files are zero-dep:
+# at release time. The three files use only Node built-ins:
 #   lib/autoupdate-pubkey.js     — P-384 verify key (operator-owned)
 #   scripts/standalone-verifier.js — b.selfUpdate.standaloneVerifier copy
 #   scripts/verify-release.js    — CLI shim wiring the two together
