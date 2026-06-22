@@ -1,0 +1,17 @@
+{
+  "version": "0.9.13",
+  "date": "2026-06-21",
+  "headline": "Validates the configured server URL before the repair command displays it",
+  "summary": "The `hermitstash-sync repair` command now routes the configured server URL through the same URL validator the sync and WebSocket transports use before it is shown, so a malformed server entry surfaces with a clear error instead of being printed and then failing the enrollment exchange, and the command displays the normalized origin rather than the raw configuration string. Behaviour is otherwise unchanged.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Repair validates and normalizes the server URL before display",
+          "body": "The repair command parsed nothing before echoing the configured server URL. It now validates that value through the same parser the sync and WebSocket transports apply (rejecting a non-http(s) or malformed entry up front) and prints the reconstructed origin, so the value shown to the operator is a validated, normalized URL rather than the raw configuration string."
+        }
+      ]
+    }
+  ]
+}
