@@ -264,6 +264,13 @@ function _regenArtifacts(opts) {
   // changelog drift gate above.
   _run('node', ['scripts/project-transitive-manifest.js', '--check']);
   _ok('vendored transitive SBOM projection drift-checked');
+  // Hand-typed version references in the operator-facing docs (the vendored
+  // blamejs version, its minor line, the Node floor) must match their source of
+  // truth — vendor-hash.js syncs them on a refresh; here we gate drift so a
+  // vendor bump that skipped vendor-hash, or a hand-edit, fails prepare loud
+  // instead of shipping a stale version in the README.
+  _run('node', ['scripts/check-doc-versions.js', '--check']);
+  _ok('operator-facing doc versions drift-checked');
 }
 
 function _verifyCommitSignature(label) {

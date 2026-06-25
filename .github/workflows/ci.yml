@@ -198,6 +198,31 @@ jobs:
           fi
           exit $EXIT_CODE
 
+      # ── Operator-facing doc version drift gate ─────────────────
+      # The hand-typed version references in README / SECURITY /
+      # RELEASING (the vendored blamejs version, its minor line, and
+      # the Node floor) must match their source of truth
+      # (vendor/MANIFEST.json + package.json engines). Refuses to pass
+      # if a vendor bump left a stale version stranded in the prose.
+      - name: Run doc version drift gate
+        if: always()
+        id: doc_version_gate
+        run: |
+          set +e
+          OUTPUT=$(node scripts/check-doc-versions.js --check 2>&1)
+          EXIT_CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "output<<DOCVER_EOF"
+            printf '%s\n' "$OUTPUT"
+            echo "DOCVER_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::operator-facing doc version drift gate failed"
+          fi
+          exit $EXIT_CODE
+
       # ── Hadolint (Dockerfile) ──────────────────────────────────
       # Guarded: only runs when a Dockerfile is present. Will activate
       # automatically once a Dockerfile is added for containerized builds.

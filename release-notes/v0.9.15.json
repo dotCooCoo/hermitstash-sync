@@ -1,0 +1,26 @@
+{
+  "version": "0.9.15",
+  "date": "2026-06-25",
+  "headline": "Corrects the vendored framework version shown in the README and gates the operator-facing version references against future drift",
+  "summary": "A documentation and release-tooling release with no change to client behaviour. The README's stated vendored-framework version had fallen a patch behind the actual vendored tree. It is corrected, and the hand-typed version references in the operator-facing docs — the vendored framework version, its minor line, and the Node runtime floor — are now kept in lockstep with their source of truth: synced automatically at the vendoring step and verified by a drift gate in release preparation and continuous integration, so a future vendor bump cannot strand a stale version in the prose. No operator action is required.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "README stated an out-of-date vendored framework version",
+          "body": "The README's requirements section named a vendored-framework version one patch behind the version actually vendored in the previous release. It now reflects the shipped version. This is a documentation correction; the binary and its behaviour are unchanged."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Operator-facing version references are kept in sync with their source",
+          "body": "The hand-typed version references in the operator-facing documentation — the vendored framework version and its minor line, drawn from the vendored manifest, and the Node runtime floor, drawn from the package manifest — are now reconciled mechanically at the vendoring step and verified by a drift gate during release preparation and continuous integration. Each reference is anchored to a specific phrasing so an unrelated, deliberate version on the same line (such as the server-side compatibility floor) is never disturbed, and the gate fails closed if a reference is reworded away rather than silently going dormant. A vendor bump can no longer leave a stale version stranded in the docs."
+        }
+      ]
+    }
+  ]
+}

@@ -29,6 +29,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const b = require('../vendor/blamejs');
 const { projectInto } = require('./project-transitive-manifest');
+const { fixDocs } = require('./check-doc-versions');
 
 const MANIFEST_PATH = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -115,7 +116,16 @@ function refreshStandaloneVerifier() {
 
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
   const refreshed = refreshStandaloneVerifier();
+
+  // Keep the hand-typed version references in the operator-facing docs (the
+  // vendored blamejs version, its minor line, and the Node floor) in lockstep
+  // with their source of truth, so a vendor bump can't leave a stale version
+  // stranded in the README. Gated by `check-doc-versions.js --check` in release
+  // prepare + CI.
+  const docFixes = fixDocs(REPO_ROOT);
+
   console.log('vendor/MANIFEST.json updated:', Object.keys(CONSUMED).length, 'file hashes recorded; ' +
               transitiveCount + ' transitive bundles projected.' +
-              (refreshed ? ' scripts/standalone-verifier.js refreshed from upstream.' : ''));
+              (refreshed ? ' scripts/standalone-verifier.js refreshed from upstream.' : '') +
+              (docFixes ? ' ' + docFixes + ' doc version reference(s) synced.' : ''));
 })();
