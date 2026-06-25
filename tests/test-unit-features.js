@@ -399,3 +399,23 @@ describe('mTLS trio validation routes through b.x509Chain (CA-bit enforced)', ()
     nodeFs.rmSync(a.dir, { recursive: true, force: true });
   });
 });
+
+describe('auto-update egress allowlist covers the GitHub release CDN', () => {
+  // Replicate blamejs's allowedHosts matcher (vendor http-client.js): a bare
+  // entry matches a host exactly; a leading-dot entry is a SUFFIX match anchored
+  // at a label boundary (host === entry-without-dot, or host.endsWith(entry)).
+  function hostAllowed(host, allow) {
+    return host === allow || (allow[0] === '.' && (host === allow.slice(1) || host.endsWith(allow)));
+  }
+  it('admits the current AND legacy release-asset CDN hosts but not a look-alike', () => {
+    const { createUpdater } = require('../lib/updater');
+    const up = createUpdater({}); // no httpsAgent → production (non-test) allowlist
+    const hosts = up._internals.allowedHosts;
+    assert.ok(Array.isArray(hosts) && hosts.length > 0, 'production allowlist is populated');
+    const covered = (h) => hosts.some((entry) => hostAllowed(h, entry));
+    assert.ok(covered('github.com'), 'github.com (the redirect origin) is allowed');
+    assert.ok(covered('release-assets.githubusercontent.com'), 'current release-asset CDN host is allowed (the fix)');
+    assert.ok(covered('objects.githubusercontent.com'), 'legacy release-asset CDN host stays allowed');
+    assert.equal(covered('evilgithubusercontent.com'), false, 'a look-alike host is NOT allowed (suffix is label-anchored)');
+  });
+});

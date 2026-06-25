@@ -291,6 +291,65 @@ describe('HttpClient stream teardown', { timeout: 30000 }, () => {
       rmrf(tempDir);
     }
   });
+
+  it('download: a truncated body with NO checksum is rejected on the exact-size check', async (t) => {
+    if (!certs) return t.skip('test PKI unavailable (b.mtlsCa cert generation failed)');
+
+    // The client expects 64 bytes (from the WS event) but the server delivers
+    // only 32. With no reference checksum (a content-unchanged rename into
+    // selective-sync scope), the exact-size assertion is the only integrity
+    // guard — a short body must be refused, not committed as SYNCED.
+    const body = Buffer.alloc(32, 0x43);
+    const server = await startServer(certs, (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length) });
+      res.end(body);
+      req.on('error', () => {});
+    });
+    const port = server.address().port;
+    const tempDir = createTempDir('teardown-dl-trunc');
+    const destPath = nodePath.join(tempDir, 'short.bin');
+    const client = makeClient(certs, port);
+    try {
+      await assert.rejects(
+        client.downloadFile('file-trunc', destPath, undefined, 64),
+        /size mismatch/i,
+        'a body shorter than the declared size must be refused when there is no checksum',
+      );
+      assert.equal(nodeFs.existsSync(destPath), false, 'no truncated file is committed');
+      const leftover = nodeFs.readdirSync(tempDir).filter((f) => f.indexOf('.tmp.') !== -1);
+      assert.deepEqual(leftover, [], 'the rejected download leaves no temp file');
+    } finally {
+      client.destroy();
+      await new Promise((r) => server.close(r));
+      rmrf(tempDir);
+    }
+  });
+
+  it('download: a correctly-sized body with NO checksum still commits', async (t) => {
+    if (!certs) return t.skip('test PKI unavailable (b.mtlsCa cert generation failed)');
+
+    // Control: a legitimate checksumless download (exact size) must still land.
+    const body = Buffer.from('a content-unchanged rename moved me into scope', 'utf8');
+    const server = await startServer(certs, (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length) });
+      res.end(body);
+      req.on('error', () => {});
+    });
+    const port = server.address().port;
+    const tempDir = createTempDir('teardown-dl-nosum');
+    const destPath = nodePath.join(tempDir, 'moved.bin');
+    const client = makeClient(certs, port);
+    try {
+      const result = await client.downloadFile('file-nosum', destPath, undefined, body.length);
+      assert.equal(result, destPath);
+      assert.equal(nodeFs.readFileSync(destPath).toString('utf8'), body.toString('utf8'),
+        'a correctly-sized checksumless download commits unchanged');
+    } finally {
+      client.destroy();
+      await new Promise((r) => server.close(r));
+      rmrf(tempDir);
+    }
+  });
 });
 
 // Allow standalone invocation (node tests/test-http-teardown.js) without the
