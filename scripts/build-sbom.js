@@ -160,7 +160,19 @@ function build() {
     const parent = buildComponent(key, entry);
     components.push(parent);
 
-    if (typeof entry.transitive_manifest === 'string') {
+    // Transitive (noble-* / simplewebauthn / public-suffix …) surface.
+    // Prefer the committed, drift-gated projection in
+    // packages.blamejs.transitive — mechanically projected from blamejs's own
+    // vendor manifest by scripts/project-transitive-manifest.js (run at the
+    // vendor step, gated by its --check), so the SBOM is built from a
+    // reviewed, in-repo artifact rather than a release-time reach into the
+    // vendored subtree. Fall back to the live transitive manifest before the
+    // first projection is populated (and on an older checkout).
+    let transPkgs = null;
+    if (entry.transitive && entry.transitive.packages &&
+        typeof entry.transitive.packages === 'object' && !Array.isArray(entry.transitive.packages)) {
+      transPkgs = entry.transitive.packages;
+    } else if (typeof entry.transitive_manifest === 'string') {
       const transPath = nodePath.join(REPO_ROOT, entry.transitive_manifest);
       if (nodeFs.existsSync(transPath)) {
         const trans = readJson(transPath);
@@ -174,24 +186,26 @@ function build() {
         if (!trans || !trans.packages || typeof trans.packages !== 'object' || Array.isArray(trans.packages)) {
           throw new Error(`transitive manifest ${entry.transitive_manifest} missing "packages" map`);
         }
-        const transPkgs = trans.packages;
-        for (const subKey of Object.keys(transPkgs)) {
-          if (subKey.charAt(0) === '_') continue;
-          const subEntry = transPkgs[subKey];
-          if (!subEntry || typeof subEntry !== 'object' || typeof subEntry.version !== 'string') continue;
-          // Only surface transitive bundles whose runtime CJS file is
-          // actually present on disk — the upstream manifest lists
-          // every blamejs vendor dep, but the SEA only ships the ones
-          // present under vendor/blamejs/lib/vendor/. Filter by file
-          // existence so the SBOM matches the shipped surface.
-          if (!subEntry.files || typeof subEntry.files.server !== 'string') continue;
-          const onDisk = nodePath.join(REPO_ROOT, 'vendor', 'blamejs', subEntry.files.server);
-          if (!nodeFs.existsSync(onDisk)) continue;
-          const sub = buildComponent(subKey, subEntry);
-          sub['bom-ref'] = `${key}/${subKey}@${subEntry.version}`;
-          components.push(sub);
-          subDeps.push({ parentRef: parent['bom-ref'], childRef: sub['bom-ref'] });
-        }
+        transPkgs = trans.packages;
+      }
+    }
+    if (transPkgs) {
+      for (const subKey of Object.keys(transPkgs)) {
+        if (subKey.charAt(0) === '_') continue;
+        const subEntry = transPkgs[subKey];
+        if (!subEntry || typeof subEntry !== 'object' || typeof subEntry.version !== 'string') continue;
+        // Only surface transitive bundles whose runtime CJS file is
+        // actually present on disk — the upstream manifest lists
+        // every blamejs vendor dep, but the SEA only ships the ones
+        // present under vendor/blamejs/lib/vendor/. Filter by file
+        // existence so the SBOM matches the shipped surface.
+        if (!subEntry.files || typeof subEntry.files.server !== 'string') continue;
+        const onDisk = nodePath.join(REPO_ROOT, 'vendor', 'blamejs', subEntry.files.server);
+        if (!nodeFs.existsSync(onDisk)) continue;
+        const sub = buildComponent(subKey, subEntry);
+        sub['bom-ref'] = `${key}/${subKey}@${subEntry.version}`;
+        components.push(sub);
+        subDeps.push({ parentRef: parent['bom-ref'], childRef: sub['bom-ref'] });
       }
     }
   }

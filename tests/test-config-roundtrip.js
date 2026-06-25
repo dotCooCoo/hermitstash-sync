@@ -104,3 +104,40 @@ describe('config.save / config.load round-trip', () => {
       'malformed config should throw a parse error');
   });
 });
+
+describe('config.load env overlay — boolean blank guard', () => {
+  const KEY = 'HERMITSTASH_AUTO_UPDATE';
+  function withEnv(val, fn) {
+    const had = Object.prototype.hasOwnProperty.call(process.env, KEY);
+    const prev = process.env[KEY];
+    if (val === undefined) delete process.env[KEY]; else process.env[KEY] = val;
+    try { return fn(); } finally {
+      if (had) process.env[KEY] = prev; else delete process.env[KEY];
+    }
+  }
+
+  it('a blank HERMITSTASH_AUTO_UPDATE does NOT override an explicit config.json autoUpdate=false', () => {
+    // Container platforms hand an empty string for an optional boolean left
+    // blank (Unraid Default="", Docker `VAR=`). Without the blank guard this
+    // would force the value ON and silently re-enable the self-replace update
+    // path the operator disabled.
+    config.save({ server: 'https://example.test', syncFolder: TMP_DIR, bundleId: 'b', autoUpdate: false });
+    withEnv('', () => {
+      assert.equal(config.load().autoUpdate, false,
+        'a blank boolean env var must be treated as unset, not as ON');
+    });
+    withEnv('   ', () => {
+      assert.equal(config.load().autoUpdate, false, 'whitespace-only is also unset');
+    });
+  });
+
+  it('an explicit token still sets the overlay (0/false/no/off => false, else => true)', () => {
+    config.save({ server: 'https://example.test', syncFolder: TMP_DIR, bundleId: 'b', autoUpdate: false });
+    withEnv('1', () => assert.equal(config.load().autoUpdate, true));
+    withEnv('true', () => assert.equal(config.load().autoUpdate, true));
+    config.save({ server: 'https://example.test', syncFolder: TMP_DIR, bundleId: 'b', autoUpdate: true });
+    withEnv('0', () => assert.equal(config.load().autoUpdate, false));
+    withEnv('false', () => assert.equal(config.load().autoUpdate, false));
+    withEnv('off', () => assert.equal(config.load().autoUpdate, false));
+  });
+});

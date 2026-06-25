@@ -10,8 +10,12 @@
 // into the install pipeline. The pubkey at `lib/autoupdate-pubkey.js`
 // is operator-owned (this repo's release key).
 //
-// Algorithm + format auto-detected by the standalone verifier (by length):
-//   - ECDSA P-384 (DER, ~100-104 bytes, SHA3-512) — what release.yml emits
+// Algorithm + format are detected by the standalone verifier from the
+// signature's ASN.1 structure, not its byte length: an ECDSA signature that
+// parses as a DER SEQUENCE{INTEGER r, INTEGER s} is verified as DER; otherwise
+// an exactly-96-byte pair is verified as IEEE-P1363 r||s; anything else fails
+// closed. The digest is SHA3-512.
+//   - ECDSA P-384 (DER over SHA3-512) — what release.yml emits
 //   - ECDSA P-384 (IEEE-P1363 r||s, 96 bytes) — also accepted
 //   - Ed25519, ML-DSA-87 — accepted if the pubkey SPKI matches
 //

@@ -256,6 +256,14 @@ function _regenArtifacts(opts) {
   _run('node', ['scripts/generate-changelog-entry.js', '--rebuild']);
   _run('node', ['scripts/check-changelog-extract.js']);
   _ok('CHANGELOG regenerated + drift-checked');
+  // Vendored transitive surface (packages.blamejs.transitive) must match
+  // blamejs's own authoritative manifest. The projection is populated
+  // mechanically at the vendor step (scripts/vendor-hash.js); here we only
+  // gate drift, so a blamejs refresh that skipped vendor-hash or a hand-edit
+  // fails prepare loud instead of shipping a stale SBOM — mirroring the
+  // changelog drift gate above.
+  _run('node', ['scripts/project-transitive-manifest.js', '--check']);
+  _ok('vendored transitive SBOM projection drift-checked');
 }
 
 function _verifyCommitSignature(label) {

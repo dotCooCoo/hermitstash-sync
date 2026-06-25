@@ -172,6 +172,32 @@ jobs:
           fi
           exit $EXIT_CODE
 
+      # ── Vendored transitive SBOM projection drift gate ─────────
+      # packages.blamejs.transitive in vendor/MANIFEST.json is a
+      # mechanical projection of blamejs's own authoritative vendor
+      # manifest, populated at the vendor step and consumed by the
+      # release SBOM. Refuses to pass if the projection drifts from the
+      # vendored tree (a blamejs refresh that skipped vendor-hash, or a
+      # hand-edit), so a stale transitive surface can't reach the SBOM.
+      - name: Run transitive SBOM projection gate
+        if: always()
+        id: transitive_gate
+        run: |
+          set +e
+          OUTPUT=$(node scripts/project-transitive-manifest.js --check 2>&1)
+          EXIT_CODE=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "output<<TRANS_EOF"
+            printf '%s\n' "$OUTPUT"
+            echo "TRANS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::transitive SBOM projection drift gate failed"
+          fi
+          exit $EXIT_CODE
+
       # ── Hadolint (Dockerfile) ──────────────────────────────────
       # Guarded: only runs when a Dockerfile is present. Will activate
       # automatically once a Dockerfile is added for containerized builds.

@@ -18,10 +18,10 @@
  *   (d) the single-slot _encChain lock that serializes overlapping encrypted
  *       requests so their counters never interleave.
  *
- * Plus the client-side wall-clock cap (_withWallClock): the blamejs encrypted
- * wrapper forwards only idleTimeoutMs and exposes no abort handle, so a request
- * that never settles must still reject at the wall-clock ceiling rather than
- * wedging the serialized _encChain queue.
+ * Plus the overall wall-clock cap: the client forwards ENC_WALL_CLOCK_TIMEOUT_MS
+ * to b.httpClient.encrypted as timeoutMs (which the base request converts into a
+ * socket-aborting AbortSignal), and translates the resulting ETIMEDOUT into the
+ * actionable, transient ENC_WALL_CLOCK_TIMEOUT contract callers depend on.
  *
  * These run without a server: _getEncClient is stubbed to return a scripted
  * fake enc client and _resetEncClient is spied. Self-contained — runnable via
@@ -246,55 +246,64 @@ describe('encrypted-request serialization (_encChain)', () => {
   });
 });
 
-describe('encrypted-request wall-clock cap (_withWallClock)', () => {
-  it('a request that never settles rejects at the wall-clock ceiling, not hangs forever', async () => {
+describe('encrypted-request wall-clock cap (timeoutMs forwarded to the primitive)', () => {
+  // The overall wall-clock ceiling is now enforced by b.httpClient.encrypted:
+  // the client forwards ENC_WALL_CLOCK_TIMEOUT_MS as timeoutMs, which the base
+  // request converts into an AbortSignal that tears the socket down on expiry
+  // (replacing the old client-side Promise.race that left the socket orphaned).
+  // The scripted enc client can't reproduce the real socket abort, so we assert
+  // (a) the cap is forwarded to the primitive, and (b) the resulting base-request
+  // ETIMEDOUT is translated to the actionable, transient HermitStash contract.
+
+  it('forwards an overall wall-clock timeoutMs (alongside the idle cap) to enc.request', async () => {
     const client = makeClient();
     const ctl = installScript(client, [
-      { hang: true },
+      { resp: { statusCode: 200, body: { ok: true } } },
     ]);
-    // Shrink the ceiling so the test is fast; the production constant is 60s.
-    const start = Date.now();
-    await assert.rejects(
-      client._withWallClock(client._getEncClient().then((e) => e.request({})), 60, 'POST /sync/rename'),
-      (e) => e.code === 'ENC_WALL_CLOCK_TIMEOUT' && e.permanent === false,
-    );
-    const elapsed = Date.now() - start;
-    assert.ok(elapsed < 5000, 'rejected promptly at the cap, elapsed=' + elapsed + 'ms');
-    assert.ok(ctl.callCount >= 1, 'the underlying request was issued');
+    await client._encryptedRequest('POST', '/sync/rename', { a: 1 });
+    const opts = ctl.calls[0];
+    assert.ok(typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0,
+      'an overall wall-clock timeoutMs must be forwarded so the primitive aborts the socket');
+    assert.ok(typeof opts.idleTimeoutMs === 'number' && opts.idleTimeoutMs > 0,
+      'the idle (zero-progress) cap must still be forwarded');
     client.destroy();
   });
 
-  it('a fast request resolves through the wall-clock wrapper unchanged', async () => {
+  it('a base-request ETIMEDOUT (the timeoutMs-driven abort) is translated to the actionable transient ENC_WALL_CLOCK_TIMEOUT', async () => {
     const client = makeClient();
-    const v = await client._withWallClock(Promise.resolve({ statusCode: 200 }), 1000, 'POST /x');
-    assert.strictEqual(v.statusCode, 200);
-    client.destroy();
-  });
-
-  it('the timeout error is actionable and transient (translated, not the raw primitive code)', async () => {
-    const client = makeClient();
+    const timedOut = new Error('request timed out'); timedOut.code = 'ETIMEDOUT';
+    const ctl = installScript(client, [
+      { throw: timedOut },
+    ]);
     await assert.rejects(
-      client._withWallClock(new Promise(() => {}), 10, 'POST /sync/rename'),
+      client._encryptedRequest('POST', '/sync/rename', { a: 1 }),
       (e) => {
-        // The hardened primitive raises async/timeout; _withWallClock must
-        // translate it to the HermitStash-specific contract callers depend on,
-        // not leak the framework code.
         assert.strictEqual(e.code, 'ENC_WALL_CLOCK_TIMEOUT');
         assert.strictEqual(e.permanent, false);
-        assert.match(e.message, /wall-clock limit/);
+        assert.match(e.message, /wall-clock cap/);
         assert.match(e.message, /POST \/sync\/rename/);
         assert.match(e.message, /Retry/);
         return true;
       },
     );
+    assert.strictEqual(ctl.callCount, 1, 'a wall-clock timeout is not retried');
     client.destroy();
   });
 
-  it('a non-timeout rejection passes through the wall-clock wrapper untranslated', async () => {
+  it('a fast request resolves unchanged', async () => {
+    const client = makeClient();
+    installScript(client, [{ resp: { statusCode: 200, body: { ok: true } } }]);
+    const resp = await client._encryptedRequest('POST', '/x', { a: 1 });
+    assert.strictEqual(resp.statusCode, 200);
+    client.destroy();
+  });
+
+  it('a non-timeout rejection passes through untranslated', async () => {
     const client = makeClient();
     const orig = new Error('decrypt failed'); orig.code = 'CLIENT_RESPONSE_NOT_JSON';
+    installScript(client, [{ throw: orig }]);
     await assert.rejects(
-      client._withWallClock(Promise.reject(orig), 1000, 'POST /x'),
+      client._encryptedRequest('POST', '/x', { a: 1 }),
       (e) => e === orig && e.code === 'CLIENT_RESPONSE_NOT_JSON',
     );
     client.destroy();

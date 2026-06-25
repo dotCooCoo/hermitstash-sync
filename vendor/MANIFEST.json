@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.15.15",
+      "version": "0.15.19",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.15.15",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.15:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.15.15",
+      "tag": "v0.15.19",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.19:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.15.19",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -46,16 +46,137 @@
         "http-client": "sha256:aab09c8459cd12b3a84b7c8b838fffa93991cabbb8ade9b5af2d7c0b82dc8b30",
         "ws-client": "sha256:9216df399c1a512e0278530a09d40fa505cef48035599ff0326afbb53d3d6c4f",
         "log-stream": "sha256:cd4e01642b0e6909886973f2bfb6c70d803a2e628316d13ef25f1515cb4a3dbc",
-        "log-stream-local": "sha256:f05cb83e0f852a554ddbeb9757b62ddf4a3840a682d88de5eee19bafdf68adc6",
-        "atomic-file": "sha256:fb18029faa6240be00ebce24b4d2cb13fd5cb2f932a561014bb523ec7e12facf",
+        "log-stream-local": "sha256:e721dbd168882d79abcab774ac4d0de564397a7bcc089c4c61a0e93a41c08a93",
+        "atomic-file": "sha256:f51b60395826674bb916282c8c3c3e7237772e6c3612caae13a3ac205050a7d5",
         "app-shutdown": "sha256:86e2318795f3b3341bd33f52bde657d38ee3d4907594f3b62a4b25b0ebed6475",
         "retry": "sha256:1ca448007f6a27d69a259724b2da86ff5d2653d80a9b931dc5aeb40a74d68388",
         "framework-error": "sha256:b2c0a5991bc45e5adfb5e1de858f908ba894d8b8f48c8cd9c3953764b895a51d",
         "process-spawn": "sha256:e59049967331f3cc91cc1c67846d32706ecdacacec315099752b0df0b4704a62",
         "config-drift": "sha256:4d84c7325904857327055f304650aa5e2c182582fc97244ae9816517ab036fc9",
-        "middleware-api-encrypt": "sha256:2e9bff9ec4e8117c308fa8a2eed788af1f3aefeb366350ddddad27b712ae6e07",
+        "middleware-api-encrypt": "sha256:85b959b3b76406b375f1e0b7ae5cdde5c6b56400c1d2965b9d4782eb3546183d",
         "noble-post-quantum": "sha256:f9190309daadca4c2e2cc2b76beaa6b96e463429cc3c390bd9f0ceaf7b588c68",
         "noble-ciphers": "sha256:5d539dfc9ef47121d4c09bd7256d76448a1f5ac47ee09ac44c78ff6a062af9ab"
+      },
+      "transitive": {
+        "_note": "Mechanically projected from vendor/blamejs/lib/vendor/MANIFEST.json by scripts/project-transitive-manifest.js. Run by scripts/vendor-hash.js on every blamejs refresh and gated by its --check (scripts/release.js prepare + CI). Do not hand-edit — re-run the projector. Filtered to bundles whose files.server ships under vendor/blamejs/, carrying only the fields the release SBOM consumes.",
+        "source": "vendor/blamejs/lib/vendor/MANIFEST.json",
+        "packages": {
+          "@noble/ciphers": {
+            "version": "2.2.0",
+            "license": "MIT",
+            "author": "Paul Miller",
+            "source": "https://github.com/paulmillr/noble-ciphers",
+            "cpe": "cpe:2.3:a:paulmillr:noble-ciphers:2.2.0:*:*:*:*:node.js:*:*",
+            "files": {
+              "server": "lib/vendor/noble-ciphers.cjs"
+            },
+            "hashes": {
+              "server": "sha256:5d539dfc9ef47121d4c09bd7256d76448a1f5ac47ee09ac44c78ff6a062af9ab"
+            },
+            "bundledAt": "2026-04-25T00:00:00Z"
+          },
+          "@noble/curves": {
+            "version": "2.2.0",
+            "license": "MIT",
+            "author": "Paul Miller",
+            "source": "https://github.com/paulmillr/noble-curves",
+            "cpe": "cpe:2.3:a:paulmillr:noble-curves:0.0.0:*:*:*:*:node.js:*:*",
+            "files": {
+              "server": "lib/vendor/noble-curves.cjs"
+            },
+            "hashes": {
+              "server": "sha256:ebf254d5eb56aef8705a1c4af9603f47987b4870a9bb5e657e06907b701e2731"
+            },
+            "bundledAt": "2026-05-26T00:00:00Z"
+          },
+          "@noble/post-quantum": {
+            "version": "0.6.1",
+            "license": "MIT",
+            "author": "Paul Miller",
+            "source": "https://github.com/paulmillr/noble-post-quantum",
+            "cpe": "cpe:2.3:a:paulmillr:noble-post-quantum:0.6.1:*:*:*:*:node.js:*:*",
+            "files": {
+              "server": "lib/vendor/noble-post-quantum.cjs"
+            },
+            "hashes": {
+              "server": "sha256:f9190309daadca4c2e2cc2b76beaa6b96e463429cc3c390bd9f0ceaf7b588c68"
+            },
+            "bundledAt": "2026-05-06T00:00:00Z"
+          },
+          "@simplewebauthn/server": {
+            "version": "13.3.1",
+            "license": "MIT",
+            "author": "Matthew Miller",
+            "source": "https://github.com/MasterKale/SimpleWebAuthn",
+            "cpe": "cpe:2.3:a:simplewebauthn:server:13.3.1:*:*:*:*:node.js:*:*",
+            "files": {
+              "server": "lib/vendor/simplewebauthn-server.cjs"
+            },
+            "hashes": {
+              "server": "sha256:f359a782ac57e3ff56ac71083d17f5c082f88ab49d645fc2bede398b47adebdb"
+            },
+            "bundledAt": "2026-05-27T00:00:00Z"
+          },
+          "SecLists-common-passwords-top-10000": {
+            "version": "10k-most-common (master)",
+            "license": "CC-BY-3.0",
+            "author": "Daniel Miessler / SecLists contributors",
+            "source": "https://github.com/danielmiessler/SecLists",
+            "files": {
+              "server": "lib/vendor/common-passwords-top-10000.txt",
+              "data_js": "lib/vendor/common-passwords-top-10000.data.js"
+            },
+            "hashes": {
+              "server": "sha256:3c04e3cec775a7d0e21e544d33810dd434cccdb02e98903ba12e506dd9cd01bd",
+              "data_js": "sha256:87b223beca89f33d2c2c32a2cfda0bc187e58061de40e7127bb5ffc4258c6e2a"
+            },
+            "bundledAt": "2026-05-13T00:00:00Z"
+          },
+          "bimi-trust-anchors": {
+            "version": "operator-managed",
+            "license": "BIMI Group / per-issuer",
+            "license_is_spdx": false,
+            "author": "BIMI Group / DigiCert / Entrust",
+            "source": "https://bimigroup.org/",
+            "files": {
+              "server": "lib/vendor/bimi-trust-anchors.pem",
+              "data_js": "lib/vendor/bimi-trust-anchors.data.js"
+            },
+            "hashes": {
+              "server": "sha256:81ff9f5ab3c9774132c845684e783be95cf73146f8b670d964105f0a3765b4b4",
+              "data_js": "sha256:aa7a4d33b65a68422a2a2c1670177689f66fdcaa08bd2514d78798b827bd1608"
+            },
+            "bundledAt": "2026-05-13T00:00:00Z"
+          },
+          "publicsuffix-list": {
+            "version": "master",
+            "license": "MPL-2.0",
+            "author": "Mozilla Foundation",
+            "source": "https://publicsuffix.org/list/public_suffix_list.dat",
+            "files": {
+              "server": "lib/vendor/public-suffix-list.dat",
+              "data_js": "lib/vendor/public-suffix-list.data.js"
+            },
+            "hashes": {
+              "server": "sha256:0adddeb62057d8d40799dffb29fe14f65dd009259afe02eb2f0b4602b791aae6",
+              "data_js": "sha256:82af512cacf0fd2c60925e63f877b69477b1b2f7bb5af698fd862af61369902e"
+            },
+            "bundledAt": "2026-06-22T00:00:00Z"
+          },
+          "peculiar-pki": {
+            "version": "2.0.0+pkijs-3.4.0",
+            "license": "MIT",
+            "author": "Peculiar Ventures",
+            "source": "https://github.com/PeculiarVentures",
+            "files": {
+              "server": "lib/vendor/pki.cjs"
+            },
+            "hashes": {
+              "server": "sha256:9bbc191afaaa2b1e5757f00480457c08134cdc2c55d541df18d9155bba9cbf77"
+            },
+            "bundledAt": "2026-04-29T00:00:00Z"
+          }
+        }
       }
     }
   }

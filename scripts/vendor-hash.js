@@ -28,6 +28,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const b = require('../vendor/blamejs');
+const { projectInto } = require('./project-transitive-manifest');
 
 const MANIFEST_PATH = path.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -103,8 +104,18 @@ function refreshStandaloneVerifier() {
   manifest.packages.blamejs.files = files;
   manifest.packages.blamejs.hashes = hashes;
 
+  // Mechanically project blamejs's own authoritative transitive manifest
+  // (the noble-* / simplewebauthn / public-suffix bundles it vendors) into
+  // packages.blamejs.transitive in the SAME write that records the consumed
+  // hashes. This keeps the release SBOM's transitive surface a committed,
+  // reviewable, drift-gated artifact instead of a release-time reach into the
+  // vendored subtree — the projection is re-checked by
+  // `scripts/project-transitive-manifest.js --check` in release prepare + CI.
+  const transitiveCount = projectInto(manifest, REPO_ROOT);
+
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
   const refreshed = refreshStandaloneVerifier();
-  console.log('vendor/MANIFEST.json updated:', Object.keys(CONSUMED).length, 'file hashes recorded.' +
+  console.log('vendor/MANIFEST.json updated:', Object.keys(CONSUMED).length, 'file hashes recorded; ' +
+              transitiveCount + ' transitive bundles projected.' +
               (refreshed ? ' scripts/standalone-verifier.js refreshed from upstream.' : ''));
 })();
