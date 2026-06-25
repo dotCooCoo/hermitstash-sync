@@ -64,8 +64,11 @@ function sourcesOfTruth(repoRoot) {
   return { blamejsVersion, blamejsMinor, nodeFloor };
 }
 
-// Each rule: an anchored regex with ONE capture group (the version token to
-// check), the canonical value it must equal, and a label for diagnostics.
+// Each rule: an anchored literal regex (global, ONE capture group = the version
+// token to check), the canonical value it must equal, and a label. The regexes
+// are literals — never built from a string — so there is no dynamic-RegExp /
+// ReDoS surface; they are consumed via matchAll/replace, which do not mutate the
+// source regex's lastIndex, so the same rule is safe to reuse across files.
 function rulesFor(s) {
   return [
     { label: 'vendored blamejs version', re: /\(on blamejs v(\d+\.\d+\.\d+)\)/g, expect: s.blamejsVersion },
@@ -82,9 +85,7 @@ function evalRule(repoRoot, rule) {
     const abs = path.join(repoRoot, file);
     if (!fs.existsSync(abs)) continue;
     const text = fs.readFileSync(abs, 'utf8');
-    const re = new RegExp(rule.re.source, 'g');
-    let m;
-    while ((m = re.exec(text)) !== null) {
+    for (const m of text.matchAll(rule.re)) {
       matches++;
       if (m[1] !== rule.expect) drift.push({ file, found: m[1], expect: rule.expect });
     }
@@ -131,8 +132,7 @@ function fixDocs(repoRoot) {
     let text = fs.readFileSync(abs, 'utf8');
     let changed = false;
     for (const rule of rulesFor(s)) {
-      const re = new RegExp(rule.re.source, 'g');
-      text = text.replace(re, (whole, found) => {
+      text = text.replace(rule.re, (whole, found) => {
         if (found === rule.expect) return whole;
         replaced++;
         changed = true;
