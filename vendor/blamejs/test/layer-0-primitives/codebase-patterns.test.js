@@ -5171,6 +5171,48 @@ var KNOWN_ANTIPATTERNS = [
     reason: "basicConstraints cA:TRUE enforcement is owned by x509Chain.issuerValidlyIssued / x509Chain.isCaCert; tsa/mail-bimi/mail-crypto-smime route through it. Any lib file calling X.checkIssued(Y) (Y!=X) directly bypasses the cA check and must use x509Chain instead. lib/x509-chain.js is the home of the primitive.",
   },
   {
+    id: "fingerprint-pin-against-claimed-field-not-recomputed",
+    primitive: "b.auditSign.fingerprintOf",
+    scanScope: "lib",
+    skipCommentLines: true,
+    // A fingerprint PIN (expectedFingerprint, supplied out-of-band by the
+    // verifier) must be checked against a fingerprint RECOMPUTED from the
+    // signature block's own publicKey — fingerprintOf(block.publicKey) — NOT
+    // the block's self-asserted `.fingerprint` field. An attacker controls that
+    // field: sign arbitrary bytes with their OWN key, set `fingerprint` to the
+    // trusted value, and a `block.fingerprint === expectedFingerprint` check
+    // passes while the signature still verifies under the attacker's key (the
+    // backup-manifest verifyBytes/verifySignature P1 substitution bug). Binding
+    // the pin to fingerprintOf(publicKey) — the key the signature is actually
+    // verified under — closes the substitution. Fires on either argument order.
+    regex: /(?:[\w.]+\.fingerprint\s*[!=]==\s*[\w.]*\bexpectedFingerprint\b|\bexpectedFingerprint\b\s*[!=]==\s*[\w.]+\.fingerprint\b)/,
+    allowlist: [],
+    reason: "A fingerprint pin must be compared against auditSign.fingerprintOf(<the block's publicKey>) — the key the signature verifies under — never the block's untrusted self-asserted `.fingerprint` field (an attacker sets that to the trusted value while signing with their own key). backup/manifest.js _verifyPayloadAgainstBlock recomputes via derivedFingerprint = fingerprintOf(sig.publicKey). Any `X.fingerprint === expectedFingerprint` (either order) re-introduces the substitution bypass and must recompute instead.",
+  },
+  {
+    id: "platform-parameterized-containment-resolves-with-runtime-path-module",
+    primitive: "b.safePath (target-platform lexical resolve)",
+    scanScope: "lib",
+    skipCommentLines: true,
+    // A path validator parameterized by opts.platform must resolve AND bound its
+    // LEXICAL containment with the TARGET platform's path module
+    // (`pathMod = isWin ? nodePath.win32 : nodePath.posix`), not the runtime
+    // node:path. The per-segment walk already splits on the target separator
+    // (`sep = isWin ? /[\\/]/ : /\//`); if the lexical resolve uses runtime
+    // semantics they disagree. On a POSIX host validating opts.platform:
+    // "windows", runtime node:path treats `\` as an ordinary filename char, so
+    // `ok\..\..\outside` was NOT collapsed and slipped past the boundary slice —
+    // resolving to `<base>/ok\..\..\outside`, a path that escapes the base once a
+    // Windows consumer reads the backslashes (Codex P1, PR #372). The realpath
+    // check hits the live filesystem and legitimately keeps a SEPARATE runtime
+    // resolve under distinctly-named vars (rtBaseResolved / rtJoined / rtSep), so
+    // those don't match this anchor. Fires if the lexical `joined` reverts to
+    // `nodePath.resolve(baseResolved, ...)` or `sepChar` to `nodePath.sep`.
+    regex: /\bjoined\s*=\s*nodePath\.resolve\s*\(\s*baseResolved|\bvar\s+sepChar\s*=\s*nodePath\.sep\b/,
+    allowlist: [],
+    reason: "b.safePath.resolve refuses traversal lexically by resolving rel under base and slicing on the containment boundary. When validating for a non-runtime platform (opts.platform), the lexical resolve + boundary separator MUST come from the target module (pathMod = isWin ? nodePath.win32 : nodePath.posix) so they share the per-segment walk's platform semantics — otherwise a separator the target treats as a delimiter (the Windows backslash) is treated as a filename char by the runtime resolver and a cross-platform `ok\\..\\..\\outside` traversal escapes the base. The realpath check keeps a separate runtime resolve (rtBaseResolved/rtJoined/rtSep) because it touches the live FS. Reverting the lexical `joined`/`sepChar` to runtime nodePath re-opens the cross-platform traversal hole.",
+  },
+  {
     id: "compose-pipeline-settle-on-response-ended-not-return",
     primitive: "b.middleware.composePipeline",
     scanScope: "lib",
@@ -9359,6 +9401,29 @@ var KNOWN_ANTIPATTERNS = [
     skipCommentLines: true,
     allowlist: [],
     reason: "#123 macOS codebase-patterns watchdog hang. _scanShardInWorker rejected on worker error/exit without w.terminate(), so an errored worker thread stayed alive holding open handles; the parent then could not exit and the smoke run ran to the 25-min watchdog on memory-starved macOS-arm64 runners (it hung this very release's CI). Every settle path must reap the worker via w.terminate() first; the fix funnels message/error/exit through a settle() guard that terminates before resolve/reject. Fires on the bare `w.once(\"error\", reject)` shape; silent once error/exit route through settle().",
+  },
+  {
+    // A test file must invoke its run()/IIFE ONLY under
+    // `if (require.main === module)`. The smoke worker REQUIRES each test
+    // module and then awaits its exported run(); a module-level `run()` (or
+    // `run().then(...process.exit...)`) at column 0 fires a SECOND, unawaited
+    // run() at require-time that races the worker's result print — and if it
+    // calls process.exit() it exits the worker BEFORE the result line is
+    // written, which the parent reports as the unattributable "no result line"
+    // / "fork failed". Found via the worker's late-error + leaked-handle audit
+    // sweep (defineguard-default-gate-posture-caps / dpop-middleware-
+    // replaystore-required / otlp-attr-redaction + two integration files), the
+    // same slow-runner-flake root as #123. Export run and guard the
+    // self-execution. Structural test-harness-contract drift a behavioral test
+    // can't assert (the race only surfaces under require, intermittently on a
+    // slow runner) — the detector is the guard.
+    id: "test-unguarded-module-level-run",
+    primitive: "a test file's run()/self-execution must sit under `if (require.main === module)` (export run for the smoke worker to await) — a bare module-level run() at column 0 re-runs at require-time and races / exits the worker",
+    scanScope: "test",
+    regex: /^run\s*\(/m,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "The smoke worker requires each test module and awaits its exported run(); a column-0 `run()` / `run().then(...process.exit...)` fires a second unawaited run() at require-time that races the worker's result print (and process.exit() exits before the result line, read as 'no result line' / 'fork failed' on a slow runner). Export `run` and wrap the invocation in `if (require.main === module)`. Fires on any `run(` at the start of a line; `function run()`, `module.exports = { run }`, and an indented `run()` inside the require-main guard stay silent.",
   },
   {
     // `Promise + setTimeout` direct sleep in tests is forbidden;

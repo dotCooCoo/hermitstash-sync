@@ -1,0 +1,26 @@
+{
+  "version": "0.9.17",
+  "date": "2026-06-25",
+  "headline": "Server-to-host sync delivers files on Linux and macOS hosts",
+  "summary": "On a non-Windows host — including the container image — a file the server reported as added or changed was resolved against a fixed Windows path separator before the client chose where to write it, so it never landed on disk and was logged as a refused path. The download path now resolves with the host's own path rules while still refusing any name a Windows peer could not represent, so server-to-host sync works on every platform. The vendored framework is refreshed to v0.15.23, which carries the underlying cross-platform path-safety fix.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Server-to-host sync writes files on Linux and macOS",
+          "body": "A file the server reported as added or changed was resolved against a fixed Windows path separator before the client chose where to write it. On a non-Windows host that produced a path the local filesystem could not address, so the file was refused as a path traversal and never written — server-to-host sync silently delivered nothing on Linux and macOS, including inside the container image. The download path now resolves with the host platform's own rules, and the strict cross-platform naming check (reserved device names, and a backslash a Windows peer would read as a directory separator) is applied separately, so a server push lands on every operating system while a name a Windows peer could not materialize is still refused."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored framework refreshed to v0.15.23",
+          "body": "The vendored framework is updated to v0.15.23, whose path-safety primitive resolves cross-platform containment with the target platform's path semantics — the fix this release depends on. The update also carries the framework's accumulated correctness fixes since the previously vendored release."
+        }
+      ]
+    }
+  ]
+}

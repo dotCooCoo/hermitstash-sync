@@ -291,6 +291,37 @@ describe('Sync cursor advances on dropped (path-traversal) server events', () =>
   });
 });
 
+// _safePath resolves a SERVER-origin name to a path used for real filesystem
+// reads and writes, so it must resolve with the RUNTIME platform: a
+// foreign-platform override returns a path in the foreign separator that does
+// not address the host filesystem (a "\data\x" written on a POSIX host never
+// lands at /data/x — the server->host break inside a Linux container). The
+// Windows-naming strictness for server-origin names is enforced separately via a
+// windows-platform validate(), so a name a Windows peer could not materialize
+// (reserved device, backslash traversal) is still refused on any host.
+describe('_safePath resolves server names natively and keeps Windows-name strictness on every host', () => {
+  const tmp = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-safepath-'));
+  const engine = new SyncEngine({ syncFolder: tmp }, 'k');
+
+  it('resolves a normal name to a native, in-folder path', () => {
+    assert.equal(engine._safePath('from-server.txt'), nodePath.resolve(tmp, 'from-server.txt'));
+    assert.equal(engine._safePath('sub/dir/file.txt'), nodePath.resolve(tmp, 'sub/dir/file.txt'));
+  });
+
+  it('refuses a parent-escape traversal', () => {
+    assert.equal(engine._safePath('../../etc/passwd'), null);
+  });
+
+  it('refuses a Windows-reserved name on every host (so a Windows peer stays safe)', () => {
+    assert.equal(engine._safePath('aux'), null);
+    assert.equal(engine._safePath('com1'), null);
+  });
+
+  it('refuses a backslash traversal a Windows peer would read as ..', () => {
+    assert.equal(engine._safePath('ok\\..\\..\\outside'), null);
+  });
+});
+
 // _validateMtlsTrio gates a server-pushed CA rotation before the new trio
 // touches the live mTLS identity. It routes the issuer test through
 // b.x509Chain.issuerValidlyIssued so a non-CA certificate (basicConstraints
