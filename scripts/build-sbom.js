@@ -206,6 +206,25 @@ function build() {
         sub['bom-ref'] = `${key}/${subKey}@${subEntry.version}`;
         components.push(sub);
         subDeps.push({ parentRef: parent['bom-ref'], childRef: sub['bom-ref'] });
+
+        // Enumerate a meta-bundle's nested packages (e.g. peculiar-pki ships
+        // @peculiar/x509 + pkijs) as their own components and dependency edges,
+        // so a CVE scanner keys on each nested package's own version instead of
+        // only the aggregate bundle name it won't recognize. The nested versions
+        // ride the drift-gated projection (subEntry.components), so they can't
+        // silently go stale on a refresh.
+        if (subEntry.components && typeof subEntry.components === 'object' && !Array.isArray(subEntry.components)) {
+          for (const nestedKey of Object.keys(subEntry.components)) {
+            const nested = subEntry.components[nestedKey];
+            if (!nested || typeof nested !== 'object' || typeof nested.version !== 'string') continue;
+            const nestedEntry = { version: nested.version };
+            if (typeof nested.url === 'string') nestedEntry.source = nested.url;
+            const nestedComp = buildComponent(nestedKey, nestedEntry);
+            nestedComp['bom-ref'] = `${key}/${subKey}/${nestedKey}@${nested.version}`;
+            components.push(nestedComp);
+            subDeps.push({ parentRef: sub['bom-ref'], childRef: nestedComp['bom-ref'] });
+          }
+        }
       }
     }
   }

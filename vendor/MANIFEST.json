@@ -174,7 +174,17 @@
             "hashes": {
               "server": "sha256:9bbc191afaaa2b1e5757f00480457c08134cdc2c55d541df18d9155bba9cbf77"
             },
-            "bundledAt": "2026-04-29T00:00:00Z"
+            "bundledAt": "2026-04-29T00:00:00Z",
+            "components": {
+              "@peculiar/x509": {
+                "url": "https://github.com/PeculiarVentures/x509",
+                "version": "2.0.0"
+              },
+              "pkijs": {
+                "url": "https://github.com/PeculiarVentures/PKI.js",
+                "version": "3.4.0"
+              }
+            }
           }
         }
       }

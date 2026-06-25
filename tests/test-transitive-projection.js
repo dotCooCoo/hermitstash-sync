@@ -177,15 +177,44 @@ describe('project-transitive-manifest — real repo is in sync', () => {
 });
 
 describe('project-transitive-manifest — SBOM consumes the projection', () => {
-  it('the release SBOM carries every projected transitive bundle as a component', () => {
+  it('the release SBOM carries every projected transitive bundle and nested package as a component', () => {
     const { doc } = sbom.build();
     const proj = projector.buildProjection(REPO_ROOT);
     const refs = new Set(doc.components.map(c => c['bom-ref']));
+
+    let nestedCount = 0;
     for (const key of Object.keys(proj)) {
       const ref = `blamejs/${key}@${proj[key].version}`;
       assert.ok(refs.has(ref), `SBOM is missing transitive component ${ref}`);
+      // A meta-bundle's nested packages (e.g. peculiar-pki -> @peculiar/x509,
+      // pkijs) must each be enumerated so a CVE scanner can key on their own
+      // version, not just the aggregate bundle.
+      const components = proj[key].components;
+      if (components && typeof components === 'object') {
+        for (const nestedKey of Object.keys(components)) {
+          nestedCount++;
+          const nestedRef = `blamejs/${key}/${nestedKey}@${components[nestedKey].version}`;
+          assert.ok(refs.has(nestedRef), `SBOM is missing nested component ${nestedRef}`);
+          const nestedComp = doc.components.find(c => c['bom-ref'] === nestedRef);
+          assert.equal(nestedComp.version, components[nestedKey].version);
+          // A dependency edge bundle -> nested package must exist.
+          const edge = doc.dependencies.find(e => e.ref === ref);
+          assert.ok(edge && edge.dependsOn.includes(nestedRef),
+            `SBOM is missing the dependency edge ${ref} -> ${nestedRef}`);
+        }
+      }
     }
-    // blamejs itself + every shipped transitive bundle.
-    assert.equal(doc.components.length, 1 + Object.keys(proj).length);
+    // blamejs itself + every shipped transitive bundle + every nested package.
+    assert.equal(doc.components.length, 1 + Object.keys(proj).length + nestedCount);
+  });
+
+  it('enumerates the peculiar-pki nested packages with their own purls', () => {
+    const { doc } = sbom.build();
+    const x509 = doc.components.find(c => c.name === '@peculiar/x509');
+    const pkijs = doc.components.find(c => c.name === 'pkijs');
+    assert.ok(x509, '@peculiar/x509 must be a distinct SBOM component');
+    assert.ok(pkijs, 'pkijs must be a distinct SBOM component');
+    assert.match(x509.purl, /^pkg:github\/peculiarventures\/x509@/);
+    assert.match(pkijs.purl, /^pkg:github\/peculiarventures\/pki\.js@/);
   });
 });

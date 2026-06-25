@@ -52,6 +52,12 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const PROJECTED_FIELDS = Object.freeze([
   'version', 'license', 'license_is_spdx', 'author',
   'source', 'cpe', 'description', 'files', 'hashes', 'bundledAt',
+  // `components` carries the nested package versions of a meta-bundle (e.g.
+  // peculiar-pki ships @peculiar/x509 + pkijs). The release SBOM enumerates
+  // each nested package so a CVE scanner can key on its own version rather than
+  // only the aggregate bundle, so the nested versions must ride the projection
+  // (and be drift-gated) too.
+  'components',
 ]);
 
 const PROJECTION_NOTE =
