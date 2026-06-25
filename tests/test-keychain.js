@@ -24,6 +24,7 @@ const { execFileSync } = require('node:child_process');
 
 const KEYCHAIN = path.resolve(__dirname, '../lib/keychain.js');
 const BLAMEJS = path.resolve(__dirname, '../vendor/blamejs');
+const LOGGER = path.resolve(__dirname, '../lib/logger.js');
 
 function tmpConfigDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `hs-keychain-${label}-`));
@@ -291,6 +292,60 @@ describe('keychain — world-readable credentials file is refused when un-tighte
       assert.equal(got, 'OK-KEY', 'a tightenable loose-perm file should still be served after re-chmod');
       const mode = (fs.statSync(CREDENTIALS_FILE).mode & 0o777).toString(8);
       assert.equal(mode, '600');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+});
+
+// A native stub that throws the typed `keychain/bad-fallback-file` error — the
+// shape blamejs produces when NO native credential store is present (headless
+// Linux without libsecret, most containers): it selects the file backend, then
+// throws here because we pass no fallbackFile (we own the on-disk fallback).
+// This is the NORMAL path and must NOT print the misleading "unlock the
+// keychain" warning.
+const NATIVE_ABSENT = `{
+  store: async () => { throw new b.keychain.KeychainError('keychain/bad-fallback-file', 'no fallback file configured'); },
+  retrieve: async () => { throw new b.keychain.KeychainError('keychain/bad-fallback-file', 'no fallback file configured'); },
+  remove: async () => { throw new Error('absent'); },
+  KeychainError: b.keychain.KeychainError,
+}`;
+
+describe('keychain — calm message on a genuinely-absent native store', () => {
+  it('no-native-backend (keychain/bad-fallback-file) writes the fallback with a calm info line, not a misleading "unlock" warning', () => {
+    const dir = tmpConfigDir('absent');
+    // Patch the shared logger object (the same module instance keychain holds)
+    // to capture warn/info, then store. The absent-backend path must store to
+    // file AND avoid the "unlock the keychain and re-run init" warning, which is
+    // impossible advice when there is no keychain to unlock.
+    const out = runChild(dir, NATIVE_ABSENT, `
+      const log = require(${JSON.stringify(LOGGER)});
+      const lines = [];
+      log.warn = (m) => { lines.push('WARN ' + m); };
+      log.info = (m) => { lines.push('INFO ' + m); };
+      const where = await keychain.store('SECRET-ABSENT');
+      assert.equal(where, 'file', 'no native store -> file fallback');
+      assert.ok(fs.existsSync(CREDENTIALS_FILE), 'fallback file written');
+      const joined = lines.join('\\n');
+      assert.doesNotMatch(joined, /unlock the keychain/i,
+        'must NOT tell a headless operator to unlock a keychain that does not exist');
+      assert.match(joined, /No OS credential store detected/i,
+        'must emit the calm informational line for the normal headless path');
+    `);
+    assert.match(out, /CHILD_OK/);
+  });
+
+  it('a present-but-failed native store (plain error) still emits the actionable operational warning', () => {
+    const dir = tmpConfigDir('locked');
+    const out = runChild(dir, NATIVE_UNAVAILABLE, `
+      const log = require(${JSON.stringify(LOGGER)});
+      const lines = [];
+      log.warn = (m) => { lines.push('WARN ' + m); };
+      log.info = (m) => { lines.push('INFO ' + m); };
+      const where = await keychain.store('SECRET-LOCKED');
+      assert.equal(where, 'file', 'a failed native store still falls back to file');
+      const joined = lines.join('\\n');
+      assert.match(joined, /OS keychain store failed/i,
+        'a present-but-failed store keeps the actionable operational warning');
     `);
     assert.match(out, /CHILD_OK/);
   });

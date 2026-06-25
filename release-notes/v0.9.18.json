@@ -1,0 +1,63 @@
+{
+  "version": "0.9.18",
+  "date": "2026-06-25",
+  "headline": "Fixes a sync-engine hang on a case-only rename, fails closed on a WebSocket post-quantum downgrade, and corrects the control-channel reconnect classification",
+  "summary": "A reliability and security release. A case-only file rename (changing only letter case) on a case-folding filesystem could hang the sync engine when a failed server rename fell back to delete-plus-upload; it now completes. The WebSocket control channel now fails closed with an actionable message when a connection negotiates a classical (non-post-quantum) key exchange or is refused by the outbound-URL guard, instead of reconnecting into the same hopeless condition indefinitely. The client adopts the framework's per-error transience signal for the control channel — so a transient drop reconnects and a terminal handshake failure fails closed — jitters the reconnect backoff to avoid a reconnect stampede, restarts the backoff on an explicit reconnect, runs the symlinked-ancestor escape check on the server-push reconcile path, no longer drops log lines after a logger re-initialization, and gives a host with no OS credential store a clear message instead of impossible advice. A from-source install now passes the vendored-dependency integrity check at startup, which had been refusing to start on a hash mismatch unrelated to the file contents; prebuilt release binaries were unaffected. The vendored framework is refreshed to its latest build supply-chain hardening release. No configuration changes are required.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A case-only rename on a case-folding filesystem no longer hangs the sync engine",
+          "body": "On a case-folding filesystem (Windows, macOS, or a synced-folder mount that ignores case), renaming a file by changing only its letter case — and then having the server-side rename fail so the client falls back to delete-plus-upload — could deadlock the sync engine's per-path lock and stall that worker indefinitely, because the old and new names mapped to the same lock. The fallback now runs the delete under the lock it already holds in that case, so the rename completes and the daemon keeps syncing."
+        },
+        {
+          "title": "Control-channel reconnect classification follows the framework's per-error signal",
+          "body": "The WebSocket control channel now decides whether a failure is terminal (stop and surface an actionable error) or transient (reconnect) using the framework's per-error transience signal, replacing a hand-maintained list. A handshake rejection's HTTP status is read directly (a 4xx is terminal, a 5xx is a transient server blip that reconnects), and a mid-stream protocol-violation frame is recovered by a fresh dial rather than being treated as fatal. Reconnect behaviour for a healthy server is unchanged."
+        },
+        {
+          "title": "Logger re-initialization no longer drops subsequent log lines",
+          "body": "Re-initializing the logger within a running process (for example to change the level) could leave the new log sink unopened because the previous sink's asynchronous shutdown had not completed, silently dropping every log line written afterward. Re-initialization now waits for the previous sink to drain before opening the new one, so logging continues uninterrupted. The normal first-time initialization at startup is unaffected."
+        },
+        {
+          "title": "Reconnect backoff is jittered and an explicit reconnect restarts it",
+          "body": "The WebSocket reconnect delay is now jittered with cryptographic randomness, so a fleet of clients that all lose the connection at the same instant (a server restart or deploy) no longer redial in lockstep and stampede the server. An explicit reconnect — for example after a manual resync — also restarts the backoff ladder, so a fresh connection attempt does not inherit a long delay from a prior backoff."
+        },
+        {
+          "title": "A from-source install passes the vendored-dependency integrity check at startup",
+          "body": "Running the client from a source checkout verifies each vendored dependency file at startup against the SHA-256 hashes recorded in vendor/MANIFEST.json and refuses to start on a mismatch. The recorded hashes had been computed from file bytes that differed from the committed bytes, so a from-source start failed this check with a hash-mismatch error. The manifest now records the hashes of the committed bytes, so a from-source start succeeds. Prebuilt release binaries skip this check and were never affected."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "The WebSocket control channel fails closed on a post-handshake post-quantum downgrade",
+          "body": "If the control-channel TLS connection negotiates a classical (non-post-quantum) key exchange after the handshake, the client already tears the connection down — but it would then reconnect into the same downgrade indefinitely without surfacing the problem. It now fails closed with an actionable message (upgrade the server to a post-quantum build, or set HERMITSTASH_ALLOW_CLASSICAL_TLS=1 to permit it deliberately, then restart), so a store-now-decrypt-later downgrade is refused rather than retried forever."
+        },
+        {
+          "title": "An outbound-URL refusal of the control-channel dial surfaces an actionable error",
+          "body": "When the outbound-URL guard refuses the WebSocket dial — for example a configured server that resolves to a private, link-local, or cloud-metadata address — the refusal is now surfaced as an actionable \"fix the server URL\" error and the daemon stops retrying, instead of churning a reconnect storm against a target that can never succeed. The refusal is recognized regardless of which field of the framework error carries the marker."
+        },
+        {
+          "title": "Server-pushed paths are checked for a symlinked-ancestor escape on the reconcile path",
+          "body": "The symlink-escape defence for a server-pushed path — refusing a write that would resolve through a symlinked directory out of the sync root — is now part of the single path-resolution gate that every write goes through, including the periodic reconcile/recover sweep. Previously the sweep relied on the point-in-time check done when the change first arrived, leaving a window in which a symlink planted before the sweep could redirect a write. The check is a no-op for a normal not-yet-existing path, so legitimate downloads are unaffected."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored blamejs framework updated to 0.15.24",
+          "body": "The vendored blamejs framework is updated to 0.15.24, a build supply-chain hardening release with no runtime API changes. The release SBOM's component version and the recorded per-file dependency hashes are regenerated to match the updated tree."
+        },
+        {
+          "title": "Vendored-dependency hashes match the canonical source bytes",
+          "body": "The SHA-256 hashes recorded for each vendored dependency file — in vendor/MANIFEST.json and in the release SBOM — are now computed from the committed source bytes, so an operator who hashes the published source reproduces them exactly. They previously reflected a working copy whose line endings differed from the committed bytes."
+        }
+      ]
+    }
+  ]
+}

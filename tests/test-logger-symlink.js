@@ -42,7 +42,7 @@ describe('logger symlink defence (fix-audit)', () => {
     created.push(dir);
     const file = path.join(dir, 'hermitstash-sync.log');
 
-    log.init({ file, stdout: false });
+    await log.init({ file, stdout: false });
     log.info('audit-happy-path-marker', { ok: true });
 
     // Drain the fire-and-forget emit before asserting the file exists.
@@ -54,7 +54,7 @@ describe('logger symlink defence (fix-audit)', () => {
     assert.match(body, /audit-happy-path-marker/, 'emitted record should reach the file');
   });
 
-  it('refuses to follow a symlinked active log path (POSIX)', { skip: IS_WIN ? 'O_NOFOLLOW unavailable on win32' : false }, () => {
+  it('refuses to follow a symlinked active log path (POSIX)', { skip: IS_WIN ? 'O_NOFOLLOW unavailable on win32' : false }, async () => {
     const dir = freshDir();
     created.push(dir);
 
@@ -67,8 +67,10 @@ describe('logger symlink defence (fix-audit)', () => {
     fs.symlinkSync(sentinel, active);
 
     const file = path.join(dir, 'hermitstash-sync.log');
-    assert.throws(
-      () => log.init({ file, stdout: false }),
+    // init() is async (it awaits the drain on re-init), so a symlink refusal
+    // surfaces as a rejected promise, not a synchronous throw.
+    await assert.rejects(
+      log.init({ file, stdout: false }),
       /refusing to write logs through it/,
       'a symlinked active path must be refused with the actionable message');
 
@@ -78,5 +80,25 @@ describe('logger symlink defence (fix-audit)', () => {
       'sentinel target must be untouched');
     assert.ok(fs.lstatSync(active).isSymbolicLink(),
       'planted symlink must remain (no silent unlink)');
+  });
+
+  it('re-init without an intervening close awaits the drain so the new sink receives logs', async () => {
+    const dirA = freshDir();
+    const dirB = freshDir();
+    created.push(dirA, dirB);
+
+    // Init to dirA, then re-init to dirB WITHOUT calling close() in between —
+    // this is the path that silently dropped all subsequent logs when the
+    // shutdown was fire-and-forget (the framework's initialized flag was still
+    // set, so the second init() no-op'd and the new sink was never opened).
+    await log.init({ file: path.join(dirA, 'hermitstash-sync.log'), stdout: false });
+    await log.init({ file: path.join(dirB, 'hermitstash-sync.log'), stdout: false });
+    log.info('reinit-marker', { ok: true });
+    await log.close();
+
+    const activeB = path.join(dirB, 'hermitstash-sync.log');
+    assert.ok(fs.existsSync(activeB), 'the re-init target (dirB) active log must be created');
+    assert.match(fs.readFileSync(activeB, 'utf8'), /reinit-marker/,
+      'the post-re-init record must land in the new sink, not be silently dropped');
   });
 });

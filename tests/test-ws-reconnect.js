@@ -311,3 +311,97 @@ describe('WsClient drops a late open that wins the race against close()', () => 
   });
 
 });
+
+describe('WsClient SSRF refusal is detected even when the slug lands in err.message (arg-swap)', () => {
+
+  it('a real ssrf-guard error (code = human message, message = slug) is still terminal', async () => {
+    // blamejs constructs the guard refusal via SsrfError(message, code, ctx) but
+    // passes errorClass: WsClientError whose signature is (code, message,
+    // statusCode), so the live error has err.code = the human message and
+    // err.message = the 'ssrf-guard/...' slug. The wrapper must detect the slug
+    // in EITHER field. A code-only check (the pre-fix behavior) would miss this
+    // and churn a reconnect storm against the blocked target.
+    const h = withCapturingTransport(0);
+    try {
+      let reconnected = false;
+      h.ws.on('reconnecting', () => { reconnected = true; });
+      h.ws.on('error', (e) => {
+        assert.fail('a real SSRF refusal must route through upgrade_rejected, not generic error: ' + (e && e.message));
+      });
+      const rejectedP = waitForEvent(h.ws, 'upgrade_rejected', 3000);
+      // Swapped: code = message text, message = the slug.
+      const err = new WsClientError(
+        'URL resolves to 169.254.169.254 (cloud-metadata) — blocked unconditionally',
+        'ssrf-guard/blocked-cloud-metadata');
+      driveError(h.stub, err);
+
+      const [info] = await rejectedP;
+      assert.equal(info.status, 0, 'SSRF refusal maps to synthetic status 0');
+      assert.equal(h.ws._closing, true, 'a real SSRF refusal must be terminal');
+      await new Promise(r => setTimeout(r, 50));
+      assert.equal(reconnected, false, 'no reconnect after a terminal SSRF refusal');
+      assert.equal(h.urls.length, 1, 'no redial');
+    } finally {
+      h.ws.close();
+      h.restore();
+    }
+  });
+
+});
+
+describe('WsClient fails closed on a post-handshake PQC-floor downgrade', () => {
+
+  it('a classical TLS group at open destroys the socket and surfaces upgrade_rejected without reconnecting', async () => {
+    const h = withCapturingTransport(0);
+    try {
+      let reconnected = false;
+      h.ws.on('reconnecting', () => { reconnected = true; });
+      let opened = false;
+      h.ws.on('open', () => { opened = true; });
+      // Present a settled classical (non-ML-KEM) key exchange on the TLS socket
+      // the 'open' handler inspects — the downgrade the PQC floor must refuse.
+      h.stub._socket = {
+        getEphemeralKeyInfo: () => ({ name: 'X25519', type: 'ECDH' }),
+        destroy: () => {},
+      };
+      const rejectedP = waitForEvent(h.ws, 'upgrade_rejected', 3000);
+      h.stub.emit('open');
+
+      const [info] = await rejectedP;
+      assert.equal(info.status, 0, 'a PQC-floor violation maps to synthetic status 0 (sticky ERROR)');
+      assert.match(info.body, /classical TLS group|post-quantum/i, 'the body explains the floor violation');
+      assert.equal(h.ws._closing, true, 'a PQC-floor downgrade is terminal — must fail closed');
+      assert.equal(opened, false, 'must NOT emit open on a torn-down socket');
+      await new Promise(r => setTimeout(r, 50));
+      assert.equal(reconnected, false, 'must NOT reconnect into the same classical downgrade forever');
+    } finally {
+      h.ws.close();
+      h.restore();
+    }
+  });
+
+});
+
+describe('WsClient connect() restarts the backoff ladder', () => {
+
+  it('an explicit connect() resets _reconnectAttempt so a resync re-dial starts fresh', async () => {
+    const h = withCapturingTransport(0);
+    try {
+      h.ws.on('error', () => {});
+      // Climb the ladder with a couple of transient drops.
+      driveError(h.stub, new WsClientError('ws-client/pong-timeout', 'no pong'));
+      await new Promise(r => setTimeout(r, 5));
+      assert.ok(h.ws._reconnectAttempt >= 1, 'a transient drop should climb the backoff ladder');
+
+      // A resync re-dials the same instance: close() then connect(). connect()
+      // must restart the ladder so the fresh attempt doesn't inherit a far-out step.
+      h.ws.close();
+      h.ws.connect('stub-bundle', 0);
+      assert.equal(h.ws._reconnectAttempt, 0, 'connect() must reset the backoff ladder');
+    } finally {
+      h.ws.close();
+      h.restore();
+    }
+  });
+
+});

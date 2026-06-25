@@ -320,6 +320,24 @@ describe('_safePath resolves server names natively and keeps Windows-name strict
   it('refuses a backslash traversal a Windows peer would read as ..', () => {
     assert.equal(engine._safePath('ok\\..\\..\\outside'), null);
   });
+
+  it('refuses a path that escapes the sync root through a symlinked ancestor (realpath, POSIX)', () => {
+    // The reconcile/recover sweep resolves server-pushed paths through _safePath
+    // only (not the live-event intake guard), so _safePath itself must run the
+    // realpath/symlink-escape walk. Plant a directory symlink inside the sync
+    // root pointing outside it and assert a path through it is refused.
+    // Unprivileged Windows cannot create a dir symlink (EPERM) — skip there.
+    const outside = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-sp-outside-'));
+    let planted = false;
+    try { nodeFs.symlinkSync(outside, nodePath.join(tmp, 'esc'), 'dir'); planted = true; }
+    catch { /* EPERM on unprivileged Windows — POSIX-only assertion */ }
+    if (!planted) return;
+    assert.equal(engine._safePath('esc/evil.txt'), null,
+      'a server-pushed path through a symlinked ancestor must be refused (realpath escape)');
+    // A legitimate not-yet-existing path still resolves (realpath is a no-op for
+    // a non-existent ancestor) — the fix must not break normal new-file writes.
+    assert.equal(engine._safePath('fresh/new.txt'), nodePath.resolve(tmp, 'fresh/new.txt'));
+  });
 });
 
 // _validateMtlsTrio gates a server-pushed CA rotation before the new trio
