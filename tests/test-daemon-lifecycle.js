@@ -168,3 +168,81 @@ test('SIGTERM drives a clean exit-0 teardown with phases firing once', { skip: p
   assert.ok(out.includes('ENGINE\n'), 'the engine phase ran; output:\n' + out);
   assert.ok(out.includes('ENGINE_CALLS=1'), 'the engine phase ran exactly once across a double SIGTERM; output:\n' + out);
 });
+
+// A SIGHUP must NOT reload/resync once a graceful shutdown has begun — otherwise
+// the reload re-opens the WebSocket and the resync clear()s the state DB the
+// teardown is draining. handleTerm sets _shuttingDown synchronously (before its
+// first await), so a SIGHUP delivered immediately after a SIGTERM is swallowed
+// by the guard. Driven in-process by invoking the installed handlers directly
+// (process.exit is stubbed so the SIGTERM path doesn't kill the test runner).
+// SIGHUP is POSIX-only (daemon.js gates the listener on process.platform).
+test('SIGHUP during shutdown is ignored (no reload/resync mid-teardown)', { skip: process.platform === 'win32' }, async () => {
+  const watched = ['SIGTERM', 'SIGINT', 'SIGHUP', 'uncaughtException', 'unhandledRejection'];
+  const before = {};
+  for (const sig of watched) before[sig] = process.listeners(sig).slice();
+  const added = (sig) => process.listeners(sig).filter(fn => !before[sig].includes(fn));
+
+  let reloads = 0, resyncs = 0, engineCalls = 0, exitCalls = 0;
+  const realExit = process.exit;
+  process.exit = () => { exitCalls++; }; // neutralize the handler's terminal exit during the test
+
+  try {
+    daemon.installSignalHandlers(
+      async () => { engineCalls++; },   // shutdownFn (engine phase)
+      async () => { resyncs++; },        // resyncFn
+      async () => { reloads++; }         // reloadFn
+    );
+    const myTerm = added('SIGTERM')[0];
+    const myHup = added('SIGHUP')[0];
+    assert.equal(typeof myTerm, 'function', 'SIGTERM handler installed');
+    assert.equal(typeof myHup, 'function', 'SIGHUP handler installed (POSIX)');
+
+    // Begin graceful shutdown; _shuttingDown is now true (set synchronously).
+    myTerm('SIGTERM');
+    // A SIGHUP arriving mid-shutdown must hit the guard and return early.
+    myHup('SIGHUP');
+    // Let handleTerm's awaited shutdown settle (process.exit is stubbed).
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.equal(reloads, 0, 'SIGHUP reload must NOT run during shutdown');
+    assert.equal(resyncs, 0, 'SIGHUP resync must NOT run during shutdown');
+    assert.equal(engineCalls, 1, 'the shutdown engine phase still ran once');
+    assert.ok(exitCalls >= 1, 'handleTerm reached its terminal exit');
+  } finally {
+    process.exit = realExit;
+    for (const sig of watched) {
+      for (const fn of process.listeners(sig)) {
+        if (!before[sig].includes(fn)) process.removeListener(sig, fn);
+      }
+    }
+  }
+});
+
+// Positive control: a SIGHUP during NORMAL operation still runs reload + resync,
+// so the guard above is not over-blocking.
+test('SIGHUP during normal operation runs reload + resync', { skip: process.platform === 'win32' }, async () => {
+  const watched = ['SIGTERM', 'SIGINT', 'SIGHUP', 'uncaughtException', 'unhandledRejection'];
+  const before = {};
+  for (const sig of watched) before[sig] = process.listeners(sig).slice();
+  const added = (sig) => process.listeners(sig).filter(fn => !before[sig].includes(fn));
+
+  let reloads = 0, resyncs = 0;
+  try {
+    daemon.installSignalHandlers(
+      async () => {},
+      async () => { resyncs++; },
+      async () => { reloads++; }
+    );
+    const myHup = added('SIGHUP')[0];
+    assert.equal(typeof myHup, 'function', 'SIGHUP handler installed');
+    await myHup('SIGHUP'); // async handler — await reload + resync
+    assert.equal(reloads, 1, 'a normal SIGHUP runs the config reload');
+    assert.equal(resyncs, 1, 'a normal SIGHUP runs the resync');
+  } finally {
+    for (const sig of watched) {
+      for (const fn of process.listeners(sig)) {
+        if (!before[sig].includes(fn)) process.removeListener(sig, fn);
+      }
+    }
+  }
+});

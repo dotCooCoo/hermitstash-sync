@@ -113,6 +113,61 @@ describe('config — warnUnsupportedPatterns WARNs (never throws) on bad shapes 
   it('never throws on a fully-unsupported batch', () => {
     assert.doesNotThrow(() => config.warnUnsupportedPatterns(['/a', 'b/', 'c?', '!d', 'e/**/f'], 'ignore', { warn() {} }));
   });
+
+  it('never throws on a NON-STRING entry, flags it, and keeps processing the batch', () => {
+    const warned = [];
+    const logStub = { warn: (m) => warned.push(m) };
+    let out;
+    // A hand-edited config.json `ignore: ["*.log", 123, null, {}]` reaches here
+    // via the SIGHUP reload (validate only warns, doesn't strip). classifyPattern
+    // reports each non-string as 'unsupported'; _unsupportedPatternHelp must not
+    // call a string method on it (the pre-fix TypeError aborted the whole reload).
+    assert.doesNotThrow(() => {
+      out = config.warnUnsupportedPatterns(['*.log', 123, null, 'node_modules/**'], 'ignore', logStub);
+    });
+    assert.ok(out.includes(123) && out.includes(null), 'non-string entries are returned as unsupported');
+    assert.ok(!out.includes('node_modules/**'), 'a supported pattern after a non-string is still processed (no early abort)');
+    assert.ok(warned.some(m => /not a string/i.test(m)), 'a non-string warns with a clear "not a string" message');
+  });
+});
+
+describe('config — non-boolean autoUpdate is rejected at validate (v0.9.19)', () => {
+  // server/syncFolder/bundleId are the required fields; REPO_ROOT is a real dir.
+  const base = () => ({ server: 'https://h.example', syncFolder: REPO_ROOT, bundleId: 'b1' });
+
+  it('a quoted "false" / 0 / 1 / null is a load-time error, not a silent self-update-still-on', () => {
+    for (const bad of ['false', 0, 1, null]) {
+      const errs = config.validate(Object.assign(base(), { autoUpdate: bad }));
+      assert.ok(
+        errs.some(e => /autoUpdate/i.test(e) && /boolean/i.test(e)),
+        `autoUpdate: ${JSON.stringify(bad)} must be rejected with a boolean-type error`
+      );
+    }
+  });
+
+  it('a real boolean (or omission) produces no autoUpdate error', () => {
+    for (const ok of [true, false, undefined]) {
+      const cfg = base();
+      if (ok !== undefined) cfg.autoUpdate = ok;
+      const errs = config.validate(cfg);
+      assert.ok(!errs.some(e => /autoUpdate\b/i.test(e)), `autoUpdate: ${JSON.stringify(ok)} must not error`);
+    }
+  });
+});
+
+describe('config — getIgnorePatterns/getIncludePatterns drop non-string entries (v0.9.19)', () => {
+  it('a non-string ignore entry is dropped so it never reaches the matcher', () => {
+    const ig = config.getIgnorePatterns({ ignore: ['*.log', 123, 'foo/**', null] });
+    assert.ok(ig.every(p => typeof p === 'string'), 'every returned ignore pattern is a string');
+    assert.ok(ig.includes('*.log') && ig.includes('foo/**'), 'valid string patterns survive');
+    assert.ok(!ig.includes(123), 'the number entry is dropped');
+  });
+
+  it('a non-string include entry is dropped', () => {
+    const inc = config.getIncludePatterns({ include: ['Work/**', 42] });
+    assert.ok(inc.every(p => typeof p === 'string'), 'every returned include pattern is a string');
+    assert.ok(inc.includes('Work/**') && !inc.includes(42), 'string kept, number dropped');
+  });
 });
 
 // --- diagnose: planted secrets must not survive into the bundle (R26) ---

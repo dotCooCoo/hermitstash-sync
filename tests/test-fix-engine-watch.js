@@ -530,3 +530,111 @@ describe('sync-engine#8 — _initialSync surfaces an auth-class bundle-metadata 
     rm(tmp);
   });
 });
+
+// ---------------------------------------------------------------------------
+// watcher#39 — _dirPrefixIgnores forwards BOTH subtree-exclude shapes to the
+// underlying walk: 'recursive-dir' (foo/**) AND 'path-qualified' (data/cache,
+// which operators routinely write without the trailing /**). Forwarding only
+// the /** shape left a large path-qualified excluded subtree un-pruned, so the
+// poll walk counted its files toward pollMaxFiles and overflowed into degraded.
+// ---------------------------------------------------------------------------
+describe('watcher#39 — path-qualified subtree excludes are forwarded to the walk', () => {
+  it('forwards recursive-dir AND path-qualified, but never basename/ext', () => {
+    const tmp = mkTmp('hs-fix39-');
+    try {
+      const w = new Watcher(tmp, ['foo/**', 'data/cache', 'src/node_modules', '*.log', '.DS_Store'], []);
+      const fwd = w._dirIgnores;
+      assert.ok(fwd.includes('foo/**'), 'recursive-dir is forwarded');
+      assert.ok(fwd.includes('data/cache'), 'path-qualified subtree is forwarded (the poll-overflow fix)');
+      assert.ok(fwd.includes('src/node_modules'), 'a deeper path-qualified subtree is forwarded');
+      assert.ok(!fwd.includes('*.log'), 'an ext pattern stays on the hook-side filter');
+      assert.ok(!fwd.includes('.DS_Store'), 'a basename pattern stays on the hook-side filter');
+    } finally { rm(tmp); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// watcher#40 — a watcher that exhausted its recovery budget (degraded: handle
+// dropped, NOT operator-stopped) is re-armed by an ignore-pattern change. This
+// is the live-reload remediation the degraded-state error advertises ("narrow
+// your ignore patterns"); pre-fix it was a no-op because the restart was gated
+// on a live handle, leaving change detection off until a full daemon restart.
+// ---------------------------------------------------------------------------
+describe('watcher#40 — a degraded watcher is re-armed by an ignore-pattern change', () => {
+  it('updatePatterns re-arms a degraded (handle-less, non-stopped) watcher when the subtree set changes', () => {
+    const tmp = mkTmp('hs-fix40-');
+    try {
+      const w = new Watcher(tmp, [], []);
+      w.start();
+      assert.ok(w._handle, 'watcher started with a live handle');
+      // Reproduce the terminal degraded state _scheduleRecovery leaves at the cap.
+      try { w._handle.stop(); } catch { /* idempotent */ }
+      w._handle = null;
+      w._recoveryAttempts = 999;
+      w._recovering = false;
+      assert.equal(w._stopped, false, 'degraded is distinct from operator-stopped');
+      let rescans = 0;
+      w.on('rescan', () => { rescans++; });
+      w.updatePatterns(['huge_subtree/**'], []); // operator narrows ignores + SIGHUP
+      assert.ok(w._handle, 'a degraded watcher is re-armed (was a silent no-op pre-fix)');
+      assert.equal(w._recoveryAttempts, 0, 're-arm resets the recovery budget via start()');
+      assert.equal(rescans, 1, 're-arm emits rescan so the engine re-walks for edits missed while degraded');
+      w.stop();
+    } finally { rm(tmp); }
+  });
+
+  it('does NOT re-arm an operator-stopped watcher, nor on a no-op (non-forwarded) pattern change', () => {
+    const tmp = mkTmp('hs-fix40b-');
+    try {
+      const w = new Watcher(tmp, [], []);
+      w.start();
+      w.stop();
+      assert.equal(w._handle, null);
+      w.updatePatterns(['x/**'], []);
+      assert.equal(w._handle, null, 'an operator-stopped watcher is never re-armed');
+
+      const w2 = new Watcher(tmp, ['keep/**'], []);
+      w2.start();
+      try { w2._handle.stop(); } catch { /* idempotent */ }
+      w2._handle = null;
+      w2._recoveryAttempts = 999;
+      // Only a basename pattern is added — the forwarded subtree set is unchanged,
+      // so re-arming would just re-overflow; it must stay degraded.
+      w2.updatePatterns(['keep/**', '*.log'], []);
+      assert.equal(w2._handle, null, 'no re-arm when the forwarded subtree set is unchanged');
+      w2.stop();
+    } finally { rm(tmp); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sync-engine#9 — resync() is a no-op once the engine is stopping. A SIGHUP
+// delivered inside the graceful-stop window must not run _resyncOnce (which
+// clearAll()s the state DB and re-opens the WebSocket against teardown).
+// ---------------------------------------------------------------------------
+describe('sync-engine#9 — resync() refuses to run once the engine is stopping', () => {
+  it('a stopped engine never enters _resyncOnce', async () => {
+    const tmp = mkTmp('hs-fix9-');
+    try {
+      const e = new SyncEngine({ syncFolder: tmp }, 'k');
+      let ran = false;
+      e._resyncOnce = async () => { ran = true; };
+      e._stopped = true;
+      const r = e.resync();
+      assert.ok(r && typeof r.then === 'function', 'resync still returns a promise');
+      await r;
+      assert.equal(ran, false, 'resync must not start a teardown once stopped (SIGHUP-mid-shutdown guard)');
+    } finally { rm(tmp); }
+  });
+
+  it('a live (non-stopped) engine still resyncs normally', async () => {
+    const tmp = mkTmp('hs-fix9b-');
+    try {
+      const e = new SyncEngine({ syncFolder: tmp }, 'k');
+      let ran = false;
+      e._resyncOnce = async () => { ran = true; };
+      await e.resync();
+      assert.equal(ran, true, 'a non-stopped engine resyncs');
+    } finally { rm(tmp); }
+  });
+});

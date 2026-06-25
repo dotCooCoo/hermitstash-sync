@@ -1,0 +1,38 @@
+{
+  "version": "0.9.19",
+  "date": "2026-06-25",
+  "headline": "Recovers a stalled file watcher on a config reload, protects local sync state during shutdown, and validates the auto-update setting",
+  "summary": "A reliability and safety release for the file watcher and configuration paths. A file watcher that gave up after a sustained change storm can now be brought back by editing the ignore patterns and reloading, instead of requiring a full restart; a folder excluded by its path (without a trailing /**) now also prunes the polling scan, so a large excluded folder no longer overflows the watcher. A reload signal arriving during shutdown can no longer clear the local sync database or re-open the server connection mid-teardown. The auto-update setting is now validated at startup: a non-boolean value such as a quoted \"false\" previously passed silently and left the in-binary self-replace path enabled — the opposite of the intent — and is now rejected with an actionable message. A malformed (non-string) ignore or include entry no longer aborts a live config reload. Operators who set autoUpdate to a quoted string must change it to an unquoted true or false; no other action is required.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A file watcher that exhausted its restart attempts can be recovered by a config reload",
+          "body": "If the file watcher hit a sustained event storm and used up its automatic restart attempts, it stopped detecting local changes until the daemon was restarted — even though the error advised narrowing the ignore patterns and reloading. Editing the ignore patterns and sending a reload now re-arms the watcher, so the advised remediation works without a full restart. The reload also triggers a fresh scan so any change made while the watcher was down is picked up."
+        },
+        {
+          "title": "Excluding a folder by its path now prevents a watcher overflow on large trees",
+          "body": "An ignore entry written as a folder path without a trailing /** (for example data/cache) already excluded that folder from sync, but it was not used to prune the polling file-walk, so a very large excluded folder could still push the per-scan file count past the watcher's ceiling and stop change detection. The walk now skips such folders the same way it skips the data/cache/** form, only at a path-segment boundary so a sibling like data/cache.txt is unaffected."
+        },
+        {
+          "title": "A reload signal during shutdown no longer clears local sync state",
+          "body": "A reload/resync signal delivered while the daemon was shutting down could clear the local sync database and re-open the server connection in the middle of teardown, discarding state the shutdown had just drained. Shutdown now ignores a reload signal, and a resync requested while the engine is stopping is a no-op, so a shutdown completes cleanly."
+        },
+        {
+          "title": "A malformed ignore or include entry no longer aborts a live config reload",
+          "body": "A non-string entry in the ignore or include list — for example a number left by a hand-edit — would abort the entire live config reload with an internal error, silently discarding valid pattern edits made at the same time. Non-string entries are now dropped (they can never match a path) and the rest of the reload is applied; the bad entry is still reported by configuration validation."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "A non-boolean auto-update setting is rejected at startup instead of silently leaving self-update enabled",
+          "body": "The auto-update setting (autoUpdate) is now type-checked when the configuration is loaded. A non-boolean value — most commonly a quoted \"false\" — previously passed validation but left the in-binary self-replace path enabled, the opposite of what an operator writing \"autoUpdate\": \"false\" intended. Such a value is now rejected at startup with a message that names the field and the fix. If you set autoUpdate to a quoted string, change it to an unquoted true or false; a correctly written boolean is unaffected."
+        }
+      ]
+    }
+  ]
+}

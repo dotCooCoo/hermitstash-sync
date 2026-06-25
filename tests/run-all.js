@@ -80,6 +80,7 @@ const SEQUENTIAL = new Set([
   'test-orphan-cleanup.js',      // seeds files under uploads/ and exercises scheduled cleanup
   'test-sync-rename-idor.js',    // seeds multiple bundles/files, races with parallel sync tests
   'test-fresh-install-setup.js', // spawns its own server with SETUP_COMPLETE unset — keep serial to avoid port + dataDir contention with the shared ctx
+  'test-stash.js',               // seeds stash-scoped api_keys/enrollment_codes against the shared users table + WebSocket ownership (403) checks — same user-sequence race as test-bundle-ownership
 ]);
 
 const ONLY = (process.env.HS_ONLY || '').split(',').map(s => s.trim()).filter(Boolean);

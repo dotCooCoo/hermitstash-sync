@@ -222,7 +222,7 @@ Env vars overlay `config.json` (env wins). All values are validated at config-lo
 
 ### Selective sync (subdir allowlist)
 
-By default the daemon syncs every file in `syncFolder` not caught by an ignore pattern. To restrict sync to specific subtrees, set `"include": [...]` in `config.json` or drop a `.hermitstash-include` file in the sync folder. Pattern grammar matches the ignore matcher: exact path, basename (no `/`), `*.ext`, or `dir/**` for recursive subtree inclusion.
+By default the daemon syncs every file in `syncFolder` not caught by an ignore pattern. To restrict sync to specific subtrees, set `"include": [...]` in `config.json` or drop a `.hermitstash-include` file in the sync folder. Pattern grammar matches the ignore matcher: exact path, basename (no `/`), `*.ext`, `dir/**` for recursive subtree inclusion, or a plain folder path (`dir/sub`) treated the same as `dir/sub/**`.
 
 ```json
 {
@@ -290,7 +290,7 @@ Add custom patterns in:
 - `config.json` → `ignore` array
 - `.hermitstash-ignore` file in the sync folder root (one pattern per line, `#` comments supported)
 
-Supported pattern syntax: exact filename (`file.txt`), extension (`*.log`), and directory recursion (`build/**`).
+Supported pattern syntax: exact filename (`file.txt`), extension (`*.log`), directory recursion (`build/**`), and a plain folder path (`build/cache`) — which excludes that folder and everything under it, the same as `build/cache/**` (matched only at a path-segment boundary, so a sibling `build/cache.txt` is unaffected).
 
 ### API key storage
 
