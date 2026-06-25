@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.15.19",
+      "version": "0.15.20",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.15.19",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.19:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.15.19",
+      "tag": "v0.15.20",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.15.20:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.15.20",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -80,7 +80,7 @@
             "license": "MIT",
             "author": "Paul Miller",
             "source": "https://github.com/paulmillr/noble-curves",
-            "cpe": "cpe:2.3:a:paulmillr:noble-curves:0.0.0:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:paulmillr:noble-curves:2.2.0:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/noble-curves.cjs"
             },
@@ -104,18 +104,18 @@
             "bundledAt": "2026-05-06T00:00:00Z"
           },
           "@simplewebauthn/server": {
-            "version": "13.3.1",
+            "version": "13.3.2",
             "license": "MIT",
             "author": "Matthew Miller",
             "source": "https://github.com/MasterKale/SimpleWebAuthn",
-            "cpe": "cpe:2.3:a:simplewebauthn:server:13.3.1:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:simplewebauthn:server:13.3.2:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/simplewebauthn-server.cjs"
             },
             "hashes": {
-              "server": "sha256:f359a782ac57e3ff56ac71083d17f5c082f88ab49d645fc2bede398b47adebdb"
+              "server": "sha256:49411d893f5e9b0e2fcaa564b4ec7921f73a9a06229b5e53d49c1453ea1a365c"
             },
-            "bundledAt": "2026-05-27T00:00:00Z"
+            "bundledAt": "2026-06-24T00:00:00Z"
           },
           "SecLists-common-passwords-top-10000": {
             "version": "10k-most-common (master)",
@@ -158,10 +158,10 @@
               "data_js": "lib/vendor/public-suffix-list.data.js"
             },
             "hashes": {
-              "server": "sha256:0adddeb62057d8d40799dffb29fe14f65dd009259afe02eb2f0b4602b791aae6",
-              "data_js": "sha256:82af512cacf0fd2c60925e63f877b69477b1b2f7bb5af698fd862af61369902e"
+              "server": "sha256:42c4f3544726fa2feb4f304c889c5e391feb5d28080c9b6356ff82e267a93706",
+              "data_js": "sha256:c840d9ae5c6bf4a07967340a5c649df2c6a66a287db41e408461c46cc32348e6"
             },
-            "bundledAt": "2026-06-22T00:00:00Z"
+            "bundledAt": "2026-06-24T00:00:00Z"
           },
           "peculiar-pki": {
             "version": "2.0.0+pkijs-3.4.0",

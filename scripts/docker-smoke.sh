@@ -87,7 +87,9 @@ fi
 # entrypoint bash's "Running first-time enrollment" banner, which would
 # still appear even if the binary failed to load (e.g. missing libstdc++).
 # This is how we caught the wolfi-base libstdc++ regression.
-if ! echo "$OUT" | grep -qE "\[init\] Enrolling with https://127\.0\.0\.1:9/"; then
+# The client normalizes the displayed server URL to scheme + host (the path /
+# trailing slash is dropped before display), so the trailing slash is optional.
+if ! echo "$OUT" | grep -qE "\[init\] Enrolling with https://127\.0\.0\.1:9/?"; then
   echo "$OUT"
   fail "binary did not reach init step — failed to load or crashed early"
 fi

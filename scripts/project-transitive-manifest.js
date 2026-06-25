@@ -45,7 +45,6 @@ const path = require('node:path');
 const b = require('../vendor/blamejs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-const TOP_MANIFEST = path.join(REPO_ROOT, 'vendor', 'MANIFEST.json');
 
 // The SBOM-material fields build-sbom.js reads off each transitive entry, in a
 // fixed emission order. Anything not in this list is excluded from the
