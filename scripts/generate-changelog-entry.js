@@ -48,17 +48,19 @@ var NOTES_DIR     = path.join(ROOT, 'release-notes');
 function _leakPatterns() {
   return [
     // Phase / sweep / tier numbering — internal sequencing the
-    // operator doesn't share. The digit-anchored forms catch
-    // "phase 9", "slice 4"; the noun-anchored forms below catch
-    // un-numbered sequencing like "the cleanup sweep" / "across the
-    // slice" / "a second drift-audit pass".
-    /\bphase\s+\d/i,
-    /\bsweep\s+\d/i,
+    // operator doesn't share. The digit-anchored forms catch both the
+    // spaced and hyphenated spellings ("phase 9" AND "phase-9", "slice 4"
+    // AND "slice-4") via [\s-]+, matching how the tier pattern already
+    // tolerates a hyphen; the noun-anchored forms below catch un-numbered
+    // sequencing like "the cleanup sweep" / "across the slice" / "a second
+    // drift-audit pass".
+    /\bphase[\s-]+\d/i,
+    /\bsweep[\s-]+\d/i,
     /\btier[- ]?[abc]\b/i,
-    /\bbatch\s+\d/i,
+    /\bbatch[\s-]+\d/i,
     /\bgroup\s+[a-h]\s+remainder\b/i,
-    /\bslice\s+\d/i,
-    /\bpass\s+\d/i,
+    /\bslice[\s-]+\d/i,
+    /\bpass[\s-]+\d/i,
     // Un-numbered internal-sequencing phrasings. "sweep" is anchored to the
     // drift-audit qualifier (the unambiguous internal-process sense) so
     // everyday technical English — "the startup sweep that removes temp
@@ -121,6 +123,14 @@ function _walkForLeaks(node, basePath, patterns, out) {
   if (typeof node === 'string') {
     var hits = _scanString(node, basePath, patterns);
     for (var i = 0; i < hits.length; i += 1) out.push(hits[i]);
+    // A C0 / DEL control character (newline, tab, …) in an operator-facing
+    // string breaks the single-line CHANGELOG bullet that --rebuild emits and
+    // the awk/grep per-line extract contract (scripts/test-codebase-patterns.js
+    // scans CHANGELOG.md line by line). It round-trips cleanly through --check,
+    // so only this gate catches it. Reject it here alongside the leak sweep.
+    if (/[\u0000-\u001f\u007f]/.test(node)) {  // C0/DEL controls: an operator-facing field must be single-line (see comment above)
+      out.push({ path: basePath, pattern: 'embedded control character (newline/tab) — operator-facing fields must be single-line' });
+    }
     return;
   }
   if (Array.isArray(node)) {

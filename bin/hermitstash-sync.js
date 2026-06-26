@@ -67,23 +67,59 @@
     var manifest = JSON.parse(manifestRaw);                                      // allow:bare-json-parse — pre-vendor-load precheck; b.safeJson not yet loadable; trusted size-capped in-repo manifest
     var pkgs = (manifest && manifest.packages) || {};
     var mismatches = [];
+    var checkedCount = 0;
+    function _checkFiles(files, hashes, baseDir) {
+      for (var kind in files) {
+        if (!Object.prototype.hasOwnProperty.call(files, kind)) continue;
+        var rel = files[kind];
+        var expected = hashes && hashes[kind];
+        if (typeof rel !== 'string' || typeof expected !== 'string') continue;
+        var actual;
+        try {
+          actual = 'sha256:' + nodeCrypto.createHash('sha256').update(nodeFs.readFileSync(nodePath.join(baseDir, rel))).digest('hex');
+        } catch (_e) {
+          actual = '<read-failed>';
+        }
+        checkedCount += 1;
+        if (actual !== expected) mismatches.push(rel);
+      }
+    }
     for (var name in pkgs) {
       if (!Object.prototype.hasOwnProperty.call(pkgs, name)) continue;
       var pkg = pkgs[name];
       if (!pkg || !pkg.files || !pkg.hashes) continue;
-      for (var kind in pkg.files) {
-        if (!Object.prototype.hasOwnProperty.call(pkg.files, kind)) continue;
-        var rel = pkg.files[kind];
-        var expected = pkg.hashes[kind];
-        if (typeof rel !== 'string' || typeof expected !== 'string') continue;
-        var actual;
-        try {
-          actual = 'sha256:' + nodeCrypto.createHash('sha256').update(nodeFs.readFileSync(nodePath.join(root, rel))).digest('hex');
-        } catch (_e) {
-          actual = '<read-failed>';
+      // Top-level files.<kind> are paths from the repo root (e.g.
+      // "vendor/blamejs/lib/ws-client.js"); transitive files.server are
+      // relative to the package directory (e.g. "lib/vendor/noble-curves.cjs").
+      _checkFiles(pkg.files, pkg.hashes, root);
+      var transitiveBase = nodePath.join(root, (typeof pkg.directory === 'string' ? pkg.directory : ('vendor/' + name)));
+      // Also verify the transitive bundles (noble-curves, peculiar-pki,
+      // simplewebauthn-server, …) that blamejs require()s at load time. Their
+      // per-file hashes live under transitive.packages (projected for the
+      // SBOM); without this they would execute at boot BEFORE any integrity
+      // check — the exact boot-time arbitrary-code-execution window this
+      // preload precheck exists to close. The .cjs bundles run on require; the
+      // data payloads (.txt) get the same hash coverage for free.
+      var tp = pkg.transitive && pkg.transitive.packages;
+      if (tp && typeof tp === 'object') {
+        for (var tk in tp) {
+          if (!Object.prototype.hasOwnProperty.call(tp, tk)) continue;
+          var tpkg = tp[tk];
+          if (tpkg && tpkg.files && tpkg.hashes) _checkFiles(tpkg.files, tpkg.hashes, transitiveBase);
         }
-        if (actual !== expected) mismatches.push(rel);
       }
+    }
+    // Coverage floor: a manifest stripped of its files/hashes maps (a botched
+    // refresh, a partial clone, or tampering) would otherwise verify ZERO files
+    // and pass silently. The gate's job is to verify the vendored tree —
+    // verifying nothing is a failure, not a success.
+    if (checkedCount === 0) {
+      process.stderr.write(
+        'hermitstash-sync: vendor integrity precheck verified 0 files —\n' +
+        '  vendor/MANIFEST.json has no files/hashes to check. Refusing.\n' +
+        '  Re-clone the repository or run `node scripts/vendor-hash.js`.\n'
+      );
+      process.exit(70);
     }
     if (mismatches.length > 0) {
       process.stderr.write(

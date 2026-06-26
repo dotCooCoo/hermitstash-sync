@@ -91,13 +91,24 @@ function integrityBlocks(entry) {
   return { hashes, properties };
 }
 
+// Percent-encode a purl version component. The purl spec + RFC 3986 forbid raw
+// spaces/parentheses; a version like "10k-most-common (master)" would otherwise
+// emit a syntactically-invalid purl a strict validator rejects. encodeURIComponent
+// handles spaces and most reserved chars but leaves !'()* unencoded — encode
+// those too for a strictly-conformant purl. A normal SemVer ("2.2.0") is untouched.
+function encodePurlVersion(v) {
+  return encodeURIComponent(v).replace(/[!'()*]/g, function (c) {
+    return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+
 function purlFor(entry, fallbackPkg) {
   if (entry && typeof entry.purl === 'string' && entry.purl.length > 0) return entry.purl;
   if (entry && entry.source && /^https:\/\/github\.com\//.test(entry.source)) {
     const m = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/.exec(entry.source);
-    if (m && entry.version) return `pkg:github/${m[1].toLowerCase()}/${m[2].toLowerCase()}@${entry.version}`;
+    if (m && entry.version) return `pkg:github/${m[1].toLowerCase()}/${m[2].toLowerCase()}@${encodePurlVersion(entry.version)}`;
   }
-  if (fallbackPkg && entry && entry.version) return `pkg:generic/${fallbackPkg}@${entry.version}`;
+  if (fallbackPkg && entry && entry.version) return `pkg:generic/${fallbackPkg}@${encodePurlVersion(entry.version)}`;
   return undefined;
 }
 

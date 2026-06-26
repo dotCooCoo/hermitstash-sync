@@ -1223,13 +1223,15 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     // "all tests passing" / "ci green" tautologies are all forbidden
     // in operator-facing surface.
     var patterns = [
-      /\bphase\s+\d/i,
-      /\bsweep\s+\d/i,
+      // [\s-]+ catches both the spaced and hyphenated spellings ("phase 9" AND
+      // "phase-9"), mirroring scripts/generate-changelog-entry.js#_leakPatterns.
+      /\bphase[\s-]+\d/i,
+      /\bsweep[\s-]+\d/i,
       /\btier[- ]?[abc]\b/i,
-      /\bbatch\s+\d/i,
+      /\bbatch[\s-]+\d/i,
       /\bgroup\s+[a-h]\s+remainder\b/i,
-      /\bslice\s+\d/i,
-      /\bpass\s+\d/i,
+      /\bslice[\s-]+\d/i,
+      /\bpass[\s-]+\d/i,
       /\bdrift[- ]?audit\s+sweep\b/i,
       /\bacross\s+the\s+slice\b/i,
       /\bdrift[- ]audit\s+pass\b/i,
