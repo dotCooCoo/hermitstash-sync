@@ -1,0 +1,1152 @@
+{
+  "minor": "0.9",
+  "releases": [
+    {
+      "version": "0.9.21",
+      "date": "2026-06-25",
+      "headline": "Refuses a symlink when reading logs into the support bundle and corrects several CLI exit-code, redaction, and enrollment edge cases",
+      "summary": "A robustness and hygiene release for the command-line surface and the diagnostic bundle. The support-bundle log read now refuses a symlink, matching every other read in the diagnostics module, so a link planted in the log directory cannot redirect an arbitrary file into the bundle. The stop and resync commands now report a non-zero exit code when they fail to act, so shell automation that gates on the exit code behaves correctly. Following the log live (log --follow) no longer prints stray NUL bytes or loses content when the log rotates. An incomplete certificate set from the server during enrollment is now surfaced as an error instead of silently doing nothing, and an init failure routes its message through the same secret-masking path as every other fatal error. No configuration changes are required.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The support bundle refuses a symlink when reading a log file",
+              "body": "Every read in the diagnostics module refuses to follow a symlink, except the support-bundle log read, which used a symlink-following call. A symlink planted in the log directory under a rotation-shaped name was therefore followed and its target read into the bundle (CWE-59), defeating the \"only log files\" contract — the bundle's redaction only masks known secret shapes, so an arbitrary target could leak. Log files are now enumerated and read with the same symlink-refusing path as the rest of the module; legitimate rotations are unaffected."
+            },
+            {
+              "title": "An init failure message is masked through the same redaction path as every other fatal error",
+              "body": "A failed init printed its error text straight to standard error, bypassing the secret-masking barrier that every other fatal exit routes through. A server that echoed a secret-shaped value back in an error would have landed it unmasked. Both the interactive and non-interactive init failure paths now go through that barrier."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "The stop and resync commands report a non-zero exit code when they fail",
+              "body": "When the daemon could not be stopped (for example a permission error killing the process) the stop command still exited zero, so a script of the form \"stop && next-step\" proceeded as though the daemon had stopped. Likewise resync exited zero when the signal could not be delivered or on a platform where it is unsupported. Both now set a non-zero exit code on a genuine failure, while the benign \"no daemon running\" case stays zero."
+            },
+            {
+              "title": "Following the log live no longer prints NUL bytes or loses content across a rotation",
+              "body": "When the log rotated while \"log --follow\" was running, the follower could emit a run of NUL bytes and then stall, missing the new file's content, because it wrote a full read buffer regardless of how many bytes were actually read and advanced its position to a stale size. It now writes only the bytes read, advances by that amount, and re-follows from the start of the fresh file when a rotation shrinks it."
+            },
+            {
+              "title": "An incomplete certificate set during enrollment is surfaced as an error",
+              "body": "If the server returned only some of the three mutual-TLS certificate fields (client certificate, key, and CA), enrollment silently wrote nothing and reported success, leaving any prior certificates in place — a later connection would then fail authentication with no hint why. A partial set is now reported as an enrollment error; a response with no certificate fields at all is still treated as an intentional API-key-only enrollment. The comment describing the certificate write was also corrected: the three files are each written atomically but not as a single transaction, so a torn set is recoverable by re-running init or repair."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs framework updated to 0.15.26",
+              "body": "The vendored blamejs framework is updated to 0.15.26. The upstream changes are a worker-thread handle-leak fix in a sandbox primitive this client does not use and internal test-harness corrections; no primitive this client consumes changed. The release SBOM's component version and the recorded per-file dependency hashes are regenerated to match."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.20",
+      "date": "2026-06-25",
+      "headline": "Restores auto-update on GitHub's current release CDN and hardens remote-delete and download handling against data loss",
+      "summary": "A reliability and integrity release for the auto-update and sync data paths. GitHub moved its release-asset content delivery network, and the in-binary self-update only permitted the previous host — so a bare-binary install with auto-update enabled silently stopped installing updates; the egress allowlist now covers GitHub's content CDN by domain suffix and survives a future CDN rename. A remote delete that arrives for a local file the client cannot hash (one that grew past the configured size ceiling, or became a special or unreadable file) is no longer honored by destroying that file; the client keeps it and retries once it can be verified again, and the same protection covers a remote overwrite. A file the server renames into the synced scope without re-sending its checksum is now size-verified before it is committed. No configuration changes are required; bare-binary installs on auto-update resume updating automatically.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Auto-update works again on GitHub's current release CDN",
+              "body": "The in-binary self-update (used by bare-binary installs with auto-update enabled) downloads each release asset from github.com, which redirects to GitHub's signed content CDN. GitHub moved that CDN to a new hostname, and the updater's egress allowlist only permitted the previous one, so the redirect was refused and the update silently never installed — the daemon stayed on its current version while logging only a warning. The allowlist now matches GitHub's content CDN by domain suffix, covering both the previous and current hosts and a future rename, so auto-update resumes. The release signature check (P-384 ECDSA over the SHA3-512 digest, verified against the in-binary public key) remains the integrity gate before any swap. Systemd, Docker, Podman, and Kubernetes installs were unaffected — they update through their own mechanisms."
+            },
+            {
+              "title": "A remote delete no longer destroys a local file it cannot verify",
+              "body": "Before honoring a server-side delete, the client hashes the local file to check whether you changed it independently (in which case it keeps your copy as a conflict file). If that hash could not be computed — the file had grown past the configured size ceiling, or had become a special or unreadable file — the client could not confirm the file was unmodified, yet it deleted the file anyway, losing locally-changed bytes with no conflict copy. It now keeps the file and its tracking row and re-tries the delete on the next reconnect once the file is verifiable again. The conflict-copy path that protects a local file from a remote overwrite is hardened the same way."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "A file received without a checksum is size-verified before being committed",
+              "body": "Every downloaded file is verified against its SHA3-512 checksum before being written into place. On one selective-sync edge — when the server renames a file from a path you do not sync into one you do, and omits the checksum because the content is unchanged — the client had no checksum to verify against and committed the bytes unconditionally, so a truncated or corrupt response body could land marked as synced. The exact byte count is now compared to the size the server declared, and a mismatch is refused. The transport is already PQC TLS 1.3 with mutual authentication, so this closes the residual gap of a half-failed response body rather than an active attacker."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.19",
+      "date": "2026-06-25",
+      "headline": "Recovers a stalled file watcher on a config reload, protects local sync state during shutdown, and validates the auto-update setting",
+      "summary": "A reliability and safety release for the file watcher and configuration paths. A file watcher that gave up after a sustained change storm can now be brought back by editing the ignore patterns and reloading, instead of requiring a full restart; a folder excluded by its path (without a trailing /**) now also prunes the polling scan, so a large excluded folder no longer overflows the watcher. A reload signal arriving during shutdown can no longer clear the local sync database or re-open the server connection mid-teardown. The auto-update setting is now validated at startup: a non-boolean value such as a quoted \"false\" previously passed silently and left the in-binary self-replace path enabled — the opposite of the intent — and is now rejected with an actionable message. A malformed (non-string) ignore or include entry no longer aborts a live config reload. Operators who set autoUpdate to a quoted string must change it to an unquoted true or false; no other action is required.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A file watcher that exhausted its restart attempts can be recovered by a config reload",
+              "body": "If the file watcher hit a sustained event storm and used up its automatic restart attempts, it stopped detecting local changes until the daemon was restarted — even though the error advised narrowing the ignore patterns and reloading. Editing the ignore patterns and sending a reload now re-arms the watcher, so the advised remediation works without a full restart. The reload also triggers a fresh scan so any change made while the watcher was down is picked up."
+            },
+            {
+              "title": "Excluding a folder by its path now prevents a watcher overflow on large trees",
+              "body": "An ignore entry written as a folder path without a trailing /** (for example data/cache) already excluded that folder from sync, but it was not used to prune the polling file-walk, so a very large excluded folder could still push the per-scan file count past the watcher's ceiling and stop change detection. The walk now skips such folders the same way it skips the data/cache/** form, only at a path-segment boundary so a sibling like data/cache.txt is unaffected."
+            },
+            {
+              "title": "A reload signal during shutdown no longer clears local sync state",
+              "body": "A reload/resync signal delivered while the daemon was shutting down could clear the local sync database and re-open the server connection in the middle of teardown, discarding state the shutdown had just drained. Shutdown now ignores a reload signal, and a resync requested while the engine is stopping is a no-op, so a shutdown completes cleanly."
+            },
+            {
+              "title": "A malformed ignore or include entry no longer aborts a live config reload",
+              "body": "A non-string entry in the ignore or include list — for example a number left by a hand-edit — would abort the entire live config reload with an internal error, silently discarding valid pattern edits made at the same time. Non-string entries are now dropped (they can never match a path) and the rest of the reload is applied; the bad entry is still reported by configuration validation."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "A non-boolean auto-update setting is rejected at startup instead of silently leaving self-update enabled",
+              "body": "The auto-update setting (autoUpdate) is now type-checked when the configuration is loaded. A non-boolean value — most commonly a quoted \"false\" — previously passed validation but left the in-binary self-replace path enabled, the opposite of what an operator writing \"autoUpdate\": \"false\" intended. Such a value is now rejected at startup with a message that names the field and the fix. If you set autoUpdate to a quoted string, change it to an unquoted true or false; a correctly written boolean is unaffected."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.18",
+      "date": "2026-06-25",
+      "headline": "Fixes a sync-engine hang on a case-only rename, fails closed on a WebSocket post-quantum downgrade, and corrects the control-channel reconnect classification",
+      "summary": "A reliability and security release. A case-only file rename (changing only letter case) on a case-folding filesystem could hang the sync engine when a failed server rename fell back to delete-plus-upload; it now completes. The WebSocket control channel now fails closed with an actionable message when a connection negotiates a classical (non-post-quantum) key exchange or is refused by the outbound-URL guard, instead of reconnecting into the same hopeless condition indefinitely. The client adopts the framework's per-error transience signal for the control channel — so a transient drop reconnects and a terminal handshake failure fails closed — jitters the reconnect backoff to avoid a reconnect stampede, restarts the backoff on an explicit reconnect, runs the symlinked-ancestor escape check on the server-push reconcile path, no longer drops log lines after a logger re-initialization, and gives a host with no OS credential store a clear message instead of impossible advice. A from-source install now passes the vendored-dependency integrity check at startup, which had been refusing to start on a hash mismatch unrelated to the file contents; prebuilt release binaries were unaffected. The vendored framework is refreshed to its latest build supply-chain hardening release. No configuration changes are required.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A case-only rename on a case-folding filesystem no longer hangs the sync engine",
+              "body": "On a case-folding filesystem (Windows, macOS, or a synced-folder mount that ignores case), renaming a file by changing only its letter case — and then having the server-side rename fail so the client falls back to delete-plus-upload — could deadlock the sync engine's per-path lock and stall that worker indefinitely, because the old and new names mapped to the same lock. The fallback now runs the delete under the lock it already holds in that case, so the rename completes and the daemon keeps syncing."
+            },
+            {
+              "title": "Control-channel reconnect classification follows the framework's per-error signal",
+              "body": "The WebSocket control channel now decides whether a failure is terminal (stop and surface an actionable error) or transient (reconnect) using the framework's per-error transience signal, replacing a hand-maintained list. A handshake rejection's HTTP status is read directly (a 4xx is terminal, a 5xx is a transient server blip that reconnects), and a mid-stream protocol-violation frame is recovered by a fresh dial rather than being treated as fatal. Reconnect behaviour for a healthy server is unchanged."
+            },
+            {
+              "title": "Logger re-initialization no longer drops subsequent log lines",
+              "body": "Re-initializing the logger within a running process (for example to change the level) could leave the new log sink unopened because the previous sink's asynchronous shutdown had not completed, silently dropping every log line written afterward. Re-initialization now waits for the previous sink to drain before opening the new one, so logging continues uninterrupted. The normal first-time initialization at startup is unaffected."
+            },
+            {
+              "title": "Reconnect backoff is jittered and an explicit reconnect restarts it",
+              "body": "The WebSocket reconnect delay is now jittered with cryptographic randomness, so a fleet of clients that all lose the connection at the same instant (a server restart or deploy) no longer redial in lockstep and stampede the server. An explicit reconnect — for example after a manual resync — also restarts the backoff ladder, so a fresh connection attempt does not inherit a long delay from a prior backoff."
+            },
+            {
+              "title": "A from-source install passes the vendored-dependency integrity check at startup",
+              "body": "Running the client from a source checkout verifies each vendored dependency file at startup against the SHA-256 hashes recorded in vendor/MANIFEST.json and refuses to start on a mismatch. The recorded hashes had been computed from file bytes that differed from the committed bytes, so a from-source start failed this check with a hash-mismatch error. The manifest now records the hashes of the committed bytes, so a from-source start succeeds. Prebuilt release binaries skip this check and were never affected."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The WebSocket control channel fails closed on a post-handshake post-quantum downgrade",
+              "body": "If the control-channel TLS connection negotiates a classical (non-post-quantum) key exchange after the handshake, the client already tears the connection down — but it would then reconnect into the same downgrade indefinitely without surfacing the problem. It now fails closed with an actionable message (upgrade the server to a post-quantum build, or set HERMITSTASH_ALLOW_CLASSICAL_TLS=1 to permit it deliberately, then restart), so a store-now-decrypt-later downgrade is refused rather than retried forever."
+            },
+            {
+              "title": "An outbound-URL refusal of the control-channel dial surfaces an actionable error",
+              "body": "When the outbound-URL guard refuses the WebSocket dial — for example a configured server that resolves to a private, link-local, or cloud-metadata address — the refusal is now surfaced as an actionable \"fix the server URL\" error and the daemon stops retrying, instead of churning a reconnect storm against a target that can never succeed. The refusal is recognized regardless of which field of the framework error carries the marker."
+            },
+            {
+              "title": "Server-pushed paths are checked for a symlinked-ancestor escape on the reconcile path",
+              "body": "The symlink-escape defence for a server-pushed path — refusing a write that would resolve through a symlinked directory out of the sync root — is now part of the single path-resolution gate that every write goes through, including the periodic reconcile/recover sweep. Previously the sweep relied on the point-in-time check done when the change first arrived, leaving a window in which a symlink planted before the sweep could redirect a write. The check is a no-op for a normal not-yet-existing path, so legitimate downloads are unaffected."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs framework updated to 0.15.24",
+              "body": "The vendored blamejs framework is updated to 0.15.24, a build supply-chain hardening release with no runtime API changes. The release SBOM's component version and the recorded per-file dependency hashes are regenerated to match the updated tree."
+            },
+            {
+              "title": "Vendored-dependency hashes match the canonical source bytes",
+              "body": "The SHA-256 hashes recorded for each vendored dependency file — in vendor/MANIFEST.json and in the release SBOM — are now computed from the committed source bytes, so an operator who hashes the published source reproduces them exactly. They previously reflected a working copy whose line endings differed from the committed bytes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.17",
+      "date": "2026-06-25",
+      "headline": "Server-to-host sync delivers files on Linux and macOS hosts",
+      "summary": "On a non-Windows host — including the container image — a file the server reported as added or changed was resolved against a fixed Windows path separator before the client chose where to write it, so it never landed on disk and was logged as a refused path. The download path now resolves with the host's own path rules while still refusing any name a Windows peer could not represent, so server-to-host sync works on every platform. The vendored framework is refreshed to v0.15.23, which carries the underlying cross-platform path-safety fix.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Server-to-host sync writes files on Linux and macOS",
+              "body": "A file the server reported as added or changed was resolved against a fixed Windows path separator before the client chose where to write it. On a non-Windows host that produced a path the local filesystem could not address, so the file was refused as a path traversal and never written — server-to-host sync silently delivered nothing on Linux and macOS, including inside the container image. The download path now resolves with the host platform's own rules, and the strict cross-platform naming check (reserved device names, and a backslash a Windows peer would read as a directory separator) is applied separately, so a server push lands on every operating system while a name a Windows peer could not materialize is still refused."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Vendored framework refreshed to v0.15.23",
+              "body": "The vendored framework is updated to v0.15.23, whose path-safety primitive resolves cross-platform containment with the target platform's path semantics — the fix this release depends on. The update also carries the framework's accumulated correctness fixes since the previously vendored release."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.16",
+      "date": "2026-06-25",
+      "headline": "Enumerates the vendored PKI meta-bundle's nested packages in the release SBOM so a vulnerability scan keys on each nested version",
+      "summary": "A supply-chain release with no change to client behaviour. The release software bill of materials previously listed the vendored PKI bundle only by its aggregate name, so a vulnerability scanner could not map an advisory against the specific packages it contains. The SBOM now enumerates those nested packages — each with its own version, package URL, and dependency edge — so a scan keys on the version actually shipped. The nested versions ride the same drift-gated projection as the rest of the vendored surface, so they cannot silently go stale on a vendor refresh. No operator action is required.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Nested packages of a vendored meta-bundle are enumerated in the SBOM",
+              "body": "The vendored PKI bundle is a meta-bundle that ships several packages under one aggregate name. The release software bill of materials previously recorded only that aggregate, so a CVE/SBOM scanner could not match an advisory against the nested packages it actually contains. Each nested package is now emitted as its own SBOM component — with its own version, package URL, and a dependency edge from the bundle — and those nested versions are carried by the drift-gated transitive projection (populated at the vendoring step, verified in release preparation and continuous integration), so a vendor refresh can no longer leave a stale nested version in the bill of materials. The SBOM is the only place these versions appear; no client behaviour or runtime surface changes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.15",
+      "date": "2026-06-25",
+      "headline": "Corrects the vendored framework version shown in the README and gates the operator-facing version references against future drift",
+      "summary": "A documentation and release-tooling release with no change to client behaviour. The README's stated vendored-framework version had fallen a patch behind the actual vendored tree. It is corrected, and the hand-typed version references in the operator-facing docs — the vendored framework version, its minor line, and the Node runtime floor — are now kept in lockstep with their source of truth: synced automatically at the vendoring step and verified by a drift gate in release preparation and continuous integration, so a future vendor bump cannot strand a stale version in the prose. No operator action is required.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "README stated an out-of-date vendored framework version",
+              "body": "The README's requirements section named a vendored-framework version one patch behind the version actually vendored in the previous release. It now reflects the shipped version. This is a documentation correction; the binary and its behaviour are unchanged."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Operator-facing version references are kept in sync with their source",
+              "body": "The hand-typed version references in the operator-facing documentation — the vendored framework version and its minor line, drawn from the vendored manifest, and the Node runtime floor, drawn from the package manifest — are now reconciled mechanically at the vendoring step and verified by a drift gate during release preparation and continuous integration. Each reference is anchored to a specific phrasing so an unrelated, deliberate version on the same line (such as the server-side compatibility floor) is never disturbed, and the gate fails closed if a reference is reworded away rather than silently going dormant. A vendor bump can no longer leave a stale version stranded in the docs."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.14",
+      "date": "2026-06-25",
+      "headline": "Refreshes the vendored framework to v0.15.20 for accurate SBOM scanner metadata, and restores the container packaging smoke-test",
+      "summary": "This release refreshes the vendored framework to v0.15.20, which corrects the version and CPE metadata a CVE/SBOM scanner reads for the vendored cryptographic and supporting bundles so an advisory is matched against the version actually shipped, and refreshes the bundled WebAuthn and public-suffix data. The client's runtime is unchanged — every file the client consumes is byte-identical to the previous release. It also restores the container packaging smoke-test, which had started failing on a stale match after the previous release normalized the displayed server URL, and removes two unused local variables. No operator action is required.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Container packaging smoke-test matches the normalized enrollment line",
+              "body": "The release smoke-test that verifies the container binary loads and reaches the enrollment step matched only the older trailing-slash form of the displayed server URL. Now that the server URL is normalized to its scheme and host before display, the smoke-test accepts the normalized line, so the container release is validated again. The published image itself was unaffected and the binary was always functional."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Remove two unused local variables",
+              "body": "Two computed-but-unused local variables — one in the status display, one in the release SBOM projection helper — are removed. This is an internal cleanup with no change to behaviour or output."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework refreshed to v0.15.20",
+              "body": "The single vendored upstream is updated to v0.15.20, which corrects the structured component versions and CPE strings the vendored manifest records for a CVE/SBOM scanner (a vendored elliptic-curve bundle's CPE and a PKI bundle's component version had drifted from the code actually shipped, which could match an advisory against the wrong version) and derives them from the installed package versions so they cannot drift again. It also refreshes the bundled WebAuthn server library and the Mozilla Public Suffix List. Every file this client consumes at runtime is byte-identical to the previous release; the corrected metadata flows into the release software bill of materials through the drift-gated transitive projection, so a vulnerability scan now keys on the shipped versions. The integrity manifest is recomputed against the refreshed bytes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.13",
+      "date": "2026-06-24",
+      "headline": "Refreshes the vendored framework and hardens server-URL display, the WebSocket control channel, log reads, and the encrypted request path",
+      "summary": "This release refreshes the vendored framework to v0.15.19 and tightens a broad set of client behaviours. The commands that display the configured server URL now validate and mask it, so a value carrying embedded credentials is refused rather than printed, and only the normalized scheme and host are shown. A permanently-failing WebSocket handshake now fails closed with an actionable message instead of reconnecting forever or sitting silently in a reconnecting state. The local log and metrics reads refuse a symlinked path, and an encrypted-route request now enforces an overall wall-clock timeout that tears the connection down rather than leaving a stalled socket open. It also corrects several edge cases: a blank boolean environment variable no longer overrides an explicit configuration value, the sync cursor is hardened against a corrupt stored value, the support bundle again reports an absent configuration correctly, and a buffered local delete targets the current server file. No configuration changes are required for the common case; see Migration for the one boolean-environment-variable change.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "A blank boolean environment variable is treated as unset",
+              "body": "A boolean tunable such as HERMITSTASH_AUTO_UPDATE set to an empty or whitespace-only value is now treated as unset and preserves the value from config.json, matching how the numeric and list environment variables already behave. Previously a blank value was read as true and could silently re-enable a setting an operator had turned off in config.json. Set the variable to an explicit true/false (or 1/0) to override the configured value."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A permanently-misconfigured WebSocket target stops reconnecting forever",
+              "body": "When the control-channel dial failed for a config-time reason (a malformed server URL or a rejected handshake), the daemon would redial the same hopeless target indefinitely on the backoff ladder with no operator signal. Such a failure now fails closed with an actionable message — fix the server URL and restart — instead of churning."
+            },
+            {
+              "title": "A terminal WebSocket handshake no longer leaves the engine stuck reconnecting",
+              "body": "For a handshake that failed terminally without an HTTP status (a non-WebSocket peer or a malformed upgrade response), the engine could report a reconnecting state forever while the control channel was in fact dead and would never redial. Those failures now surface on the same fail-closed path as a rejected handshake, so the daemon reports a clear error to restart rather than a silent, never-progressing reconnect."
+            },
+            {
+              "title": "The sync cursor is hardened against a corrupt stored value",
+              "body": "A corrupt or non-numeric stored sync position could read back as Not-a-Number, which stranded the cursor so it never advanced and every reconnect re-ran a full catch-up. The cursor now reads back as a finite, non-negative integer (falling back to zero), and a non-finite position is refused on write so a transient bad value cannot become a permanent stuck cursor."
+            },
+            {
+              "title": "The catch-up complete signal is reset on reconnect",
+              "body": "A reconnect that re-entered catch-up could carry over a stale catch-up-complete latch from the previous session and briefly report the daemon as synced while it was still draining the catch-up batch. The latch is now reset on every reconnect, so the synced state is reported only after the new catch-up genuinely completes."
+            },
+            {
+              "title": "A buffered local delete targets the current server file",
+              "body": "A local delete is buffered briefly to detect a rename. The buffered delete now re-reads the tracked record when it fires rather than acting on the snapshot captured a moment earlier, so a server-side change to the same path within that window can no longer cause the wrong server file to be deleted."
+            },
+            {
+              "title": "The support bundle reports an absent configuration correctly",
+              "body": "After the framework refresh changed the shape of the file-not-found error from the bounded file reader, the support bundle treated a genuinely-absent config.json as unreadable instead of absent. The absent case is now recognized through the reader's typed error hook, so the bundle reports it accurately."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Server-URL display validates and masks the configured value",
+              "body": "Every command that prints the configured server URL — status, repair, and the environment-driven init — now routes it through the same validator the sync and WebSocket transports use and shows only the normalized scheme and host. A URL carrying embedded user:pass credentials is refused outright rather than echoed, so a credential can never reach a status line or log."
+            },
+            {
+              "title": "Log and metrics reads refuse a symlinked path",
+              "body": "Reading the daemon log (including the follow mode) and the metrics sidecar now opens the file with a symlink-refusing read, so a symlink planted at the log or sidecar path is refused rather than followed to read an attacker-chosen file through the operator's own privileges. The active log directory is already owner-only; this closes the read side as well."
+            },
+            {
+              "title": "Encrypted-route requests enforce an overall wall-clock timeout",
+              "body": "An encrypted metadata request (bundle init, finalize, and rename) now passes an overall wall-clock timeout to the transport, which aborts the underlying connection on expiry. Previously only a zero-progress idle bound was enforced, so a peer that trickled bytes within the idle window could hold the connection open and tie up a connection-pool slot; the connection is now torn down at the ceiling."
+            },
+            {
+              "title": "A keychain store failure surfaces before the plaintext fallback",
+              "body": "When the OS keychain is present but the store fails (for example a locked login keychain or an unavailable session bus), the client now logs one actionable line — naming the fallback file and how to migrate the secret back — before writing the API key to the owner-only fallback file. The line carries no key material. A genuinely-absent keychain still falls back silently, as before."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework refreshed to v0.15.19",
+              "body": "The single vendored upstream is updated to v0.15.19, which restores stapled-OCSP freshness enforcement, classifies a self-update signature by its structure (failing closed on an indeterminate shape), bounds outbound clients with an overall wall-clock timeout, and refuses a symlinked append-only log path atomically at open time. The integrity manifest is recomputed against the refreshed bytes."
+            },
+            {
+              "title": "The release SBOM's transitive surface is a drift-gated projection",
+              "body": "The transitive components in the release software bill of materials are now a mechanical projection of the framework's own vendored manifest, recorded in the committed manifest at the vendoring step and verified by a drift gate in the release preparation and continuous-integration checks. A change to a transitive bundle can no longer reach the published SBOM without a reviewed, gated update."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "A blank boolean environment variable no longer overrides configuration",
+              "body": "If a deployment relies on setting a boolean environment variable to an empty value to force a setting on, that no longer takes effect — a blank value is now treated as unset and the config.json value applies. Set the variable to an explicit true/false (or 1/0) to override. Deployments that set these variables to real values, or do not set them at all, are unaffected."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.12",
+      "date": "2026-06-21",
+      "headline": "Hardens certificate, WebSocket, and credential handling, refreshes the vendored framework, and restores the container image build",
+      "summary": "This release refreshes the vendored framework to v0.15.15 and tightens a broad set of client behaviours: a server-pushed certificate rotation now refuses a trust anchor that is not a real CA, the WebSocket control channel fails closed on a classical-TLS downgrade and bounds a fragmented message before it completes, a denied bundle-metadata request surfaces an actionable error instead of syncing nothing, and the on-disk credentials read is symlink-refusing and refuses a world-readable fallback file. It also fixes `log --follow`, lets the beta auto-update channel self-update, restores the container image build that a malformed shell script had skipped, and corrects several sync edge cases. No configuration changes are required for the common case; see Migration for the one credentials-permission change.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Certificate rotation enforces the CA basic-constraints bit",
+              "body": "When the server pushes a new client certificate, key, and CA, the client now requires the supplied CA to assert basicConstraints cA:TRUE and to have actually issued the new leaf before it adopts the rotated identity. A non-CA end-entity certificate can no longer be accepted as the trust anchor for a swapped-in identity (the classic basic-constraints bypass)."
+            },
+            {
+              "title": "WebSocket classical-TLS downgrade fails closed",
+              "body": "If the control-channel handshake negotiates a classical key exchange instead of a post-quantum hybrid, the client now tears the connection down without ever signalling a successful connect, and the normal reconnect path takes over. Previously the engine briefly saw the connection as live before the socket was destroyed. Setting HERMITSTASH_ALLOW_CLASSICAL_TLS=1 still relaxes the floor to a warning."
+            },
+            {
+              "title": "Bundle-metadata request fails closed on a denial",
+              "body": "An access-denied or error response to the initial bundle-metadata fetch is now surfaced as an actionable error (and an authentication denial stops the daemon with a re-enroll message) instead of being treated as a successful empty bundle that silently syncs nothing."
+            },
+            {
+              "title": "Credentials file read is symlink-refusing and rejects loose permissions",
+              "body": "The plaintext credentials fallback file is read through a symlink-refusing, inode-pinned open, and a group- or world-readable file is now refused with an actionable message rather than being silently re-permissioned. This removes a window where a planted symlink could redirect a permission change at an arbitrary file. See Migration."
+            },
+            {
+              "title": "WebSocket fragmented messages are bounded before completion",
+              "body": "Inherited from the framework refresh: an incoming fragmented message is now bounded by its running total as each continuation frame arrives, so a peer can no longer stream unbounded continuation frames to exhaust memory before the message-size cap is checked, and a frame arriving after close is ignored."
+            },
+            {
+              "title": "Diagnostic bundle stops leaking the previous-binary path and bounds log decompression",
+              "body": "The support bundle now ships only the basename of the pending-update marker's previous-binary path (it previously embedded the absolute path, exposing the OS username and home-directory layout), and rotated compressed logs are decompressed under an expansion-ratio and output-size guard sized to the configured rotation policy so a crafted log file cannot exhaust memory."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "`log --follow` now actually follows",
+              "body": "The follow mode exited immediately instead of tailing the log, because its repeating timer did not hold the event loop open. It now stays alive and streams new lines until interrupted."
+            },
+            {
+              "title": "Beta auto-update channel can self-update",
+              "body": "The release-asset matcher rejected prerelease version strings (for example a `-beta.N` suffix), so a client on the beta channel could never select a newer beta build. The matcher now accepts an optional prerelease or build suffix while still rejecting a wrong-architecture asset and the post-quantum signature sidecar."
+            },
+            {
+              "title": "Malformed numeric environment variables are rejected by name",
+              "body": "A numeric tunable such as HERMITSTASH_UPLOAD_BYTES_PER_SEC set to a unit-suffixed or non-numeric value (for example `10MB` or `unlimited`) is now rejected at startup with the offending variable named, instead of being silently coerced to a wrong number or dropped while the operator believes it took effect. A blank value still falls back to the documented default, so a container variable left empty continues to start normally."
+            },
+            {
+              "title": "Empty-bundle catch-up completes",
+              "body": "A freshly created bundle with no files (a zero-tip catch-up) could leave the engine stuck reporting that it was still catching up. The catch-up-complete transition now fires for an empty bundle."
+            },
+            {
+              "title": "Local rename no longer drops a file when the source delete is gated",
+              "body": "When a local rename fell back to delete-plus-recreate and the delete was gated by an in-flight transfer for the same path, the recreated file could be skipped. The fallback now distinguishes a gated delete from a completed one and still uploads the renamed file."
+            },
+            {
+              "title": "Internal scratch files are never uploaded",
+              "body": "The case-folding probe and the rename staging file now use the same temporary-file naming the download path uses, so a copy left behind by an interrupted run is swept on the next start and is never mistaken for a real file to upload to the server."
+            },
+            {
+              "title": "Upload and download response bodies use byte-accurate caps",
+              "body": "Response bodies are collected against true byte limits instead of a character-length count that could overshoot, a large success response is no longer truncated, and an oversized error body from a failing upload is bounded to the same limit the download path uses."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Ignore and include patterns fold case on case-insensitive filesystems",
+              "body": "On Windows and macOS, selective-sync ignore and include patterns now match case-insensitively, consistent with how the client already tracks file identity on those filesystems. On case-sensitive filesystems matching stays byte-exact."
+            },
+            {
+              "title": "Client builds on more hardened framework primitives",
+              "body": "Path resolution, untrusted-input parsing, bounded response collection, decompression, atomic secret reads, and retry backoff now route through the vendored framework's hardened primitives instead of hand-rolled equivalents, so the client inherits their fail-closed input validation and cross-platform guards directly."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework refreshed to v0.15.15",
+              "body": "The single vendored upstream is updated to v0.15.15, which fails more authentication and signature verifiers closed and bounds the WebSocket fragmented-message reassembly the client relies on. The integrity manifest is recomputed against the refreshed bytes."
+            },
+            {
+              "title": "Container image build restored",
+              "body": "A committed shell script carried Windows line endings, which failed the shell-lint gate and skipped the container image build for the previous release. Shell scripts are now pinned to line-feed endings repository-wide, and the image-publish lint is scoped to first-party scripts, so the multi-architecture image publishes again."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "A world-readable credentials fallback file is now refused",
+              "body": "If the plaintext credentials fallback file has group- or world-readable permissions, the client now refuses to read it instead of silently tightening it in place. Re-run `hermitstash-sync init`, or restrict the file with `chmod 600`, to restore access. Installs whose credentials file is already owner-only (the normal case) are unaffected."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.11",
+      "date": "2026-06-21",
+      "headline": "Installs the CI lint tooling from a committed lockfile",
+      "summary": "The continuous-integration lint step now installs eslint and its security plugin from a committed package-lock.json via `npm ci`, instead of resolving them ad-hoc at run time, so the lint toolchain is reproducible and its full dependency tree is pinned. This development-only tooling is never bundled into the released binary, and the client's runtime behavior is unchanged.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "CI lint tooling installs from a committed lockfile",
+              "body": "The lint jobs previously installed eslint and eslint-plugin-security ad-hoc, leaving their transitive tree unpinned. They now install from a committed package-lock.json via `npm ci`, pinning the entire tool dependency tree for a reproducible, tamper-evident lint step. This development-only tooling is never bundled into the released binary; the shipped runtime continues to use only Node built-in modules plus the vendored framework."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.10",
+      "date": "2026-06-21",
+      "headline": "Scopes the workflow security scan to first-party workflows",
+      "summary": "The repository's workflow security scan no longer descends into vendored dependencies' bundled CI files, which never run here, so its code-scanning results stay focused on the project's own workflows. There is no change to the client binary or its runtime behavior.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "The workflow security scan is scoped to the project's own workflows",
+              "body": "The static workflow-security scanner previously walked the whole tree, including the bundled framework's own GitHub Actions files under the vendored directory, and reported findings about third-party CI pipelines that never execute in this repository. It now scans only the project's first-party workflows, matching how the other static scanner already excludes the vendored tree."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.9",
+      "date": "2026-06-21",
+      "headline": "Refreshes the vendored framework to v0.15.14 and hardens uploads, secret-file reads, disconnected-window recovery, the status exit code, and the release supply chain",
+      "summary": "This release advances the vendored framework to v0.15.14, which closes a WebSocket reconnect gap where a redial whose address resolved to a private, loopback, or cloud-metadata host could connect without being re-validated. It also reads the mTLS certificate, private key, CA bundle, and the auto-update marker without following a symlink and bound to the opened file, creates the credential and state directories private, recovers local edits and deletions made while the connection was down, keeps the server from being stranded on stale bytes when a file is edited during its own upload, makes the status command report a stopped daemon by exit code, and pins the published image base and a workflow scanner by digest.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "WebSocket reconnect re-validates the server address before connecting",
+              "body": "On each redial the outbound-address check is now completed before the socket opens, so a server address that resolves to — or is rebound to — a private, loopback, link-local, reserved, or cloud-metadata host is refused on every reconnect instead of being connected without validation. This comes from the framework refresh and applies to the live sync channel."
+            },
+            {
+              "title": "The certificate, private key, CA bundle, and update marker are read without following a symlink",
+              "body": "These files are now read bound to the file that was opened, refusing a symlink at the path, so a symlink planted in the configuration directory cannot redirect the daemon to read key material or rollback metadata from an attacker-chosen file. The reads are byte-identical to before on a regular file."
+            },
+            {
+              "title": "The credential and state directories are created private",
+              "body": "The directory holding the API credentials, mTLS material, state database, and configuration is now created mode 0700, and an existing one created world-traversable by an older version is tightened on start, so other local users cannot traverse into the secrets directory."
+            },
+            {
+              "title": "The diagnostic bundle is written atomically and refuses a symlink target",
+              "body": "The support bundle is written to a fresh file that refuses to follow a symlink at the destination and is renamed into place, so it cannot be redirected through a pre-planted link and never leaves a half-written archive on a crash."
+            },
+            {
+              "title": "A dial refused by the outbound-address guard stops reconnecting",
+              "body": "A WebSocket connection rejected because its destination resolves to a blocked address now surfaces an actionable error and stops, instead of retrying the same unreachable target indefinitely; fix the server URL and restart."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A file edited during its own upload no longer strands the server on stale bytes",
+              "body": "If a file changed on disk while it was being uploaded, the client could record the newer content as synced while the server still held the older bytes, so the change was never re-sent. The client now records what the server received and re-checks the file after the upload, re-queuing it when the two differ."
+            },
+            {
+              "title": "An upload of a file that changes size mid-transfer is retried instead of corrupting or stalling the connection",
+              "body": "A file that grew or shrank between the time its length was measured and the time it finished streaming could overrun or under-fill the declared upload length, poisoning the next request or stalling the socket. Such an upload is now aborted and retried once the file settles."
+            },
+            {
+              "title": "Local changes made while the connection was down are re-detected on reconnect",
+              "body": "A file modified or deleted while the sync connection was in an error or reconnecting state was dropped because change detection was paused. On reconnect the synced folder is now re-walked so a missed edit is re-uploaded and a missed deletion is propagated, mirroring the recovery already done after a file-watcher restart."
+            },
+            {
+              "title": "A rename whose source is missing no longer creates an empty directory",
+              "body": "A server rename event for a file the client did not have locally created the destination directory before falling through to re-download, leaving an empty folder the user never had. The destination directory is now created only when the file is actually moved into it."
+            },
+            {
+              "title": "Rename detection works when the file watcher does not report a size",
+              "body": "Some watcher backends deliver a change without a numeric size, which silently disabled rename detection for that path and stored a null size that mismatched later comparisons. The size is now recovered from the file so rename detection and the stored size no longer depend on the backend populating it."
+            },
+            {
+              "title": "Reading status or collecting diagnostics no longer writes to the running daemon's database",
+              "body": "The status, stats, and diagnose commands opened the state database in a mode that could issue a schema-changing write against the database the live daemon holds open, risking a write conflict and, for diagnostics, mutating the data being collected. These read-only commands no longer perform that write."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The status command reports a stopped daemon by exit code",
+              "body": "hermitstash-sync status now exits 0 when the daemon is running and 3 when it is not, following the init-script convention, so a health probe or orchestrator can detect a dead daemon by exit code. The printed output is unchanged for text-based checks."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework advanced to v0.15.14",
+              "body": "The bundled framework moves from v0.15.13 to v0.15.14, bringing the reconnect address re-validation noted above along with the symlink-refusing and bounded file-read primitives the client now uses for its secret material."
+            },
+            {
+              "title": "The published image base and the workflow-lint scanner are pinned by digest",
+              "body": "The container runtime base and the GitHub Actions workflow linter are now referenced by immutable digest rather than a moving tag, so a republished upstream tag cannot change what a release build pulls."
+            },
+            {
+              "title": "The native-install updater verifies against the install-time key and probes as the service user",
+              "body": "The system updater verifies a downloaded binary against the signing key pinned when it was installed rather than re-fetching the key from the release it is installing, and runs its post-update health check as the service user so the daemon's data directory keeps consistent ownership."
+            },
+            {
+              "title": "The native installer refuses to install an unverified binary",
+              "body": "When the signature verifier is unavailable, the installer now stops instead of falling back to installing a binary whose signature was never checked."
+            },
+            {
+              "title": "Release and image workflows build the released tag by a resolved reference",
+              "body": "The image-publish workflow now checks out the released tag through a validated, resolved reference and keeps its same-repository origin guard, so it builds exactly the published commit without consuming an unvalidated event field as a checkout reference."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "A health check that reads the status exit code now sees 3 when the daemon is stopped",
+              "body": "If you check the daemon purely by the status command's exit code, note that a stopped daemon now exits 3 instead of 0; checks that grep the printed output need no change. The shipped Kubernetes liveness probe and the native updater's health check already use the new code."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.8",
+      "date": "2026-06-20",
+      "headline": "Corrects a rename data-integrity bug and an auto-update rollback gap in 0.9.7, and hardens uploads, catch-up status, the release SBOM, and from-source boot",
+      "summary": "Two changes in 0.9.7 were incomplete: a server-driven rename could record an unrelated local file as synced and later upload its bytes, and the auto-update health check could let a build that crashes shortly after starting avoid rollback while deleting the build it would roll back to. Both are corrected. This release also refuses an upload whose path carries a control character, stops sync status from briefly reporting synced mid-catch-up, removes contradictory hashes from the release SBOM, keeps the reconnect position from regressing, and verifies the vendored bundle before loading it on from-source installs. Operators on 0.9.7 should upgrade promptly.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A server rename can no longer mark an unrelated local file as synced",
+              "body": "When a file's local copy was absent and an unrelated file already occupied the rename destination, the client could record that unrelated file as fully synced and later upload its bytes to the server under the renamed path. A synced state is now recorded only when the client actually moved the file and its bytes match the server; otherwise the file is re-downloaded."
+            },
+            {
+              "title": "Auto-update reliably rolls back a build that does not stay up",
+              "body": "The post-update health check treated the new build merely reaching a running engine once as proof of health, so a build that started then crashed repeatedly could be recorded as healthy, skip the rollback, and delete the previous build it would have restored. Health is now recorded only on a clean, signal-handled shutdown, so a crashing build rolls back to its predecessor while a reboot or operator restart during the probation window is correctly treated as healthy."
+            },
+            {
+              "title": "An upload no longer lets a control character in a path break the request framing",
+              "body": "A file whose path contained a control character (legal on some platforms) could break out of the multipart upload body and reframe the request the server parses. Such a path is now refused at upload with an actionable error."
+            },
+            {
+              "title": "Sync status no longer briefly reports synced during catch-up",
+              "body": "While catching up after connecting, a finishing transfer could flip the reported state to synced even though catch-up events were still pending. Catch-up now completes only when the server signals it and all queued work has drained."
+            },
+            {
+              "title": "The reconnect position no longer regresses on an out-of-order event",
+              "body": "An out-of-order or replayed event could push the reconnect cursor below the last applied position, making the server resend already-applied events after a reconnect. The reconnect cursor now tracks the persisted, monotonic position."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "From-source boot verifies the vendored bundle before loading it",
+              "body": "From-source startup now re-hashes every vendored framework file against the recorded checksums before any of that code is loaded, so a tampered vendored file is refused before it can execute rather than after. Single-executable release binaries carry their own signed integrity check and are unaffected."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Release SBOM no longer emits contradictory hashes for the vendored framework",
+              "body": "The CycloneDX SBOM recorded the vendored framework's per-file digests as many same-algorithm hashes on one component, asserting that a single component hashes to several different values and confusing hash-keyed SBOM consumers. Per-file digests are now recorded as component properties, leaving a single valid hash where one applies."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "0.9.7",
+      "date": "2026-06-20",
+      "headline": "Closes silent local data loss on server renames, stops a status command from resetting sync state, and prevents a healthy auto-update from being rolled back",
+      "summary": "Two server-driven rename paths could mark a file fully synced when its bytes never reached disk, leaving it permanently missing locally while reported as synced; this release closes both. A read-only status or stats command could trigger destructive recovery on the running daemon's state database, and auto-update could downgrade a healthy build after an unrelated restart — both are fixed. The release also adds a tamper-resistant read of the stored credential and advances the vendored framework to v0.15.13.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "A server rename no longer loses a file locally",
+              "body": "If a file's download had not yet landed and the server then renamed it, the client recorded the new name as fully synced even though no bytes existed on disk, and nothing ever re-fetched them — the file was permanently missing while reported as synced. A rename now records a synced state only once the bytes are present and match the server; otherwise it re-downloads the file."
+            },
+            {
+              "title": "Case-only renames no longer drop a not-yet-downloaded file",
+              "body": "On case-folding filesystems, a case-variant server event for a file whose download had failed could mark it synced from the server's checksum alone, with no local bytes — the same unrecoverable missing-file state. The client now requires the local content to be present and matching before recording a synced state."
+            },
+            {
+              "title": "A status or stats command can no longer reset the running daemon's state",
+              "body": "Reading sync status or stats opened the local state database with destructive recovery enabled, so a transient integrity hiccup while the daemon was writing could rename the live database aside and start an empty one, forcing a full resync. These read-only commands now refuse recovery and leave the database untouched."
+            },
+            {
+              "title": "Auto-update no longer downgrades a healthy build after a restart",
+              "body": "A restart for any unrelated reason — a reboot, a service restart, an operator stop and start — during the post-update probation window could be mistaken for a crash and roll the healthy new build back to its predecessor. The daemon now records reaching a running engine durably, so a restart across the window is recognized as a healthy restart and not rolled back; a marker with no valid install time is cleared instead of forcing a downgrade."
+            },
+            {
+              "title": "Machine-readable stats output is indented again",
+              "body": "The stats command with --json emitted a single minified line instead of the intended indented object. It now prints two-space-indented JSON."
+            },
+            {
+              "title": "A state-database migration failure now surfaces instead of corrupting later writes",
+              "body": "A one-time column migration on the local state database swallowed every error, so a transient failure could leave the column missing and make later writes throw partway through a sync. The migration now ignores only the already-present case and surfaces any real failure when the database is opened."
+            },
+            {
+              "title": "Ignore and include warnings match actual behavior for wildcard path patterns",
+              "body": "A path pattern containing a wildcard was warned as matching nothing while the matcher actually applied it to a directory whose name contained a literal wildcard character. The matcher and the warning now agree — such a pattern matches nothing."
+            },
+            {
+              "title": "The support bundle no longer includes the PID file as a log",
+              "body": "The diagnostics bundle swept the PID file into its log directory by prefix match. It now collects only the active log file and its rotated copies."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Tamper-resistant read of the stored credential",
+              "body": "When the API key is held in the on-disk fallback rather than the OS keychain, the client now reads it in a way that binds the returned bytes to the opened file and refuses a symlinked or swapped source, closing a check-then-read race on the credential file."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework advanced to v0.15.13",
+              "body": "The vendored blamejs framework moves to v0.15.13, which routes file reads, injected-dependency and numeric-option validation, and markup escaping through shared hardened primitives and adds a time-of-check/time-of-use-safe file read used here for the credential fallback."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs v0.15.13 release",
+          "url": "https://github.com/blamejs/blamejs/releases/tag/v0.15.13"
+        }
+      ]
+    },
+    {
+      "version": "0.9.6",
+      "date": "2026-06-14",
+      "headline": "Restores in-binary auto-update and hardens the daemon, transfers, and release pipeline",
+      "summary": "The in-binary auto-update path was silently failing signature verification on every platform; this release fixes it and hardens the daemon's shutdown and self-replace, file hashing, the file watcher, and the encrypted/throttled transfer paths. It also adopts the framework's transient-lock-resilient rename, pins and audits the release pipeline, and advances the vendored framework to v0.15.11.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Auto-update verifies the correct signature again",
+              "body": "The in-binary updater selected the wrong signature asset — any release file ending in .sig, including another platform's signature and the larger ML-DSA sidecar — and failed verification on every platform, silently disabling self-update for bare-binary installs. The updater now pins the running platform's own P-384 signature and refuses any mismatched asset/signature pairing."
+            },
+            {
+              "title": "Graceful shutdown is no longer cut short by stop",
+              "body": "The stop command escalated to SIGKILL after five seconds, interrupting the daemon's own orderly drain, which is budgeted up to about thirty seconds. The stop timeout now matches that budget, and a forced kill is reported plainly instead of being shown as a clean shutdown."
+            },
+            {
+              "title": "Auto-update no longer races itself to a dead state",
+              "body": "On a successful self-replace the new daemon could exit with an already-running error because the previous process still held the pidfile, leaving the host with no daemon. The handoff now waits for the predecessor to release the pidfile before the replacement starts."
+            },
+            {
+              "title": "A special file in the sync folder can no longer stall hashing",
+              "body": "The single-file checksum path lacked the symlink, FIFO, device, and size-cap guards the parallel path applies, so a non-regular file could hang the hash or escape the size ceiling. Both paths now share the same hardened hashing primitive."
+            },
+            {
+              "title": "Non-ASCII ignore and include patterns match live edits",
+              "body": "The watcher evaluated ignore and include patterns against a non-normalized path while emitting a normalized one, so a pattern with non-ASCII characters could match during a full rescan but not on live edits. Both paths now normalize identically before filtering."
+            },
+            {
+              "title": "The watcher recovers from a failed pattern reload",
+              "body": "If reloading ignore patterns failed because the sync root was momentarily inaccessible, the watcher could be left silently inactive behind a success-shaped log line. The failure now routes into the watcher's recovery path and surfaces a degraded signal."
+            },
+            {
+              "title": "A transient server error no longer reports a permanent failure",
+              "body": "A transient 5xx during the WebSocket handshake was reported to the sync engine as a permanent rejection asking the operator to restart the daemon, even while the client was already reconnecting on its own. Only terminal rejections now surface that way."
+            },
+            {
+              "title": "Encrypted requests recover from a server key rotation",
+              "body": "After the server rotated its api-encrypt keypair, an encrypted request such as a file rename failed without rebuilding the session. It now rebuilds the session and retries once, matching the existing recovery for an expired session."
+            },
+            {
+              "title": "Bandwidth-throttled transfers are not aborted by the idle timeout",
+              "body": "A low configured upload or download rate limit could make a single chunk's throttle wait exceed the fixed thirty-second idle timeout and abort an otherwise-healthy transfer. The idle timeout now scales to the configured rate."
+            },
+            {
+              "title": "Diagnose bundles drop the OS username and home-directory layout",
+              "body": "The support-bundle info file embedded the absolute working directory and config directory, leaking the OS username and home-directory layout the bundle documents as out of scope. Both are now reduced to a basename."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Final file renames ride out transient locks",
+              "body": "Config saves, certificate rotation, the verified-download commit, and server-driven moves now use the framework's retry-on-transient-lock rename, so an antivirus scanner, search indexer, or file-sync client briefly holding a destination no longer fails the operation. This especially helps a sync folder that another client also watches."
+            },
+            {
+              "title": "Console log output is redacted like the log file",
+              "body": "The colored terminal and stdout log output now passes through the same redactor as the rotated log file, so a secret in a log record's metadata is masked on the console — journald, container logs, a terminal — exactly as it already was on disk."
+            },
+            {
+              "title": "The from-source runtime gate matches the declared floor",
+              "body": "The startup version check now requires Node.js 24.16.0, matching the engines floor, CI, and the runtime embedded in the release binaries. Release binaries carry their own runtime and are unaffected."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The release and image-publish pipeline is pinned and audited",
+              "body": "Every GitHub Actions reference in the release, image-publish, and continuous-integration workflows is pinned to a commit SHA, the privileged image-publish pipeline is guarded so it cannot check out and run untrusted code, and the repository now runs additional static security analysis over its own workflows and source on every change."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs advances to v0.15.11",
+              "body": "The bundled framework moves to v0.15.11. The transport, crypto, atomic-file, and validation surfaces this client consumes are unchanged in behavior; the update supplies the transient-lock-resilient rename now adopted on the data path and carries upstream security and correctness fixes."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Bare-binary installs on v0.9.5 must update to v0.9.6 by hand",
+              "body": "Because in-binary auto-update could not complete on v0.9.5, a bare-binary install on that version cannot pull v0.9.6 automatically and must download it from the releases page once. After updating to v0.9.6, auto-update resumes for later versions. Installs managed by systemd, Docker, Podman, or Kubernetes use the external updater or an image pull and need no manual step."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "Release verification + signatures",
+          "url": "https://github.com/dotCooCoo/hermitstash-sync/blob/main/SECURITY.md"
+        },
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.5",
+      "date": "2026-06-13",
+      "headline": "Vendored blamejs advances to v0.15.8",
+      "summary": "A currency refresh of the vendored framework to v0.15.8; the surfaces this client consumes are unchanged in behavior, so the update carries upstream security and correctness fixes without altering client behavior.",
+      "sections": [
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs advances to v0.15.8",
+              "body": "The bundled framework moves from v0.15.7 to v0.15.8. The transport, crypto, atomic-file, and validation surfaces this client consumes carry no behavioral change; the update brings upstream security and correctness fixes (an OTLP log-attribute redaction, a reproducible published tarball, and audited server-side correctness gaps) and keeps the vendored tree current."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.4",
+      "date": "2026-06-13",
+      "headline": "Bounded downloads, local-change ordering, native cert-expiry, and Node 24.16.0",
+      "summary": "Server file downloads are now bounded so a runaway body cannot fill the disk, local edits are ordered against same-path server transfers to remove a race, a permanently-rejected WebSocket upgrade surfaces as an error instead of an invisible stuck state, and the runtime floor moves to Node.js 24.16.0 for its OpenSSL and certificate updates.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The runtime floor moves to Node.js 24.16.0",
+              "body": "This pulls in OpenSSL 3.5.6, updated root certificates (NSS 3.121), additional crypto-validation hardening, and a fix that hardens HTTP client-request option merging against prototype pollution. Pre-built binaries embed it; from-source installs now require Node.js 24.16.0+."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Server downloads are bounded before and during the transfer",
+              "body": "A file download is now refused before it starts if its declared size exceeds the per-file limit or the available disk, and aborted mid-stream if the body grows past the limit, instead of writing an unbounded body to disk and only verifying the checksum after the whole thing has landed. The size check no longer depends on the server declaring a size or on the free-space probe succeeding."
+            },
+            {
+              "title": "Local edits are ordered against same-path server transfers",
+              "body": "A local file change and a server change to the same path could previously interleave so a local upload raced a concurrent server download. Local changes now run in the same total order as server events and re-check the suppression state after hashing, so the two cannot stomp each other."
+            },
+            {
+              "title": "A rejected WebSocket upgrade surfaces as an error",
+              "body": "A permanent WebSocket handshake rejection — a wrong path, a stale bundle, or a server too old to speak the protocol — used to leave the daemon stuck in a reconnecting state forever with no signal. It now transitions to an error state with an actionable message and a metric, while genuinely recoverable cases still reconnect."
+            },
+            {
+              "title": "Resync is safe under overlapping triggers",
+              "body": "Two resyncs triggered close together — for example a repeated reload signal — could clear the database twice and reopen each other's protected window. Resync now coalesces overlapping callers onto one operation, and the reload signal handler waits for it to finish."
+            },
+            {
+              "title": "A configuration reload re-scans for changes missed during the watcher restart",
+              "body": "Reloading the configuration briefly bounces the file watcher; a local file changed during that window is now re-detected by a rescan instead of being silently missed until the next change."
+            },
+            {
+              "title": "Certificate expiry is detected without an external tool",
+              "body": "The client read certificate expiry by spawning the openssl binary, which silently did nothing when openssl was not on the path — common in a single-file binary or a minimal container — so the certificate could expire with no auto-renewal. It now reads the expiry natively, so auto-renewal works everywhere."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs advances to v0.15.7",
+              "body": "A currency refresh: the framework surfaces this client consumes are unchanged from v0.15.6, so the update carries upstream security fixes (the URL-canonicalizer IPv4-mapped allowlist bypass and server-side correctness gaps) without altering client behavior."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.3",
+      "date": "2026-06-13",
+      "headline": "Post-quantum negotiated-group enforcement and a sync-correctness hardening pass",
+      "summary": "After each handshake to a HermitStash server the client now verifies the negotiated key-exchange group is a post-quantum hybrid and refuses a classical fallback, and a broad correctness pass closes data-integrity gaps in rename detection, resync, the local state database, certificate rotation, and cross-platform path handling.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "TLS connections enforce a post-quantum negotiated group",
+              "body": "After each handshake to a HermitStash server, the client reads the negotiated key-exchange group and refuses the connection if it fell back to a classical group instead of a post-quantum hybrid — closing a silent-downgrade gap where the offered list was post-quantum-preferred but the negotiated result was never checked. The auto-update download path, which talks to a non-post-quantum CDN, logs the fallback instead of failing. Set HERMITSTASH_ALLOW_CLASSICAL_TLS=1 to permit a classical negotiation deliberately."
+            },
+            {
+              "title": "The diagnostic bundle no longer leaks secrets in log content or config paths",
+              "body": "Log files in the support bundle are re-redacted at bundle time — redaction previously ran only when a line was first written, so a token already on disk shipped in the clear. The configuration snapshot is reduced to an explicit allow-list of fields, so home-directory certificate paths and the sync-folder location no longer ship, and the certificate summary carries only the common names rather than the full distinguished name."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Renames on case-insensitive and Unicode-normalizing filesystems no longer duplicate or churn state",
+              "body": "A file the server calls Foo.txt and a local foo.txt on Windows or macOS used to map to two separate database rows for one on-disk file, and macOS's Unicode form differences produced phantom add/remove cycles. Paths are now normalized and case-folded consistently, and a server-supplied path is screened for reserved Windows names before it is written to disk."
+            },
+            {
+              "title": "Rename detection no longer moves the wrong file on content collisions",
+              "body": "A delete-plus-create of two unrelated files with identical content — common for empty files — could be mistaken for a rename and move the wrong file on the server. Detection now requires matching size and name locality and skips zero-byte files."
+            },
+            {
+              "title": "Resync drains in-flight work before wiping local state",
+              "body": "A resync used to clear the local database while uploads, downloads, and buffered rename-deletes were still in flight, so an in-flight operation could write into the just-cleared database or a stale timer could delete a file the resync was about to re-fetch. Resync now quiesces all in-flight work first."
+            },
+            {
+              "title": "Local-state writes are transactional",
+              "body": "A rename and the full-reset operation now each commit as a single transaction, so a crash mid-operation can no longer strand the sync cursor ahead of an empty file set — which silently broke all future catch-up — or lose a file from the database."
+            },
+            {
+              "title": "Certificate-authority rotation validates and can roll back",
+              "body": "A server-pushed certificate-authority rotation now validates the new certificate, key, and CA chain before swapping, keeps a backup, and recovers on the next boot if the swap is interrupted, instead of risking an unusable client identity on a malformed trio or a mid-write crash."
+            },
+            {
+              "title": "The file watcher reconciles after a recovery",
+              "body": "When the watcher restarts itself after an event-queue overflow, the client now re-scans the folder for changes missed during the gap instead of resuming blind, so a burst of local changes during the overflow is no longer lost."
+            },
+            {
+              "title": "Oversized downloads are refused up front",
+              "body": "A download that would not fit in the available disk space is now refused before it starts, rather than filling the disk and retrying the same file forever."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Selective-sync patterns warn on unsupported shapes",
+              "body": "An include or ignore pattern using a glob shape the matcher does not support — which would silently match nothing — now logs a warning at startup, so a mistyped pattern is loud instead of quietly failing to back up a file. A path-qualified directory pattern now correctly excludes its whole subtree."
+            },
+            {
+              "title": "The API-key reference is honored, and an unreachable keychain reports an actionable error",
+              "body": "The apiKeyRef configuration field is now read rather than ignored, and when the OS keychain stored a key but is unreachable on a later read, the client reports how to recover instead of failing with an opaque authentication error."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.2",
+      "date": "2026-06-13",
+      "headline": "TLS group list aligned with the v0.15.x server group preference",
+      "summary": "The advertised TLS key-exchange group list now appends an X25519 classical last-resort after the three post-quantum hybrid groups, matching the group preference a v0.15.x server advertises so the two ends agree on the offered set.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "TLS group list appends an X25519 classical last-resort",
+              "body": "The key-exchange group list the client advertises is now SecP384r1MLKEM1024, X25519MLKEM768, SecP256r1MLKEM768, then X25519, matching the group preference a v0.15.x server advertises. The three post-quantum hybrids stay first and are selected against any compatible server; the classical group is a last resort only, and a classical negotiation is surfaced by the framework's downgrade audit."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.1",
+      "date": "2026-06-13",
+      "headline": "Sync correctness and crash hardening, Windows file-lock tolerance, and blamejs v0.15.6",
+      "summary": "Server-driven changes now apply in strict order and survive a transient local failure without silently dropping a file, two paths where a dropped connection could crash the daemon are closed, the client keeps reconnecting after a dead-peer timeout, and writes tolerate the file locking common on Windows and cloud-synced folders. The vendored framework advances to blamejs v0.15.6.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Server-driven changes apply in order and never silently drop a file",
+              "body": "File events from the server were applied concurrently, so two changes to the same path could race and leave the local copy with the wrong content, and a failed download could advance the sync cursor past the file, dropping it until a full resync. Changes now apply strictly in order, the cursor only advances once a change is durably applied, and a reconnect re-drives any file left pending so a transient failure self-heals."
+            },
+            {
+              "title": "A dropped connection no longer crashes the daemon",
+              "body": "The upload and download response readers had no handler for a mid-response socket reset, which could terminate the whole daemon. Each now rejects the single operation instead, and the file handles those error paths leaked are released."
+            },
+            {
+              "title": "The client reconnects after a dead-peer timeout",
+              "body": "A WebSocket pong timeout — the dead-peer check — was treated as permanent and disabled reconnection, stranding the daemon offline until a manual restart. Pong and handshake timeouts now reconnect, while genuine terminal errors such as a bad URL or a 4xx handshake rejection still stop."
+            },
+            {
+              "title": "Remote deletes no longer discard unsynced local edits",
+              "body": "A file deleted on the server was removed locally even when it held unsynced local edits. The client now compares checksums first and preserves a diverging local file as a conflict copy, matching how added and replaced files are already handled."
+            },
+            {
+              "title": "Large files and long paths sync reliably",
+              "body": "Files larger than 1 GiB aborted the whole batch checksum and paths over 260 characters were skipped on Windows; both now hash correctly, and a single unreadable file no longer fails the rest of the batch."
+            },
+            {
+              "title": "A permanently-rejected upload no longer stalls the queue",
+              "body": "An un-uploadable file — a 4xx the server will reject on every attempt — was retried and could trip the per-target circuit breaker, pausing healthy uploads. It is now marked failed without consuming retry or breaker budget."
+            },
+            {
+              "title": "Bad configuration and input fail with an actionable message",
+              "body": "A corrupt config file, an invalid environment-overridden setting, or a manually-entered relative certificate path now produce a clear, actionable error instead of an unhandled crash or a silent misbehavior, and configuration is validated before the daemon starts."
+            },
+            {
+              "title": "The diagnostic bundle can no longer damage a live database",
+              "body": "Collecting a support bundle opened the running state database in a mode that could rename and recreate a corrupt file out from under the daemon. It now opens the database read-only."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Writes tolerate Windows and cloud-sync file locks",
+              "body": "Config, certificate, credential, and downloaded-file writes now retry briefly on the transient EPERM, EACCES, and EBUSY locks that antivirus, the search indexer, and Dropbox or OneDrive hold on a file, instead of failing the operation. Temporary files are created exclusively and reject a symlink in the final path component."
+            },
+            {
+              "title": "The self-updater streams large assets and handles an in-use binary on Windows",
+              "body": "Update downloads stream to disk instead of buffering the whole binary in memory, and the Windows self-replace renames the running executable aside first so the operating system does not block the swap; the rollback marker is written atomically."
+            },
+            {
+              "title": "The file watcher recovers instead of going silent",
+              "body": "When the watcher's internal queue overflows — common during a large bulk sync — it now re-creates itself and reconciles the missed window instead of silently stopping change detection, and ignore patterns are forwarded so the poll walk skips directories like node_modules and .git."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Credentials never linger in plaintext",
+              "body": "After the API key is stored in the OS keychain, the plaintext fallback file is removed, and the fallback — when it is the only option — is written atomically at owner-only permissions and re-tightened on every write."
+            },
+            {
+              "title": "An empty environment override no longer clears a security setting",
+              "body": "A blank HERMITSTASH_PINNED_SERVER_SPKI or selective-sync list is now ignored rather than silently clearing the configured value, so a pinned server key or include list cannot be dropped by an empty variable."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs advances to v0.15.6",
+              "body": "The bundled framework moves from v0.14.17 to v0.15.6. The client consumes its hardened atomic-file primitive (Windows rename retry and exclusive temp creation), its streaming download, its TLS-posture surfaces, and its SSRF-safe URL canonicalizer, and the vendored-tree integrity manifest is recomputed so the boot-time integrity gate passes on every platform."
+            }
+          ]
+        },
+        {
+          "heading": "Migration",
+          "items": [
+            {
+              "title": "Encrypted control routes require a matching server",
+              "body": "blamejs v0.15.6 binds the request envelope fields into the per-session api-encrypt AEAD. The three encrypted control routes — file rename and public-uploader bundle init and finalize — require a server built on a matching v0.15.x blamejs; a server on an older framework rejects the request envelope. Upload, download, metadata, delete, and the WebSocket sync stream are unaffected. Upgrade the server in step with this client."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "blamejs framework",
+          "url": "https://github.com/blamejs/blamejs"
+        }
+      ]
+    },
+    {
+      "version": "0.9.0",
+      "date": "2026-06-01",
+      "headline": "Readable server errors on file rename, blamejs v0.14.17",
+      "summary": "A rejected file rename now surfaces the server's specific reason, decrypted from the server's encrypted error response, instead of a generic status line, and the vendored framework advances to v0.14.17.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "File rename failures surface the server's error detail",
+              "body": "When a file rename is rejected — a missing source path, or a bundle that does not support rename — the client now decrypts the server's per-session encrypted error response and reports its detail, instead of a generic \"HTTP 404\"-style status line. Current servers encrypt error responses on the rename route; the client resolves the non-2xx response and decrypts it rather than treating the encrypted body as a failed read."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored blamejs refreshed to v0.14.17",
+              "body": "The bundled framework advances from v0.14.10 to v0.14.17. Its encrypted HTTP client gains a passthrough response mode that resolves and decrypts a non-2xx response so an encrypted error body can be read; the other wire-layer surfaces this client consumes are unchanged."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
