@@ -33,6 +33,15 @@
           "body": "If the server returned only some of the three mutual-TLS certificate fields (client certificate, key, and CA), enrollment silently wrote nothing and reported success, leaving any prior certificates in place — a later connection would then fail authentication with no hint why. A partial set is now reported as an enrollment error; a response with no certificate fields at all is still treated as an intentional API-key-only enrollment. The comment describing the certificate write was also corrected: the three files are each written atomically but not as a single transaction, so a torn set is recoverable by re-running init or repair."
         }
       ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored blamejs framework updated to 0.15.26",
+          "body": "The vendored blamejs framework is updated to 0.15.26. The upstream changes are a worker-thread handle-leak fix in a sandbox primitive this client does not use and internal test-harness corrections; no primitive this client consumes changed. The release SBOM's component version and the recorded per-file dependency hashes are regenerated to match."
+        }
+      ]
     }
   ]
 }
