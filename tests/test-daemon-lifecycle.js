@@ -246,3 +246,31 @@ test('SIGHUP during normal operation runs reload + resync', { skip: process.plat
     }
   }
 });
+
+// A genuine stop failure (b.daemon.stop throws — e.g. process.kill EPERM) must
+// set a non-zero exit code so `hermitstash-sync stop && <next>` automation does
+// not proceed as if the daemon stopped. The benign "no daemon running" path is
+// not a failure and must stay exit 0.
+test('stop() sets a non-zero exit code on a genuine failure but not on no-daemon-running', async () => {
+  const b = require('../vendor/blamejs');
+  const realStop = b.daemon.stop;
+  const realExitCode = process.exitCode;
+  try {
+    // Genuine failure: the underlying stop throws.
+    b.daemon.stop = async () => { throw new Error('kill failed: EPERM'); };
+    process.exitCode = 0;
+    const r1 = await daemon.stop();
+    assert.equal(r1, false, 'stop returns false on a genuine failure');
+    assert.equal(process.exitCode, 1, 'a genuine stop failure sets a non-zero exit code');
+
+    // Benign: no daemon to stop — not a failure.
+    b.daemon.stop = async () => ({ stopped: false, reason: 'no-pidfile' });
+    process.exitCode = 0;
+    const r2 = await daemon.stop();
+    assert.equal(r2, false, 'stop returns false when no daemon is running');
+    assert.equal(process.exitCode, 0, 'no-daemon-running keeps exit code 0 (nothing to stop is not a failure)');
+  } finally {
+    b.daemon.stop = realStop;
+    process.exitCode = realExitCode;
+  }
+});
