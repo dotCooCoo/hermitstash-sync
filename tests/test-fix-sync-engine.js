@@ -622,3 +622,113 @@ describe('Local rescan carries a caller-supplied reason', { timeout: 30000 }, ()
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// file_replaced must not spawn a spurious conflict copy on an un-diverged file
+// ---------------------------------------------------------------------------
+describe('file_replaced conflict-copy only fires on a genuine local divergence', { timeout: 30000 }, () => {
+  it('a device holding the un-diverged last-synced version gets NO conflict copy (and no fan-out)', async () => {
+    const A = 'version-A-last-synced';
+    const B = 'version-B-from-another-device';
+    const rel = 'doc.txt';
+    const h = makeEngine({ downloads: { F2: { content: B } } });
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      const filePath = path.join(h.syncFolder, rel);
+      fs.writeFileSync(filePath, A); // this device still holds the un-diverged A
+      stateDb.upsertFile({ relativePath: rel, serverFileId: 'F2', serverChecksum: sha3(A), localChecksum: sha3(A), size: A.length, serverSeq: 5, status: FILE_STATUS.SYNCED });
+      // Another device edited A -> B; server broadcasts file_replaced{B}.
+      await h.engine._handleFileReplaced({ fileId: 'F2', relativePath: rel, checksum: sha3(B), size: B.length, seq: 6 });
+      assert.equal(conflictFiles(h.syncFolder).length, 0, 'no spurious .conflict copy on the most common multi-device edit');
+      assert.equal(fs.readFileSync(filePath, 'utf8'), B, 'doc.txt is updated to the new server content');
+    } finally { cleanup(h); }
+  });
+
+  it('a genuinely locally-diverged file IS still preserved as a conflict copy', async () => {
+    const A = 'version-A-last-synced';
+    const B = 'version-B-from-another-device';
+    const C = 'UNSYNCED local edit on this device';
+    const rel = 'doc.txt';
+    const h = makeEngine({ downloads: { F3: { content: B } } });
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      const filePath = path.join(h.syncFolder, rel);
+      fs.writeFileSync(filePath, C); // this device diverged locally (unsynced)
+      stateDb.upsertFile({ relativePath: rel, serverFileId: 'F3', serverChecksum: sha3(A), localChecksum: sha3(A), size: A.length, serverSeq: 5, status: FILE_STATUS.SYNCED });
+      await h.engine._handleFileReplaced({ fileId: 'F3', relativePath: rel, checksum: sha3(B), size: B.length, seq: 6 });
+      const conflicts = conflictFiles(h.syncFolder);
+      assert.equal(conflicts.length, 1, 'the genuine local divergence is preserved as a conflict copy');
+      assert.equal(fs.readFileSync(path.join(h.syncFolder, conflicts[0]), 'utf8'), C, "the conflict copy holds the user's unsynced edit C");
+      assert.equal(fs.readFileSync(filePath, 'utf8'), B, 'doc.txt converges to server B');
+    } finally { cleanup(h); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// catch-up wedge must not redial past a lower-seq event that failed to apply
+// ---------------------------------------------------------------------------
+describe('Catch-up wedge refuses to redial past an un-applied lower-seq event', { timeout: 30000 }, () => {
+  it('does NOT redial when a lower-seq event failed closed this session (would leapfrog a delete)', async () => {
+    const h = makeEngine({});
+    try {
+      // Cursor at 99, tip at 101, sweep landed a recoverable download (landed=1),
+      // no pending rows — but a file_removed at seq 100 failed closed (locked
+      // file), recorded as the lowest un-applied seq. Redialing would replay from
+      // 99, re-skip 100, and let the idempotent seq-101 short-circuit advance the
+      // cursor past 100 — silently dropping the server-side delete.
+      h.engine._setState(SYNC_STATE.CATCHING_UP);
+      h.engine._caughtUpAtSeq = false;
+      h.engine._catchUpPending = 0;
+      h.engine._activeDownloads = 0;
+      h.engine._catchUpTipSeq = 101;
+      h.engine._lowestUnappliedSeq = 100;
+      stateDb.setLastSeq(99);
+      h.engine._maybeRecoverCatchUpWedge(1);
+      assert.equal(h.wsLog.connects.length, 0, 'no redial — leaves the recoverable CATCHING_UP stall');
+      assert.equal(h.wsLog.closes, 0, 'the socket is not churned');
+    } finally { cleanup(h); }
+  });
+
+  it('DOES redial when the un-applied gap is already below the cursor (unrecoverable — must not wedge)', async () => {
+    const h = makeEngine({});
+    try {
+      // A legitimate download-recovery wedge, but a fail-closed gap at seq 10 is
+      // already BELOW the cursor (11) — no redial can recover it, so the guard
+      // must NOT block the valid redial that advances the cursor to the tip.
+      h.engine._setState(SYNC_STATE.CATCHING_UP);
+      h.engine._caughtUpAtSeq = false;
+      h.engine._catchUpPending = 0;
+      h.engine._activeDownloads = 0;
+      h.engine._catchUpTipSeq = 12;
+      h.engine._lowestUnappliedSeq = 10;
+      stateDb.setLastSeq(11);
+      h.engine._maybeRecoverCatchUpWedge(1);
+      assert.equal(h.wsLog.connects.length, 1, 'the legitimate download-recovery redial still fires');
+    } finally { cleanup(h); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the sync cursor never advances past a fail-closed gap (no leapfrogged delete)
+// ---------------------------------------------------------------------------
+describe('The sync cursor stops at a fail-closed gap (contiguous watermark)', { timeout: 30000 }, () => {
+  it('_updateSeq caps the cursor one below the lowest un-applied seq', () => {
+    const h = makeEngine({});
+    try {
+      stateDb.setLastSeq(9);
+      h.engine._lowestUnappliedSeq = 10; // a fail-closed delete at seq 10
+      h.engine._updateSeq(11);           // a later successful event in the same batch
+      assert.equal(stateDb.getLastSeq(), 9, 'the cursor stays below the gap so the delete is re-delivered on reconnect');
+    } finally { cleanup(h); }
+  });
+
+  it('_updateSeq advances normally (monotone) when there is no gap', () => {
+    const h = makeEngine({});
+    try {
+      stateDb.setLastSeq(9);
+      h.engine._lowestUnappliedSeq = 0;
+      h.engine._updateSeq(11);
+      assert.equal(stateDb.getLastSeq(), 11, 'no gap -> normal advance');
+    } finally { cleanup(h); }
+  });
+});
