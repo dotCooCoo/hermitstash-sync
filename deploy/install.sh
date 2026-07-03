@@ -86,9 +86,13 @@ esac
 
 if [ -z "${VERSION:-}" ]; then
   log "Resolving latest release..."
+  # `|| true` so a failed resolve (GitHub API 403 rate-limit on an unauthenticated
+  # host, a network blip, or a pipefail on curl) does NOT abort under `set -e`
+  # before the empty-check below — otherwise the actionable "Set VERSION=X.Y.Z to
+  # pin" hint is never printed and the operator sees only an opaque non-zero exit.
   VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/')
+    | sed -E 's/.*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/') || true
   if [ -z "$VERSION" ]; then
     err "Could not resolve latest release. Set VERSION=X.Y.Z to pin."
     exit 1
@@ -199,7 +203,18 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 "$SYNC_DIR"
 install -m 0644 "${WORK}/deploy/hermitstash-sync.service"          /etc/systemd/system/hermitstash-sync.service
 install -m 0644 "${WORK}/deploy/hermitstash-sync-update.service"   /etc/systemd/system/hermitstash-sync-update.service
 install -m 0644 "${WORK}/deploy/hermitstash-sync-update.timer"     /etc/systemd/system/hermitstash-sync-update.timer
-install -m 0644 -b "${WORK}/deploy/hermitstash-sync-update.env"    /etc/default/hermitstash-sync-update
+# The env file is OPERATOR config, not a checked-in unit — a re-run must NOT
+# reset it to the all-commented default (that would silently discard an explicit
+# HERMITSTASH_AUTO_UPDATE pause or other edits; `install -b` still overwrites the
+# live file, only keeping a backup). Install it only when absent; on an upgrade
+# with existing config, drop the shipped template beside it as `.new` so an
+# operator can diff for newly-added options.
+if [ ! -f /etc/default/hermitstash-sync-update ]; then
+  install -m 0644 "${WORK}/deploy/hermitstash-sync-update.env"     /etc/default/hermitstash-sync-update
+else
+  install -m 0644 "${WORK}/deploy/hermitstash-sync-update.env"     /etc/default/hermitstash-sync-update.new
+  log "Kept existing /etc/default/hermitstash-sync-update; shipped template written to .new — diff it for new options."
+fi
 
 # Patch non-default paths into the daemon unit via a drop-in (cleaner than
 # sed'ing the upstream file — operators can diff the drop-in to see exactly

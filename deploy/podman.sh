@@ -184,6 +184,30 @@ if [ "${GENERATE_SYSTEMD}" = "true" ]; then
       echo "WantedBy=${WANTED_BY}"
     } > "${QUADLET_FILE}"
 
+    # First-run race guard: enrollment runs INSIDE the container started above
+    # (with SERVER_URL / ENROLL_CODE) and writes config.json to the /config
+    # volume. The Quadlet unit that replaces it carries NO enrollment env, so
+    # swapping before enrollment has persisted config.json makes the Quadlet
+    # container crash-loop "not configured". Wait (bounded, ~60s) for config.json
+    # to land on the volume — or for the bootstrap container to exit early (a
+    # failed enroll: bad code / unreachable server) — before handing off. The
+    # file persists on the named volume across the container removal below.
+    _cfg_seen=false
+    _tries=0
+    while [ "${_tries}" -lt 30 ]; do
+      if podman exec "${CONTAINER_NAME}" test -f /config/config.json >/dev/null 2>&1; then
+        _cfg_seen=true; break
+      fi
+      if [ "$(podman inspect -f '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null)" != "true" ]; then
+        break  # bootstrap container stopped before enrolling — surface it below
+      fi
+      _tries=$((_tries + 1))
+      sleep 2
+    done
+    if [ "${_cfg_seen}" != "true" ]; then
+      echo "WARNING: enrollment did not persist /config/config.json in ~60s — the Quadlet unit may crash-loop until you enroll. Check: podman logs ${CONTAINER_NAME}" >&2
+    fi
+
     # Quadlet owns the container lifecycle; remove the one we started above so
     # the generated unit can create it without a name clash.
     podman rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true

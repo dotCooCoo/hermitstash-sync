@@ -1,0 +1,55 @@
+{
+  "version": "0.10.4",
+  "date": "2026-07-03",
+  "headline": "Hardens the container build and the systemd / Podman / Kubernetes / Unraid deployment paths",
+  "summary": "A deployment-surface release. It digest-pins the container build's verify stage (closing a path where a republished base tag could ship a backdoored signed binary), fixes the systemd auto-updater so it actually rolls back when a new binary won't start, stops the installer from overwriting an operator-edited update config, and tightens the Kubernetes and Unraid references. The client binary and its behavior are unchanged; these are build- and deploy-layer fixes.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "The container build's verify stage is digest-pinned",
+          "body": "The two-stage image build runs the SHA3-512 + ECDSA signature check — and materializes the binary copied into the runtime image — in a first stage based on node:24.18.0-slim. That base was a mutable tag while the runtime base was already digest-pinned, so a republished base tag could have run attacker code in the verify stage and shipped a backdoored binary that then carried a valid cosign signature and SLSA attestation. The verify-stage base is now pinned to an immutable digest, on the same refresh cadence as the runtime base."
+        }
+      ]
+    },
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "The systemd auto-updater rolls back when a new binary won't start",
+          "body": "The external updater (deploy/update.sh) restarts the service after swapping in a new binary, then health-checks it. Under `set -e`, a restart that returned non-zero — exactly what happens when the new binary crash-loops or never signals ready — aborted the script before the rollback ran, leaving the broken binary installed and the daemon down. The restart no longer aborts the script; the health probe decides, and an unhealthy start now rolls back to the previous binary as intended."
+        },
+        {
+          "title": "Reinstalling no longer overwrites your updater configuration",
+          "body": "Re-running deploy/install.sh reset /etc/default/hermitstash-sync-update to the shipped all-commented default, silently discarding an operator edit such as a paused auto-update. The installer now writes that file only when it is absent; on an upgrade it drops the shipped template beside it as a .new file to diff, leaving your configuration intact."
+        },
+        {
+          "title": "The installer prints an actionable hint when it can't resolve the latest release",
+          "body": "If the GitHub API call that resolves the latest version failed (for example an unauthenticated rate-limit), `set -e` aborted the installer before its 'set VERSION=X.Y.Z to pin' guidance could print. The resolve step no longer aborts, so the actionable message is shown."
+        },
+        {
+          "title": "The Podman runner waits for first-run enrollment before handing off",
+          "body": "On first run, deploy/podman.sh enrolled inside a bootstrap container and then replaced it with a Quadlet unit that carries no enrollment code. If enrollment hadn't finished writing its config to the volume in that window, the Quadlet container crash-looped as unconfigured. The runner now waits (bounded) for the config to be persisted — or for a failed enrollment to surface — before the hand-off."
+        },
+        {
+          "title": "Uninstall removes a leftover in-progress update binary",
+          "body": "deploy/uninstall.sh removed the installed binary and its rollback copy but not a `.new` staging file left by an update interrupted mid-swap. That file is now swept as well, and the updater clears a stale `.new` on exit."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Kubernetes manifest drops the service-account token and re-pulls a rebuilt image",
+          "body": "The reference Deployment is outbound-only and never calls the Kubernetes API, so it now sets automountServiceAccountToken: false — removing a default credential a compromised client could use for lateral movement. Its imagePullPolicy is now Always (instead of IfNotPresent) so a rebuilt, security-patched :latest is re-pulled on restart; pin the image to a @sha256 digest in your overlay for a reproducible, cosign-verifiable deployment."
+        },
+        {
+          "title": "Unraid template drops the ineffective PUID/PGID variables",
+          "body": "The container runs as a fixed non-root user (uid:gid 1000:1000) by design, so the template's PUID/PGID variables were silently ignored. They have been removed; set your appdata and synced host folders to owner 1000:1000 (or group-writable for gid 1000) instead — the template descriptions now say so."
+        }
+      ]
+    }
+  ]
+}

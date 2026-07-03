@@ -85,6 +85,11 @@ spec:
       labels:
         app.kubernetes.io/name: hermitstash-sync
     spec:
+      # The client is outbound-only and never calls the Kubernetes API, so it
+      # needs no service-account token. Opt out of the default token projection
+      # (mounted at /var/run/secrets/kubernetes.io/serviceaccount) so a
+      # compromised client has no credential for lateral movement.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -94,8 +99,13 @@ spec:
           type: RuntimeDefault
       containers:
         - name: hermitstash-sync
+          # :latest is a MUTABLE reference — Always re-pulls a rebuilt / security-
+          # patched image on pod (re)start, where IfNotPresent would pin the node
+          # to whatever it first cached and never pick up a fix. For a
+          # reproducible, cosign-verifiable deployment, pin image to a
+          # @sha256:<digest> (from `cosign verify`) in your kustomize/Helm overlay.
           image: ghcr.io/dotcoocoo/hermitstash-sync:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           envFrom:
             - secretRef:
                 name: hermitstash-sync-enrollment

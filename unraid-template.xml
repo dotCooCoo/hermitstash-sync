@@ -20,11 +20,13 @@
 
     <!-- Volumes -->
     <Config Name="Config" Target="/config" Default="/mnt/user/appdata/hermitstash-sync" Mode="rw" Description="Persistent client state: API key, mTLS certificates, state.db, logs, update marker. Back this up — losing it means re-enrolling with a new code." Type="Path" Display="always" Required="true" Mask="false"/>
-    <Config Name="Sync Folder" Target="/data" Default="/mnt/user/synced" Mode="rw" Description="The folder that's kept in sync with the server bundle. Changes here go up; server changes come down." Type="Path" Display="always" Required="true" Mask="false"/>
+    <Config Name="Sync Folder" Target="/data" Default="/mnt/user/synced" Mode="rw" Description="The folder that's kept in sync with the server bundle. Changes here go up; server changes come down. The container runs as a FIXED non-root user (uid:gid 1000:1000) — chown this host folder (and the Config path above) to 1000:1000, or make them group-writable for gid 1000, so the client can read/write them." Type="Path" Display="always" Required="true" Mask="false"/>
 
     <!-- Container user -->
-    <Config Name="PUID" Target="PUID" Default="99" Description="User ID for synced file ownership. Use 99 (nobody) for Unraid's shared storage model." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-    <Config Name="PGID" Target="PGID" Default="100" Description="Group ID for synced file ownership. Use 100 (users) for Unraid's shared storage model." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+    <!-- No PUID/PGID: the image runs as a fixed non-root user (uid:gid 1000:1000)
+         by design (readOnlyRootFilesystem-friendly, no root entrypoint remap), so
+         PUID/PGID env vars would be silently ignored. Set host-folder ownership to
+         1000:1000 instead (see the Sync Folder / Config descriptions above). -->
     <Config Name="Timezone" Target="TZ" Default="" Description="Container timezone, e.g. America/New_York. Used for log timestamps." Type="Variable" Display="always" Required="false" Mask="false"/>
 
     <!-- Enrollment — required on first start only; can be unset after initial sync -->

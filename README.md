@@ -136,7 +136,7 @@ Each deployment shape has its own update path. The in-binary self-replace only r
 | **systemd** (via `install.sh`) | External: `hermitstash-sync-update.timer` fires daily + 4h random delay; `update.sh` downloads + verifies + atomic swap + `systemctl restart`, rolls back if the daemon doesn't report RUNNING within 60s. In-daemon path is disabled (can't cross the root/hermit permission boundary under `ProtectSystem=strict`). | Opt-in — install with `HERMITSTASH_AUTO_UPDATE=yes` to enable the timer |
 | **Docker** | Pull a new image tag manually (`docker pull ... && docker restart ...`). In-daemon self-replace is hard-disabled — mutating `/usr/local/bin` inside a running image violates the immutable-image model. | No |
 | **Podman** | `podman auto-update` reads the image's `io.containers.autoupdate=registry` label and pulls the newest digest for the current tag. Enable `podman-auto-update.timer` (system or `--user`) to run on a schedule. | Opt-in via timer |
-| **Kubernetes** | Bump the image tag in your manifest and `kubectl apply`. `imagePullPolicy: IfNotPresent` means you need to delete the pod or roll the Deployment to pick up a floating tag. Consider a pinned digest + a GitOps flow for production. | No |
+| **Kubernetes** | Bump the image tag in your manifest and `kubectl apply`. The reference manifest uses `imagePullPolicy: Always`, so a rebuilt `:latest` is re-pulled on pod (re)start; pin a `@sha256` digest + a GitOps flow for production. | No |
 
 ## Quick start
 

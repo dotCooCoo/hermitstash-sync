@@ -221,7 +221,12 @@ fi
 # ─── Download + verify ──────────────────────────────────────────────────
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# Clean the scratch dir AND a stale "${BIN}.new" left by a swap interrupted
+# between `install ... "${BIN}.new"` and `mv -f "${BIN}.new" "$BIN"` — otherwise
+# an aborted update leaks a half-written binary next to the live one (uninstall
+# also sweeps it). ${BIN:-} keeps this safe under `set -u` before BIN is set;
+# rm -f never fails, so the trap can't itself abort.
+trap 'rm -rf "$WORK"; rm -f "${BIN:-}.new"' EXIT
 
 BASE="https://github.com/${GITHUB_REPO}/releases/download/v${TARGET}"
 NAME="hermitstash-sync-v${TARGET}-linux-${ARCH}"
@@ -275,7 +280,14 @@ mv -f "${BIN}.new" "$BIN"
 # ─── Restart + health probe ─────────────────────────────────────────────
 
 log "Restarting ${SERVICE_NAME}"
-systemctl restart "$SERVICE_NAME"
+# Don't let a non-zero restart abort the script under `set -e`. The unit is
+# Type=notify with TimeoutStartSec, so `systemctl restart` returns non-zero when
+# the freshly-swapped binary crash-loops or never signals READY=1 — which is the
+# exact failure the rollback below exists to handle. Swallow the status (warn
+# returns 0) and let the health probe be the single source of truth: an unhealthy
+# service falls through to the rollback instead of exiting here with the broken
+# binary still installed and the daemon down.
+systemctl restart "$SERVICE_NAME" || warn "systemctl restart returned non-zero — the health probe decides success/failure"
 
 health_ok() {
   # `status` reports RUNNING when the daemon's PID file confirms it's up and
@@ -313,7 +325,9 @@ done
 
 err "Health check failed after ${HEALTH_TIMEOUT}s — rolling back to ${CURRENT}"
 mv -f "$ROLLBACK" "$BIN"
-systemctl restart "$SERVICE_NAME"
+# Same errexit guard as the forward restart: a non-zero rollback restart must not
+# abort before the final health probe + the "manual intervention required" exit.
+systemctl restart "$SERVICE_NAME" || warn "rollback restart returned non-zero — the final health probe decides"
 
 DEADLINE=$(( $(date +%s) + HEALTH_TIMEOUT ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do

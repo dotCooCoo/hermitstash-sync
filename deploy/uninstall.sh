@@ -120,7 +120,7 @@ systemctl reset-failed hermitstash-sync-update 2>/dev/null || true
 
 # ─── Step 3: Remove binary + verify-release cache ───────────────────────
 
-for f in "${INSTALL_DIR}/hermitstash-sync" "${INSTALL_DIR}/hermitstash-sync.prev"; do
+for f in "${INSTALL_DIR}/hermitstash-sync" "${INSTALL_DIR}/hermitstash-sync.prev" "${INSTALL_DIR}/hermitstash-sync.new"; do
   if [ -f "$f" ]; then
     log "Removing $f"
     rm -f "$f"
