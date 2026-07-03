@@ -18,7 +18,7 @@
   "author": "dotCooCoo",
   "license": "AGPL-3.0-or-later",
   "engines": {
-    "node": ">=24.16.0"
+    "node": ">=24.18.0"
   },
   "devDependencies": {
     "eslint": "10.5.0",

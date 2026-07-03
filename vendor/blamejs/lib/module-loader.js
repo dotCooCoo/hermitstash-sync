@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * lib/module-loader.js — the single audited entry point for loading an
  * operator-supplied module file (a migration or a seed) by path.
  *
  * Operator modules execute arbitrary code on `require`, so the dynamic
- * `require()` lives here behind ONE `allow:dynamic-require` marker rather
+ * `require()` lives here behind ONE `allow:dynamic-require-operator-module` marker rather
  * than scattered across every host-CLI loader (`b.migrations`,
  * `b.seeders`, `b.externalDb.migrate`). The require cache is busted first
  * so a dev / test rewriting a fixture between calls picks up the new
@@ -33,7 +35,7 @@
 function requireFresh(absPath, onLoadError) {
   try { delete require.cache[require.resolve(absPath)]; } catch (_e) { /* not yet cached */ }
   try {
-    return require(absPath);   // allow:dynamic-require — operator-supplied module (migration / seed)
+    return require(absPath);   // allow:dynamic-require-operator-module — operator-supplied module (migration / seed)
   } catch (e) {
     throw onLoadError(e);
   }

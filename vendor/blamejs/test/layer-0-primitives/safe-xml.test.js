@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.parsers.xml.parse — security-focused XML parser.
@@ -124,7 +126,7 @@ function testConstructorAttributeNoFalseDuplicate() {
         threw && threw.code === "xml/forbidden-name");
 }
 
-(function run() {
+function run() {
   try {
     testParsesAttributedElement();
     testRejectsDoctype();
@@ -140,4 +142,7 @@ function testConstructorAttributeNoFalseDuplicate() {
     process.exit(1);
   }
   console.log("OK — safe-xml tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

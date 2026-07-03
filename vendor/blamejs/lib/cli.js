@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * cli — the engine behind `blamejs` on the command line.
@@ -346,6 +348,44 @@ function _coerceList(val) {
   return Array.isArray(val) ? val.slice() : [val];
 }
 
+// Compile one operator-supplied `dev --ignore` pattern to a RegExp,
+// refusing (with a CliError the caller converts to exit 2) any pattern
+// that is over-length, a ReDoS catastrophic-backtracking shape, or one
+// RegExp() itself can't compile. Every refusal shape raises the same
+// CliError type so a single caller-side catch takes the standard
+// exit-2 + stderr path.
+function _compileIgnorePattern(s) {
+  var str = String(s);
+  if (str.length > MAX_IGNORE_PATTERN_LENGTH) {
+    throw new CliError("cli/bad-ignore-pattern",
+      "blamejs dev: --ignore pattern exceeds max length " +
+      MAX_IGNORE_PATTERN_LENGTH + " (got " + str.length + ")");
+  }
+  // ReDoS / catastrophic-backtracking defense — refuses nested-quant
+  // (CVE-2024-21538 class), consecutive-* (CVE-2026-26996), nested
+  // extglob (CVE-2026-33671), and lookaround-quant shapes before the
+  // pattern reaches RegExp(). Operator typo / hostile-input identical
+  // shape from here on — both want the same refusal.
+  try {
+    guardRegex.sanitize(str, { profile: "strict" });
+  } catch (e) {
+    throw new CliError("cli/bad-ignore-pattern",
+      "blamejs dev: --ignore pattern refused by guardRegex: " +
+      ((e && e.message) || String(e)));
+  }
+  // A pattern that clears the ReDoS screen can still be un-compilable
+  // (unbalanced group, dangling quantifier). RegExp() throws a
+  // SyntaxError here — route it through the same refusal, not up to a
+  // main() rejection.
+  try {
+    return RegExp(str);
+  } catch (e) {
+    throw new CliError("cli/bad-ignore-pattern",
+      "blamejs dev: --ignore pattern is not a valid regular expression: " +
+      ((e && e.message) || String(e)));
+  }
+}
+
 async function _runDev(args, ctx) {
   if (args.flags.help || args.flags.h) {
     _writeLine(ctx.stdout, DEV_USAGE);
@@ -359,27 +399,24 @@ async function _runDev(args, ctx) {
   }
   var argList   = _coerceList(args.flags.arg).map(String);
   var watchList = _coerceList(args.flags.watch).map(String);
-  var ignoreList = _coerceList(args.flags.ignore).map(function (s) {
-    var str = String(s);
-    if (str.length > MAX_IGNORE_PATTERN_LENGTH) {
-      throw new CliError("cli/bad-ignore-pattern",
-        "blamejs dev: --ignore pattern exceeds max length " +
-        MAX_IGNORE_PATTERN_LENGTH + " (got " + str.length + ")");
+  // --ignore validation is operator-input validation, not an internal
+  // fault: a refused pattern must take the same exit-2 + stderr path
+  // every other dev flag uses, never reject main()'s awaited promise
+  // (the bin shim would surface a rejection as a stack trace + exit 1).
+  // The per-pattern helper raises a CliError for the three refusal
+  // shapes — over-length, guardRegex-refused, and an un-compilable
+  // RegExp — and the catch below converts any of them to the standard
+  // refusal path; a non-CliError (a genuine internal fault) re-throws.
+  var ignoreList;
+  try {
+    ignoreList = _coerceList(args.flags.ignore).map(_compileIgnorePattern);
+  } catch (e) {
+    if (e && e.isCliError) {
+      _writeLine(ctx.stderr, e.message || String(e));
+      return 2;
     }
-    // ReDoS / catastrophic-backtracking defense — refuses nested-quant
-    // (CVE-2024-21538 class), consecutive-* (CVE-2026-26996), nested
-    // extglob (CVE-2026-33671), and lookaround-quant shapes before the
-    // pattern reaches RegExp(). Operator typo / hostile-input identical
-    // shape from here on — both want the same refusal.
-    try {
-      guardRegex.sanitize(str, { profile: "strict" });
-    } catch (e) {
-      throw new CliError("cli/bad-ignore-pattern",
-        "blamejs dev: --ignore pattern refused by guardRegex: " +
-        ((e && e.message) || String(e)));
-    }
-    return RegExp(str);
-  });
+    throw e;
+  }
   var graceMs = args.flags["grace-ms"] !== undefined ? Number(args.flags["grace-ms"]) : undefined;
   if (graceMs !== undefined && (!Number.isFinite(graceMs) || graceMs < 0)) {
     _writeLine(ctx.stderr, "blamejs dev: --grace-ms must be a non-negative number");
@@ -455,11 +492,11 @@ function _resolveTargetModule(modulePath, ctx) {
   // code never reaches this nodePath.
   if (!modulePath) {
     var root = nodePath.resolve(__dirname, "..");
-    return require(nodePath.join(root, "index.js"));   // allow:dynamic-require — operator-extensibility entry point
+    return require(nodePath.join(root, "index.js"));   // allow:dynamic-require-operator-module — operator-extensibility entry point
   }
   var abs = nodePath.isAbsolute(modulePath) ? modulePath : nodePath.resolve(ctx.cwd, modulePath);
   delete require.cache[require.resolve(abs)];
-  return require(abs);                              // allow:dynamic-require — operator-extensibility entry point
+  return require(abs);                              // allow:dynamic-require-operator-module — operator-extensibility entry point
 }
 
 function _runApiSnapshot(args, ctx) {

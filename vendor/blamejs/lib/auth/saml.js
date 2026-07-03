@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module     b.auth.saml
@@ -1050,7 +1052,7 @@ function create(opts) {
         "parseLogoutRequest: inflate failed: " + ((e && e.message) || String(e)));
     }
     // Verify the redirect-binding signature when an IdP key is supplied.
-    if (vopts.idpVerifyKey) {
+    if (_verifyConfig(vopts.idpVerifyKey, vopts.idpVerifyAlg, "parseLogoutRequest")) {
       if (typeof vopts.queryString !== "string") {
         throw new AuthError("auth-saml/no-query-string",
           "parseLogoutRequest: idpVerifyKey requires queryString (raw URL query)");
@@ -1238,7 +1240,7 @@ function create(opts) {
       throw new AuthError("auth-saml/bad-saml-response",
         "parseLogoutResponse: inflate failed: " + ((e && e.message) || String(e)));
     }
-    if (vopts.idpVerifyKey) {
+    if (_verifyConfig(vopts.idpVerifyKey, vopts.idpVerifyAlg, "parseLogoutResponse")) {
       if (typeof vopts.queryString !== "string") {
         throw new AuthError("auth-saml/no-query-string",
           "parseLogoutResponse: idpVerifyKey requires queryString");
@@ -1410,7 +1412,7 @@ function create(opts) {
         "parseLogoutRequestPost: samlRequestB64 must be a non-empty string");
     }
     var xml = Buffer.from(samlRequestB64, "base64").toString("utf8");
-    if (vopts.idpVerifyKey || vopts.idpVerifyAlg) {
+    if (_verifyConfig(vopts.idpVerifyKey, vopts.idpVerifyAlg, "parseLogoutRequestPost")) {
       _verifyEmbeddedXmlDsig(xml, vopts.idpVerifyKey, vopts.idpVerifyAlg, "LogoutRequest");
     }
     var c14n = xmlC14n();
@@ -1532,7 +1534,7 @@ function create(opts) {
         "parseLogoutResponseSoap: soap:Body is empty");
     }
     var innerXml = Buffer.from(c14n.canonicalize(inner)).toString("utf8");
-    if (vopts.idpVerifyKey || vopts.idpVerifyAlg) {
+    if (_verifyConfig(vopts.idpVerifyKey, vopts.idpVerifyAlg, "parseLogoutResponseSoap")) {
       _verifyEmbeddedXmlDsig(innerXml, vopts.idpVerifyKey, vopts.idpVerifyAlg, "LogoutResponse");
     }
     var innerLocal = inner.name.split(":").pop();
@@ -1864,8 +1866,31 @@ function _embedXmlDsig(bodyXml, refId, signingKey, signingAlg) {
   return bodyXml.substring(0, splitAt) + sigEl + bodyXml.substring(splitAt);
 }
 
+// SLO verification-config gate. Presence of EITHER idpVerifyKey or
+// idpVerifyAlg signals the operator intends to verify the inbound
+// message; a half-supplied pair is a configuration error, never a
+// license to skip the signature check. Returns true when both are
+// present (verify), false when neither is (verification not requested),
+// and throws — fail closed — when exactly one is present, so a
+// fat-fingered verifier can never silently accept a forged, unsigned
+// LogoutRequest / LogoutResponse. Every SLO parse path (HTTP-Redirect,
+// HTTP-POST, SOAP) routes its verify decision through this one gate so
+// the redirect and back-channel bindings agree on fail-closed behavior.
+function _verifyConfig(idpVerifyKey, idpVerifyAlg, ctx) {
+  if (!idpVerifyKey && !idpVerifyAlg) return false;
+  if (!idpVerifyKey) {
+    throw new AuthError("auth-saml/no-verify-key",
+      ctx + ": idpVerifyAlg supplied without idpVerifyKey — verification cannot proceed");
+  }
+  if (!idpVerifyAlg) {
+    throw new AuthError("auth-saml/no-verify-alg",
+      ctx + ": idpVerifyKey supplied without idpVerifyAlg (alg is required when key is supplied)");
+  }
+  return true;
+}
+
 function _verifyEmbeddedXmlDsig(xml, idpVerifyKey, idpVerifyAlg, expectedRootLocal) {
-  if (!idpVerifyKey || !idpVerifyAlg) return;
+  if (!_verifyConfig(idpVerifyKey, idpVerifyAlg, "_verifyEmbeddedXmlDsig")) return;
   var sigAlgUrn = _sigAlgUrn(idpVerifyAlg);
   if (!sigAlgUrn) {
     throw new AuthError("auth-saml/bad-verify-alg",
@@ -2128,12 +2153,48 @@ async function fetchMdq(opts) {
   if (opts.trustCertPem) {
     var c14n = xmlC14n();
     var root = c14n.parse(xml);
-    var sig = _findChild(root, "Signature");
+    // The element the operator consumes is the document-root EntityDescriptor
+    // (fetchMdq queries a single entityID; an EntitiesDescriptor aggregate is
+    // not what a per-entity MDQ lookup returns). Refusing the wrapper closes the
+    // XML-signature-wrapping vector where a genuine federation signature over a
+    // buried entity is paired with a forged sibling/outer entity carrying the
+    // attacker's signing cert (CVE-2024-45409 class).
+    var rootColon = root.name.indexOf(":");
+    var rootLocal = rootColon !== -1 ? root.name.substring(rootColon + 1) : root.name;
+    if (rootLocal !== "EntityDescriptor") {
+      throw new AuthError("auth-saml/mdq-not-entity-descriptor",
+        "fetchMdq: metadata root must be a single EntityDescriptor, got " + rootLocal +
+        " (signature-wrapping defense)");
+    }
+    // Refuse a duplicate top-level Signature (XSW multi-signature shape), the
+    // way verifyResponse refuses duplicate security-critical children.
+    var sigChildren = _findAllChildren(root, "Signature", null);
+    if (sigChildren.length > 1) {
+      throw new AuthError("auth-saml/mdq-duplicate-signature",
+        "fetchMdq: EntityDescriptor has multiple Signature children (XSW shape refused)");
+    }
+    var sig = sigChildren[0] || null;
     if (!sig) {
       throw new AuthError("auth-saml/mdq-unsigned",
         "fetchMdq: metadata is unsigned but trustCertPem was supplied");
     }
-    _verifyXmldsig(xml, sig, opts.trustCertPem);
+    var signed = _verifyXmldsig(xml, sig, opts.trustCertPem);
+    // Bind the verified bytes to the consumed element: the federation signature
+    // MUST cover the document-root EntityDescriptor, not some inner element a
+    // wrapper buried beside a forged one. Mirrors verifyResponse's
+    // signed.refId === _attr(root/assertion, "ID") guard.
+    if (signed.refId !== _attr(root, "ID")) {
+      throw new AuthError("auth-saml/signed-different-element",
+        "fetchMdq: metadata signature references a different element than the " +
+        "EntityDescriptor root (signature-wrapping defense)");
+    }
+    // And the signed root must be the entity that was requested, so a signed
+    // descriptor for one entity cannot be served for another.
+    if (_attr(root, "entityID") !== opts.entityId) {
+      throw new AuthError("auth-saml/mdq-entity-mismatch",
+        "fetchMdq: signed EntityDescriptor entityID '" + _attr(root, "entityID") +
+        "' does not match requested '" + opts.entityId + "'");
+    }
   }
   _emitAudit("mdq_fetched", "success", { entityId: opts.entityId });
   _emitMetric("mdq-fetched");

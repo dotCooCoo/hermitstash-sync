@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.flag — feature-flag primitive (OpenFeature spec).
@@ -239,6 +241,30 @@ function run() {
       t.validateRules([{ variant: "v", conditions: [{ attribute: "x", op: "regex", value: "(unclosed" }] }]);
     },
     /invalid regex/);
+
+  // ReDoS-shaped pattern (nested quantifier) refused. The compiled regex is
+  // .test()'d against runtime (request) attribute values, so a catastrophic-
+  // backtracking pattern is a DoS vector; the 200-char length bound is NOT a
+  // ReDoS defense (`(a+)+$` is 6 chars). The pattern is screened through
+  // b.guardRegex before compilation.
+  rejects("targeting: ReDoS-shaped regex (nested quantifier) refused",
+    function () {
+      t.validateRules([{ variant: "v", conditions: [{ attribute: "x", op: "regex", value: "(a+)+$" }] }]);
+    },
+    /unsafe|ReDoS|backtrack|quantifier/i);
+  // Wrapping the inner quantified atom in an extra group — `((a)+)+$` — is the
+  // same catastrophic-backtracking class; a paren-blind `[^()]*` detector misses
+  // it. The structural screener must still refuse these nested-group forms.
+  rejects("targeting: wrapped nested-quantifier regex refused",
+    function () {
+      t.validateRules([{ variant: "v", conditions: [{ attribute: "x", op: "regex", value: "((a)+)+$" }] }]);
+    },
+    /unsafe|ReDoS|backtrack|quantifier/i);
+  rejects("targeting: deeper wrapped nested-quantifier regex refused",
+    function () {
+      t.validateRules([{ variant: "v", conditions: [{ attribute: "x", op: "regex", value: "(([a-z]+)*)*$" }] }]);
+    },
+    /unsafe|ReDoS|backtrack|quantifier/i);
 
   // nested attribute path
   var pathRules = t.validateRules([
@@ -496,6 +522,12 @@ function run() {
     function () { b.flag.cache({}); }, /must implement/);
   rejects("cache: ttlMs too small",
     function () { b.flag.cache(memProvider, { ttlMs: 100 }); }, /ttlMs/);
+  // A non-finite ttlMs / maxEntries must be refused (Infinity would otherwise
+  // give a never-expiring entry / an unbounded cache, not be clamped).
+  rejects("cache: maxEntries Infinity refused (unbounded cache)",
+    function () { b.flag.cache(memProvider, { ttlMs: 5000, maxEntries: Infinity }); }, /maxEntries|finite/);
+  rejects("cache: ttlMs Infinity refused",
+    function () { b.flag.cache(memProvider, { ttlMs: Infinity }); }, /ttlMs|finite/);
 
   var cachedProvider = b.flag.cache(memProvider, { ttlMs: 5000, maxEntries: 50 });
   check("cache: kind",                           cachedProvider.kind === "cache:memory");

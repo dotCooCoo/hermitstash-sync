@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.acme
@@ -1026,7 +1028,7 @@ function create(opts) {
         // Non-crypto: RFC 9773 §4.2 fleet-scheduling jitter inside the
         // CA-suggested renewal window. Predictability is not a threat
         // here; uniform distribution across the window is the goal.
-        renewAtMs = jLo + Math.floor(Math.random() * (jHi - jLo + 1));   // allow:math-random-noncrypto — RFC 9773 fleet jitter, predictability not a threat
+        renewAtMs = jLo + Math.floor(Math.random() * (jHi - jLo + 1));   // allow:math-random-noncrypto-jitter-sampling — RFC 9773 fleet jitter, predictability not a threat
       } else {
         // Past-window — renew immediately, no jitter.
         renewAtMs = nowMs;
@@ -1175,7 +1177,11 @@ function create(opts) {
       url: state.directory.keyChange,
     };
     var innerPayload = { account: state.accountUrl, oldKey: publicJwk };
-    var innerJws = _signJws(newPrivateKey, innerProtected, _stringify(innerPayload));
+    // _signJws base64url-encodes _stringify(payload) itself (like every
+    // other signer, e.g. _signedPost) — pass the raw object, never a
+    // pre-stringified string, or the inner JWS payload double-encodes to
+    // a JSON *string* and every RFC 8555 §7.3.5 server rejects it.
+    var innerJws = _signJws(newPrivateKey, innerProtected, innerPayload);
     var rsp = await _signedPost(state.directory.keyChange, innerJws);
     if (rsp.statusCode !== 200) {
       _emitAudit(audit, "acme.account.key_rotated", "failure",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.wsClient — outbound WebSocket client (RFC 6455).
@@ -52,6 +54,7 @@ var { EventEmitter } = require("node:events");
 
 var lazyRequire    = require("./lazy-require");
 var validateOpts   = require("./validate-opts");
+var numericBounds  = require("./numeric-bounds");
 var safeAsync      = require("./safe-async");
 var safeBuffer     = require("./safe-buffer");
 var bCrypto        = lazyRequire(function () { return require("./crypto"); });
@@ -217,16 +220,18 @@ function connect(target, opts) {
         "wsClient.connect: subprotocols[" + sp + "] must be a non-empty string");
     }
   }
-  var pingMs = (typeof opts.pingMs === "number" && opts.pingMs > 0)              // allow:numeric-opt-Infinity
-    ? opts.pingMs : DEFAULT_PING_MS;
-  var pongMs = (typeof opts.pongMs === "number" && opts.pongMs > 0)              // allow:numeric-opt-Infinity
-    ? opts.pongMs : DEFAULT_PONG_MS;
-  var maxMessageBytes = (typeof opts.maxMessageBytes === "number" && opts.maxMessageBytes > 0)   // allow:numeric-opt-Infinity
-    ? opts.maxMessageBytes : DEFAULT_MAX_BYTES;
-  var maxFrameBytes = (typeof opts.maxFrameBytes === "number" && opts.maxFrameBytes > 0)         // allow:numeric-opt-Infinity
-    ? opts.maxFrameBytes : DEFAULT_MAX_FRAME;
-  var handshakeTimeoutMs = (typeof opts.handshakeTimeoutMs === "number" && opts.handshakeTimeoutMs > 0)  // allow:numeric-opt-Infinity
-    ? opts.handshakeTimeoutMs : DEFAULT_HANDSHAKE_TIMEOUT_MS;
+  // These are keepalive/timeout intervals and inbound-OOM caps; a present
+  // value must be a positive finite integer. A bare `typeof === "number" && > 0`
+  // check accepts Infinity, which silently disables the cap (a malicious server
+  // could then send an unbounded message/frame, or stall the handshake forever).
+  numericBounds.requireAllPositiveFiniteIntIfPresent(opts,
+    ["pingMs", "pongMs", "maxMessageBytes", "maxFrameBytes", "handshakeTimeoutMs"],
+    "wsClient.connect", WsClientError, "ws-client/bad-opt");
+  var pingMs = (typeof opts.pingMs === "number") ? opts.pingMs : DEFAULT_PING_MS;
+  var pongMs = (typeof opts.pongMs === "number") ? opts.pongMs : DEFAULT_PONG_MS;
+  var maxMessageBytes = (typeof opts.maxMessageBytes === "number") ? opts.maxMessageBytes : DEFAULT_MAX_BYTES;
+  var maxFrameBytes = (typeof opts.maxFrameBytes === "number") ? opts.maxFrameBytes : DEFAULT_MAX_FRAME;
+  var handshakeTimeoutMs = (typeof opts.handshakeTimeoutMs === "number") ? opts.handshakeTimeoutMs : DEFAULT_HANDSHAKE_TIMEOUT_MS;
 
   var reconnectOpts = _normaliseReconnect(opts.reconnect);
   var permessageDeflate = opts.permessageDeflate !== false;
@@ -281,14 +286,18 @@ function _normaliseReconnect(input) {
       "wsClient.connect: reconnect must be false / null / object");
   }
   validateOpts(input, ["maxAttempts", "baseMs", "maxMs", "enabled"], "wsClient.connect.reconnect");
+  // baseMs / maxMs are backoff durations; a present value must be a positive
+  // finite integer (an Infinity base would stall the first reconnect forever).
+  numericBounds.requireAllPositiveFiniteIntIfPresent(input, ["baseMs", "maxMs"],
+    "wsClient.connect.reconnect", WsClientError, "ws-client/bad-reconnect-opt");
   return {
     enabled:     input.enabled !== false,
-    maxAttempts: (typeof input.maxAttempts === "number" && input.maxAttempts >= 0)            // allow:numeric-opt-Infinity
+    // maxAttempts: Infinity is a deliberate "reconnect indefinitely" intent, so
+    // a non-finite value is accepted here (unlike the bounded caps above).
+    maxAttempts: (typeof input.maxAttempts === "number" && input.maxAttempts >= 0)            // allow:numeric-opt-Infinity-intentional — Infinity = reconnect indefinitely, a supported intent
       ? input.maxAttempts : DEFAULT_RECONNECT_MAX_ATTEMPTS,
-    baseMs:      (typeof input.baseMs === "number" && input.baseMs > 0)                       // allow:numeric-opt-Infinity
-      ? input.baseMs : DEFAULT_RECONNECT_BASE_MS,
-    maxMs:       (typeof input.maxMs === "number" && input.maxMs > 0)                         // allow:numeric-opt-Infinity
-      ? input.maxMs : DEFAULT_RECONNECT_MAX_MS,
+    baseMs:      (typeof input.baseMs === "number") ? input.baseMs : DEFAULT_RECONNECT_BASE_MS,
+    maxMs:       (typeof input.maxMs === "number") ? input.maxMs : DEFAULT_RECONNECT_MAX_MS,
   };
 }
 
@@ -492,7 +501,7 @@ class WsClient extends EventEmitter {
   }
 
   _consumeHandshake(chunk) {
-    // allow:handrolled-buffer-collect — handshake header capped at 64 KiB below; once handshake parses we switch to FrameParser
+    // allow:handrolled-buffer-collect-bounded-framing — handshake header capped at 64 KiB below; once handshake parses we switch to FrameParser
     this._handshakeBuf = Buffer.concat([this._handshakeBuf, chunk]);
     var headerEnd = this._handshakeBuf.indexOf("\r\n\r\n");
     if (headerEnd === -1) {
@@ -737,7 +746,7 @@ class WsClient extends EventEmitter {
       return;
     }
     if (frame.fin) {
-      var fullPayload = Buffer.concat(this._fragmentChunks);                              // allow:handrolled-buffer-collect — bounded by maxMessageBytes below
+      var fullPayload = Buffer.concat(this._fragmentChunks);                              // allow:handrolled-buffer-collect-bounded-framing — bounded by maxMessageBytes below
       if (safeBuffer.byteLengthOf(fullPayload) > this._opts.maxMessageBytes) {
         this._handleSocketError(new WsClientError("ws-client/message-too-big",
           "incoming message exceeds maxMessageBytes (" + this._opts.maxMessageBytes + ")"));
@@ -964,7 +973,7 @@ class WsClient extends EventEmitter {
     this._reconnectAttempt += 1;
     var attempt = Math.min(this._reconnectAttempt, 30);                                   // clamp 2^attempt overflow
     var ceiling = Math.min(rOpts.maxMs, rOpts.baseMs * Math.pow(2, attempt - 1));
-    var delay   = Math.floor(Math.random() * ceiling);                                    // allow:math-random-noncrypto — backoff jitter, not security
+    var delay   = Math.floor(Math.random() * ceiling);                                    // allow:math-random-noncrypto-jitter-sampling — backoff jitter, not security
     var self = this;
     this._reconnectTimer = setTimeout(function () {
       self._reconnectTimer = null;

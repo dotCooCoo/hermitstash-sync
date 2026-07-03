@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * pqc-gate — TCP-level enforcement of post-quantum key exchange.
@@ -232,7 +234,7 @@ function create(opts) {
       // each chunk to read the record-length prefix) before deciding
       // whether more data is needed. boundedChunkCollector is append-
       // only with no peek, doesn't fit.
-      // allow:handrolled-buffer-collect — see comment above
+      // allow:handrolled-buffer-collect-bounded-framing — see comment above
       var buf = Buffer.concat(chunks);
       var recordLen = buf.readUInt16BE(3);
       var neededLen = 5 + recordLen;

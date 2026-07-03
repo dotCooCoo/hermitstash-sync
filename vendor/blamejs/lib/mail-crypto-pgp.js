@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 // codebase-patterns:allow-file raw-byte-literal — RFC 9580 OpenPGP packet
 // framing carries protocol-mandated byte-shape constants throughout (32-byte
@@ -563,7 +565,7 @@ function sign(opts) {
   // signed-part bytes plus the armored signature.
   // MIME-boundary uniqueness only (not a security token); operator
   // key/cert material flows through createSign/verify, not this path.
-  // allow:raw-randombytes-token — boundary string, not auth credential
+  // allow:raw-randombytes-token-mime-boundary — boundary string, not auth credential
   var boundary = "blamejs-pgp-" + nodeCrypto.randomBytes(12).toString("hex");
   // The OpenPGP signature covers the signed-part bytes exactly, so the
   // multipart/signed wrapper is assembled as a Buffer — a JS-string round
@@ -865,11 +867,22 @@ function verify(opts) {
   var ok;
   if (parsed.pubAlg === PUB_ALG_RSA) {
     var rsaMpi = _readMpi(parsed.sigMpisBytes, 0);
+    // The signature is an integer in [0, n); when its value has one or more
+    // high zero bytes (~1/256 of signatures) the OpenPGP MPI encoding strips
+    // them (RFC 9580 §3.2), but node's RSA verify requires a signature exactly
+    // the modulus byte length. Left-pad the stripped MPI back to the modulus
+    // width — the same correction the Ed25519 branch applies to its R/S
+    // components below — or a valid signature is rejected.
+    var rsaSigBytes = rsaMpi.value;
+    var modLen = rsaPub.n.length;
+    if (rsaSigBytes.length < modLen) {
+      rsaSigBytes = Buffer.concat([Buffer.alloc(modLen - rsaSigBytes.length), rsaSigBytes]);
+    }
     try {
       ok = nodeCrypto.verify(hashName, hashInput, {
         key: publicKey,
         padding: nodeCrypto.constants.RSA_PKCS1_PADDING,
-      }, rsaMpi.value);
+      }, rsaSigBytes);
     } catch (e) {
       return _fail("mail-crypto/pgp/verify-error",
         "RSA verify threw: " + ((e && e.message) || String(e)));

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * request-helpers — resolveRoute + captureResponseStatus.
@@ -618,6 +620,11 @@ function testMakeSkipMatcher() {
   check("makeSkipMatcher: non-function skip throws",
         (function () { try { b.requestHelpers.makeSkipMatcher({ skip: "x" }); return false; }
                        catch (e) { return e instanceof TypeError; } })());
+  // A ReDoS-shaped skip RegExp (wrapped nested quantifier) is screened at
+  // build time, never reaching the per-request .test() on attacker paths.
+  check("makeSkipMatcher: ReDoS-shaped skipPaths RegExp refused",
+        (function () { try { b.requestHelpers.makeSkipMatcher({ skipPaths: [/((a)+)+$/] }); return false; }
+                       catch (e) { return e instanceof Error; } })());
 }
 
 module.exports = { run: run };

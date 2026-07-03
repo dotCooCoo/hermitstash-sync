@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.middleware.requestLog — HTTP access-log middleware.
@@ -75,6 +77,7 @@ async function run() {
   rejects("missing logger",          function () { b.middleware.requestLog(); }, /logger must be/);
   rejects("non-logger logger",       function () { b.middleware.requestLog({ logger: {} }); }, /logger must be/);
   rejects("bad skipPaths entry",     function () { b.middleware.requestLog({ logger: _captureLogger(), skipPaths: [42] }); }, /skipPaths/);
+  rejects("ReDoS skipPaths RegExp",  function () { b.middleware.requestLog({ logger: _captureLogger(), skipPaths: [/((a)+)+$/] }); }, /./);
 
   // ---- Happy path: 200 → info ----
   var logger = _captureLogger();

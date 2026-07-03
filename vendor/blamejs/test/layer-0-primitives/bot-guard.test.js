@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Layer 0 — b.middleware.botGuard.
@@ -89,6 +91,16 @@ function testOverridesAndSkips() {
   var threw = null;
   try { b.middleware.botGuard({ blockedAgents: ["badbot"] }); } catch (e) { threw = e.code; }
   check("string blockedAgents pattern is refused", threw === "bot-guard/bad-pattern");
+
+  // An operator bot pattern is .test()'d against the attacker-controlled
+  // User-Agent on every request, so a catastrophic-backtracking RegExp would be
+  // a per-request DoS. The pattern is screened through b.guardRegex at create().
+  var threwRedos = null;
+  try { b.middleware.botGuard({ blockedAgents: [/((a)+)+$/] }); } catch (e) { threwRedos = e.code; }
+  check("ReDoS-shaped blockedAgents pattern is refused", threwRedos === "bot-guard/unsafe-pattern");
+  var threwRedosAllow = null;
+  try { b.middleware.botGuard({ allowedAgents: [/(a+)+$/] }); } catch (e) { threwRedosAllow = e.code; }
+  check("ReDoS-shaped allowedAgents pattern is refused", threwRedosAllow === "bot-guard/unsafe-pattern");
 }
 
 function testPeerGatedAuditIp() {

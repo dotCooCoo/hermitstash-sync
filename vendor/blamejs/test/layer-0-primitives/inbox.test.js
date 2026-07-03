@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.inbox — transactional dedupe-on-receive (companion to b.outbox).
@@ -118,6 +120,12 @@ async function run() {
   var fake = _makeFakeExternalDb();
   rejects("inbox.create: bad table name",
     function () { b.inbox.create({ externalDb: fake.db, table: "bad-name" }); }, /not a safe SQL identifier/);
+  // A non-finite byte/length cap must be refused — Infinity would disable the
+  // cap and admit unbounded stored payloads / identifiers.
+  rejects("inbox.create: maxPayloadBytes Infinity refused",
+    function () { b.inbox.create({ externalDb: fake.db, table: "t", maxPayloadBytes: Infinity }); }, /maxPayloadBytes|finite/);
+  rejects("inbox.create: messageIdMaxLen Infinity refused",
+    function () { b.inbox.create({ externalDb: fake.db, table: "t", messageIdMaxLen: Infinity }); }, /messageIdMaxLen|finite/);
 
   var inbox = b.inbox.create({
     externalDb: fake.db,
@@ -182,6 +190,16 @@ async function run() {
 
   var deleted = await inbox.sweep();
   check("inbox.sweep: returns deleted count",     typeof deleted === "number");
+
+  // retentionDays: Infinity means "retain indefinitely" — sweep() must be a
+  // no-op (delete nothing), not compute an invalid horizon. Before the fix the
+  // sqlite path threw RangeError on `new Date(now - Infinity).toISOString()`.
+  var foreverInbox = b.inbox.create({
+    externalDb: fake.db, table: "forever_inbox", audit: false, retentionDays: Infinity,
+  });
+  await foreverInbox.declareSchema(fake.xdb);
+  var foreverDeleted = await foreverInbox.sweep();
+  check("inbox.sweep: retentionDays Infinity retains all (no-op, no throw)", foreverDeleted === 0);
 }
 
 module.exports = { run: run };

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "frameworkVersion": "0.15.26",
-  "createdAt": "2026-06-25T20:58:27.525Z",
+  "frameworkVersion": "0.16.2",
+  "createdAt": "2026-07-03T12:18:24.287Z",
   "exports": {
     "a2a": {
       "type": "object",
@@ -33331,6 +33331,10 @@
             }
           }
         },
+        "assertSafe": {
+          "type": "function",
+          "arity": 5
+        },
         "buildProfile": {
           "type": "function",
           "arity": 1
@@ -48947,6 +48951,10 @@
     "publicSuffix": {
       "type": "object",
       "members": {
+        "canonicalDomain": {
+          "type": "function",
+          "arity": 1
+        },
         "isPublicSuffix": {
           "type": "function",
           "arity": 1
@@ -49778,6 +49786,10 @@
           "type": "function",
           "arity": 3
         },
+        "keyedSerializer": {
+          "type": "function",
+          "arity": 0
+        },
         "makeBatchDrain": {
           "type": "function",
           "arity": 1
@@ -49879,6 +49891,10 @@
           "type": "instance",
           "ctorName": "RegExp"
         },
+        "assertHeaderSafe": {
+          "type": "function",
+          "arity": 4
+        },
         "boundedChunkCollector": {
           "type": "function",
           "arity": 1
@@ -49888,6 +49904,10 @@
           "arity": 2
         },
         "collectStream": {
+          "type": "function",
+          "arity": 2
+        },
+        "foldHeaderText": {
           "type": "function",
           "arity": 2
         },
@@ -50883,6 +50903,10 @@
         "parseOrDefault": {
           "type": "function",
           "arity": 3
+        },
+        "parseStringOrObject": {
+          "type": "function",
+          "arity": 2
         },
         "registerFormat": {
           "type": "function",

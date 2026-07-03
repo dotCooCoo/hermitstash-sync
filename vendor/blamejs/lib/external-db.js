@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.externalDb
@@ -1338,8 +1340,9 @@ async function transaction(fn, opts) {
   // (serialization_failure) are transient — retry with capped attempts
   // and a small jittered backoff. Operators tune retries via opts.deadlockRetries (default 3).
   // numeric-bounds doesn't have a non-negative-int helper; use a
-  // direct check with allow marker (zero is permitted to disable
-  // retries entirely).
+  // Explicit isFinite/integer guard (zero is permitted to disable retries
+  // entirely); a non-finite deadlockRetries is refused here, so Math.floor
+  // below only ever sees a validated finite integer.
   if (opts.deadlockRetries !== undefined) {
     if (typeof opts.deadlockRetries !== "number" || !isFinite(opts.deadlockRetries) ||
         opts.deadlockRetries < 0 || (opts.deadlockRetries | 0) !== opts.deadlockRetries) {
@@ -1348,7 +1351,7 @@ async function transaction(fn, opts) {
     }
   }
   var maxRetries = (typeof opts.deadlockRetries === "number")
-    ? Math.floor(opts.deadlockRetries) : 3;                                       // allow:numeric-opt-Infinity
+    ? Math.floor(opts.deadlockRetries) : 3;
   // Validate the transaction-level residency tag shape at entry (the
   // sessionGucs / deadlockRetries discipline) so an empty-string tag
   // fails before BEGIN rather than at the first statement.
@@ -1709,7 +1712,7 @@ function _crossBorderRegulated(posture) {
 
 function _residencyCompatible(primaryTag, replicaTag) {
   if (!primaryTag || !replicaTag) return true;
-  if (primaryTag === replicaTag) return true; // allow:raw-hash-compare — residency tag string, not a secret hash
+  if (primaryTag === replicaTag) return true; // allow:raw-hash-compare-nonsecret-tag — residency tag string, not a secret hash
   if (primaryTag === "unrestricted" || replicaTag === "unrestricted") return true;
   return false;
 }

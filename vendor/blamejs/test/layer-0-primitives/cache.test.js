@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.cache — caching primitive.
@@ -654,6 +656,16 @@ async function testUpdateMemory() {
   var cr = await c.update("fresh", function (cur) { return { value: cur === null ? "created" : "x" }; });
   check("update memory: absent key seen as null", cr.value === "created" && (await c.get("fresh")) === "created");
   await c.close();
+
+  // A committing decision can set the written value's own lifetime via
+  // { value, ttlMs } — a duration the cache resolves against its own clock.
+  var nowMs = 5000000;
+  var ck = _newCache({ namespace: "upd-ttl", clock: function () { return nowMs; } });
+  await ck.update("k", function () { return { value: "short", ttlMs: 100 }; });
+  check("update memory: decision ttlMs present before expiry", (await ck.get("k")) === "short");
+  nowMs += 150;
+  check("update memory: decision ttlMs expired the value", (await ck.get("k")) === undefined);
+  await ck.close();
 }
 
 async function testUpdateClusterCas() {

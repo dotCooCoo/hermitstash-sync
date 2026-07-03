@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 // blamejs wiki — small client-side helpers.
 // No jQuery, no framework. ~150 lines of vanilla JS.
 //
@@ -202,7 +204,7 @@
     function loadManifest() {
       if (manifest) return Promise.resolve(manifest);
       if (loadPromise) return loadPromise;
-      loadPromise = fetch("/symbols.json", { credentials: "same-origin" }) // allow:raw-outbound-http — browser-side script; b.httpClient is Node-server-only
+      loadPromise = fetch("/symbols.json", { credentials: "same-origin" }) // allow:raw-outbound-http-framework-internal — browser-side script; b.httpClient is Node-server-only
         .then(function (r) { return r.ok ? r.json() : []; })
         .then(function (data) { manifest = Array.isArray(data) ? data : []; return manifest; })
         .catch(function () { manifest = []; return manifest; });

@@ -61,10 +61,19 @@ describe('updater#18 — beta-channel asset/signature regex accepts a prerelease
     assert.equal(assetRe.test(build), true);
   });
 
-  it('guards the old bug: the asset pattern must contain an optional prerelease group', () => {
-    // Direct guard so a revert to the digit-only `\d+\.\d+\.\d+-<plat>` form fails here.
-    assert.match(assetRe.source, /\(\?:\[-\+\]\[0-9A-Za-z\.-\]\+\)\?/);
-    assert.match(sigRe.source, /\(\?:\[-\+\]\[0-9A-Za-z\.-\]\+\)\?/);
+  it('guards the old bug: a digit-only version pattern (no prerelease tail) is rejected', () => {
+    // Behavioral guard so a revert to the digit-only `\d+\.\d+\.\d+-<plat>` form
+    // (which drops the prerelease/build tail) fails here. The prerelease slot is a
+    // BARE bounded char class, not a `(?:…)?` group — b.selfUpdate runs the pattern
+    // through b.guardRegex.sanitize, which refuses a quantified group.
+    assert.match(assetRe.source, /\[-0-9A-Za-z\.\+\]\{0,\d+\}/, 'asset pattern carries a bounded prerelease char class');
+    assert.match(sigRe.source, /\[-0-9A-Za-z\.\+\]\{0,\d+\}/, 'sig pattern carries a bounded prerelease char class');
+  });
+
+  it('both patterns pass b.guardRegex.sanitize (b.selfUpdate refuses an unsafe assetPattern)', () => {
+    const b = require('../vendor/blamejs');
+    assert.doesNotThrow(() => b.guardRegex.sanitize(assetRe.source), 'asset pattern must be guardRegex-safe');
+    assert.doesNotThrow(() => b.guardRegex.sanitize(sigRe.source), 'sig pattern must be guardRegex-safe');
   });
 
   it('still rejects the ML-DSA sidecar (.mldsa.sig) — property preserved', () => {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.auth.lockout — per-key failed-attempt tracking with backoff lockouts.
@@ -228,6 +230,25 @@ async function testConcurrentFailuresAllCounted() {
   check("5 concurrent failures all counted (no lost update)", state.attempts === 5);
 }
 
+async function testCrossNodeFailuresAllCounted() {
+  // The in-process serializer only orders calls within ONE instance. Several
+  // lockout instances sharing one cache (multiple app nodes) each serialize
+  // their own calls, so concurrent recordFailure for the same key ACROSS nodes
+  // races the cache read-modify-write (get -> increment -> set) and increments
+  // are lost — a brute-force attacker spread across nodes stays under the
+  // lockout threshold. The atomic cache.update counts every failure. Each node
+  // fires once, so the race is N-way (no per-node serializer masks it).
+  var cache = _newCache("ns-xnode");
+  var N = 12;
+  var nodes = [];
+  for (var i = 0; i < N; i++) {
+    nodes.push(b.auth.lockout.create({ cache: cache, namespace: "login", maxAttempts: 1000 }));
+  }
+  await Promise.all(nodes.map(function (n) { return n.recordFailure("attacker"); }));
+  var verdict = await nodes[0].check("attacker");
+  check("cross-node concurrent failures all counted (atomic RMW)", verdict.attempts === N);
+}
+
 async function testNonMutatingCheck() {
   var lockout = b.auth.lockout.create({
     cache: _newCache("ns-nonmutating"), namespace: "login", maxAttempts: 5,
@@ -303,6 +324,20 @@ async function testCustomDurationFn() {
   nowMs += 2000;
   var v2 = await lockout.recordFailure("k");
   check("custom-fn: 2nd lockout = 2s", v2.lockedUntil === nowMs + 2000);
+}
+
+async function testBadDurationFnSurfaces() {
+  // A configuration fault inside the cache.update mutator (a lockoutDurations
+  // function returning a non-number) must surface, not be swallowed as a cache
+  // backend failure and silently disable the lockout.
+  var lockout = b.auth.lockout.create({
+    cache: _newCache("ns-baddur"), namespace: "login", maxAttempts: 1,
+    lockoutDurations: function () { return "not-a-number"; },
+  });
+  var threw = null;
+  try { await lockout.recordFailure("k"); } catch (e) { threw = e; }
+  check("bad lockoutDurations function surfaces (not swallowed as fail-open)",
+        threw !== null && /lockoutDurations|duration/i.test(threw.message || ""));
 }
 
 async function testWindowDecay() {
@@ -486,6 +521,7 @@ async function testBackendErrorFailOpen() {
     get: function () { return Promise.reject(new Error("backend down")); },
     set: function () { return Promise.reject(new Error("backend down")); },
     del: function () { return Promise.reject(new Error("backend down")); },
+    update: function () { return Promise.reject(new Error("backend down")); },
   };
   var lockout = b.auth.lockout.create({
     cache: brokenCache, namespace: "login", observability: obsCap,
@@ -536,6 +572,81 @@ async function testClusterBackend(tmpDir) {
   }
 }
 
+// ---- lock() force-lock + windowMs guard ----
+
+async function testLockForcesLockout() {
+  var lockout = b.auth.lockout.create({ cache: _newCache("force"), namespace: "login" });
+  var before = await lockout.check("victim");
+  check("lock: not locked before", before.locked === false);
+  var rv = await lockout.lock("victim", { reason: "ato", durationMs: 60 * 1000 });
+  check("lock: returns locked + future lockedUntil",
+        rv.locked === true && typeof rv.lockedUntil === "number" && rv.lockedUntil > Date.now());
+  var after = await lockout.check("victim");
+  check("lock: check reports locked", after.locked === true);
+  // unlock clears it.
+  var had = await lockout.unlock("victim");
+  check("lock: unlock clears the forced lock", had === true && (await lockout.check("victim")).locked === false);
+
+  // A forced (ATO/admin) lock must SURVIVE recordSuccess — a successful login
+  // by someone who still holds the compromised password must not release the
+  // kill-switch lock. RED before the forced flag: recordSuccess deletes it.
+  await lockout.lock("victim2", { reason: "ato", durationMs: 60 * 1000 });
+  await lockout.recordSuccess("victim2");
+  check("lock: a forced lock survives recordSuccess (compromised-password login can't clear it)",
+        (await lockout.check("victim2")).locked === true);
+  // Only an explicit unlock() releases a forced lock.
+  await lockout.unlock("victim2");
+  check("lock: unlock() releases the forced lock", (await lockout.check("victim2")).locked === false);
+
+  // A lock whose resolved instant is not in the future is refused.
+  var threw = false;
+  try { await lockout.lock("victim", { untilMs: Date.now() - 1000 }); } catch (_e) { threw = true; }
+  check("lock: a past untilMs is refused", threw);
+}
+
+function testCreateRejectsZeroWindow() {
+  // windowMs:0 self-disables lockout (every failure decays immediately + the
+  // 0-TTL state never persists) — refuse it at config time.
+  var threw = false;
+  try {
+    b.auth.lockout.create({ cache: _newCache("zw"), namespace: "login", windowMs: 0 });
+  } catch (e) { threw = /windowMs/.test(e.message); }
+  check("create: windowMs:0 refused (self-disabling)", threw);
+}
+
+// ---- ATO kill-switch wiring ----
+
+async function testAtoKillSwitchLocksWithInstance(tmpDir) {
+  await setupTestDb(tmpDir);
+  try {
+    var appLockout = b.auth.lockout.create({ cache: _newCache("ato-login"), namespace: "login" });
+    var rv = await b.auth.atoKillSwitch.trigger({
+      userId: "u_42", reason: "fraud-signal", lockout: appLockout,
+    });
+    // RED before the fix: lockout().lock threw (no module-level lock) and was
+    // swallowed, so lockoutApplied was always false and the user never locked.
+    check("ato: lockoutApplied true when a lockout instance is supplied", rv.lockoutApplied === true);
+    check("ato: the user is actually locked out of new logins",
+          (await appLockout.check("u_42")).locked === true);
+  } finally {
+    await teardownTestDb(tmpDir);
+  }
+}
+
+async function testAtoKillSwitchReportsNoLockWithoutInstance(tmpDir) {
+  await setupTestDb(tmpDir);
+  try {
+    var rv = await b.auth.atoKillSwitch.trigger({ userId: "u_43", reason: "fraud-signal" });
+    // Without a lockout instance the kill-switch cannot lock — it must report
+    // lockoutApplied:false (not silently claim success).
+    check("ato: lockoutApplied false when no lockout instance is supplied", rv.lockoutApplied === false);
+    check("ato: sessions still destroyed (the destroy step is independent)",
+          typeof rv.sessionsDestroyed === "number");
+  } finally {
+    await teardownTestDb(tmpDir);
+  }
+}
+
 // ---- Run ----
 
 async function run() {
@@ -546,10 +657,12 @@ async function run() {
     await testKeyValidation();
     await testRecordFailureCounter();
     await testConcurrentFailuresAllCounted();
+    await testCrossNodeFailuresAllCounted();
     await testNonMutatingCheck();
     await testRecordSuccessClears();
     await testExponentialLadder();
     await testCustomDurationFn();
+    await testBadDurationFnSurfaces();
     await testWindowDecay();
     await testAdminUnlock();
     await testUnlockClearsAttemptsBelowThreshold();
@@ -561,6 +674,8 @@ async function run() {
     await testFailureDuringLock();
     await testBackendErrorFailOpen();
     await testClusterBackend(tmpDir);
+    await testLockForcesLockout();
+    testCreateRejectsZeroWindow();
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_e) {}
   }
@@ -583,7 +698,12 @@ async function _testAtoKillSwitch() {
     typeof b.auth.atoKillSwitch.AtoKillSwitchError === "function");
 }
 
-module.exports = { run: async function () { await run(); await _testAtoKillSwitch(); } };
+module.exports = { run: async function () {
+  await run();
+  await _testAtoKillSwitch();
+  await testAtoKillSwitchLocksWithInstance(_tmp());
+  await testAtoKillSwitchReportsNoLockWithoutInstance(_tmp());
+} };
 
 if (require.main === module) {
   run().then(

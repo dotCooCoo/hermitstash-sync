@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * X.509 basicConstraints cA enforcement across the framework's cert-chain
@@ -37,6 +39,9 @@ async function _mintChain(opts) {
   opts = opts || {};
   var interCa = opts.interCa === true;          // default cA:FALSE (the attack)
   var leafSan = opts.leafSan || "victim.example";
+  // Default SAN is DNS:<leafSan>; a test can supply explicit entries (e.g. a
+  // hostile URI SAN) to exercise the SAN-vs-domain matcher.
+  var leafSanEntries = opts.leafSanEntries || [{ type: "dns", value: leafSan }];
   var now = new Date();
   var notAfter = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
   var alg = { name: "ECDSA", namedCurve: "P-256" };
@@ -70,19 +75,41 @@ async function _mintChain(opts) {
     extensions: [
       new x509.BasicConstraintsExtension(false, undefined, true),
       new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
-      new x509.SubjectAlternativeNameExtension([{ type: "dns", value: leafSan }]),
+      new x509.SubjectAlternativeNameExtension(leafSanEntries),
       new x509.ExtendedKeyUsageExtension([BIMI_EKU_OID], false),
     ],
   });
+
+  // Export the leaf's private key so a consumer test can sign a payload that
+  // the forged leaf would verify (e.g. a fido-mds3 BLOB).
+  var leafPkcs8 = await pki.crypto.subtle.exportKey("pkcs8", leafKeys.privateKey);
+  var leafKeyB64 = Buffer.from(leafPkcs8).toString("base64").match(/.{1,64}/g).join("\n");
+  var leafKeyPem = "-----BEGIN PRIVATE KEY-----\n" + leafKeyB64 + "\n-----END PRIVATE KEY-----\n";
 
   return {
     rootPem:  root.toString("pem"),
     interPem: inter.toString("pem"),
     leafPem:  leaf.toString("pem"),
+    leafKeyPem: leafKeyPem,
     root:  new nodeCrypto.X509Certificate(root.toString("pem")),
     inter: new nodeCrypto.X509Certificate(inter.toString("pem")),
     leaf:  new nodeCrypto.X509Certificate(leaf.toString("pem")),
   };
+}
+
+// Build a fido-mds3 JWS BLOB signed by `leafKeyPem` with x5c = the given cert
+// chain (PEMs, leaf-first), so a forged leaf can attempt to authenticate a BLOB.
+function _b64url(buf) { return Buffer.from(buf).toString("base64url"); }
+function _mds3Blob(payload, leafKeyPem, chainPems) {
+  var x5c = chainPems.map(function (pem) {
+    return pem.replace(/-----BEGIN CERTIFICATE-----/g, "")
+              .replace(/-----END CERTIFICATE-----/g, "").replace(/\s+/g, "");
+  });
+  var header = { alg: "ES256", typ: "JWT", x5c: x5c };
+  var signingInput = _b64url(JSON.stringify(header)) + "." + _b64url(JSON.stringify(payload));
+  var sig = nodeCrypto.sign("sha256", Buffer.from(signingInput, "ascii"),
+    { key: leafKeyPem, dsaEncoding: "ieee-p1363" });
+  return signingInput + "." + _b64url(sig);
 }
 
 function _stubHttpClient(body) {
@@ -148,6 +175,95 @@ async function run() {
     httpClient:      _stubHttpClient(ok.leafPem + "\n" + ok.interPem),
   });
   check("bimi.fetchAndVerifyMark: valid CA chain still verifies", rv.ok === true);
+
+  // ---- 2b. SAN-vs-domain authorization must bind to the cert's actual host.
+  // A CA-chained VMC whose only SAN is a URI the URL parser refuses (here the
+  // real host is attacker.test, with the victim domain placed in the userinfo)
+  // must NOT vouch for the victim domain. The pre-fix matcher fell back to a raw
+  // substring search of the whole SAN string when safeUrl.parse threw, so
+  // "victim.example" appearing anywhere (userinfo / path) wrongly matched.
+  var hostile = await _mintChain({
+    interCa: true,
+    leafSan: "attacker.test",
+    leafSanEntries: [{ type: "url", value: "https://victim.example@attacker.test/" }],
+  });
+  var sanThrew = null;
+  try {
+    await b.mail.bimi.fetchAndVerifyMark({
+      domain:          "victim.example",
+      vmcUrl:          "https://victim.example/cert.pem",
+      trustAnchorsPem: hostile.rootPem,
+      httpClient:      _stubHttpClient(hostile.leafPem + "\n" + hostile.interPem),
+    });
+  } catch (e) { sanThrew = e; }
+  check("bimi.fetchAndVerifyMark: hostile URI-SAN (userinfo) does NOT vouch for the victim domain",
+        sanThrew && sanThrew.code === "bimi/vmc-domain-mismatch");
+
+  // Control: a CA-chained VMC whose URI SAN host genuinely IS the domain verifies.
+  var legit = await _mintChain({
+    interCa: true,
+    leafSan: "good.example",
+    leafSanEntries: [{ type: "url", value: "https://good.example/" }],
+  });
+  var legitRv = await b.mail.bimi.fetchAndVerifyMark({
+    domain:          "good.example",
+    vmcUrl:          "https://good.example/cert.pem",
+    trustAnchorsPem: legit.rootPem,
+    httpClient:      _stubHttpClient(legit.leafPem + "\n" + legit.interPem),
+  });
+  check("bimi.fetchAndVerifyMark: a genuine URI-SAN host still verifies", legitRv.ok === true);
+
+  // domainToASCII truncates at a URL delimiter, so a DNS SAN "victim.example/evil"
+  // would have canonicalized to "victim.example" and matched — must fail closed.
+  var dnsDelim = await _mintChain({
+    interCa: true,
+    leafSan: "attacker.test",
+    leafSanEntries: [{ type: "dns", value: "victim.example/evil" }],
+  });
+  var dnsThrew = null;
+  try {
+    await b.mail.bimi.fetchAndVerifyMark({
+      domain:          "victim.example",
+      vmcUrl:          "https://victim.example/cert.pem",
+      trustAnchorsPem: dnsDelim.rootPem,
+      httpClient:      _stubHttpClient(dnsDelim.leafPem + "\n" + dnsDelim.interPem),
+    });
+  } catch (e) { dnsThrew = e; }
+  check("bimi.fetchAndVerifyMark: a delimiter-bearing DNS SAN does NOT vouch for the prefix domain",
+        dnsThrew && dnsThrew.code === "bimi/vmc-domain-mismatch");
+
+  // ---- 3. Consumer path: b.auth.fidoMds3.fetch must refuse a BLOB whose x5c
+  // chains the leaf through the cA:FALSE intermediate. The forged leaf GENUINELY
+  // signs the BLOB (ES256), so without cA enforcement on the intermediate link a
+  // basicConstraints bypass would accept attacker-forged FIDO metadata.
+  var mds3Payload = {
+    legalHeader: "Test BLOB", no: 1,
+    nextUpdate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+    entries: [{ aaguid: "01234567-89ab-cdef-0123-456789abcdef",
+                metadataStatement: { description: "Test entry" },
+                statusReports: [{ status: "FIDO_CERTIFIED_L2" }] }],
+  };
+  var forgedBlob = _mds3Blob(mds3Payload, c.leafKeyPem, [c.leafPem, c.interPem]);
+  var hcPath = require.resolve("../../lib/http-client");
+  var origHc = require.cache[hcPath].exports;
+  require.cache[hcPath].exports = Object.assign({}, origHc, {
+    request: async function () {
+      return { statusCode: 200, headers: {}, body: Buffer.from(forgedBlob, "ascii") };
+    },
+  });
+  var fmPath = require.resolve("../../lib/auth/fido-mds3");
+  delete require.cache[fmPath];
+  var fm = require(fmPath);
+  var mdsThrew = null;
+  try {
+    await fm.fetch({ url: "https://test.invalid/mds3", caCertificate: c.rootPem, force: true });
+  } catch (e) { mdsThrew = e; }
+  finally {
+    require.cache[hcPath].exports = origHc;
+    delete require.cache[fmPath];
+  }
+  check("fido-mds3.fetch: forged BLOB via cA:FALSE intermediate is REJECTED",
+        mdsThrew && mdsThrew.code === "fido-mds3/chain-broken");
 
   console.log("OK — x509 cA enforcement (" + helpers.getChecks() + " checks)");
 }

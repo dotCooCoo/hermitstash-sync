@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * mail-dkim — DKIM-Signature header generation for outbound mail.
@@ -44,6 +46,7 @@ var structuredFields = require("./structured-fields");
 var nodeCrypto  = require("node:crypto");
 var safeBuffer  = require("./safe-buffer");
 var validateOpts = require("./validate-opts");
+var ARC_AMS_REUSE = require("./mail-arc-reuse-token");
 var C           = require("./constants");
 var networkDnsResolver = lazyRequire(function () { return require("./network-dns-resolver"); });
 var { FrameworkError } = require("./framework-error");
@@ -684,7 +687,12 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
   // of d=. A signature whose i= claims `@evil.example.com` while d=
   // is `example.org` is malformed and binds the signer's claim to a
   // domain the verifier wouldn't otherwise associate. Refuse.
-  if (typeof sigTags.i === "string" && sigTags.i.length > 0) {
+  // arcAmsReuse: the caller is b.mail.arc.verify reusing this verifier for an
+  // ARC-Message-Signature, whose i= is an RFC 8617 instance number, not a DKIM
+  // AUID — skip the AUID/d= binding check for it. The flag rides a Symbol key
+  // unreachable from the public string-opts surface, so the check stays a
+  // non-opt-out default for every real DKIM signature.
+  if (!verifyOpts.arcAmsReuse && typeof sigTags.i === "string" && sigTags.i.length > 0) {
     var iDomain = sigTags.i.indexOf("@") === -1
                     ? sigTags.i
                     : sigTags.i.slice(sigTags.i.indexOf("@") + 1);
@@ -745,6 +753,21 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
   if (actualBh !== expectedBh) {
     return { result: "fail", errors: ["body hash mismatch"] };
   }
+  // RFC 6376 §8.2 — l= signs only the first lcap canonicalized octets, so any
+  // body delivered beyond lcap is UNSIGNED: the body hash above matched the
+  // prefix, but the recipient receives appended content the signer never
+  // authenticated (verified bytes ≠ delivered bytes, CWE-345). The framework
+  // already refuses l= at sign-time; on verify, a signature whose l= leaves
+  // appended content unsigned must not pass by default. An operator who must
+  // accept legacy l= senders opts in via verify({ acceptBodyLengthLimit: true }).
+  if (lcap !== undefined && !verifyOpts.acceptBodyLengthLimit) {
+    var fullCanon = canonBody === "simple" ? _canonBodySimple(body) : _canonBodyRelaxed(body);
+    if (lcap < Buffer.byteLength(fullCanon, "utf8")) {
+      return { result: "fail",
+               errors: ["DKIM-Signature l= leaves appended body content unsigned " +
+                        "(RFC 6376 §8.2 append-after-signature)"] };
+    }
+  }
 
   // 2. Canonicalize the headers in h= order, then the DKIM-Signature
   //    header itself with the b= value emptied (per §3.7).
@@ -781,9 +804,15 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
   // name ends in `b` (`ab=`, `pub=`, `cb=` …). Anchor on the tag-list
   // structure instead.
   var unsignedSigValue = _stripBTagValue(sigHeader.value);
+  // The signature header is canonicalized under its true field name (§3.7).
+  // For the ARC reuse the header on the wire is ARC-Message-Signature, signed
+  // under that name; the synthetic renames it to DKIM-Signature only so this
+  // verifier finds it, so the canonical form must restore the real name or the
+  // b= value never matches what the relay signed.
+  var sigCanonName = verifyOpts.arcAmsReuse ? "ARC-Message-Signature" : "DKIM-Signature";
   canonicalizedHeaders += canonHeader === "simple"
-    ? _canonHeaderSimple("DKIM-Signature", " " + unsignedSigValue).replace(/\r\n$/, "")
-    : _canonHeaderRelaxed("DKIM-Signature", unsignedSigValue).replace(/\r\n$/, "");
+    ? _canonHeaderSimple(sigCanonName, " " + unsignedSigValue).replace(/\r\n$/, "")
+    : _canonHeaderRelaxed(sigCanonName, unsignedSigValue).replace(/\r\n$/, "");
 
   // 3. Verify the signature.
   var sigB64 = sigTags.b;
@@ -864,7 +893,7 @@ async function verify(rfc822, opts) {
   }
   opts = opts || {};
   validateOpts(opts, ["dnsLookup", "audit", "clockSkewMs", "maxSignatures",
-                       "minRsaBits"], "mail.dkim.verify");
+                       "minRsaBits", "acceptBodyLengthLimit"], "mail.dkim.verify");
   var auditOn = opts.audit !== false;
 
   // Bounded clock skew: refuse non-numeric / negative / infinite /
@@ -906,7 +935,16 @@ async function verify(rfc822, opts) {
     }
     maxSignatures = Math.floor(opts.maxSignatures);
   }
-  var verifyOpts = { minRsaBits: opts.minRsaBits };
+  var verifyOpts = { minRsaBits: opts.minRsaBits,
+                     acceptBodyLengthLimit: opts.acceptBodyLengthLimit === true };
+  // Framework-internal ARC reuse: the key is a Symbol owned by
+  // mail-arc-reuse-token (exported from no public surface), so only framework
+  // code that requires that module can set it. When present, the i= tag is an
+  // RFC 8617 instance number, not a DKIM AUID — the §3.5 AUID-subdomain check
+  // is skipped and the signature header is canonicalized under its real
+  // ARC-Message-Signature name. The public b.mail.dkim.verify path can never
+  // reach this, so the AUID check stays a non-opt-out default for real DKIM.
+  if (opts[ARC_AMS_REUSE] === true) verifyOpts.arcAmsReuse = true;
 
   var split = _splitHeadersBody(rfc822);
   var parsedHeaders = _parseHeaders(split.headers);
@@ -1287,6 +1325,7 @@ module.exports = {
   _canonHeaderRelaxedForTest: _canonHeaderRelaxed,
   _canonBodyRelaxedForTest:   _canonBodyRelaxed,
   _canonBodySimpleForTest:    _canonBodySimple,
+  _stripBTagValue:            _stripBTagValue,   // RFC 6376 §3.5 — tag-aware b= zeroing; shared by the ARC seal verifier (internal cross-module helper)
   _stripBTagValueForTest:     _stripBTagValue,
   // The header-block parser that produces the { name, value } pairs fed to the
   // canonicalizers. Exposed so a golden-vector test can pin its byte-exact

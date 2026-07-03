@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module     b.agent.postureChain
@@ -124,7 +126,7 @@ function create(opts) {
   var auditImpl = opts.audit || audit();
   var declaredRegimes = Object.create(null);
   for (var i = 0; i < BUILTIN_REGIMES.length; i += 1) declaredRegimes[BUILTIN_REGIMES[i]] = true;
-  // allow:numeric-opt-Infinity — operator opt clamped to [1, DEFAULT_MAX_HOP_COUNT]; bad input falls back to default
+  // allow:numeric-opt-Infinity-intentional — operator opt clamped to [1, DEFAULT_MAX_HOP_COUNT] (the `<= DEFAULT_MAX_HOP_COUNT` upper bound rejects Infinity); bad input falls back to default
   var maxHopCount = typeof opts.maxHopCount === "number" && opts.maxHopCount > 0 &&
                     opts.maxHopCount <= DEFAULT_MAX_HOP_COUNT
                       ? Math.floor(opts.maxHopCount)

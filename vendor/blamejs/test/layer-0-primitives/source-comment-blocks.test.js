@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Source @module / @primitive comment-block gate.
@@ -43,7 +45,7 @@ function _buildLocalOptsResolver() {
   }
   function _probe(fn) {
     if (typeof fn !== "function") return { ok: false, reason: "not-a-function" };
-    var probeKey = "__opts_smoke_probe_" + Date.now() + "_" + Math.random().toString(36).slice(2);     // allow:math-random-noncrypto — probe-key uniqueness only
+    var probeKey = "__opts_smoke_probe_" + Date.now() + "_" + Math.random().toString(36).slice(2);     // allow:math-random-noncrypto-jitter-sampling — probe-key uniqueness only
     var probeOpts = {}; probeOpts[probeKey] = true;
     var caught = null;
     try {

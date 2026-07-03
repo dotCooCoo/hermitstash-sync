@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 
 // SMOKE_RUN_SOLO — the smoke runner (test/smoke.js) runs this file ALONE
@@ -120,6 +122,26 @@ function _walk(dir, files) {
     var e = entries[i];
     var full = path.join(dir, e.name);
     if (e.isDirectory()) _walk(full, files);
+    else if (e.isFile() && e.name.endsWith(".js")) files.push(full);
+  }
+  return files;
+}
+
+// Like _walk but also prunes node_modules / .test-output — used to scan the
+// FULL repo surface (incl operator-shipped examples/*/lib app code) for retired
+// allow-tokens, without descending into vendored example dependencies.
+function _walkAllSource(dir, files) {
+  files = files || [];
+  var base = path.basename(dir);
+  if (base === "vendor" || base === "node_modules" || base === ".test-output" ||
+      base === ".git" || base === "dist" || base === "build" || base === "coverage") return files;
+  var entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch (_e) { return files; }
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    var full = path.join(dir, e.name);
+    if (e.isDirectory()) _walkAllSource(full, files);
     else if (e.isFile() && e.name.endsWith(".js")) files.push(full);
   }
   return files;
@@ -299,47 +321,142 @@ var VALID_ALLOW_CLASSES = {
   "backup-adapter-storage-without-posture-check": 1,
   "bare-canonicalize-walk": 1,
   "bare-error-throw": 1,
-  "bare-json-parse": 1,
-  "bare-split-on-quoted-header": 1,
+  "bare-split-on-quoted-header-token-grammar": 1,
   "console-direct": 1,
   "deny-path-hardcoded-response": 1,
   "duplicate-regex": 1,
   "dynamic-regex": 1,
-  "dynamic-require": 1,
+  "dynamic-require-operator-module": 1,
   "from-base64url-untrapped": 1,
   "hand-rolled-sql": 1,
   "fs-path-from-operator-identifier-without-traversal-refusal": 1,
   "gitleaks-entropy": 1,
-  "handrolled-buffer-collect": 1,
-  "handrolled-debounce": 1,
-  "hostname-compare-trailing-dot": 1,
+  "handrolled-buffer-collect-bounded-framing": 1,
+  "handrolled-debounce-stream-idle": 1,
+  "hostname-compare-trailing-dot-pre-split-refused": 1,
   "inline-numeric-bounds-cascade": 1,
   "inline-require": 1,
   "inline-require-non-empty-string-validation": 1,
   "internal-binding-in-prose": 1,
   "internal-narrative-comment": 1,
+  "leftmost-domain-informational": 1,
   "list-without-pagination": 1,
-  "math-random-noncrypto": 1,
+  "math-random-noncrypto-jitter-sampling": 1,
   "no-number-money-arithmetic": 1,
-  "numeric-opt-Infinity": 1,
+  "numeric-opt-Infinity-intentional": 1,
   "primitive-unreachable": 1,
-  "process-exit": 1,
+  "process-exit-operator-optin": 1,
   "raw-byte-literal": 1,
-  "raw-hash-compare": 1,
-  "raw-new-url": 1,
-  "raw-outbound-http": 1,
-  "raw-process-env": 1,
-  "raw-randombytes-token": 1,
+  "raw-hash-compare-nonsecret-tag": 1,
+  "raw-new-url-parse-only": 1,
+  "raw-outbound-http-framework-internal": 1,
+  "raw-process-env-bootstrap": 1,
+  "raw-randombytes-token-mime-boundary": 1,
   "raw-time-literal": 1,
-  "raw-timing-safe-equal": 1,
-  "raw-xfp": 1,
+  "raw-timing-safe-equal-boot-prechecked": 1,
+  "raw-xfp-telemetry-only": 1,
   "regex-no-length-cap": 1,
-  "seal-without-aad": 1,
-  "silent-catch": 1,
+  "seal-without-aad-by-design": 1,
+  "silent-catch-stream-teardown": 1,
   "slsa-framework-action-not-sha-pinned": 1,
-  "timer-no-unref": 1,
+  "timer-no-unref-unrefed-below": 1,
   "wildcard-suffix-match-without-single-label-check": 1,
 };
+
+// Retired allow-class tokens — a class renamed during a re-verification pass so
+// its OLD name can never be silently re-granted (operator 2026-06-26: "rename the
+// per-class token so it doesn't get re-added as the same 'silent-catch'"). Key =
+// retired token; value = where it went + the rule. Two protections below:
+//   (1) testNoRetiredAllowTokenReRegistered refuses re-adding a retired token to
+//       VALID_ALLOW_CLASSES (the old name cannot be quietly resurrected), and
+//   (2) testNoOrphanAllowClass reports a `// allow:<retired>` marker with a
+//       pointer to the current token instead of a generic "unregistered" note.
+// To re-open a class for re-verification: rename its token in VALID_ALLOW_CLASSES
+// AND its detector's _filterMarkers() arg, add the old token here, then re-stamp
+// each surviving site under the NEW token only after re-checking it. Never reuse
+// a retired name; never bulk find-replace the markers.
+var RETIRED_ALLOW_TOKENS = {
+  "silent-catch": "renamed to 'silent-catch-stream-teardown' (2026-06-26 re-verify pass) — re-examine each empty-catch site before reusing; the old token is retired and must not be re-registered",
+  "raw-randombytes-token": "renamed to 'raw-randombytes-token-mime-boundary' (2026-06-26 re-verify pass) — the one site is a MIME boundary, not an auth credential; re-verify before reusing",
+  "raw-timing-safe-equal": "renamed to 'raw-timing-safe-equal-boot-prechecked' (2026-06-26 re-verify pass) — node timingSafeEqual used directly (b.crypto circular at boot) with a length pre-check; re-verify before reusing",
+  "handrolled-debounce": "renamed to 'handrolled-debounce-stream-idle' (2026-06-26 re-verify pass) — a single file-stream idle-deadline reset, not a reusable debounce; re-verify before reusing",
+  "hostname-compare-trailing-dot": "renamed to 'hostname-compare-trailing-dot-pre-split-refused' (2026-06-26 re-verify pass) — List-Id parts are pre-split on '.', so an empty trailing-dot label is refused upstream; re-verify before reusing",
+  "raw-xfp": "renamed to 'raw-xfp-telemetry-only' (2026-06-26 re-verify pass) — both sites use X-Forwarded-Proto as a telemetry/display label, not a trust sink; re-verify before reusing",
+  "raw-process-env": "renamed to 'raw-process-env-bootstrap' (2026-06-26 re-verify pass) — both sites read a bootstrap signal (TZ / log header) with no operator-supplied default needed; re-verify before reusing",
+  "timer-no-unref": "renamed to 'timer-no-unref-unrefed-below' (2026-06-26 re-verify pass) — both sites call .unref() immediately below, so the timer doesn't pin the event loop; re-verify before reusing",
+  "handrolled-buffer-collect": "renamed to 'handrolled-buffer-collect-bounded-framing' (2026-06-26 re-verify pass) — every site is a bounded protocol-framing / TLV-serialization assembly, not a collect-to-end stream; re-verify before reusing",
+  "process-exit": "renamed to 'process-exit-operator-optin' (2026-06-26 re-verify pass) — every site exits only on an explicit operator opt-in (exitAfterPhases / { exit: true } bin shim / watchdog); re-verify before reusing",
+  "raw-outbound-http": "renamed to 'raw-outbound-http-framework-internal' (2026-06-26 re-verify pass) — every site routes through b.httpClient / a framework wrapper, or is the documented DoH cycle exception; re-verify before reusing",
+  "math-random-noncrypto": "renamed to 'math-random-noncrypto-jitter-sampling' (2026-06-26 re-verify pass) — every site is jitter / sampling / backoff where predictability is not a threat; re-verify before reusing",
+  "raw-new-url": "renamed to 'raw-new-url-parse-only' (2026-06-26 re-verify pass) — every site parses for shape/origin inspection, is the safeUrl wrapper itself, or is re-validated downstream — none is an unguarded outbound-fetch target; re-verify before reusing",
+  "dynamic-require": "renamed to 'dynamic-require-operator-module' (2026-06-26 re-verify pass) — every site loads an operator-supplied path (migration / seed / extensibility entry, centralized in module-loader.js) or is diagnostic message text; re-verify before reusing",
+  "raw-hash-compare": "renamed to 'raw-hash-compare-nonsecret-tag' (2026-06-26 re-verify pass) — the one site compares a data-residency region tag with ===, not a secret hash; re-verify before reusing",
+  "seal-without-aad": "renamed to 'seal-without-aad-by-design' (2026-06-26 re-verify pass) — both sites intentionally seal without AAD (a non-regulated plain-mode table whose AAD is enforced by the posture sealEnvelopeFloor where required, and a throwaway vault-readiness probe sentinel); re-verify before reusing",
+  "bare-split-on-quoted-header": "renamed to 'bare-split-on-quoted-header-token-grammar' (2026-06-26 re-verify pass) — every live marker splits an RFC token-only header grammar with no quoted-string members (RRULE / RFC 9421 component-ids / TLS-RPT rua / SCIM attribute paths), so a bare comma/semicolon split is correct; re-verify the grammar before reusing. The re-verify also found 5 markers were inert (detector pre-filter skips their file, or the line is a .replace not a split) and cleared them",
+  "numeric-opt-Infinity": "renamed to 'numeric-opt-Infinity-intentional' (2026-06-27 re-verify pass) — only the markers where Infinity is genuinely SAFE remain: clamped to a max (agent-posture-chain maxHopCount), fail-closed (age-gate requireAge / consentRequired), or a deliberate unbounded intent (inbox retentionDays = retain indefinitely, ws-client reconnect maxAttempts = retry forever). The re-verify found 13 sites where Infinity SILENTLY DISABLED a cap or security check (clock-skew → expiry/OCSP-freshness/ARC-expiry; ws-client maxMessageBytes/maxFrameBytes/handshakeTimeoutMs; inbox/flag-cache/audit-chain caps; mail-arc-sign timestamp) — those now route through numeric-bounds (throw / safe-default on non-finite) and lost the marker. re-verify each remaining site before reusing",
+};
+
+function testNoRetiredAllowTokenReRegistered() {
+  // A retired token must never reappear as a VALID_ALLOW_CLASSES key — that would
+  // silently re-grant the old blessing under its original name, defeating the
+  // rename-to-re-verify forcing function. Pick a fresh distinct token instead.
+  var bad = [];
+  Object.keys(RETIRED_ALLOW_TOKENS).forEach(function (tok) {
+    if (Object.prototype.hasOwnProperty.call(VALID_ALLOW_CLASSES, tok)) {
+      bad.push({
+        file:    "test/layer-0-primitives/codebase-patterns.test.js",
+        line:    0,
+        content: "retired allow-token '" + tok + "' was re-registered in " +
+                 "VALID_ALLOW_CLASSES — " + RETIRED_ALLOW_TOKENS[tok],
+      });
+    }
+  });
+  _report("no retired allow-token is re-registered in VALID_ALLOW_CLASSES", bad);
+}
+
+function testNoRetiredTokenUsedAnywhere() {
+  // A retired token must appear NOWHERE in the repo — not as an `// allow:<token>`
+  // suppression marker AND not as a `_filterMarkers(..., "<token>")` detector arg.
+  // testNoOrphanAllowClass only covers lib + test/ markers; it misses (a) operator-
+  // shipped example app code under examples/*/lib, and (b) a DUPLICATED detector suite
+  // (examples/wiki/test/codebase-patterns.test.js) whose filter still references the
+  // old class. Renaming a class in one suite but leaving a copy on the old name keeps
+  // the retired approval silently reusable in that suite's CI path (Codex P2, PR #384).
+  // This scans the FULL source surface (lib + test + all examples, minus node_modules).
+  var retired = Object.keys(RETIRED_ALLOW_TOKENS);
+  if (retired.length === 0) { check("no retired allow-token used anywhere (none retired)", true); return; }
+  var alt = retired.map(function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|");
+  // The new name is always `<old>-<suffix>`, so a trailing `-`/word char means it is the
+  // NEW token (exempt); a non-identifier boundary means the bare retired token is in use.
+  var markerRe = new RegExp("\\ballow:(" + alt + ")(?![-\\w])");
+  var filterRe = new RegExp("_filterMarkers\\([^,]+,\\s*[\"'](" + alt + ")[\"']");
+  var examplesRoot = path.resolve(__dirname, "..", "..", "examples");
+  var seen = {};
+  var files = _libFiles().concat(_walk(TEST_ROOT)).concat(_walkAllSource(examplesRoot));
+  var bad = [];
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    // Skip THIS file: it holds RETIRED_ALLOW_TOKENS + the regexes that name retired tokens.
+    if (rel === "test/layer-0-primitives/codebase-patterns.test.js") continue;
+    if (seen[rel]) continue; seen[rel] = true;
+    if (/\/node_modules\//.test(rel) || /\/\.test-output\//.test(rel)) continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var m = markerRe.exec(lines[li]) || filterRe.exec(lines[li]);
+      if (m) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "retired allow-token '" + m[1] + "' still used here — " + RETIRED_ALLOW_TOKENS[m[1]],
+        });
+      }
+    }
+  }
+  _report("no retired allow-token is used as a marker or detector arg anywhere (lib + test + examples)", bad);
+}
 
 function testNoOrphanAllowClass() {
   // scanScope: lib + test (every shipped + test source).
@@ -366,11 +483,14 @@ function testNoOrphanAllowClass() {
       while ((m = re.exec(comment)) !== null) {
         var cls = m[1];
         if (!Object.prototype.hasOwnProperty.call(VALID_ALLOW_CLASSES, cls)) {
+          var isRetired = Object.prototype.hasOwnProperty.call(RETIRED_ALLOW_TOKENS, cls);
           bad.push({
             file:    rel,
             line:    li + 1,
-            content: "unregistered allow-class '" + cls + "' — names no detector " +
-                     "(fix the typo, or register it in VALID_ALLOW_CLASSES)",
+            content: isRetired
+              ? "retired allow-class '" + cls + "' — " + RETIRED_ALLOW_TOKENS[cls]
+              : "unregistered allow-class '" + cls + "' — names no detector " +
+                "(fix the typo, or register it in VALID_ALLOW_CLASSES)",
           });
         }
       }
@@ -578,13 +698,13 @@ function testNoRawTimeLiterals() {
 }
 
 function testNumericOptsValidate() {
-  // class: numeric-opt-Infinity
+  // class: numeric-opt-Infinity-intentional
   var matches = _scan(
     /typeof\s+opts\.\w+\s*===\s*"number"\s*&&\s*opts\.\w+\s*>=?\s*0\b/);
   // numeric-bounds itself contains the helper definitions that look
   // like the pattern.
   matches = matches.filter(function (m) { return m.file !== "lib/numeric-bounds.js"; });
-  matches = _filterMarkers(matches, "numeric-opt-Infinity");
+  matches = _filterMarkers(matches, "numeric-opt-Infinity-intentional");
   _report("numeric opts route through lib/numeric-bounds (or have an allow marker)",
     matches);
 }
@@ -632,36 +752,14 @@ function testNoUnresolvedMarkers() {
 // or an item on the gap backlog being worked down. The key is the file; the
 // value is a list of distinctive content substrings to permit. Remove an entry
 // when the comment is corrected or the gap is closed — that is the backlog.
-var STALE_DEFER_ALLOWLIST = {
-  // Deliberate defer-with-condition: needs an envelope-semantics decision
-  // (per-tenant KEM keypair vs symmetric); explicit escape hatch is passing
-  // { publicKey, ecPublicKey } directly. Tracked for design, not overdue work.
-  "lib/archive-wrap.js": [
-    // quote-free phrases (source has escaped \" so avoid quote chars here)
-    "deferred to v0.12.11",
-    "lands in v0.12.11",
-  ],
-  // Deliberate: Sieve extension refused per RFC 5228 §3.2 — script-declared
-  // capability gating, defer-with-condition (operator demand).
-  "lib/safe-sieve.js": ["not implemented in v0.9.55 — script refused"],
-  // Conditional on a future vendoring decision (no bundled EXIF/IPTC reader);
-  // operator-feeds-metadata escape hatch. Defer-with-condition.
-  "lib/ai-content-detect.js": ["IPTC PhotoMetadata reader lands in v0.10.9"],
-  // GAP BACKLOG (being worked down — these are real overdue items):
-  //   archive-read ZIP64 read (promised v0.12.8) — building. (The
-  //   fromTrustedStream defer was reworded to a version-free "not
-  //   implemented / re-opens when needed" in v0.13.15, so it no longer
-  //   needs an allowlist entry.)
-  "lib/archive-read.js": [
-    "not supported in v0.12.7. Will land",
-    "switch to tar — lands v0.12.8",
-    "carries ZIP64 sentinel sizes (not supported in v0.12.7)",
-  ],
-  "lib/safe-archive.js": [
-    "tar lands v0.12.8, gz v0.12.9",
-    "fromTrustedStream` is deferred to v0.12.8",
-  ],
-};
+// Empty: every prior entry's promised-landing comment has been reworded to a
+// version-free re-open-condition (the established shape — a deferred feature
+// states its escape hatch, not a version it "lands in"), so no source line
+// matches the PROMISE pattern below and nothing needs allowlisting. Re-add an
+// entry { "lib/<file>.js": ["<distinctive substring>"] } only for a deliberate
+// defer-with-condition whose comment unavoidably names a version; prefer
+// rewording the comment instead.
+var STALE_DEFER_ALLOWLIST = {};
 
 function testNoStaleDefers() {
   var path = require("node:path");
@@ -1078,6 +1176,9 @@ var CANONICAL_REQUIRE_BINDINGS = {
   // public namespace and doesn't shadow node:crypto.
   "./crypto":     "bCrypto",
   "../crypto":    "bCrypto",
+  // Internal ARC/DKIM reuse handshake token (a Symbol) — same constant-style
+  // name in mail-dkim (checker) and mail-auth (setter).
+  "./mail-arc-reuse-token": "ARC_AMS_REUSE",
 };
 
 // Node built-ins that the framework requires anywhere — used by the
@@ -1548,7 +1649,7 @@ function testNoDynamicRequires() {
   // interpolation is rare in require()). Skip require.resolve too —
   // distinct API.
   var matches = _scan(/\brequire\(\s*[^"'`)]/);
-  matches = _filterMarkers(matches, "dynamic-require");
+  matches = _filterMarkers(matches, "dynamic-require-operator-module");
   _report("require() argument must be a string literal " +
           "(or has dynamic-require allow marker)",
     matches);
@@ -1562,7 +1663,7 @@ function testNoMathRandomForSecurity() {
   // Math.random has legitimate uses (jitter, non-security IDs); those
   // get an allow marker.
   var matches = _scan(/\bMath\.random\(/);
-  matches = _filterMarkers(matches, "math-random-noncrypto");
+  matches = _filterMarkers(matches, "math-random-noncrypto-jitter-sampling");
   _report("Math.random() in lib/ has an explicit non-crypto allow marker",
     matches);
 }
@@ -1574,7 +1675,7 @@ function testNoRawHashCompare() {
   // with === are timing-attack-prone. Should use `crypto.timingSafeEqual`.
   var matches = _scan(
     /\b\w*(Hash|Token|Sig|Signature|Mac|Digest|Tag)\s*===\s*\w*(Hash|Token|Sig|Signature|Mac|Digest|Tag)/);
-  matches = _filterMarkers(matches, "raw-hash-compare");
+  matches = _filterMarkers(matches, "raw-hash-compare-nonsecret-tag");
   _report("hash/token/sig/mac/digest compared with timingSafeEqual " +
           "(or has allow marker for known-non-secret comparison)",
     matches);
@@ -1587,7 +1688,7 @@ function testRawNewURL() {
   // protocol allowlist + length cap + userinfo block apply. Internal
   // URL building (test fixtures, sigv4 canonical query) is fine.
   var matches = _scan(/\bnew URL\(/);
-  matches = _filterMarkers(matches, "raw-new-url");
+  matches = _filterMarkers(matches, "raw-new-url-parse-only");
   _report("new URL(...) routes through safeUrl.parse (or has allow marker)",
     matches);
 }
@@ -1595,17 +1696,18 @@ function testRawNewURL() {
 // ---- Pattern 14: silent JSON.parse() on operator-supplied data ----
 
 function testNoBareJsonParse() {
-  // `JSON.parse(operatorInput)` lacks the maxBytes / depth / proto
-  // pollution defenses that `safeJson.parse` adds. Internal JSON
-  // (vendor manifest, tests, internal state) is fine with bare parse.
+  // Inverse guard (NO allow path): every JSON parse in lib/ routes through
+  // `safeJson.parse` / `safeJson.parseStringOrObject`, which add the
+  // proto-pollution-key strip + depth / key / size caps a raw `JSON.parse`
+  // lacks. A raw `JSON.parse` re-creates a `"__proto__"` member as an own key
+  // and is unbounded — even "internal" callers (a sealed store payload, a
+  // sandbox worker's result, a canonical re-format) route through the primitive
+  // so the guarantee can't be bypassed one site at a time. safe-json.js IS the
+  // wrapper, so its own `JSON.parse` (the thing being wrapped) is the sole site.
   var matches = _scan(/\bJSON\.parse\(/);
-  // safe-json.js IS the safe wrapper; the bare JSON.parse call lives
-  // there by definition (it's what safe-json wraps with maxBytes /
-  // depth / proto-pollution defenses).
   matches = matches.filter(function (m) { return m.file !== "lib/safe-json.js"; });
-  matches = _filterMarkers(matches, "bare-json-parse");
-  _report("JSON.parse on operator input routes through safeJson.parse " +
-          "(or has allow marker)",
+  _report("JSON parse in lib/ routes through safeJson.parse / safeJson.parseStringOrObject " +
+          "(no raw JSON.parse — use the primitive; it carries the proto / depth / size defenses)",
     matches);
 }
 
@@ -1675,7 +1777,7 @@ function testFormatValidatorLengthCap() {
 
 function testNoProcessExitInLib() {
   var matches = _scan(/\bprocess\.exit\(/);
-  matches = _filterMarkers(matches, "process-exit");
+  matches = _filterMarkers(matches, "process-exit-operator-optin");
   _report("no process.exit() in lib/ (CLI surface only)", matches);
 }
 
@@ -1763,8 +1865,8 @@ function testNoSilentCatchSwallow() {
   // re-throw, log, or have an allow marker explaining why dropping
   // is correct (e.g., best-effort cleanup, audit-safe drops).
   var matches = _scan(/catch\s*\(\s*_\w*\s*\)\s*\{\s*\}/);
-  matches = _filterMarkers(matches, "silent-catch");
-  _report("empty catch(_e) {} blocks have an explicit silent-catch allow marker",
+  matches = _filterMarkers(matches, "silent-catch-stream-teardown");
+  _report("empty catch(_e) {} blocks have an explicit silent-catch-stream-teardown allow marker",
     matches);
 }
 
@@ -1783,6 +1885,616 @@ function testNoDynamicRegexFromOperatorInput() {
   _report("new RegExp(...) marked with dynamic-regex allow marker " +
           "(input source documented)",
     matches);
+}
+
+// ---- Pattern: operator RegExp instance matched against request input without a ReDoS screen ----
+//
+// A primitive that accepts an operator-supplied RegExp (`instanceof RegExp`
+// from opts) AND executes it (`.test` / `.exec` / `.match`) is a ReDoS surface
+// when the matched value is attacker-controllable (User-Agent, Origin, request
+// path, form field, SMTP HELO, remote asset name): an accidentally-catastrophic
+// operator pattern pins a CPU on a crafted input, and a length cap does not
+// bound backtracking. v0.15.38 / v0.15.39 swept the whole family — bot-guard,
+// cors, span-http-server, request-log, request-helpers, forms, static,
+// mail-helo, self-update (+ the string-compile siblings flag-targeting / mcp,
+// covered by the dynamic-regex detector) — and routed every operator pattern
+// through `b.guardRegex.assertSafe` at config time. A NEW such site must do the
+// same. This is the structural guard the operator-regex-ReDoS class (a Codex
+// finding) earns so it can't be reintroduced. The ALLOW map covers files whose
+// accepted RegExp is matched against a TRUSTED value, not attacker request data.
+function testOperatorRegexScreenedForReDoS() {
+  var ALLOW = {
+    "lib/dev.js": "ignore RegExp matched against an fs.watch filename in the operator's local source tree; dev-loop only, hard-refused under NODE_ENV=production",
+    "lib/parsers/safe-env.js": "keyShape RegExp matched against env-var keys parsed from the operator's .env config at boot, not request input",
+    "lib/safe-json.js": "JSON Schema `pattern` is part of the operator-owned schema (the documented trust boundary), not request data — same stance as the dynamic-regex detector's safe-json exclusion",
+  };
+  var files = _libFiles();
+  var bad = [];
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    if (ALLOW[rel]) continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    if (!/instanceof RegExp/.test(content)) continue;             // accepts an operator RegExp opt
+    if (!/\.(?:test|exec|match)\s*\(/.test(content)) continue;    // and executes a regex
+    if (/\bassertSafe\s*\(/.test(content)) continue;              // already ReDoS-screened
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (/instanceof RegExp/.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "accepts an operator-supplied RegExp + executes a regex but never calls b.guardRegex.assertSafe — screen the operator pattern for ReDoS at config time, or add the file to this detector's ALLOW map with a reason if the regex is matched against trusted (non-request) input",
+        });
+        break;
+      }
+    }
+  }
+  _report("a primitive accepting + executing an operator-supplied RegExp must ReDoS-screen it via b.guardRegex.assertSafe (or be allowlisted as matched-against-trusted-input)",
+    bad);
+}
+
+// ---- Pattern: process.moduleLoadList filter must match the "NativeModule X" naming ----
+//
+// An edge-runtime guard test inspects process.moduleLoadList to assert a
+// networking builtin did NOT eager-load. Node 20+ records a loaded builtin as
+// "NativeModule http" (Node <24 also used "node:http"); filtering ONLY the
+// `node:` form silently passes even after a top-level networking require is
+// reintroduced — the test rots green and the regression ships (Codex P2, PR
+// #381). Any test that filters moduleLoadList must also match "NativeModule ".
+function testModuleLoadListMatchesNativeModuleNaming() {
+  var files = _testFiles();
+  var bad = [];
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    if (!/moduleLoadList/.test(content)) continue;
+    if (/NativeModule/.test(content)) continue;            // matches the Node 20+ form
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (/moduleLoadList/.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "filters process.moduleLoadList without matching the 'NativeModule X' naming (Node 20+) — a `node:`-only filter rots green when a top-level builtin require is reintroduced; match `NativeModule ` too",
+        });
+        break;
+      }
+    }
+  }
+  _report("a test filtering process.moduleLoadList must match the 'NativeModule X' naming (Node 20+), not only 'node:X'",
+    bad);
+}
+
+// (No structural detector for the PR #370 sync-run().catch class: a sync
+// `function run()` that RETURNS a promise chain is the common, correct pattern,
+// so `run().then/.catch` cannot be distinguished lexically from the bug shape
+// — sync run() returning UNDEFINED. That case is behavioral, guarded by the
+// inline fix + the test-detached-async-iife / test-unguarded-module-level-run
+// detectors for adjacent shapes.)
+
+// ---- Pattern: a competing-consumer claim must use FOR UPDATE SKIP LOCKED ----
+//
+// A poller that claims due rows across concurrent workers — SELECT
+// status='pending' inside a transaction, then flip the rows to
+// 'in-flight'/'inflight' — MUST hold a row lock via FOR UPDATE SKIP LOCKED on
+// the row-locking backends (Postgres / MySQL). Without it, two pollers under
+// READ COMMITTED both SELECT the same pending row; the loser's gated UPDATE
+// matches zero rows, but a reselect-by-id re-reads the row the WINNER just
+// flipped to in-flight and hands it back — so both workers process the same row
+// in one cycle. sqlite's single writer is safe via the mark-then-reselect
+// fallback, but that fallback ALONE (no skipLocked branch) is the bug.
+// b.outbox._claimBatch and b.queue-local are the canonical correct claims; the
+// webhook dispatcher's processRetries shipped without the skipLocked branch and
+// double-claimed under Postgres / MySQL (fixed this release). This guards every
+// future poller from re-introducing the no-SKIP-LOCKED shape.
+function testCompetingConsumerClaimUsesSkipLocked() {
+  var bad = [];
+  var files = _libFiles();
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); }
+    catch (_e) { continue; }
+    // The claim shape: marks rows to in-flight/inflight via a builder .set AND
+    // selects rows by status='pending' (the competing-consumer claim idiom).
+    var marksInflight = /\.set\(\s*\{[^{}]*status:\s*["']in-?flight["']/.test(content)
+      || /\.set\(\s*["']status["']\s*,\s*["']in-?flight["']/.test(content);
+    if (!marksInflight) continue;
+    var selectsPending = /status\s*=\s*'pending'/.test(content)
+      || /\.where\(\s*["']status["']\s*,\s*["']pending["']/.test(content);
+    if (!selectsPending) continue;
+    if (/skipLocked|SKIP LOCKED/.test(content)) continue;     // competing-consumer safe
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (/status:\s*["']in-?flight["']|["']status["']\s*,\s*["']in-?flight["']/.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "a competing-consumer claim (SELECT status='pending' then flip to in-flight) must use FOR UPDATE SKIP LOCKED on the row-locking backends (Postgres / MySQL) so concurrent pollers see disjoint sets — mirror b.outbox._claimBatch; a mark-then-reselect with no skipLocked branch double-claims under READ COMMITTED",
+        });
+        break;
+      }
+    }
+  }
+  _report("every competing-consumer claim (pending->in-flight poller) must use FOR UPDATE SKIP LOCKED (mirror b.outbox._claimBatch)",
+    bad);
+}
+
+// ---- Pattern: a cache-backed counter must use atomic cache.update ----
+//
+// Accumulating on a cache with `await cache.get(K)` → mutate/increment →
+// `await cache.set(K, ...)` is a non-atomic read-modify-write: two concurrent
+// writers read the same value and one set clobbers the other (lost update),
+// under-counting on a shared / cluster cache and letting a quota / rate /
+// bandwidth / concurrency cap be bypassed. b.cache.update is the atomic
+// compare-and-set RMW. The byte-quota and static bandwidth/concurrency
+// lost-updates (fixed this release) were this shape. Allowlisted: a cache used
+// for lookups or cache-aside (the stored value is recomputed or replaced
+// wholesale, never incremented) or whose writes are serialized another way (an
+// in-process per-key chain) — none of which can lose an increment.
+function testCacheCounterUsesAtomicUpdate() {
+  var ALLOW = {
+    "lib/network-dns-resolver.js": "a DNS lookup cache (cache-aside): get a cached resolution, set the freshly-resolved entry — the stored value is replaced wholesale, never incremented, so there is no lost-update counter",
+    "lib/tenant-quota.js": "a cache-aside for bytesUsed (recomputed by walking the tenant's tables, then cached) — the value is replaced from source, not incremented; the QPS/rows budget counter is an in-process Map, not the cache",
+  };
+  var bad = [];
+  var files = _libFiles();
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    if (ALLOW[rel]) continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (!/\bcache\.get\s*\(/.test(content)) continue;
+    if (!/\bcache\.set\s*\(/.test(content)) continue;
+    if (/\bcache\.update\s*\(/.test(content)) continue;     // already atomic
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (/\bcache\.set\s*\(/.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "a cache-backed counter must use atomic cache.update, not a cache.get -> mutate -> cache.set read-modify-write (loses concurrent updates on a shared cache) — use cache.update, or allowlist this file with the reason its get/set is not a lost-update counter (lookup / cache-aside, or in-process-serialized)",
+        });
+        break;
+      }
+    }
+  }
+  _report("a cache-backed counter must use the atomic cache.update, not a get->set read-modify-write", bad);
+}
+
+// ---- Pattern: a registry check-then-create must serialize per key ----
+//
+// An async check-then-create on a pluggable backend — `await backend.get(key)`
+// -> throw a `/duplicate` error if present -> `await backend.set(key, ...)` —
+// has an await between the read and the write, so two concurrent calls for one
+// key both observe absence and both write (duplicate-create / lost-registration).
+// It must be serialized per key (b.safeAsync.keyedSerializer, exposed on ctx as
+// registrySerializer) so the second call sees the first's row and is refused.
+// The agent orchestrator + tenant registries were this shape (fixed this release).
+function testRegistryCheckThenCreateSerialized() {
+  var bad = [];
+  var files = _libFiles();
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (!/\/duplicate["']/.test(content)) continue;             // throws a duplicate error
+    if (!/backend\.get\s*\(/.test(content)) continue;           // the check
+    if (!/backend\.set\s*\(/.test(content)) continue;           // the create
+    if (/keyedSerializer|registrySerializer/.test(content)) continue;  // serialized per key
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (/\/duplicate["']/.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "a check-then-create on a pluggable backend (await backend.get -> throw /duplicate -> await backend.set) must be serialized per key (b.safeAsync.keyedSerializer / ctx.registrySerializer) so two concurrent calls for one key can't both create",
+        });
+        break;
+      }
+    }
+  }
+  _report("a registry check-then-create on a pluggable backend must serialize per key (b.safeAsync.keyedSerializer)", bad);
+}
+
+// ---- Pattern: a cert-chain issuance link must use issuerValidlyIssued ----
+//
+// A multi-hop X.509 chain walker must test each ISSUANCE link with
+// x509Chain.issuerValidlyIssued (which enforces basicConstraints cA:TRUE),
+// NOT a bare X509Certificate.checkIssued(): node's checkIssued does not enforce
+// the CA bit, so a non-CA / end-entity cert (cA:FALSE) spliced in as an
+// intermediate is wrongly accepted as an issuer — the classic basicConstraints
+// bypass (CVE-2002-0862 class). fido-mds3 was the sole outlier (fixed this
+// release); mdoc / tsa / bimi / content-credentials / smime all route through
+// issuerValidlyIssued. A self-signed-root check (cert.checkIssued(cert) — same
+// receiver and argument) is NOT an issuance hop and is fine. lib/x509-chain.js
+// owns the one legitimate checkIssued (inside issuerValidlyIssued).
+function testCertChainIssuanceUsesIssuerValidlyIssued() {
+  var bad = [];
+  var files = _libFiles();
+  var RE = /([\w$.[\]]+)\.checkIssued\s*\(\s*([\w$.[\]\s+]+?)\s*\)/;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    if (rel === "lib/x509-chain.js") continue;   // the canonical home (inside issuerValidlyIssued)
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (content.indexOf(".checkIssued(") === -1) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var t = lines[li].trim();
+      if (t.indexOf("//") === 0 || t.indexOf("*") === 0) continue;   // comment line
+      var m = RE.exec(lines[li]);
+      if (!m) continue;
+      if (m[1].replace(/\s+/g, "") === m[2].replace(/\s+/g, "")) continue;  // self-signed check, not an issuance hop
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "a cert-chain issuance link uses bare X509Certificate.checkIssued() (no basicConstraints cA:TRUE enforcement) — route it through x509Chain.issuerValidlyIssued(issuer, subject), like mdoc / tsa / bimi / content-credentials, so a non-CA intermediate is refused (basicConstraints bypass, CVE-2002-0862)",
+      });
+    }
+  }
+  _report("a cert-chain issuance link must use x509Chain.issuerValidlyIssued (cA-enforcing), not bare checkIssued", bad);
+}
+
+// ---- Pattern: domainToASCII must reject URL delimiters before a host compare ----
+// node:url.domainToASCII silently TRUNCATES at "/" "?" "#" "\" — e.g.
+// domainToASCII("victim.example/evil") === "victim.example" — so a host carrying
+// a delimiter canonicalizes to a trusted PREFIX. A canonicalizer that feeds the
+// raw result into an identity / authorization comparison lets a hostile host
+// masquerade as a trusted one (the BIMI/VMC SubjectAltName bypass class, and a
+// DMARC-alignment spoof). The two guarded homes — public-suffix._normalizeInput
+// and mail.toAscii — reject those delimiters BEFORE calling domainToASCII; every
+// other consumer must route through publicSuffix.canonicalDomain (delimiter-safe,
+// fails closed to "").
+function testDomainToAsciiRejectsUrlDelimiters() {
+  var bad = [];
+  var files = _libFiles();
+  var RE = /\bdomainToASCII\s*\(/;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    // The two homes that reject "/" "?" "#" "\" before calling domainToASCII.
+    if (rel === "lib/public-suffix.js" || rel === "lib/mail.js") continue;
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (content.indexOf("domainToASCII(") === -1) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var t = lines[li].trim();
+      if (t.indexOf("//") === 0 || t.indexOf("*") === 0) continue;   // comment line
+      if (RE.test(lines[li])) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "raw node:url.domainToASCII() used for host normalization — it silently TRUNCATES at a URL delimiter (\"/\" \"?\" \"#\"), reducing a hostile host to a trusted prefix (the BIMI/VMC SAN bypass + DMARC-alignment spoof class). Route the host through publicSuffix.canonicalDomain, which rejects delimiters and fails closed.",
+        });
+      }
+    }
+  }
+  _report("a host canonicalizer must route domainToASCII through publicSuffix.canonicalDomain (delimiter-safe), not call it raw", bad);
+}
+
+// ---- Pattern: URLSearchParams("..."+x) must escape "&" in the concatenated x ----
+// new URLSearchParams(str) parses str as a query and splits pairs on "&". A
+// caller value concatenated into that string (e.g. new URLSearchParams("k=" +
+// token)) is split + truncated at any literal "&" the value carries — silently
+// dropping everything after it (the httpSig @query-param decoded-name bug). The
+// value must be "&"-escaped (.replace(/&/g, "%26")) before concatenation.
+function testUrlSearchParamsConcatEscapesAmpersand() {
+  var bad = [];
+  var files = _libFiles();
+  var RE = /new\s+URLSearchParams\s*\(\s*["'][^"']*["']\s*\+/;   // string-literal + concat into the query
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (content.indexOf("URLSearchParams") === -1) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li];
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+      if (!RE.test(line)) continue;
+      // Safe iff the concatenated value is "&"-escaped on the same expression.
+      if (/replace\s*\(\s*\/&\//.test(line) || line.indexOf("%26") !== -1) continue;
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "new URLSearchParams() built by concatenating a value into the query string — it splits on a literal \"&\" in that value, silently truncating it (the httpSig @query-param bug). Escape the value with .replace(/&/g, \"%26\") before concatenation.",
+      });
+    }
+  }
+  _report("a URLSearchParams query built by string concatenation must escape \"&\" in the concatenated value", bad);
+}
+
+// ---- Pattern: email-domain via split("@")[1] must reject a multi-@ addr-spec ----
+// An RFC 5322 addr-spec has exactly one "@". str.split("@")[1] pulls the
+// LEFTMOST segment, so on a multi-@ string (x@attacker@victim) it derives
+// attacker's domain — while a rightmost-@ parser (lastIndexOf) derives victim.
+// When one site authorizes/routes on the leftmost domain and another gates on
+// the rightmost, DMARC/SPF authorizes a domain the attacker controls while the
+// displayed From is the victim's (CWE-290), or outbound delivery routes to an
+// unintended host. Every leftmost-@ domain pull must first reject a multi-@
+// address (str.indexOf("@") !== str.lastIndexOf("@")) within its function; a
+// purely informational, non-routing use is marked inline.
+function testEmailDomainDerivationGuardsMultiAt() {
+  var bad = [];
+  var files = _libFiles();
+  var SPLIT_RE = /\.split\(\s*["']@["']\s*\)\s*\[\s*1\s*\]/;     // leftmost-@ domain pull
+  var GUARD_RE = /lastIndexOf\(\s*["']@["']\s*\)/;               // single-@ rejection anchor
+  var FN_RE    = /^\s*(?:async\s+)?function\b/;                  // function-head boundary
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (content.indexOf('split("@")') === -1 && content.indexOf("split('@')") === -1) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li];
+      if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) continue;            // comment line
+      if (!SPLIT_RE.test(line)) continue;
+      // Safe iff a single-@ rejection (lastIndexOf "@") appears on this line or
+      // anywhere above it within the same function body.
+      var guarded = GUARD_RE.test(line);
+      for (var w = li - 1; w >= 0 && !guarded && w >= li - 200; w--) {
+        if (GUARD_RE.test(lines[w])) { guarded = true; break; }
+        if (FN_RE.test(lines[w])) break;                         // hit the function head, no guard
+      }
+      if (!guarded) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "email-domain derived via str.split(\"@\")[1] (the LEFTMOST segment). On a multi-@ addr-spec (x@attacker@victim) this authorizes/routes to attacker's domain while a rightmost-@ parser reads victim — the DMARC/SPF-alignment + delivery-routing bypass class (CWE-290). Reject a multi-@ address first (str.indexOf(\"@\") !== str.lastIndexOf(\"@\")), or mark an informational non-routing use with // allow:leftmost-domain-informational.",
+        });
+      }
+    }
+  }
+  bad = _filterMarkers(bad, "leftmost-domain-informational");
+  _report("an email-domain derivation via split(\"@\")[1] must first reject a multi-@ addr-spec (single-@ guard)", bad);
+}
+
+// ---- Pattern: fileUpload lifecycle methods enforce per-upload ownership ----
+// A fileUpload lifecycle method that loads an upload by a request-supplied
+// uploadId (_readMeta(uploadId)) and then acts on it MUST call _checkOwnership
+// before mutating/returning, or a caller can act on another actor's upload by
+// guessing its uploadId (IDOR / CWE-639). A behavioral test covers the four
+// current methods; this detector keeps a NEW lifecycle method from silently
+// reintroducing the gap (the internal enumerate/cleanup sweeps read
+// _readMeta(e.name), not uploadId, so they are not matched).
+function testFileUploadLifecycleChecksOwnership() {
+  var bad = [];
+  var rel = "lib/file-upload.js";
+  var content;
+  try {
+    content = fs.readFileSync(path.resolve(path.resolve(__dirname, "..", ".."), rel), "utf8");
+  } catch (_e) { _report("fileUpload lifecycle methods enforce per-upload ownership", bad); return; }
+  var lines = content.split(/\r?\n/);
+  for (var li = 0; li < lines.length; li++) {
+    // The CALL shape (`= _readMeta(uploadId)`), not the `function _readMeta(...)`
+    // definition.
+    if (!/=\s*_readMeta\(uploadId\)/.test(lines[li])) continue;
+    // _checkOwnership must appear after the read, within the same method body
+    // (a method-closing brace at 2-space indent ends the scan).
+    var guarded = false;
+    for (var w = li + 1; w < lines.length && w <= li + 30; w++) {
+      if (/^ {2}\}/.test(lines[w])) break;                       // method-closing brace
+      if (/_checkOwnership\(/.test(lines[w])) { guarded = true; break; }
+    }
+    if (!guarded) {
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "a fileUpload lifecycle method loads an upload by request-supplied uploadId (_readMeta(uploadId)) but does not call _checkOwnership before acting — a caller could act on another actor's upload by guessing its uploadId (IDOR / CWE-639).",
+      });
+    }
+  }
+  _report("every fileUpload lifecycle method reading _readMeta(uploadId) must call _checkOwnership before acting (IDOR guard)", bad);
+}
+
+// ---- Pattern: scope/role wildcard matching must use b.permissions.match ----
+// The hand-rolled wildcard idiom — detect a trailing "*" (charAt(len-1)==="*"),
+// strip it (slice(0,-1)), then raw-prefix-match (indexOf(prefix)===0) — ignores
+// ":" segment boundaries, so a partial-segment scope "phi:a*" wrongly satisfies
+// "phi:admin". Scope/role wildcard matching must route through the segment-aware
+// b.permissions.match (break-glass + dual-control hand-rolled it independently).
+function testScopeWildcardUsesPermissionsMatch() {
+  var bad = [];
+  var files = _libFiles();
+  var STAR = /charAt\([^)]*\.length\s*-\s*1\)\s*===\s*"\*"/;
+  var SLICE = /\.slice\(\s*0\s*,\s*-\s*1\s*\)/;
+  var PREFIX = /\.indexOf\([^)]*\)\s*===\s*0/;
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (!STAR.test(content)) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      if (!STAR.test(lines[li])) continue;
+      // The full hand-rolled-wildcard signature is the trailing-"*" check plus a
+      // slice(0,-1) strip plus a raw indexOf(...)===0 prefix match, all within
+      // the same small block (a trailing-"*" check alone — e.g. URI-template
+      // explode, array-key parsing — is not a scope match).
+      var hasSlice = false, hasPrefix = false;
+      for (var w = li; w < lines.length && w <= li + 12; w++) {
+        if (SLICE.test(lines[w])) hasSlice = true;
+        if (PREFIX.test(lines[w])) hasPrefix = true;
+      }
+      if (hasSlice && hasPrefix) {
+        bad.push({
+          file:    rel,
+          line:    li + 1,
+          content: "hand-rolled scope/role wildcard match (trailing-\"*\" + slice(0,-1) + indexOf(prefix)===0) ignores \":\" segment boundaries, so a partial-segment scope wrongly satisfies a different value — route through the segment-aware b.permissions.match.",
+        });
+      }
+    }
+  }
+  _report("scope/role wildcard matching must use the segment-aware b.permissions.match, not a hand-rolled prefix match", bad);
+}
+
+// ---- Pattern: queue-redis inflight-transition LUA result must be captured ----
+// COMPLETE_LUA / FAIL_LUA atomically ZREM a job from the inflight set and
+// return whether THIS call won that transition (1 = won, 0/-1 = stale). The
+// caller MUST capture that result and gate its side effects on it: a stale
+// worker whose lease expired (the job swept back to ready and re-leased /
+// completed by another worker) must NOT run complete()'s cron re-enqueue +
+// flow release, nor fail()'s retry/dlq re-queue — doing so double-fires a cron
+// repeat or resurrects an already-finished job. A bare
+// `await client.runScript(COMPLETE_LUA, …)` (result discarded) is the bug
+// shape; it must be `var x = await client.runScript(COMPLETE_LUA, …)` + a
+// gate. The SQL backends carry the equivalent `WHERE status='inflight'` guard;
+// this keeps the redis backend from diverging.
+function testQueueRedisGateLuaResultCaptured() {
+  var bad = [];
+  var rel = "lib/queue-redis.js";
+  var content;
+  try {
+    content = fs.readFileSync(path.resolve(path.resolve(__dirname, "..", ".."), rel), "utf8");
+  } catch (_e) { _report("queue-redis gate-LUA results captured + gated", bad); return; }
+  var lines = content.split(/\r?\n/);
+  for (var li = 0; li < lines.length; li++) {
+    if (!/client\.runScript\(/.test(lines[li])) continue;
+    // The first ARGUMENT identifies the script. It may sit on the call line or
+    // the next few lines (the call is multi-line).
+    var gate = null;
+    for (var w = li; w < lines.length && w <= li + 3; w++) {
+      var m = lines[w].match(/(?:runScript\(\s*)?\b(COMPLETE_LUA|FAIL_LUA)\b/);
+      if (m && (w === li ? /runScript\(\s*(COMPLETE_LUA|FAIL_LUA)\b/.test(lines[w]) : /^\s*(COMPLETE_LUA|FAIL_LUA)\b/.test(lines[w]))) {
+        gate = m[1]; break;
+      }
+    }
+    if (!gate) continue;
+    // The call line MUST assign the result (so a guard can read it). A bare
+    // `await client.runScript(...)` statement discards the gate.
+    if (!/=\s*await\s+client\.runScript\(/.test(lines[li]) &&
+        !/=\s*client\.runScript\(/.test(lines[li])) {
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "the result of client.runScript(" + gate + ") is discarded — it must be captured into a variable and gated (a stale worker must not run the post-transition side effects: double cron-fire / resurrected job).",
+      });
+    }
+  }
+  _report("queue-redis complete()/fail() must capture + gate the inflight-transition LUA result (COMPLETE_LUA / FAIL_LUA)", bad);
+}
+
+// ---- Pattern: ARC instance (i=) parsing must route through _arcInstanceOf ----
+// The ARC instance tag is parsed in several passes: the indexing pass that
+// drives the AMS/AS crypto checks, the AMS h= retention test, and the finalAr
+// surfacing in arcEvaluate. If any pass uses a looser i= regex than the
+// indexer (allowing "i = 1" with a space, or unbounded digits), an attacker
+// can inject an ARC-Authentication-Results that the strict crypto pass ignores
+// while the loose pass consumes it — forging the upstream auth-results
+// (finalAr) on a chain that still verifies pass, with no signing key. Every
+// instance read must go through the one shared _arcInstanceOf reader; flag any
+// instance-capturing regex (`i\s*=...(\d` or `i=(\d`) elsewhere in mail-auth.
+function testArcInstanceParseUsesSharedHelper() {
+  var bad = [];
+  var rel = "lib/mail-auth.js";
+  var content;
+  try {
+    content = fs.readFileSync(path.resolve(path.resolve(__dirname, "..", ".."), rel), "utf8");
+  } catch (_e) { _report("ARC i= instance parse routes through _arcInstanceOf", bad); return; }
+  var lines = content.split(/\r?\n/);
+  // Matches an instance-capturing regex literal: `i\s*=` (spaced form) or
+  // `i=(\d` (bare capture). Prose like "i=1" / "(i=)" lacks the digit capture
+  // and the `\s*`, so comments are not flagged.
+  var ARC_I_REGEX = /i\\s\*=|i=\(\\d/;
+  var inHelper = false;
+  for (var li = 0; li < lines.length; li++) {
+    if (/function _arcInstanceOf\b/.test(lines[li])) { inHelper = true; continue; }
+    if (inHelper) { if (/^\}/.test(lines[li])) inHelper = false; continue; }
+    if (ARC_I_REGEX.test(lines[li])) {
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "an ARC instance (i=) parsing regex outside _arcInstanceOf — route it through _arcInstanceOf so the crypto-indexing pass and the finalAr / AMS passes parse the instance identically (a divergent parser forges finalAr on a passing chain).",
+      });
+    }
+  }
+  _report("ARC i= instance parsing must route through the shared _arcInstanceOf reader (no divergent regex)", bad);
+}
+
+// ---- Pattern: OID4VCI single-use store claims must gate on the delete ----
+// A pre-authorized code (codeStore) and a single-use access token (atStore)
+// are single-use: issuance must proceed only when THIS request's atomic delete
+// removed the entry. cache.del returns true only for the winner of two racing
+// deletes, so the return must be captured and checked — a bare
+// `await codeStore.del(...)` / `await atStore.del(...)` discards it, letting two
+// concurrent requests both mint (two access tokens from one code / two
+// credentials from one single-use token). cNonceStore.del is cleanup, not a
+// claim, so it is allowed to be bare.
+function testOid4vciSingleUseClaimGated() {
+  var bad = [];
+  var rel = "lib/auth/oid4vci.js";
+  var content;
+  try {
+    content = fs.readFileSync(path.resolve(path.resolve(__dirname, "..", ".."), rel), "utf8");
+  } catch (_e) { _report("OID4VCI single-use store claims gate on the delete", bad); return; }
+  var lines = content.split(/\r?\n/);
+  for (var li = 0; li < lines.length; li++) {
+    var m = lines[li].match(/\bawait\s+(codeStore|atStore)\.del\(/);
+    if (!m) continue;
+    // Must be captured into a variable (`var x = await codeStore.del(...)`),
+    // never a bare expression statement.
+    if (!/=\s*await\s+(codeStore|atStore)\.del\(/.test(lines[li])) {
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "the result of await " + m[1] + ".del(...) is discarded — a single-use claim must capture the delete result and issue only when it removed the entry (two concurrent requests would otherwise both mint).",
+      });
+    }
+  }
+  _report("OID4VCI single-use claims (codeStore/atStore .del) must capture + gate the delete result", bad);
+}
+
+// ---- Pattern: clock-skew / tolerance opts must be finite-guarded ----
+// A token/signature verifier that reads a skew or tolerance opt with a bare
+// `typeof opts.x === "number"` lets Infinity / NaN through, and the resulting
+// `exp + Infinity < now` / `ageMs > Infinity` comparison is always false —
+// silently DISABLING the expiry / not-before / future-dating gate so an expired
+// (or future-dated, or replayed) token or signature verifies. Every such opt
+// must be finite-guarded: a numericBounds.requireNonNegativeFiniteIntIfPresent
+// throw (jwt verifiers), an inline `isFinite(...) && >= 0` fallback (verdict-
+// returning verifiers), or a create-time `validateOpts` "optional-non-negative"
+// schema. This is the OCSP non-finite-clockSkew bug class generalized across
+// the JWT / SD-JWT-VC / OAuth / HTTP-message-signature verifiers.
+function testClockSkewOptsAreFiniteGuarded() {
+  var bad = [];
+  var SKEW = "clockSkewMs|clockSkewSec|maxClockSkewSec|maxPopAgeSec|toleranceMs";
+  var READ = new RegExp("typeof\\s+\\w+\\.(" + SKEW + ")\\s*===\\s*\"number\"");
+  var files = _libFiles();
+  for (var fi = 0; fi < files.length; fi++) {
+    var rel = _relPath(files[fi]);
+    var content;
+    try { content = fs.readFileSync(files[fi], "utf8"); } catch (_e) { continue; }
+    if (!READ.test(content)) continue;
+    var lines = content.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var m = lines[li].match(READ);
+      if (!m) continue;
+      var opt = m[1];
+      // (a) inline isFinite on the read line itself.
+      if (/isFinite/.test(lines[li])) continue;
+      // (b) a numericBounds / isFinite guard for the same opt in the preceding lines.
+      var guardRe = new RegExp("(requireNonNegativeFiniteIntIfPresent|isFinite)\\([^)]*\\b" + opt + "\\b");
+      var guarded = false;
+      for (var w = Math.max(0, li - 10); w < li; w++) {
+        if (guardRe.test(lines[w])) { guarded = true; break; }
+      }
+      if (guarded) continue;
+      // (c) the opt is validated at create() via a non-negative-finite validateOpts schema.
+      if (new RegExp("\\b" + opt + "\\b\\s*:\\s*\"optional-non-negative").test(content)) continue;
+      bad.push({
+        file:    rel,
+        line:    li + 1,
+        content: "clock-skew/tolerance opt '" + opt + "' is read with a bare `typeof === \"number\"` and is not finite-guarded — Infinity/NaN would disable the time-window gate (an expired/future/replayed token or signature would verify). Guard it (numericBounds.requireNonNegativeFiniteIntIfPresent, an inline isFinite check, or a create-time validateOpts non-negative-finite schema).",
+      });
+    }
+  }
+  _report("clock-skew / tolerance verifier opts must be finite-guarded (no bare typeof===\"number\")", bad);
 }
 
 // ---- Pattern 20: trustProxy bypass — raw req.headers x-forwarded-for read ----
@@ -1822,7 +2534,7 @@ function testNoRawForwardedProtoHostRead() {
   var matches = _scan(/req\.headers\s*\[\s*["']x-forwarded-(?:proto|host)["']\s*\]/i);
   // request-helpers.js IS the canonical reader (the primitive home).
   matches = matches.filter(function (m) { return m.file !== "lib/request-helpers.js"; });
-  matches = _filterMarkers(matches, "raw-xfp");
+  matches = _filterMarkers(matches, "raw-xfp-telemetry-only");
   _report("req.headers['x-forwarded-proto'|'x-forwarded-host'] routes through requestHelpers.trustedProtocol/trustedHost",
     matches);
 }
@@ -1858,7 +2570,7 @@ function testNoRawProcessEnv() {
     return m.file !== "lib/safe-env.js" &&
            m.file !== "lib/parsers/safe-env.js";
   });
-  matches = _filterMarkers(matches, "raw-process-env");
+  matches = _filterMarkers(matches, "raw-process-env-bootstrap");
   _report("process.env reads route through safeEnv.readVar (or have allow marker)",
     matches);
 }
@@ -1876,7 +2588,7 @@ function testNoRawTimingSafeEqual() {
   var matches = _scan(/\bnodeCrypto\.timingSafeEqual\(/);
   // The framework crypto module is the canonical wrapper.
   matches = matches.filter(function (m) { return m.file !== "lib/crypto.js"; });
-  matches = _filterMarkers(matches, "raw-timing-safe-equal");
+  matches = _filterMarkers(matches, "raw-timing-safe-equal-boot-prechecked");
   _report("crypto.timingSafeEqual routes through b.crypto.timingSafeEqual " +
           "(length-tolerant wrapper)",
     matches);
@@ -1992,7 +2704,7 @@ function testTimersUnref() {
       });
     }
   }
-  bad = _filterMarkers(bad, "timer-no-unref");
+  bad = _filterMarkers(bad, "timer-no-unref-unrefed-below");
   _report("setInterval timers call .unref() (or have allow marker for " +
           "process-pinning intent)",
     bad);
@@ -2009,7 +2721,7 @@ function testNoRawRandomBytesToken() {
   var matches = _scan(/\b(nodeCrypto|crypto)\.randomBytes\([^)]+\)\s*\.\s*toString\s*\(/);
   // crypto.js itself wraps these.
   matches = matches.filter(function (m) { return m.file !== "lib/crypto.js"; });
-  matches = _filterMarkers(matches, "raw-randombytes-token");
+  matches = _filterMarkers(matches, "raw-randombytes-token-mime-boundary");
   _report("nodeCrypto.randomBytes(n).toString routes through " +
           "b.crypto.generateToken / generateBytes (or has allow marker)",
     matches);
@@ -2049,7 +2761,7 @@ function testNoRawOutboundHttp() {
     "lib/testing.js":      true,
   };
   matches = matches.filter(function (m) { return !exemptFiles[m.file]; });
-  matches = _filterMarkers(matches, "raw-outbound-http");
+  matches = _filterMarkers(matches, "raw-outbound-http-framework-internal");
   _report("http(s).request / fetch route through b.httpClient (or have allow marker)",
     matches);
 }
@@ -2197,7 +2909,7 @@ function testNoHandrolledBufferCollect() {
       }
     }
   }
-  bad = _filterMarkers(bad, "handrolled-buffer-collect");
+  bad = _filterMarkers(bad, "handrolled-buffer-collect-bounded-framing");
   _report("hand-rolled chunks-array buffer collect → use " +
           "safeBuffer.boundedChunkCollector (cap-bounded)",
     bad);
@@ -2237,7 +2949,7 @@ function testNoHandrolledDebounce() {
       }
     }
   }
-  bad = _filterMarkers(bad, "handrolled-debounce");
+  bad = _filterMarkers(bad, "handrolled-debounce-stream-idle");
   _report("hand-rolled clearTimeout/setTimeout debounce → use " +
           "safeAsync.debounce (timer lifecycle owned)",
     bad);
@@ -2783,6 +3495,26 @@ async function testNoDuplicateCodeBlocks() {
   // shape.
   var KNOWN_CLUSTERS = [
     {
+      // Opts-passthrough / allow-list token run — shape-only. A run of
+      // `<ident>: <ident>.<ident>,` assignments (jar.parse forwarding its
+      // verify options to verifyExternal) and the parallel `validateOpts(opts,
+      // [ ...string keys ])` allow-list tokenize to the same skeleton as
+      // db.init's per-table `cryptoField.registerTable` metadata object,
+      // eat.verify's option forwarding, and the cookie-jar's getAll loop. The
+      // functions are wholly unrelated (OAuth request-object parsing vs schema
+      // registration vs EAT verification vs cookie enumeration); the longest
+      // byte-identical run across any pair is a single `key: value,` line. There
+      // is no shared primitive to extract — the coincidence is the generic
+      // object-literal / key-array shape, not behavior.
+      mode:  "family-subset",
+      files: [
+        "lib/auth/jar.js:parse",
+        "lib/db.js:init",
+        "lib/eat.js:verify",
+        "lib/http-client-cookie-jar.js:getAll",
+      ],
+    },
+    {
       // Delimited key/value split idiom — shape-only. The "split a string on a
       // separator, slice each piece at the first `=` into key + value" loop
       // recurs across unrelated parsers whose bodies diverge entirely: jmap's
@@ -2835,13 +3567,29 @@ async function testNoDuplicateCodeBlocks() {
       // The prior JOSE pass (jwtExternal.algParams) deliberately kept the
       // verify-assembly per-caller (PQC/EdDSA/sign-vs-verify diverge); the one
       // genuine within-SAML signature-EXTRACTION pair is consolidated in
-      // saml._extractRedirectSignature.
+      // saml._extractRedirectSignature. The family spans every JWS/signature
+      // verifier (dpop proof, fido-mds3 metadata JWS, jwt-external compact JWS,
+      // oauth id-token / attestation / backchannel-logout, oid4vci proof,
+      // mail-auth inbound, SAML SLO POST/SOAP + redirect) — each with its own
+      // key shape, error class, and canonical-byte rules; only the tokenized
+      // verify-skeleton coincides. Membership tracked from the MIGRATE-DUMP.
       mode:  "family-subset",
       files: [
+        "lib/auth/dpop.js:buildProof",
+        "lib/auth/dpop.js:verify",
         "lib/auth/fido-mds3.js:_verifyJws",
         "lib/auth/jwt.js:verify",
+        "lib/auth/jwt-external.js:_signCompactJws",
+        "lib/auth/jwt-external.js:verifyExternal",
+        "lib/auth/oauth.js:_verifyAttestationJws",
+        "lib/auth/oauth.js:verifyBackchannelLogoutToken",
+        "lib/auth/oauth.js:verifyClientAttestation",
+        "lib/auth/oauth.js:verifyIdToken",
+        "lib/auth/oid4vci.js:_verifyProofJwt",
+        "lib/auth/saml.js:_verifyEmbeddedXmlDsig",
         "lib/auth/saml.js:parseLogoutRequest",
         "lib/auth/saml.js:parseLogoutResponse",
+        "lib/mail-auth.js:inboundVerify",
       ],
     },
     {
@@ -5171,6 +5919,91 @@ var KNOWN_ANTIPATTERNS = [
     reason: "basicConstraints cA:TRUE enforcement is owned by x509Chain.issuerValidlyIssued / x509Chain.isCaCert; tsa/mail-bimi/mail-crypto-smime route through it. Any lib file calling X.checkIssued(Y) (Y!=X) directly bypasses the cA check and must use x509Chain instead. lib/x509-chain.js is the home of the primitive.",
   },
   {
+    id: "mail-report-header-builder-must-guard-crlf",
+    primitive: "b.safeBuffer.assertHeaderSafe",
+    scanScope: "lib",
+    // A DSN / MDN / ARC report-header builder interpolates operator- or
+    // peer-supplied fields (recipients, MTA names, the 5xx diagnostic
+    // reply, ARC authserv/domain/selector) into `Name: value\r\n` lines. An
+    // unguarded field lets a hostile original sender or a malicious peer MX
+    // smuggle a new header or forge a report part (CRLF injection). Every
+    // such field must route through safeBuffer.assertHeaderSafe (reject
+    // structured fields) or stripCrlf (fold free-text like the SMTP reply).
+    // The anchor matches a quoted report-header prefix immediately
+    // concatenated (`"Diagnostic-Code: smtp; " +`, `"ARC-Message-Signature: " +`)
+    // or the mail-bounce `_foldFieldValue(` choke point — the shape only a
+    // builder has (parsers/validators match field names in lowercased maps,
+    // not quoted `"Name: " +` literals), so guard-dsn / mail-arf / mail-auth
+    // are correctly excluded.
+    regex: /"(?:Final-Recipient|Diagnostic-Code|Disposition|Original-Recipient|Reporting-MTA|ARC-Message-Signature|ARC-Seal|ARC-Authentication-Results)\b[^"\n]*"\s*\+|_foldFieldValue\s*\(/,
+    requires: /assertHeaderSafe/,
+    allowlist: [],
+    reason: "DSN (mail-send-deliver.buildDsn, mail-bounce.dsn.build), MDN (mail-mdn.build) and ARC (mail-arc-sign.sign) report-header builders MUST compose safeBuffer.assertHeaderSafe on every structured field (and stripCrlf-fold the free-text 5xx reason). An unguarded `Name: value\\r\\n` built from a hostile original sender / peer MX is a header-injection vector (v0.15.68 root sweep — 4 HIGH + archive + srs). A new builder in this family that matches the report-header anchor but drops the guard re-opens the class.",
+  },
+  {
+    id: "dsn-diagnostic-free-text-fold-must-strip-nul",
+    primitive: "b.safeBuffer.foldHeaderText",
+    scanScope: "lib",
+    // A DSN builder folds the peer's free-text 5xx diagnostic (which may
+    // legitimately wrap) onto the Diagnostic-Code header line. That fold must
+    // use foldHeaderText (removes CR/LF AND NUL), not a bare CR/LF strip — a
+    // NUL is never valid in an RFC 5322 header value and is treated specially
+    // by downstream SMTP parsers, so a CR/LF-only fold serializes it
+    // verbatim. Only mail-send-deliver + mail-bounce build a Diagnostic-Code
+    // line, and both now compose foldHeaderText.
+    regex: /"Diagnostic-Code/,
+    requires: /foldHeaderText/,
+    allowlist: [],
+    reason: "A builder emitting a Diagnostic-Code header must fold the free-text diagnostic with safeBuffer.foldHeaderText (CR/LF + NUL), not a bare stripCrlf — otherwise a NUL in the peer's 5xx reply is serialized into the header line. Reverting the fold to stripCrlf drops the foldHeaderText reference and trips this.",
+  },
+  {
+    id: "xml-c14n-parseElement-must-thread-depth",
+    primitive: "xml-c14n nesting-depth cap",
+    scanScope: "lib",
+    // lib/xml-c14n.js parseElement must thread the nesting depth through the
+    // recursion (parseElement(depth) at entry, parseElement(depth + 1) on
+    // descent, parseElement(0) at the root) so the MAX_DEPTH cap can
+    // actually fire. The pre-fix code kept a per-frame-local `var depth = 0`
+    // incremented then decremented around each single recursive call, so it
+    // was always 1 at the check — a dead cap and a stack-overflow DoS on
+    // deeply-nested untrusted SAML / WebDAV XML. `parseElement` is unique to
+    // xml-c14n; an empty-arg parseElement() (definition or self-call)
+    // re-introduces the dead cap.
+    regex: /parseElement\s*\(\s*\)/,
+    allowlist: [],
+    reason: "xml-c14n's recursive-descent parseElement must thread the depth argument so the MAX_DEPTH nesting cap fires. An arg-less parseElement() (definition or self-call) drops the threading and re-opens the stack-exhaustion DoS on deeply-nested untrusted XML.",
+  },
+  {
+    id: "idempotency-replay-slot-must-bind-principal",
+    primitive: "b.requestHelpers.extractActorContext",
+    scanScope: "lib",
+    // The Idempotency-Key replay/response cache must key its slot on the
+    // authenticated principal (requestHelpers.extractActorContext /
+    // opts.scopeFn -> scopedKey), not on the client-supplied Idempotency-Key
+    // alone. Otherwise principal B is served principal A's cached response
+    // via a shared / guessed key (cross-actor disclosure), or A pre-seeds a
+    // key to force a 422 on B (cross-actor denial). `opts.store.set(` is
+    // unique to the idempotency middleware's replay-write.
+    regex: /opts\.store\.set\s*\(/,
+    requires: /scopeFn|scopedKey/,
+    allowlist: [],
+    reason: "The idempotency replay cache write must use a principal-scoped key (scopedKey derived via scopeFn / extractActorContext), not the raw client Idempotency-Key. Reverting store.get/set to the raw key drops the scopedKey reference and re-opens cross-actor disclosure / denial.",
+  },
+  {
+    id: "vc-jose-verify-must-bind-alg-to-key",
+    primitive: "b.vc.verify",
+    scanScope: "lib",
+    // vc._verifyJose resolves the public key then calls nodeCrypto.verify
+    // with the header-declared alg. Without binding the alg to the key's
+    // type/curve (_assertJoseAlgKey), an attacker picks the alg (hash +
+    // dsaEncoding) independent of the key an ECDSA curve/type confusion
+    // (CWE-347, RFC 7518 3.4). The binding check must stay composed.
+    regex: /function _verifyJose\b/,
+    requires: /_assertJoseAlgKey/,
+    allowlist: [],
+    reason: "The JOSE verify path must bind the header alg to the resolved key's curve/type via _assertJoseAlgKey before nodeCrypto.verify. Dropping the call re-opens ECDSA alg/curve confusion (an ES384 header verified against a P-256 key).",
+  },
+  {
     id: "fingerprint-pin-against-claimed-field-not-recomputed",
     primitive: "b.auditSign.fingerprintOf",
     scanScope: "lib",
@@ -6212,6 +7045,13 @@ var KNOWN_ANTIPATTERNS = [
       "lib/cose.js",                    // protMap.has(HDR_CRIT) → validate the crit array if present
       "lib/cwt.js",                     // raw.has(exp) → validate the exp claim if present
       "lib/db-query.js",                // JSONB_CONTAINMENT_OPS.has(op) → special-case the operator if it is one
+      // (3) Single-flight coalescing table — `if (inflight.has(key))` awaits an
+      //     in-flight async cache fill and returns the shared result; NOTHING is
+      //     inserted-then-rejected (the winner registers its own promise via a
+      //     plain `inflight.set` after the check). The matched `throw` is a
+      //     per-caller DNSSEC validate gate on the shared answer, not a
+      //     duplicate-key reject, so requireAbsent can't express it.
+      "lib/network-dns-resolver.js",    // inflight single-flight map, not a uniqueness register
       // (NB: the prototype-pollution POISONED_KEYS deny-set guards that used to
       //  live here — body-parser, the safe-* parsers, safe-schema — were
       //  extracted into the pick.isPoisonedKey primitive and no longer fire.)
@@ -9403,6 +10243,24 @@ var KNOWN_ANTIPATTERNS = [
     reason: "#123 macOS codebase-patterns watchdog hang. _scanShardInWorker rejected on worker error/exit without w.terminate(), so an errored worker thread stayed alive holding open handles; the parent then could not exit and the smoke run ran to the 25-min watchdog on memory-starved macOS-arm64 runners (it hung this very release's CI). Every settle path must reap the worker via w.terminate() first; the fix funnels message/error/exit through a settle() guard that terminates before resolve/reject. Fires on the bare `w.once(\"error\", reject)` shape; silent once error/exit route through settle().",
   },
   {
+    // A test that asserts a raw ECDSA signature's first byte is NOT 0x30 (the
+    // DER SEQUENCE tag) to prove "this is raw, not DER" is NONDETERMINISTIC: the
+    // first byte of an IEEE-P1363 r||s signature is r's high octet, which equals
+    // 0x30 ~1/256 of the time, so a bare check flakes ~1/256 (it blocked a
+    // release's ubuntu smoke). The fixed r||s LENGTH (64 for P-256, 96 for
+    // P-384) is the deterministic raw-vs-DER distinguisher and what the verifier
+    // keys off, so the byte check must be guarded with a `|| sig.length === <N>`
+    // disjunction (the sd-jwt-vc-ecdsa-p1363 convention). Structural test-flake
+    // drift a behavioral test can't assert (it passes 255/256 of the time).
+    id: "test-ecdsa-raw-sig-der-tag-byte-flake",
+    primitive: "a test asserting a raw ECDSA signature's first byte !== 0x30 (DER SEQUENCE tag) must guard it with a `|| sig.length === <N>` disjunction — the byte is r's high octet and equals 0x30 ~1/256 of the time, so a bare check flakes nondeterministically",
+    scanScope: "test",
+    regex: /\[0\]\s*!==\s*0x30(?!.*\|\|.*length)/,
+    skipCommentLines: true,
+    allowlist: [],
+    reason: "0.15.54 — self-update-standalone-verifier-ecdsa-encoding.test.js:189 asserted that a raw IEEE-P1363 P-384 signature's first byte was not the DER SEQUENCE tag 0x30, to prove it was not DER-encoded; that byte is r's high octet, which equals 0x30 ~1/256 of the time, so the setup assertion flaked and blocked the release's ubuntu smoke (the saml-mdq-wrapping release CI). The deterministic distinguisher is the fixed 96-byte (P-384) / 64-byte (P-256) raw length; the fix guards the byte check with a `|| sig.length === N` disjunction, matching sd-jwt-vc-ecdsa-p1363.test.js:51. Fires on a bare first-byte-not-0x30 check with no length disjunction on the same line; silent once guarded.",
+  },
+  {
     // A test file must invoke its run()/IIFE ONLY under
     // `if (require.main === module)`. The smoke worker REQUIRES each test
     // module and then awaits its exported run(); a module-level `run()` (or
@@ -10226,7 +11084,7 @@ function testNoBoolStringCoerceShape() {
 //
 // Surfaced 2026-05-11 — `b.cdnCacheControl.parse` did this.
 function testNoBareCommaSplitOnQuotedHeader() {
-  // class: bare-split-on-quoted-header
+  // class: bare-split-on-quoted-header-token-grammar
   var files = _libFiles();
   var bad = [];
   for (var fi = 0; fi < files.length; fi++) {
@@ -10248,7 +11106,7 @@ function testNoBareCommaSplitOnQuotedHeader() {
       });
     }
   }
-  bad = _filterMarkers(bad, "bare-split-on-quoted-header");
+  bad = _filterMarkers(bad, "bare-split-on-quoted-header-token-grammar");
   _report("RFC structured-fields parser must use quote-aware top-level splitter, not bare `.split(\",\") / .split(\";\")` (RFC 8941 §3.3.3 quoted-string values can contain delimiter chars — cdn-cache-control.parse bug class)",
     bad);
 }
@@ -10395,7 +11253,7 @@ function testHostnameCompareTrailingDotNormalize() {
       content: "hostname compared against reserved-name set without trailing-dot normalize — `localhost.` resolves to the same target as `localhost` (RFC 1034 §3.1); strip trailing dots BEFORE the equality check or attackers bypass the gate by appending a dot",
     });
   }
-  bad = _filterMarkers(bad, "hostname-compare-trailing-dot");
+  bad = _filterMarkers(bad, "hostname-compare-trailing-dot-pre-split-refused");
   _report("reserved-hostname string-equality compare must strip trailing root-zone dot first (RFC 1034 §3.1; SSRF gate bypass class — guard-list-unsubscribe v0.10.7 finding)",
     bad);
 }
@@ -11032,7 +11890,7 @@ function testSealWithoutAad() {
       }
     }
   }
-  bad = _filterMarkers(bad, "seal-without-aad");
+  bad = _filterMarkers(bad, "seal-without-aad-by-design");
   _report("dbStore-shaped sealed-row code routes through vault.aad.seal " +
           "(or has allow marker) — CRYPTO-1",
     bad);
@@ -11085,7 +11943,7 @@ function testNoHexShaCompareEquals() {
   matches = matches.concat(_scan(
     /\b\w+Hex\s*(===|!==)\s*(hmac\w*Hex|mac\w*Hex|signature\w*Hex|sigVerify\w*Hex)/i));
   matches = _filterMarkers(matches, "hex-sha-compare-equals");
-  matches = _filterMarkers(matches, "raw-hash-compare");
+  matches = _filterMarkers(matches, "raw-hash-compare-nonsecret-tag");
   _report("hex HMAC / MAC / signature compared with timingSafeEqual " +
           "(CVE-2026-21713 — memcmp leaks per-byte timing)",
     matches);
@@ -12267,21 +13125,22 @@ function testWikiPortAgreesAcrossArtifacts() {
     bad);
 }
 
-// The esbuild dev-tool is pinned across artifacts that carry no lockfile to keep
-// them in sync: package.json devDependencies (the version source-of-truth, also
-// postject), ci.yml + npm-publish.yml's exact `npm install esbuild@<v>` for the
-// SEA / bundler-output build, and scripts/esbuild-binary-pin.json's reviewed
-// per-platform binary hashes (verified on disk by the bundler-output smoke
-// gate). A bump that updates one and not the others is the v0.11.40 silent-drift
-// class: ci.yml tested 0.28.0 while package.json declared 0.28.1, so CI verified
-// an unreviewed version. The agreement + per-platform hash COMPLETENESS is owned
-// by one shared checker (scripts/check-esbuild-pin.js), called here and by
-// release.js regen so neither path can silently drift — a bump that forgets the
-// reviewed hashes fails closed instead of degrading the smoke pin to a skip.
+// The esbuild dev-tool is pinned across three artifacts kept in sync:
+// package.json devDependencies (the version source-of-truth, also postject), the
+// committed root package-lock.json that ci.yml + npm-publish.yml install via
+// `npm ci` for the SEA / bundler-output build, and scripts/esbuild-binary-pin.json's
+// reviewed per-platform binary hashes (verified on disk by the bundler-output
+// smoke gate). A bump that updates one and not the others is the v0.11.40
+// silent-drift class: CI verified an unreviewed version while package.json
+// declared another. The lockfile-package.json agreement + per-platform hash
+// COMPLETENESS is owned by one shared checker (scripts/check-esbuild-pin.js),
+// called here and by release.js regen so neither path can silently drift — a
+// bump that forgets the reviewed hashes fails closed instead of degrading the
+// smoke pin to a skip.
 function testEsbuildPinAgreesAcrossArtifacts() {
   var checkEsbuildPin = require("../../scripts/check-esbuild-pin.js").checkEsbuildPin;
   var bad = _filterMarkers(checkEsbuildPin().violations, "esbuild-pin-cross-artifact-drift");
-  _report("esbuild pin agrees across package.json devDep + ci.yml/npm-publish.yml install + " +
+  _report("esbuild pin agrees across package.json devDep + package-lock.json (npm ci) + " +
           "esbuild-binary-pin.json reviewed per-platform hashes (prevent a workflow / pin silently " +
           "drifting from the reviewed version)",
     bad);
@@ -13147,6 +14006,8 @@ async function run() {
   testDenyPathComposesDenyResponse();
   testNoInternalNarrativeComments();
   testNoOrphanAllowClass();
+  testNoRetiredAllowTokenReRegistered();
+  testNoRetiredTokenUsedAnywhere();
   testNoRawByteLiterals();
   testNoRawTimeLiterals();
   testNumericOptsValidate();
@@ -13180,6 +14041,21 @@ async function run() {
   testBuildProfileWrongKey();
   testNoSilentCatchSwallow();
   testNoDynamicRegexFromOperatorInput();
+  testOperatorRegexScreenedForReDoS();
+  testModuleLoadListMatchesNativeModuleNaming();
+  testCompetingConsumerClaimUsesSkipLocked();
+  testCacheCounterUsesAtomicUpdate();
+  testRegistryCheckThenCreateSerialized();
+  testCertChainIssuanceUsesIssuerValidlyIssued();
+  testDomainToAsciiRejectsUrlDelimiters();
+  testUrlSearchParamsConcatEscapesAmpersand();
+  testEmailDomainDerivationGuardsMultiAt();
+  testFileUploadLifecycleChecksOwnership();
+  testScopeWildcardUsesPermissionsMatch();
+  testQueueRedisGateLuaResultCaptured();
+  testArcInstanceParseUsesSharedHelper();
+  testOid4vciSingleUseClaimGated();
+  testClockSkewOptsAreFiniteGuarded();
   testNoRawXffRead();
   testNoRawForwardedProtoHostRead();
   testNoRawRemoteAddress();

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.auth.accessLock — three-mode access-lock primitive tests.
@@ -124,7 +126,7 @@ function testCreateRefusesBadStartMode() {
   check("create refuses bad startMode", threw);
 }
 
-(function run() {
+function run() {
   testOpenModePassesEverything();
   testReadOnlyModeRefusesWrites();
   testLockedModeRefusesEverythingExceptPassthrough();
@@ -133,4 +135,7 @@ function testCreateRefusesBadStartMode() {
   testSetRefusesUnknownMode();
   testCreateRefusesBadStartMode();
   console.log("OK — access-lock tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

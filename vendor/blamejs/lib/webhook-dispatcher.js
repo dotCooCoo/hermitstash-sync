@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Durable signed-webhook delivery store — the middle the framework was
@@ -26,7 +28,6 @@ var safeSql = require("./safe-sql");
 var safeUrl = require("./safe-url");
 var safeJson = require("./safe-json");
 var bCrypto = require("./crypto");
-var httpClient = require("./http-client");
 var frameworkSchema = require("./framework-schema");
 var validateOpts = require("./validate-opts");
 var lazyRequire = require("./lazy-require");
@@ -44,6 +45,11 @@ var vault = lazyRequire(function () { return require("./vault"); });
 var ssrfGuard = lazyRequire(function () { return require("./ssrf-guard"); });
 var audit = lazyRequire(function () { return require("./audit"); });
 var observability = lazyRequire(function () { return require("./observability"); });
+// Lazy — http-client pulls in node:http / node:https / node:http2; only the
+// default delivery transport touches it. Keeping it lazy keeps b.webhook (which
+// re-exports this module) free of the Node networking chain on its inbound
+// verify path, so b.webhook.verify stays loadable in a Worker / edge runtime.
+var httpClient = lazyRequire(function () { return require("./http-client"); });
 
 var _err = WebhookDispatcherError.factory;
 
@@ -223,7 +229,7 @@ function dispatcher(opts) {
   // Default transport: a real signed POST through the framework http client.
   // Injectable so a test (or a non-HTTP transport) substitutes its own.
   var httpRequest = opts.httpRequest || function (url, body, headers) {
-    return httpClient.request({
+    return httpClient().request({
       method:           "POST",
       url:              url,
       headers:          headers,
@@ -570,21 +576,41 @@ function dispatcher(opts) {
     await externalDb.query(stmt.sql, stmt.params);
   }
 
+  // FOR UPDATE SKIP LOCKED is Postgres / MySQL-only; sqlite is a single writer
+  // with no row lock. Decide on the NORMALIZED dialect — the same resolution the
+  // SQL builders use (_sqlDialect maps the `postgresql` alias to `postgres`) — so
+  // the lock decision can never disagree with the rendered SQL: a `postgresql`
+  // caller emits Postgres SQL AND row-locks, never Postgres SQL with the sqlite
+  // mark-then-reselect fallback (which would reopen the double-claim race).
+  function _supportsForUpdateSkipLocked() {
+    var d = _sqlDialect(externalDb);
+    return d === "postgres" || d === "mysql";
+  }
+
   // Claim due-pending deliveries by flipping them to 'in-flight' inside a
-  // transaction (mark-then-reselect; gated on status='pending' so two pollers
-  // can't both claim the same row), then attempt each claimed delivery.
+  // transaction, then attempt each claimed delivery. On Postgres / MySQL the
+  // SELECT row-locks the due rows via FOR UPDATE SKIP LOCKED, so concurrent
+  // retry pollers see DISJOINT sets — the rows this poller selected are exactly
+  // the rows it owns. sqlite (single writer, no row lock) falls back to a
+  // guarded mark-then-reselect: the UPDATE gated on status='pending' transitions
+  // each row once, and we re-read the in-flight rows we flipped. Without the
+  // SKIP LOCKED branch, two pollers under READ COMMITTED both reselect the same
+  // in-flight row (the loser's UPDATE matches zero rows, but the reselect-by-id
+  // re-reads the row the winner flipped) and double-deliver it in one cycle.
   async function processRetries() {
     await _reapStaleInflight();
     var dialect = _sqlDialect(externalDb);
+    var supportsSkipLocked = _supportsForUpdateSkipLocked();
     var claimed = await externalDb.transaction(async function (xdb) {
       var nowDate = _nowDate();
-      var sel = sql.select(deliveriesTable, { dialect: dialect })
+      var selBuilder = sql.select(deliveriesTable, { dialect: dialect })
         .columns(["delivery_id"])
         .whereRaw("status = 'pending'", [], { allowLiterals: true })
         .whereRaw("next_attempt_at <= ?", [nowDate])
         .orderBy("next_attempt_at")
-        .limit(batchSize)
-        .toExternalSql(dialect);
+        .limit(batchSize);
+      if (supportsSkipLocked) selBuilder.forUpdate({ skipLocked: true });
+      var sel = selBuilder.toExternalSql(dialect);
       var rows = await xdb.query(sel.sql, sel.params);
       var ids = ((rows && rows.rows) || []).map(function (r) { return r.delivery_id; });
       if (ids.length === 0) return [];
@@ -594,6 +620,12 @@ function dispatcher(opts) {
         .whereInArray("delivery_id", ids)
         .toExternalSql(dialect);
       await xdb.query(mark.sql, mark.params);
+      // Postgres / MySQL: the FOR UPDATE SKIP LOCKED SELECT already gave us an
+      // exclusively-locked, disjoint set, so the selected ids ARE our claim.
+      if (supportsSkipLocked) return ids;
+      // sqlite / other: no row lock, so re-read which rows WE flipped. The
+      // single writer serializes the gated UPDATE, so the in-flight rows in our
+      // id set are ours.
       var after = sql.select(deliveriesTable, { dialect: dialect })
         .columns(["delivery_id"])
         .whereRaw("status = 'in-flight'", [], { allowLiterals: true })

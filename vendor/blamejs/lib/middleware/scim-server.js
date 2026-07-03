@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 // SCIM 2.0 server middleware (RFC 7642 / 7643 / 7644).
 // Provides /Users + /Groups + /ServiceProviderConfig + /ResourceTypes
@@ -237,8 +239,8 @@ async function _dispatch(req, res, basePath, bearer, opts, maxPageSize, bulkCfg)
       count:              pageSize,
       sortBy:             query.sortBy || null,
       sortOrder:          query.sortOrder || null,
-      attributes:         query.attributes ? query.attributes.split(",") : null,                  // allow:bare-split-on-quoted-header — RFC 7644 §3.9 attributes/excludedAttributes are SCIM attribute paths (URN-ish identifiers); grammar excludes DQUOTE
-      excludedAttributes: query.excludedAttributes ? query.excludedAttributes.split(",") : null,    // allow:bare-split-on-quoted-header — same SCIM attribute-name grammar
+      attributes:         query.attributes ? query.attributes.split(",") : null,                  // allow:bare-split-on-quoted-header-token-grammar — RFC 7644 §3.9 attributes/excludedAttributes are SCIM attribute paths (URN-ish identifiers); grammar excludes DQUOTE
+      excludedAttributes: query.excludedAttributes ? query.excludedAttributes.split(",") : null,    // allow:bare-split-on-quoted-header-token-grammar — same SCIM attribute-name grammar
     }, ctx);
     _writeJson(res, H.OK, {
       schemas:      [SCIM_MESSAGE_LIST],

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.auth.sdJwtVc — Selective Disclosure JWT for Verifiable Credentials
@@ -62,6 +64,7 @@
 
 var nodeCrypto = require("node:crypto");
 var bCrypto = require("../crypto");
+var numericBounds = require("../numeric-bounds");
 var safeBuffer = require("../safe-buffer");
 var safeJson = require("../safe-json");
 var validateOpts = require("../validate-opts");
@@ -165,8 +168,8 @@ function _verifyJwt(token, publicKey, algorithm) {
   var headerStr = _b64uDecodeStr(parts[0]);
   var payloadStr = _b64uDecodeStr(parts[1]);
   return {
-    header:  safeJson.parse(headerStr, { maxBytes: 64 * 1024 }),                    // allow:bare-json-parse — header from cryptographically-verified JWT; signature verifies the bytes // allow:raw-byte-literal — JWT header cap (64 KB)
-    payload: safeJson.parse(payloadStr, { maxBytes: 1024 * 1024 }),                 // allow:bare-json-parse — payload from cryptographically-verified JWT; signature verifies the bytes // allow:raw-byte-literal — JWT payload cap (1 MB)
+    header:  safeJson.parse(headerStr, { maxBytes: 64 * 1024 }),                    // allow:raw-byte-literal — JWT header cap (64 KB)
+    payload: safeJson.parse(payloadStr, { maxBytes: 1024 * 1024 }),                 // allow:raw-byte-literal — JWT payload cap (1 MB)
   };
 }
 
@@ -330,7 +333,7 @@ function present(opts) {
   if (_jwtParts.length === 3) {
     try {
       _issuerPayload = safeJson.parse(_b64uDecodeStr(_jwtParts[1]),
-        { maxBytes: 64 * 1024 });                                                                  // allow:bare-json-parse — payload only read to pull _sd_alg; final auth happens in verify() // allow:raw-byte-literal — JWT payload cap (64 KB)
+        { maxBytes: 64 * 1024 });                                                                  // allow:raw-byte-literal — JWT payload cap (64 KB)
     } catch (_e) { _issuerPayload = null; }
   }
   var _sdAlg = (_issuerPayload && typeof _issuerPayload._sd_alg === "string")
@@ -448,7 +451,7 @@ async function verify(presentation, opts) {
       "verify: JWT must have 3 dot-separated parts");
   }
   var headerObj;
-  try { headerObj = safeJson.parse(_b64uDecodeStr(jwtParts[0]), { maxBytes: 64 * 1024 }); }  // allow:bare-json-parse — pre-verify header parse to look up the key resolver; checked again post-signature // allow:raw-byte-literal — JWT header cap (64 KB)
+  try { headerObj = safeJson.parse(_b64uDecodeStr(jwtParts[0]), { maxBytes: 64 * 1024 }); }  // allow:raw-byte-literal — JWT header cap (64 KB)
   catch (e) {
     throw new AuthError("auth-sd-jwt-vc/bad-header",
       "verify: malformed JWT header: " + e.message);
@@ -523,6 +526,12 @@ async function verify(presentation, opts) {
   // 2. Validate iss / iat / exp / vct
   var nowSec = (typeof opts.now === "number" && isFinite(opts.now))
     ? Math.floor(opts.now / 1000) : Math.floor(Date.now() / 1000);                  // ms→s conversion factor
+  // A present maxClockSkewSec must be a non-negative finite integer; a bare
+  // typeof check lets Infinity/NaN through, and `exp < nowSec - Infinity` (or
+  // NaN) is always false — silently accepting an expired credential. Reject a
+  // malformed skew (operator config).
+  numericBounds.requireNonNegativeFiniteIntIfPresent(opts.maxClockSkewSec,
+    "verify: opts.maxClockSkewSec", AuthError, "auth-sd-jwt-vc/bad-clock-skew");
   var skew = (typeof opts.maxClockSkewSec === "number") ? opts.maxClockSkewSec : 60; // allow:raw-time-literal — default 60s clock-skew tolerance
   if (typeof jwtParsed.payload.iat === "number" && jwtParsed.payload.iat > nowSec + skew) {
     throw new AuthError("auth-sd-jwt-vc/iat-future",
@@ -622,7 +631,7 @@ async function verify(presentation, opts) {
     }
     // Verify KB-JWT signature
     var kbHeaderObj;
-    try { kbHeaderObj = safeJson.parse(_b64uDecodeStr(maybeKbJwt.split(".")[0]), { maxBytes: 4096 }); }  // allow:bare-json-parse — kb header from validated KB-JWT; signature verifies
+    try { kbHeaderObj = safeJson.parse(_b64uDecodeStr(maybeKbJwt.split(".")[0]), { maxBytes: 4096 }); }
     catch (e) {
       throw new AuthError("auth-sd-jwt-vc/bad-kb-header",
         "verify: malformed KB-JWT header: " + e.message);

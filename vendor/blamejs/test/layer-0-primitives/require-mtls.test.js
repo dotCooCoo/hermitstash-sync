@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 var helpers = require("../helpers");
 var b = helpers.b;
@@ -24,11 +26,14 @@ function _mockRes() {
   };
 }
 
-(function run() {
+function run() {
   var requireMtls = b.middleware.requireMtls({ audit: false });
   var noPeerRes = _mockRes();
   requireMtls(_mockReq({ authorized: false }), noPeerRes, function () {});
   check("requireMtls refuses unauthorized peer 401", noPeerRes._captured.status === 401);
 
   console.log("OK — requireMtls tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

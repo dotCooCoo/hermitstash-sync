@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module     b.agent.trace
@@ -256,7 +258,7 @@ function _shouldSample(globalRate, perMethod, method, traceId) {
   // No trace-id supplied — start of a new trace. Operators wire
   // shouldSample(method, ctx.traceId) on every downstream hop so
   // children inherit the decision deterministically.
-  return Math.random() < rate;                                                                          // allow:math-random-noncrypto — start-of-trace seed only; downstream hops pass traceId for deterministic propagation
+  return Math.random() < rate;                                                                          // allow:math-random-noncrypto-jitter-sampling — start-of-trace seed only; downstream hops pass traceId for deterministic propagation
 }
 
 function _formatAttributes(info) {

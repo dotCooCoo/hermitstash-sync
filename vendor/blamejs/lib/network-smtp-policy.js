@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.network.smtp.policy — MTA-STS + DANE + TLS-RPT outbound SMTP gates.
@@ -613,7 +615,7 @@ async function tlsRptFetchPolicy(domain, opts) {
   var rua = [];
   for (var p = 0; p < pairs.length; p += 1) {
     if (pairs[p][0] === "rua") {
-      var uris = pairs[p][1].split(",");                                                      // allow:bare-split-on-quoted-header — allow:raw-time-literal — TLS-RPT rua grammar (RFC 8460 §3): rua = tlsrpt-uri *("," tlsrpt-uri); URIs percent-encode reserved chars, no quoted-string
+      var uris = pairs[p][1].split(",");                                                      // allow:bare-split-on-quoted-header-token-grammar — allow:raw-time-literal — TLS-RPT rua grammar (RFC 8460 §3): rua = tlsrpt-uri *("," tlsrpt-uri); URIs percent-encode reserved chars, no quoted-string
       for (var u = 0; u < uris.length; u += 1) {
         var uri = uris[u].trim();
         if (uri.length > 0) rua.push(uri);
@@ -660,7 +662,7 @@ async function tlsRptSubmit(report, opts) {
     try {
       if (/^https:\/\//i.test(uri)) {
         entry.kind = "https";
-        // allow:raw-outbound-http — `client` is the framework httpClient
+        // allow:raw-outbound-http-framework-internal — `client` is the framework httpClient
         // (or operator-supplied test mock); SSRF + DNS-pin already
         // applied through the framework wrapper.
         var rv = await client.request({
@@ -673,7 +675,10 @@ async function tlsRptSubmit(report, opts) {
           body:    gzipped,
           timeoutMs: timeoutMs,
         });
-        entry.status = rv && rv.status;
+        // The framework httpClient resolves { statusCode, headers, body }
+        // (same shape mtaSts.fetch reads above) — not { status }. Reading
+        // the wrong field marked every real 2xx submission as a failure.
+        entry.status = rv && rv.statusCode;
         entry.ok = entry.status >= 200 && entry.status < 300;                  // HTTP 2xx range
         if (!entry.ok) entry.error = "HTTP " + entry.status;
       } else if (/^mailto:/i.test(uri)) {

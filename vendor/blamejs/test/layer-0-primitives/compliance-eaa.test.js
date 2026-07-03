@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 var helpers = require("../helpers");
 var b = helpers.b;
 var check = helpers.check;
 
-(function run() {
+function run() {
   var eaa = b.compliance.eaa.create({
     audit: false,
     productName: "Acme Portal",
@@ -33,4 +35,7 @@ var check = helpers.check;
   check("eaa refuses bad conformance", threwBadConformance);
 
   console.log("OK — compliance.eaa tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

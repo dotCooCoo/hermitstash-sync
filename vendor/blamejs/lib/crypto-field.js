@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.cryptoField
@@ -1090,7 +1092,7 @@ function sealRow(table, row, opts) {
       out[field] = vaultAad.seal(_encodeTyped(out[field]),
         _aadParts(s, table, field, out));
     } else {
-      // allow:seal-without-aad — plain-mode legacy table; operator
+      // allow:seal-without-aad-by-design — plain-mode legacy table; operator
       // opts into AAD via registerTable({aad:true})
       out[field] = vault.seal(_encodeTyped(out[field]));
     }

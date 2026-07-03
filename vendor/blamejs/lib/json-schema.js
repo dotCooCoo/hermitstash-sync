@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.jsonSchema
@@ -54,7 +56,17 @@ var { defineClass } = require("./framework-error");
 var JsonSchemaError = defineClass("JsonSchemaError", { alwaysPermanent: true });
 
 var DIALECT_2020_12 = "https://json-schema.org/draft/2020-12/schema";
-var MAX_REF_DEPTH = 10000;                                  // recursion-depth cap (count, not a byte size)
+// Subschema-validation nesting cap. ctx.depth is incremented on entry to
+// _validate and decremented in its finally, so it tracks the live nesting
+// depth (sibling keywords/properties do not accumulate) — the deepest the
+// instance×schema walk has recursed. validate(schema, requestBody) reaches
+// it with attacker input on BOTH sides: a recursive schema (items:{$ref:"#"})
+// against a deeply-nested array/object, or a deeply-nested allOf chain.
+// Left unbounded the walk overflows the V8 stack (~1000 levels) with an
+// uncaught RangeError before this guard fired — a pre-validation DoS. 256 is
+// far beyond any legitimate document yet well under native overflow, so the
+// typed json-schema/ref-loop error is what an operator sees.
+var MAX_REF_DEPTH = 256;                                    // recursion-depth cap (count, not a byte size)
 var DEFAULT_MAX_ERRORS = 100;                               // error-collection cap
 
 function _typeOf(v) {
@@ -104,7 +116,7 @@ function _resolveUri(ref, base) {
   // RFC 3986 relative→absolute resolution of a schema $id/$ref (operator-
   // trusted schema text, not request data); safeUrl.parse intentionally
   // rejects the relative refs and non-http schemes schemas legitimately use.
-  try { return new URL(ref, base).href; }   // allow:raw-new-url — schema $id/$ref URI resolution, not request-data URL handling
+  try { return new URL(ref, base).href; }   // allow:raw-new-url-parse-only — schema $id/$ref URI resolution, not request-data URL handling
   catch (_e) {
     // Relative resolution against a non-URL base (e.g. "urn:..." or a
     // bare name). Fall back to fragment-aware concatenation.
@@ -730,7 +742,7 @@ function _checkFormat(format, value, type) {
       if (/\s/.test(value)) return false;                       // raw whitespace is not a valid URI
       if (/%(?![0-9A-Fa-f]{2})/.test(value)) return false;      // malformed percent-escape
       if (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return false;   // absolute URI requires a scheme   // allow:regex-no-length-cap — linear scheme prefix
-      try { new URL(value); return true; } catch (_e) { return false; }   // allow:raw-new-url — string-shape check, no fetch / SSRF surface
+      try { new URL(value); return true; } catch (_e) { return false; }   // allow:raw-new-url-parse-only — string-shape check, no fetch / SSRF surface
     }
     case "uuid": return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value);   // allow:regex-no-length-cap — fixed-width UUID
     case "ipv4": return /^(\d{1,3}\.){3}\d{1,3}$/.test(value) && value.split(".").every(function (o) { return Number(o) <= 255; });   // allow:regex-no-length-cap — bounded dotted-quad

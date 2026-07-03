@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.log
@@ -589,7 +591,7 @@ function _escapeC0Controls(s) {
 // runs before safeEnv on the boot path; safeEnv requires log, so log
 // can't go through safeEnv to read its own level.
 function _bootMinLevel() {
-  // allow:raw-process-env — see header comment above
+  // allow:raw-process-env-bootstrap — see header comment above
   var raw = process.env.BLAMEJS_BOOT_LOG_LEVEL || process.env.LOG_LEVEL || "info";
   return Object.prototype.hasOwnProperty.call(LEVELS, raw) ? LEVELS[raw] : LEVELS.info;
 }

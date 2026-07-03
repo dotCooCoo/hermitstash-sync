@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 var helpers = require("../helpers");
 var b = helpers.b;
@@ -18,7 +20,7 @@ function _mockRes() {
   };
 }
 
-(function run() {
+function run() {
   var aboveCalls = 0;
   var ag = b.middleware.ageGate({
     audit: false,
@@ -88,4 +90,7 @@ function _mockRes() {
   check("ageGate refuses non-fn getAge", threwBadGetAge);
 
   console.log("OK — ageGate tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

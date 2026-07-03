@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.network.tls.ocsp.evaluate — OCSP response FRESHNESS enforcement
@@ -61,8 +63,10 @@ function _buildSignedOcsp(opts) {
   var serialHex = serial.toString("hex");
 
   // certID = SEQ { AlgId{sha1,NULL}, issuerNameHash OCTET(20), issuerKeyHash OCTET(20), serial INT }
-  // (the evaluator only reads the serial from certID; the two hashes are not
-  // checked, so fixed 20-byte fillers are fine.)
+  // (these freshness cases pass no opts.issuerCertDer, so the evaluator binds on
+  // the serial only and the issuerNameHash/issuerKeyHash are not checked here —
+  // fixed 20-byte fillers are fine. The CertID issuer binding is exercised in
+  // tls-ocsp-verify.test.js.)
   var hashAlg = asn1.writeSequence([asn1.writeOid("1.3.14.3.2.26"), asn1.writeNull()]);  // sha1
   var nameHash = asn1.writeOctetString(Buffer.alloc(20, 0xaa));
   var keyHash  = asn1.writeOctetString(Buffer.alloc(20, 0xbb));
@@ -175,11 +179,39 @@ function testAcceptsFreshNoNextUpdate() {
   check("no-nextUpdate fresh: certStatus good", rv.certStatus === "good");
 }
 
+// A non-finite clockSkewMs must NOT disable the freshness window. The stale
+// check is `now > nextUpdate + skew`; skew === Infinity makes it `now >
+// Infinity` (always false), so a STALE (past-nextUpdate) response — exactly
+// the pre-revocation "good" reply an attacker replays after the cert is
+// revoked — would be accepted. A present-but-non-finite skew falls back to
+// the safe default instead of being honored. RED before the fix: rv.ok===true.
+function testInfinityClockSkewDoesNotDisableFreshness() {
+  var fx = _buildSignedOcsp({
+    thisUpdateMs: FIXED_NOW - 3 * 86400000,   // 3 days ago
+    nextUpdateMs: FIXED_NOW - 2 * 86400000,   // 2 days ago → STALE
+  });
+  var rv = b.network.tls.ocsp.evaluate(fx.der, {
+    issuerPem: fx.issuerPem, serialHex: fx.serialHex, now: FIXED_NOW,
+    clockSkewMs: Infinity,
+  });
+  check("Infinity skew: stale response still rejected (freshness not disabled)", rv.ok === false);
+  check("Infinity skew: rejected for the STALE reason",
+        /nextUpdate|stale/i.test((rv.errors || []).join(" ; ")));
+  // A negative skew is likewise treated as invalid → safe default, so the
+  // stale response stays rejected.
+  var rvNeg = b.network.tls.ocsp.evaluate(fx.der, {
+    issuerPem: fx.issuerPem, serialHex: fx.serialHex, now: FIXED_NOW,
+    clockSkewMs: -1,
+  });
+  check("negative skew: stale response still rejected", rvNeg.ok === false);
+}
+
 async function run() {
   testRejectsStaleResponse();
   testAcceptsFreshResponse();
   testRejectsFutureThisUpdate();
   testAcceptsFreshNoNextUpdate();
+  testInfinityClockSkewDoesNotDisableFreshness();
 }
 
 module.exports = { run: run };

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 // opts-resolver — single source of truth for "what opts does b.X.Y accept?".
 //
@@ -34,7 +36,7 @@ function probeAllowList(fn) {
   if (typeof fn !== "function") {
     return { ok: false, reason: "not-a-function" };
   }
-  var probeKey = "__opts_resolver_probe_" + Date.now() + "_" + Math.random().toString(36).slice(2); // allow:math-random-noncrypto — probe-key uniqueness only; never reaches a security boundary
+  var probeKey = "__opts_resolver_probe_" + Date.now() + "_" + Math.random().toString(36).slice(2); // allow:math-random-noncrypto-jitter-sampling — probe-key uniqueness only; never reaches a security boundary
   var probeOpts = {};
   probeOpts[probeKey] = true;
   var thrown = null;

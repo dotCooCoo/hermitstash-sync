@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * cors middleware — same-origin pass-through + allow-list refusal.
@@ -275,6 +277,16 @@ function testCorsConfigValidationThrows() {
   catch (e) { threwOnUnparseableSiteOrigin = e; }
   check("unparseable siteOrigin URL throws CorsError",
         threwOnUnparseableSiteOrigin && threwOnUnparseableSiteOrigin.code === "cors/bad-site-origin");
+
+  // A catastrophic-backtracking (ReDoS) RegExp in origins[] is screened
+  // at create() — the wrapped nested quantifier /((a)+)+$/ would pin a
+  // CPU when .test()'d against a hostile Origin header, so it's refused
+  // before the middleware is built.
+  var threwOnUnsafePattern = null;
+  try { b.middleware.cors({ origins: [/((a)+)+$/] }); }
+  catch (e) { threwOnUnsafePattern = e; }
+  check("ReDoS-shaped origins[] RegExp throws cors/unsafe-pattern",
+        threwOnUnsafePattern && threwOnUnsafePattern.code === "cors/unsafe-pattern");
 
   // undefined / not-passed → no throw, default behaviour.
   var ok = b.middleware.cors({});

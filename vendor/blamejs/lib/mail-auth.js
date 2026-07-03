@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.mail.spf + b.mail.dmarc + b.mail.arc — inbound mail authentication
@@ -52,7 +54,9 @@ var structuredFields = require("./structured-fields");
 var markupEscape = require("./markup-escape").markupEscape;
 var bCrypto = require("./crypto");
 var C = require("./constants");
+var numericBounds = require("./numeric-bounds");
 var dkim = require("./mail-dkim");
+var ARC_AMS_REUSE = require("./mail-arc-reuse-token");
 var mimeParse = require("./mime-parse");
 var safeXml = require("./parsers/safe-xml");
 var ipUtils = require("./ip-utils");
@@ -290,7 +294,7 @@ function _ipv4InCidr(ip, cidr) {
   var slash = cidr.indexOf("/");
   var net = slash === -1 ? cidr : cidr.slice(0, slash);
   var mask = slash === -1 ? 32 : parseInt(cidr.slice(slash + 1), 10);             // IPv4 max prefix
-  if (mask < 0 || mask > 32) return false;                                       // IPv4 max prefix
+  if (!isFinite(mask) || mask < 0 || mask > 32) return false;                     // IPv4 max prefix
   var ipInt = _ipv4ToInt(ip);
   var netInt = _ipv4ToInt(net);
   if (ipInt === null || netInt === null) return false;
@@ -805,8 +809,24 @@ async function spfVerify(opts) {
     throw new MailAuthError("mail-auth/spf-bad-ip",
       "spf.verify: ip must be a string");
   }
+  var mailFromStr = opts.mailFrom ? String(opts.mailFrom) : "";
+  // A MAIL FROM addr-spec has exactly one '@' (RFC 5322 §3.4.1). split("@")[1]
+  // on a multi-@ string takes the LEFTMOST segment, so the SPF check would
+  // authorize a domain the attacker controls rather than the envelope sender's
+  // real domain (CWE-290). A multi-@ MAIL FROM is malformed — return a permanent
+  // SPF error (a RESULT, not a throw). spfVerify runs inside b.mail.inbound.verify,
+  // whose contract is that message-derived faults surface as a permerror/temperror
+  // verdict, never a throw: a throw here is caught by mail-server-mx as a pipeline
+  // temperror, which onTemperror:"accept" would let through — skipping SPF/DMARC
+  // gating for the spoofed From. Returning permerror (domain null → SPF cannot
+  // align) keeps the pipeline running so DMARC still gates the From header.
+  if (mailFromStr && mailFromStr.indexOf("@") !== mailFromStr.lastIndexOf("@")) {
+    return { result: "permerror", domain: null,
+             explanation: "mailFrom has more than one '@' (not a valid addr-spec)",
+             lookupCount: 0 };
+  }
   var domain = opts.mailFrom
-    ? String(opts.mailFrom).split("@")[1]
+    ? mailFromStr.split("@")[1]
     : opts.helo;
   if (typeof domain !== "string" || domain.length === 0) {
     throw new MailAuthError("mail-auth/spf-bad-domain",
@@ -1175,8 +1195,13 @@ function _parseDmarcRecord(text) {
 
 function _alignmentCheck(fromDomain, authDomain, mode) {
   if (!fromDomain || !authDomain) return false;
-  var f = fromDomain.toLowerCase();
-  var a = authDomain.toLowerCase();
+  // Canonicalize both domains identically (lowercase + trailing-dot strip + IDN
+  // A-label) so strict alignment compares the same host form the relaxed PSL
+  // path already normalizes — a trailing-dot / U-label SPF auth-domain must not
+  // fail an otherwise-aligned message.
+  var f = publicSuffix.canonicalDomain(fromDomain);
+  var a = publicSuffix.canonicalDomain(authDomain);
+  if (!f || !a) return false;
   if (mode === "s") return f === a;                                              // strict
   // RFC 7489 §3.1.1 + DMARCbis §4.4 — relaxed alignment compares the
   // organizational domain (the public-suffix-tail registered name).
@@ -1201,6 +1226,15 @@ async function dmarcEvaluate(opts) {
   if (typeof opts.from !== "string") {
     throw new MailAuthError("mail-auth/dmarc-bad-from",
       "dmarc.evaluate: opts.from must be the From-header email address");
+  }
+  // An addr-spec has exactly one '@' (RFC 5322 §3.4.1). split("@")[1] on a
+  // multi-@ string (x@attacker@victim) silently takes the LEFTMOST segment
+  // (attacker), which can diverge from the rightmost-@ domain the inbound From
+  // parser gated on — so DMARC would authorize a different domain than the one
+  // displayed. Refuse a multi-@ From as malformed (CWE-290).
+  if (opts.from.indexOf("@") !== opts.from.lastIndexOf("@")) {
+    throw new MailAuthError("mail-auth/dmarc-bad-from",
+      "dmarc.evaluate: opts.from has more than one '@' (not a valid addr-spec)");
   }
   var fromDomain = opts.from.split("@")[1];
   if (!fromDomain) {
@@ -1424,6 +1458,25 @@ function _parseHeaderLines(headerSection) {
 // limit how far an attacker can push junk headers.
 var ARC_MAX_HOPS = 50;                                                           // RFC 8617 §5.1.2 chain ceiling
 
+// Parse the ARC instance tag (i=) from an ARC header value (RFC 8617
+// §4.2.1). Strict by construction: the tag must follow a value boundary
+// (start / ";" / "," / whitespace), use no space around "=", and be 1-3
+// digits (instances are bounded to [1,50]). EVERY ARC-header instance read
+// — the indexing pass that drives the AMS/AS crypto checks, the AMS h=
+// retention test, the per-hop d= extraction, and the finalAr surfacing —
+// routes through this one parser so they can never disagree about which hop
+// a header belongs to. A looser parser in one place (e.g. allowing "i = 1"
+// with a space, or unbounded digits) lets an attacker inject an
+// ARC-Authentication-Results that the strict crypto pass ignores while a
+// permissive pass consumes it, forging the upstream auth-results surfaced as
+// finalAr on a chain that still verifies pass — with no signing key.
+function _arcInstanceOf(value) {
+  var m = String(value).match(/(?:^|[;,\s])i=(\d{1,3})\b/);
+  if (!m) return null;
+  var inst = parseInt(m[1], 10);
+  return (isFinite(inst) && inst >= 1) ? inst : null;
+}
+
 async function arcVerify(rfc822, opts) {
   if (typeof rfc822 !== "string" || rfc822.length === 0) {
     throw new MailAuthError("mail-auth/arc-bad-input",
@@ -1459,13 +1512,11 @@ async function arcVerify(rfc822, opts) {
     var value = khv.value.trim();
     if (name !== "arc-seal" && name !== "arc-message-signature" &&
         name !== "arc-authentication-results") continue;
-    // ARC hop instance per RFC 8617 §4.2.1 — bounded to 3 digits; the
-    // spec doesn't define a hard ceiling but operational use never
-    // exceeds 50 hops, and a 999-hop limit prevents pathological
-    // header values from chewing the verifier.
-    var iMatch = value.match(/(?:^|[;,\s])i=(\d{1,3})\b/);
-    var inst = iMatch ? parseInt(iMatch[1], 10) : null;
-    if (inst === null || !isFinite(inst) || inst < 1) continue;
+    // ARC hop instance per RFC 8617 §4.2.1 — parsed by the shared strict
+    // reader so the index this drives (and the AMS/AS crypto checks keyed on
+    // it) matches every other instance read in the verifier/evaluator.
+    var inst = _arcInstanceOf(value);
+    if (inst === null) continue;
     if (inst > maxInstanceSeen) maxInstanceSeen = inst;
     var slotKey = inst + ":" + name;
     if (seenSlot[slotKey]) { duplicate = true; continue; }
@@ -1575,7 +1626,11 @@ async function arcVerify(rfc822, opts) {
   var anyFail = false;
   // RFC 8617 §5.2 — operator-tunable clock skew on t= (signing
   // timestamp) and x= (expiration) tags. Default 5 min.
-  var arcClockSkewMs = typeof opts.clockSkewMs === "number" && opts.clockSkewMs >= 0           // allow:numeric-opt-Infinity — operator-supplied skew, default 5 min
+  // A present clockSkewMs must be a non-negative finite integer; an Infinity /
+  // NaN / negative skew makes `amsX + skewSec < nowSec` (and the t= future
+  // check) unsatisfiable and silently disables the RFC 8617 §5.2 expiry /
+  // future-timestamp gate. Non-finite falls to the default.
+  var arcClockSkewMs = numericBounds.isNonNegativeFiniteInt(opts.clockSkewMs)
     ? opts.clockSkewMs : C.TIME.minutes(5);
   var nowSec = Math.floor(Date.now() / 1000);                                                  // Unix epoch seconds divisor
 
@@ -1754,7 +1809,9 @@ async function _verifyArc(rfc822, hop, allHops, kind, dnsLookup, dkim) {
   }
   // Current AS with b= emptied. RFC 8617 §5.1.2: canonicalization
   // includes the AS header with `b=` value stripped + no trailing CRLF.
-  var asUnsigned = sigValue.replace(/(\bb=)[^;]*/i, "$1");
+  // Use the shared tag-aware stripper (the `\bb=...` regex it replaced
+  // mis-zeroed a value containing `b=` inside another tag, e.g. `d=ab=x`).
+  var asUnsigned = dkim._stripBTagValue(sigValue);
   canonicalized += _canonRelaxedHeader("ARC-Seal", asUnsigned).replace(/\r\n$/, "");
 
   // Verify the AS signature.
@@ -1788,15 +1845,23 @@ async function _verifyAmsViaDkim(rfc822, hop, sigValue, tags, dkim, dnsLookup) {
       // canonicalizes it via h=). Pre-v0.8.17 stripped every AAR
       // unconditionally, breaking verification on chains that
       // included AAR in h= (Microsoft + Google interop).
-      var instMatch = /\bi\s*=\s*(\d+)/.exec(khv.value);
-      if (!instMatch || parseInt(instMatch[1], 10) !== hop.instance) continue;
+      var aarInst = _arcInstanceOf(khv.value);
+      if (aarInst === null || aarInst !== hop.instance) continue;
     }
     rebuilt.push(line);
   }
   rebuilt.unshift(renamedHeader);
   var synthetic = rebuilt.join("\r\n") + (sep === -1 ? "" :
     rfc822.slice(headerEnd));
-  var rv = await dkim.verify(synthetic, { dnsLookup: dnsLookup });
+  // The AMS i= tag is an RFC 8617 §4.1.2 instance number, not a DKIM AUID;
+  // signal the verifier (via the shared internal reuse token) to skip the
+  // §3.5 AUID/d= binding check that would otherwise permerror every ARC chain
+  // and to canonicalize the signature header under its ARC-Message-Signature
+  // name. The token is exported from no public surface, so this reuse is
+  // unreachable from b.mail.dkim.verify.
+  var verifyOpts = { dnsLookup: dnsLookup };
+  verifyOpts[ARC_AMS_REUSE] = true;
+  var rv = await dkim.verify(synthetic, verifyOpts);
   if (!Array.isArray(rv) || rv.length === 0) {
     return { result: "permerror", errors: ["ams: dkim verifier returned no results"] };
   }
@@ -1936,12 +2001,14 @@ async function arcEvaluate(rfc822, opts) {
     var name = khv.key;
     var value = khv.value.trim();
     if (name === "arc-seal") {
-      var iMatch = value.match(/(?:^|[;,\s])i=(\d+)/);                            // allow:regex-no-length-cap — header bounded by RFC 5322 998
+      var sealInst = _arcInstanceOf(value);
       var dMatch = value.match(/(?:^|[;,\s])d=([^\s;]+)/);                        // allow:regex-no-length-cap — header bounded by RFC 5322 998
-      if (iMatch && dMatch) hopDomains[parseInt(iMatch[1], 10)] = dMatch[1].toLowerCase();
+      if (sealInst !== null && dMatch) hopDomains[sealInst] = dMatch[1].toLowerCase();
     } else if (name === "arc-authentication-results") {
-      var arIMatch = value.match(/\bi\s*=\s*(\d+)/);                              // allow:regex-no-length-cap — header bounded by RFC 5322 998
-      if (arIMatch) hopAr[parseInt(arIMatch[1], 10)] = value;
+      // Same strict instance reader as the indexing pass — finalAr must be the
+      // AAR the crypto pass actually indexed, never one a looser parser admits.
+      var arInst = _arcInstanceOf(value);
+      if (arInst !== null) hopAr[arInst] = value;
     }
   }
 
@@ -2056,6 +2123,10 @@ function authResultsEmit(opts) {
 
   var version = (opts.version === undefined || opts.version === null)
     ? "1" : String(opts.version);
+  if (/[\r\n\0]/.test(version)) {
+    throw new MailAuthError("mail-auth/ar-bad-version",
+      "authResults.emit: version contains forbidden control characters");
+  }
   var head = opts.authservId + (version === "1" ? "" : " " + version);
 
   if (opts.results.length === 0) {
@@ -2234,6 +2305,14 @@ function _extractFromHeaders(headerBlock) {
     // not a single bare addr-spec.
     if (/[\s,;:<>]/.test(address)) address = null;
   }
+  // An RFC 5322 addr-spec has EXACTLY ONE '@' (local-part "@" domain). A second
+  // '@' (x@attacker@victim) is malformed: the rightmost-@ derivation below reads
+  // victim as the author domain, while a downstream leftmost-@ parser
+  // (dmarc.evaluate's split("@")[1]) reads attacker — so DMARC could authorize a
+  // domain the attacker controls while the displayed From is the victim's
+  // (CWE-290). Treat any address with more than one '@' as unparsable so the
+  // caller fails closed (permerror → reject).
+  if (address && address.indexOf("@") !== address.lastIndexOf("@")) address = null;
   var at = address ? address.lastIndexOf("@") : -1;
   var domain = (at > 0 && address && at < address.length - 1)
     ? address.slice(at + 1).toLowerCase()

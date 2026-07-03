@@ -228,6 +228,56 @@ What blamejs does **not** defend against (operator responsibility):
 
 ---
 
+## Assurance case
+
+This is blamejs's assurance case — the argument, backed by evidence, that the
+framework meets its security requirements (in the sense of NIST IR 7608). The top
+claim is decomposed into sub-claims, each supported by the design and by
+verifiable evidence.
+
+**Top claim.** A blamejs deployment, run with defaults, resists the threats in
+the [Threat model](#threat-model) above and does not silently degrade its
+security posture.
+
+- **Sub-claim 1 — the security defaults are actually on.** CSRF, origin /
+  fetch-metadata, bot-guard, sealed storage, encrypted session, cookie prefixes,
+  Trusted Types, strict CSP, and the SSRF guard are wired into the request
+  lifecycle, not behind config flags. *Evidence:* the smoke suite asserts each
+  default fires; any change that trips a security default is fixed in the test,
+  never by weakening the default.
+- **Sub-claim 2 — the cryptography is post-quantum and misuse-resistant.** No
+  classical-only defaults; every sealed/signed envelope is algorithm-tagged so a
+  substitution fails the AEAD/verify check; keys and RNG come from audited
+  implementations. *Evidence:* the [Cryptographic stack](#cryptographic-stack)
+  section; known-answer tests on the crypto primitives; algorithm agility
+  exercised by round-trip tests.
+- **Sub-claim 3 — untrusted input cannot crash or subvert a parser.** Every
+  `safe-*` / `guard-*` primitive validates adversarial input and is fuzzed.
+  *Evidence:* ClusterFuzzLite per-PR + daily fuzzing with a regression corpus,
+  and a coverage gate that refuses any new parser primitive without a fuzz
+  harness.
+- **Sub-claim 4 — defects are caught before release and fixed at the root.**
+  Every bug fix lands with a reproducing test (RED-before-fix) and, where
+  structural, a detector; CI runs the full suite plus CodeQL, Semgrep,
+  OSV-Scanner, gitleaks, and OpenSSF Scorecard on every change across three
+  platforms. *Evidence:* the [CI workflow](.github/workflows/ci.yml); the
+  23,000+ smoke assertions; the OpenSSF Scorecard and Best Practices badges.
+- **Sub-claim 5 — what ships is what was reviewed.** Releases carry SLSA L3
+  provenance, Sigstore-signed SBOMs, npm provenance, and SSH-signed tags; the
+  supply chain (vendored deps, CI actions, Docker bases) is hash/digest-pinned
+  and integrity-checked at boot. *Evidence:*
+  [Verifying release authenticity](#verifying-release-authenticity);
+  `b.configDrift.verifyVendorIntegrity` at boot; the pinned-dependency gates.
+
+**Residual risk.** The items under "does not defend against" above are explicit
+operator responsibilities (vault-passphrase strength, host/root compromise,
+network-layer DoS, reverse-proxy CVEs). The project is solo-maintained, so
+review-by-a-second-person is a known gap tracked in
+[GOVERNANCE.md](GOVERNANCE.md); it is compensated by the automated gates above
+until a second maintainer is onboarded.
+
+---
+
 ## Cryptographic stack
 
 | Layer | Algorithm | Standard |
@@ -464,6 +514,7 @@ CVE classes the framework tracks but does not currently ship a primitive for —
 - **HTTP/2 WINDOW_UPDATE rate-flood variants** — CVE-2026-21714 closes the leak-after-GOAWAY shape; the broader rate-flood class (peer bursting WINDOW_UPDATE to spin nghttp2 flow-control accounting) remains an active research area. The framework's H/2 server caps `maxConcurrentStreams` / `maxSessionMemory` / `maxHeaderListPairs` plus a per-stream WINDOW_UPDATE rate cap; operators on Internet-facing deployments add upstream rate-limiting at the edge.
 - **Glassworm Unicode in audit-log readers** — log-readers that render audit-row metadata as a string in a terminal can be tricked by bidi / zero-width / homoglyph characters in operator-supplied reasons. The framework's `b.redact` strips the dangerous classes from emitted audit rows; operators building custom log viewers route the rendered string through `b.guardHtml` (HTML viewer) or `b.guardCsv` (CSV exporter) before display.
 - **picomatch / minimatch ReDoS class** — the framework does not vendor a glob library; the only glob-shaped match in `lib/` is the bounded subscription matcher in `b.pubsub` (`_MAX_CHANNEL_LEN` cap before regex compile). Operators vendoring a glob library separately must cap input length and apply a regex-evaluation budget (CVE-2026-26996 / CVE-2026-33671 / CVE-2026-27904 class).
+- **Operator regex matched against request input** — every framework primitive that accepts an operator-supplied `RegExp` and runs it against attacker-controllable data (bot-guard `User-Agent`, CORS `Origin`, the request-path skip matchers, static-serve path patterns, form-field patterns, SMTP HELO patterns, self-update asset names) screens the pattern through `b.guardRegex` at configuration time, refusing catastrophic-backtracking shapes before they can be weaponized — a length bound on the input does not stop backtracking. Operators matching their **own** regex against untrusted input (a custom router, allow-list, or content filter) should screen it the same way with `b.guardRegex.assertSafe(re)`.
 - **AdonisJS multipart-filename → arbitrary-write class** — the framework's `b.fileUpload` routes every multipart filename through `b.guardFilename.gate({ profile: "strict" })` by default (path traversal / null-byte / NTFS ADS / UNC / overlong UTF-8 / Windows reserved names / RTLO bidi). Operators implementing a parallel multipart receiver outside the framework's primitive must wire the same gate.
 - **fs.realpath symlink-chain Permission Model bypass class** — see "Operator territory" entry above; the framework's symlink defenses live at the application layer (`b.vault` PEM-file read-side + `b.staticServe` realpath gate); operators using Node's experimental Permission Model add it as defense-in-depth, never as the primary symlink-resolution boundary.
 - **QUIC / HTTP/3 outbound (RFC 9000 / RFC 9001)** — the framework's `b.httpClient` is HTTP/1.1 + HTTP/2 only. QUIC + HTTP/3 are deferred-with-condition: re-open when Node's `--experimental-quic` flag graduates to stable and `node:http3` ships. Until then, operators wanting outbound h3 wire their own client outside the framework (see `lib/http-client.js` header note on the future `kind: "h3"` transport shape). The framework's TLS 1.3 + h2 anti-amplification + flow-control caps remain in force on every other transport. Inbound h3 is similarly deferred; operators terminating h3 at the edge route h2 / h1 to the framework's `b.router`.
@@ -472,7 +523,7 @@ CVE classes the framework tracks but does not currently ship a primitive for —
 
 ## Node 26 compatibility
 
-Today's `engines.node` floor is `>=24.16.0` and the release container pins `node:24-alpine`. Node 26 satisfies the floor and the framework's test suite runs cleanly on Node 26 today. When Node 26 promotes to Active LTS (target Oct 2026), the framework will bump the floor to `>=26.x` in a dedicated release that ships the queued refactors (Map.getOrInsertComputed sweep, Ed25519 context-parameter adoption, PKCS8 reverse-direction roundtrip test) as one PR.
+Today's `engines.node` floor is `>=24.18.0` and the release container pins `node:24-alpine`. Node 26 satisfies the floor and the framework's test suite runs cleanly on Node 26 today. When Node 26 promotes to Active LTS (target Oct 2026), the framework will bump the floor to `>=26.x` in a dedicated release that ships the queued refactors (Map.getOrInsertComputed sweep, Ed25519 context-parameter adoption, PKCS8 reverse-direction roundtrip test) as one PR.
 
 Two Node 26 platform-level changes operators integrating with blamejs should be aware of now:
 

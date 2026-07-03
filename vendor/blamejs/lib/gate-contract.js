@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.gateContract
@@ -940,7 +942,7 @@ function canaryGate(gate, opts) {
     name: opts.name || "canary",
     check: async function (ctx) {
       var d = await gate.check(ctx);
-      if (d.action === "refuse" && Math.random() > rate) {       // allow:math-random-noncrypto — canary sampling, non-security
+      if (d.action === "refuse" && Math.random() > rate) {       // allow:math-random-noncrypto-jitter-sampling — canary sampling, non-security
         return Object.assign({}, d, { ok: true, action: "warn" });
       }
       return d;

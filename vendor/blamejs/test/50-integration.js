@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Layer 5 — operator-facing integration / cross-module flows.
@@ -573,10 +575,8 @@ async function testCreateAppWithJobs() {
     });
     check("route enqueues + responds",                 posted.statusCode === 200);
 
-    var t0 = Date.now();
-    while (processed.length === 0 && Date.now() - t0 < 5000) {
-      await new Promise(function (r) { setTimeout(r, 50); });
-    }
+    await helpers.waitUntil(function () { return processed.length >= 1; },
+      { timeoutMs: 5000, label: "createApp+jobs: route-enqueued job processed" });
     check("createApp+jobs: handler fired for the route-enqueued job",
           processed.length === 1 && processed[0] === "u-from-route");
   } finally {

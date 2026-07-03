@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 var helpers = require("../helpers");
 var b = helpers.b;
 var check = helpers.check;
 
-(function run() {
+function run() {
   var ropa = b.gdpr.ropa.create({
     audit: false,
     controller: { name: "Acme", contact: "dpo@acme.example" },
@@ -38,4 +40,7 @@ var check = helpers.check;
   check("ropa.remove deletes",       ropa.list().length === 0);
 
   console.log("OK — gdpr.ropa tests");
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

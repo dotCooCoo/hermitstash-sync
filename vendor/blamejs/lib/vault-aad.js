@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.vault.aad — AAD-bound sealed-column primitive.
@@ -99,7 +101,7 @@ function _canonicalize(parts) {
     valLenBuf.writeUInt32BE(valBuf.length);
     chunks.push(keyLenBuf, keyBuf, valLenBuf, valBuf);
   }
-  return Buffer.concat(chunks);                  // allow:handrolled-buffer-collect — AAD canonicalization, bounded by length-prefixed field shape
+  return Buffer.concat(chunks);                  // allow:handrolled-buffer-collect-bounded-framing — AAD canonicalization, bounded by length-prefixed field shape
 }
 
 function buildColumnAad(opts) {

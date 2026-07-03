@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * ageGate middleware — request-level age classification + high-privacy
@@ -101,9 +103,9 @@ function create(opts) {
       "middleware.ageGate: opts.getAge must be a function (req) -> number | null");
   }
   var getAge = opts.getAge;
-  var requireAge = (typeof opts.requireAge === "number" && opts.requireAge > 0)            // allow:numeric-opt-Infinity — age is operator domain, not a bytes/time-shaped opt
+  var requireAge = (typeof opts.requireAge === "number" && opts.requireAge > 0)            // allow:numeric-opt-Infinity-intentional — age threshold; an Infinity bound is fail-closed (denies everyone), never a bypass
     ? opts.requireAge : null;
-  var consentRequired = (typeof opts.consentRequired === "number" && opts.consentRequired > 0)  // allow:numeric-opt-Infinity — age threshold, not a bytes/time-shaped opt
+  var consentRequired = (typeof opts.consentRequired === "number" && opts.consentRequired > 0)  // allow:numeric-opt-Infinity-intentional — age threshold; an Infinity bound is fail-closed (classifies everyone below-threshold), never a bypass
     ? opts.consentRequired : null;
   var hasParentalConsent = typeof opts.hasParentalConsent === "function" ? opts.hasParentalConsent : null;
   var skipPaths = Array.isArray(opts.skipPaths) ? opts.skipPaths.slice() : [];

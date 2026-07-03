@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.router
@@ -42,6 +44,7 @@ var requestHelpers = require("./request-helpers");
 var lazyRequire = require("./lazy-require");
 var safeAsync = require("./safe-async");
 var safeEnv = require("./parsers/safe-env");
+var safeJson = require("./safe-json");
 var safeUrl = require("./safe-url");
 var validateOpts = require("./validate-opts");
 var websocket = require("./websocket");
@@ -161,9 +164,25 @@ function _makeSchemaValidator(spec) {
   };
 }
 
+// True when a res.end body structurally looks like a JSON document — the
+// first non-whitespace byte is an object/array opener. Narrow on purpose:
+// a plain-text / HTML body on a response-schema route (leading "<", a bare
+// word, etc.) is skipped so the validator never throws on a non-JSON
+// response, and a JSON scalar (a bare number / quoted string) is not
+// mistaken for a schema-shaped document.
+function _bodyLooksLikeJson(text) {
+  for (var i = 0; i < text.length; i += 1) {
+    var ch = text.charCodeAt(i);
+    if (ch === 0x20 || ch === 0x09 || ch === 0x0A || ch === 0x0D) continue;   // skip leading whitespace
+    return ch === 0x7B || ch === 0x5B;                                        // "{" or "["
+  }
+  return false;
+}
+
 function _makeResponseValidator(spec) {
-  // Wraps res.json (and res.end when called with a JSON-shaped buffer)
-  // to validate the response body against spec.response. Mode:
+  // Validate the response body against spec.response no matter which exit
+  // the handler used — res.json OR a raw res.end(JSON.stringify(...)) that
+  // ships a JSON-shaped buffer. Mode:
   //   - BLAMEJS_VALIDATE_RESPONSES=throw (or per-route validateResponse: "throw")
   //     → throw a SafeSchemaError-shaped error; route handler's caller sees a 500.
   //   - BLAMEJS_VALIDATE_RESPONSES=warn (or per-route validateResponse: "warn")
@@ -175,21 +194,59 @@ function _makeResponseValidator(spec) {
   if (!mode) return function passthrough(_req, _res, next) { next(); };
 
   return function responseValidator(req, res, next) {
+    // One request-scoped check shared by both the res.json and res.end
+    // wrappers so a single failure shape covers every exit.
+    var validated = false;
+    function runCheck(value, headersAlreadySent) {
+      var rr = spec.response.safeParse(value);
+      if (rr.ok) return;
+      if (mode === "throw") {
+        // A raw res.end after writeHead cannot be un-sent — throwing there
+        // would abort mid-flush and can't reach a clean 500. Degrade to a
+        // logged error in that case; res.json (and a pre-writeHead res.end)
+        // still throw before any header is committed.
+        if (!headersAlreadySent) {
+          throw new Error("router response-validation failed for " +
+            (req.method + " " + req.routePattern) + ": " +
+            JSON.stringify(rr.errors));
+        }
+        log.error("response-validation failed after headers sent on " +
+                  req.method + " " + req.routePattern + ": " +
+                  JSON.stringify(rr.errors).slice(0, 500));
+        return;
+      }
+      // warn mode
+      log.warn("response-validation drift on " + req.method + " " + req.routePattern +
+               ": " + JSON.stringify(rr.errors).slice(0, 500));
+    }
+
     var origJson = typeof res.json === "function" ? res.json.bind(res) : null;
     if (origJson) {
       res.json = function (value) {
-        var rr = spec.response.safeParse(value);
-        if (!rr.ok) {
-          if (mode === "throw") {
-            throw new Error("router response-validation failed for " +
-              (req.method + " " + req.routePattern) + ": " +
-              JSON.stringify(rr.errors));
-          }
-          // warn mode
-          log.warn("response-validation drift on " + req.method + " " + req.routePattern +
-                   ": " + JSON.stringify(rr.errors).slice(0, 500));
-        }
+        runCheck(value, false);   // res.json validates before it writes headers
+        validated = true;         // res.json delegates to res.end internally — don't re-check
         return origJson(value);
+      };
+    }
+
+    var origEnd = typeof res.end === "function" ? res.end.bind(res) : null;
+    if (origEnd) {
+      res.end = function (chunk) {
+        if (!validated) {
+          var text = null;
+          if (typeof chunk === "string") text = chunk;
+          else if (Buffer.isBuffer(chunk)) text = chunk.toString("utf8");
+          if (text !== null && _bodyLooksLikeJson(text)) {
+            var parsed;
+            var parsedOk = true;
+            try { parsed = safeJson.parse(text); } catch (_e) { parsedOk = false; }
+            if (parsedOk) {
+              validated = true;
+              runCheck(parsed, res.headersSent === true);
+            }
+          }
+        }
+        return origEnd.apply(res, arguments);
       };
     }
     next();
@@ -698,7 +755,32 @@ class Router {
     var parsed = safeUrl.parse(absolute, {
       allowedProtocols: safeUrl.ALLOW_HTTP_ALL,
     });
-    req.pathname = parsed.pathname;
+    // Canonicalize the path to a single decoded form BEFORE any path-scoped
+    // decision runs. safeUrl.parse preserves percent-escapes in the path, but
+    // path-scoped middleware (`router.use("/admin", guard)` — requireAal,
+    // bearerAuth, requireMtls, csrfProtect) matches req.pathname segment-for-
+    // segment while downstream consumers (b.staticServe, router.serveStatic)
+    // percent-decode the path before resolving the resource. If the gate and
+    // the consumer disagree on decoding, an attacker percent-encodes a
+    // character in the guarded segment ("/%61dmin/secret") or hides a
+    // separator ("/admin%2fsecret") so the guard's compare misses while the
+    // consumer still reaches the protected resource — an authn/authz/CSRF/
+    // mTLS bypass. Refuse an encoded path separator or NUL (no legitimate
+    // routing use — the consumer would treat them as a separator/terminator),
+    // then decode the remaining escapes exactly once so the guard, the route
+    // matcher, and every consumer share one canonical path.
+    if (/%2[fF]|%5[cC]|%00/.test(parsed.pathname)) {
+      res.statusCode = 400;
+      res.end("400 Bad Request: encoded path separator or null byte");
+      return;
+    }
+    try {
+      req.pathname = decodeURIComponent(parsed.pathname);
+    } catch (_decodeErr) {
+      res.statusCode = 400;
+      res.end("400 Bad Request: malformed percent-encoding in path");
+      return;
+    }
     // CVE-2026-21717 V8 HashDoS defense — cap distinct query keys
     // before forming the dense object. Integer-shaped keys past 1000
     // entries degrade V8 hidden-class transitions to O(n²).
@@ -931,16 +1013,24 @@ class Router {
             "res.redirect: target must be a non-empty string"
           );
         }
-        // Reject embedded CR / LF / NUL early — header injection class.
-        // Node's writeHead would refuse these too, but the explicit
-        // refusal here gives operators a router-shaped error rather than
-        // a generic ERR_INVALID_CHAR.
+        // Reject every byte a header line or a URL-parsing user agent
+        // treats specially. CR / LF / NUL are the header-injection class
+        // (Node's writeHead would refuse them too — the explicit refusal
+        // gives operators a router-shaped error over ERR_INVALID_CHAR).
+        // TAB (0x09) is the open-redirect class: Node PERMITS a horizontal
+        // tab in a header value, but WHATWG URL removes ASCII TAB / LF / CR
+        // from a URL before parsing it, so "/<TAB>/evil.example" — which
+        // the same-origin heuristic below reads as a rooted path — collapses
+        // to the protocol-relative "//evil.example" in the browser and
+        // bounces to an attacker origin. Refuse the whole browser-stripped
+        // set here so the byte the heuristic inspects is the byte the user
+        // agent parses.
         for (var ci = 0; ci < url.length; ci += 1) {
           var cc = url.charCodeAt(ci);
-          if (cc === 0x00 || cc === 0x0A || cc === 0x0D) {
+          if (cc === 0x00 || cc === 0x09 || cc === 0x0A || cc === 0x0D) {
             throw new RouterError(
               "router/redirect-target-has-control-chars",
-              "res.redirect: target must not contain CR / LF / NUL bytes"
+              "res.redirect: target must not contain CR / LF / TAB / NUL bytes"
             );
           }
         }

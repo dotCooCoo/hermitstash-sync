@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * spanHttpServer middleware — auto-creates a root span per HTTP
@@ -49,6 +51,7 @@ var { defineClass } = require("../framework-error");
 var SpanHttpError = defineClass("SpanHttpError", { alwaysPermanent: true });
 
 var observability = lazyRequire(function () { return require("../observability"); });
+var guardRegex = lazyRequire(function () { return require("../guard-regex"); });
 
 function _shouldIgnore(path, ignorePaths) {
   if (!ignorePaths || !Array.isArray(ignorePaths)) return false;
@@ -72,7 +75,7 @@ function _scheme(req) {
   // client used (forwarded), NOT a Secure/HSTS/origin trust decision. Routing
   // through trustedProtocol would drop the forwarded scheme from spans behind a
   // proxy (less accurate telemetry) for no security gain.
-  // allow:raw-xfp — telemetry label, not a trust sink (see above).
+  // allow:raw-xfp-telemetry-only — telemetry label, not a trust sink (see above).
   var x = req.headers && (req.headers["x-forwarded-proto"] || "");
   if (typeof x === "string" && x.length > 0) {
     var first = x.split(",")[0].trim().toLowerCase();
@@ -82,7 +85,7 @@ function _scheme(req) {
 }
 
 function _serverAddress(req) {
-  // allow:raw-xfp — display-only: server.address span attribute (telemetry),
+  // allow:raw-xfp-telemetry-only — display-only: server.address span attribute (telemetry),
   // not an authority trust decision. Same rationale as _scheme above.
   var hostHeader = req.headers && (req.headers["x-forwarded-host"] || req.headers.host);
   if (typeof hostHeader === "string" && hostHeader.length > 0) {
@@ -177,6 +180,15 @@ function create(opts) {
   var tracer            = opts.tracer;
   var onEnd             = opts.onEnd || null;
   var ignorePaths       = opts.ignorePaths || null;
+  if (Array.isArray(ignorePaths)) {
+    for (var ip = 0; ip < ignorePaths.length; ip++) {
+      if (ignorePaths[ip] instanceof RegExp) {
+        guardRegex().assertSafe(ignorePaths[ip],
+          "middleware.spanHttpServer: ignorePaths[" + ip + "]",
+          SpanHttpError, "span-http/unsafe-pattern");
+      }
+    }
+  }
   var captureReqHeaders = opts.captureRequestHeaders || null;
   var captureResHeaders = opts.captureResponseHeaders || null;
   var spanNameFn        = opts.spanNameFn || null;

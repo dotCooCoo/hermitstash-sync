@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * @module b.ssrfGuard
@@ -743,18 +745,24 @@ function createAllowlist(opts) {
       "ssrf-guard/empty-allowlist", {});
   }
   function _matches(list, hostOrIp) {
+    // Canonicalize BOTH the URL host and each non-CIDR operator entry before
+    // comparing: the URL parser already lowercases the host (and strips a
+    // trailing dot), so a mixed-case or trailing-dot operator entry compared
+    // raw silently failed to match — letting a denylisted host through.
+    var canonHost = canonicalizeHost(hostOrIp);
     for (var i = 0; i < list.length; i++) {
       var entry = list[i];
-      if (entry === hostOrIp) return true;
       if (entry.indexOf("/") !== -1) {
         try { if (cidrContains(entry, hostOrIp)) return true; } catch (_e) { /* ignore */ }
+      } else if (canonicalizeHost(entry) === canonHost) {
+        return true;
       }
     }
     return false;
   }
   async function assertUrl(url) {
     var parsed;
-    try { parsed = new URL(url); }                                                 // allow:raw-new-url — local URL parse for hostname extraction
+    try { parsed = new URL(url); }                                                 // allow:raw-new-url-parse-only — local URL parse for hostname extraction
     catch (_e) {
       throw new SsrfError("invalid URL", "ssrf-guard/bad-url", { url: url });
     }

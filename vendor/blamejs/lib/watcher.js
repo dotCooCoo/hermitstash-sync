@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.watcher — recursive filesystem-watch primitive with cross-platform
@@ -528,7 +530,7 @@ function create(opts) {
       throw new WatcherError("watcher/start-failed",
         "watcher.create: initial poll walk failed: " + ((e && e.message) || String(e)));
     }
-    pollTimer = setInterval(_pollTick, pollIntervalMs);                                            // allow:timer-no-unref — .unref() called immediately below; timer doesn't pin the event loop
+    pollTimer = setInterval(_pollTick, pollIntervalMs);                                            // allow:timer-no-unref-unrefed-below — .unref() called immediately below; timer doesn't pin the event loop
     if (typeof pollTimer.unref === "function") pollTimer.unref();
   } else {
     try {

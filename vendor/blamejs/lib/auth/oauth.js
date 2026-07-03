@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * oauth — OAuth 2 / OIDC client.
@@ -107,6 +109,7 @@
 var nodeCrypto = require("node:crypto");
 var cache = require("../cache");
 var C = require("../constants");
+var numericBounds = require("../numeric-bounds");
 var safeAsync = require("../safe-async");
 var bCrypto = require("../crypto");
 var { generateBytes, timingSafeEqual: cryptoTimingSafeEqual } = bCrypto;
@@ -282,7 +285,7 @@ function _validateUrl(url, allowHttp, label) {
   // global flag.
   var isLocalhostHttp = false;
   try {
-    var parsed = new URL(url);                                                                  // allow:raw-new-url — RFC 9700 §4.1.1 localhost-exception lookup; safeUrl re-validates below for non-localhost paths
+    var parsed = new URL(url);                                                                  // allow:raw-new-url-parse-only — RFC 9700 §4.1.1 localhost-exception lookup; safeUrl re-validates below for non-localhost paths
     // Strip trailing root-zone dot before the localhost compare.
     // RFC 1034 §3.1 — `localhost.` resolves identically to `localhost`;
     // without the strip, an attacker who registers `evil.com` as a
@@ -886,6 +889,11 @@ async function verifyClientAttestation(attestationJwt, popJwt, vopts) {
       "client-attestation: missing 'cnf.jwk' confirmation key (RFC 7800)");
   }
   var nowSec  = Math.floor(Date.now() / C.TIME.seconds(1));
+  // A present skew/maxAge must be a non-negative finite integer; a bare typeof
+  // check lets Infinity/NaN through, and `exp + Infinity < now` (or NaN) is
+  // always false — disabling the attestation/PoP expiry gates.
+  numericBounds.requireNonNegativeFiniteIntIfPresent(vopts.clockSkewSec,
+    "verifyClientAttestation: opts.clockSkewSec", OAuthError, "auth-oauth/bad-clock-skew");
   var skewSec = typeof vopts.clockSkewSec === "number" ? vopts.clockSkewSec : (C.TIME.minutes(1) / C.TIME.seconds(1));
   if (typeof ap.exp !== "number" || ap.exp + skewSec < nowSec) {
     throw new OAuthError("auth-oauth/attestation-expired",
@@ -918,6 +926,8 @@ async function verifyClientAttestation(attestationJwt, popJwt, vopts) {
   if (typeof pp.iat !== "number") {
     throw new OAuthError("auth-oauth/attestation-pop-no-iat", "client-attestation-pop: missing 'iat'");
   }
+  numericBounds.requireNonNegativeFiniteIntIfPresent(vopts.maxPopAgeSec,
+    "verifyClientAttestation: opts.maxPopAgeSec", OAuthError, "auth-oauth/bad-pop-max-age");
   var maxAge = typeof vopts.maxPopAgeSec === "number" ? vopts.maxPopAgeSec : DEFAULT_POP_MAX_AGE_SEC;
   if (pp.iat - skewSec > nowSec) {
     throw new OAuthError("auth-oauth/attestation-pop-iat-future", "client-attestation-pop: iat in the future");
@@ -951,7 +961,11 @@ async function verifyClientAttestation(attestationJwt, popJwt, vopts) {
       throw new OAuthError("auth-oauth/attestation-pop-seen-callback-failed",
         "client-attestation-pop: seenJti() callback threw: " + ((e && e.message) || String(e)));
     }
-    if (unseen === false) {
+    // Fail closed on ANY non-truthy result. The contract is "returns truthy
+    // when UNSEEN"; an operator store fronting Redis EXISTS / SISMEMBER or a
+    // SQL COUNT returns 0 (falsy, not `false`) on a replay, so an
+    // `=== false` comparison would miss it and accept the replayed PoP.
+    if (!unseen) {
       throw new OAuthError("auth-oauth/attestation-pop-replay",
         "client-attestation-pop: jti already seen (replay refused, draft §12.1)");
     }
@@ -970,6 +984,47 @@ async function verifyClientAttestation(attestationJwt, popJwt, vopts) {
 function _constantTimeStrEq(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
   return cryptoTimingSafeEqual(a, b);
+}
+
+// Framework-managed authorization-request parameters. Operator-supplied
+// extraParams may not carry any of these — the builder generates them and
+// RETURNS the security-critical ones (state, PKCE verifier/challenge) to the
+// caller, so an extraParams override would silently diverge the returned
+// values from what the URL/PAR body actually carries (a broken CSRF / PKCE
+// binding). Covers redirect target, client identity, requested response,
+// scope, state, nonce, PKCE challenge, response mode, RAR details, and the
+// JAR request container.
+var RESERVED_AUTHZ_PARAMS = {
+  "response_type":         1,
+  "client_id":             1,
+  "redirect_uri":          1,
+  "scope":                 1,
+  "state":                 1,
+  "nonce":                 1,
+  "code_challenge":        1,
+  "code_challenge_method": 1,
+  "response_mode":         1,
+  "authorization_details": 1,
+  "request":               1,
+  "request_uri":           1,
+};
+
+// Refuse operator-supplied extraParams keys that collide with a framework-
+// managed parameter. extraParams is operator-controlled, so a collision is a
+// config-time bug (a library merge / copy-paste) — refuse it loudly rather
+// than let it shadow a value the framework generated and returned. Fail
+// closed; shared by authorizationUrl, pushAuthorizationRequest, and
+// endSessionUrl so every URL/PAR builder guards the same way.
+function _assertNoReservedExtraParams(extraParams, reserved, errCode, ctx) {
+  if (!extraParams || typeof extraParams !== "object") return;
+  var ek = Object.keys(extraParams);
+  for (var i = 0; i < ek.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(reserved, ek[i])) {
+      throw new OAuthError(errCode,
+        ctx + ": extraParams key '" + ek[i] + "' collides with a " +
+        "framework-managed parameter — pass it through the named option instead");
+    }
+  }
 }
 
 // ---- core ----
@@ -992,6 +1047,12 @@ function create(opts) {
       "requires PKCE for all clients. Remove the opt or upgrade the IdP.");
   }
   var pkce = true;
+  // A present clockSkewMs must be a non-negative finite integer; Infinity/NaN
+  // would disable verifyIdToken's exp gate (`exp + Infinity < now` is always
+  // false → an expired ID token verifies). Reject a malformed skew at config
+  // time so the operator catches it.
+  numericBounds.requireNonNegativeFiniteIntIfPresent(opts.clockSkewMs,
+    "oauth.create: opts.clockSkewMs", OAuthError, "auth-oauth/bad-clock-skew");
   var clockSkewMs  = typeof opts.clockSkewMs === "number" ? opts.clockSkewMs : DEFAULT_CLOCK_SKEW_MS;
   var discoveryCacheMs = typeof opts.discoveryCacheMs === "number"
                            ? opts.discoveryCacheMs : DEFAULT_DISCOVERY_CACHE_MS;
@@ -1245,7 +1306,14 @@ function create(opts) {
       params.set("authorization_details", JSON.stringify(requestedAuthzDetails));
     }
     // Operator-supplied additional params (audience, resource, etc.).
+    // Refuse keys that collide with a framework-managed parameter so an
+    // operator typo / library-merge can't shadow the redirect_uri / state /
+    // code_challenge the builder generated and returned — which would
+    // silently diverge the returned {state, verifier} from the URL and
+    // break the CSRF / PKCE binding.
     if (uopts.extraParams && typeof uopts.extraParams === "object") {
+      _assertNoReservedExtraParams(uopts.extraParams, RESERVED_AUTHZ_PARAMS,
+        "auth-oauth/reserved-extra-param", "authorizationUrl");
       var ek = Object.keys(uopts.extraParams);
       for (var i = 0; i < ek.length; i++) params.set(ek[i], String(uopts.extraParams[ek[i]]));
     }
@@ -1357,23 +1425,30 @@ function create(opts) {
         throw new OAuthError("auth-oauth/seen-callback-failed",
           "refreshAccessToken: checkAndInsert() callback threw: " + ((e && e.message) || String(e)));
       }
-      // Spec contract: inserted===true → first sighting (OK);
-      // inserted===false → replay. v0.9.3 had this inverted, which
-      // broke every first refresh attempt for operators reusing an
-      // existing b.nonceStore-style backend.
-      alreadySeen = inserted === false;
+      // Spec contract: a TRUTHY result → first sighting (the value was
+      // inserted, OK); a FALSY result → replay. v0.9.3 had this inverted,
+      // which broke every first refresh attempt for operators reusing an
+      // existing b.nonceStore-style backend. Test truthiness, not an
+      // `=== false` literal: a store fronting Redis SETNX / SQL INSERT
+      // returns 0 (falsy, not `false`) when the row already existed, so
+      // an exact-literal compare would miss the replay and fail OPEN.
+      alreadySeen = !inserted;
     } else if (typeof ropts.seen === "function") {
       // Legacy non-atomic path. Documented as a check-then-act race;
       // operators sharing a single-writer store (Redis SETNX, DB
       // INSERT ON CONFLICT) MUST migrate to checkAndInsert. Stays
       // here for backwards-compat with existing operator code.
+      // Legacy contract: truthy → the token was presented before (replay).
+      // The value is used by truthiness at the gate below, so a store
+      // returning 1 from Redis EXISTS / a SQL COUNT is honored as "seen"
+      // instead of being missed by an `=== true` literal compare.
       try { alreadySeen = await ropts.seen(refreshToken); }
       catch (e) {
         throw new OAuthError("auth-oauth/seen-callback-failed",
           "refreshAccessToken: seen() callback threw: " + ((e && e.message) || String(e)));
       }
     }
-    if (alreadySeen === true) {
+    if (alreadySeen) {
       throw new OAuthError("auth-oauth/refresh-token-replay",
         "refreshAccessToken: refresh token has been presented before — refused " +
         "(OAuth 2.1 §6.1 / RFC 9700 §4.13 one-time-use defense). The operator MUST " +
@@ -1996,15 +2071,10 @@ function create(opts) {
         "ui_locales":                 1,
         "client_id":                  1,
       };
+      _assertNoReservedExtraParams(uopts.extraParams, RESERVED_END_SESSION_PARAMS,
+        "auth-oauth/end-session-reserved-extra-param", "endSessionUrl");
       var ek = Object.keys(uopts.extraParams);
-      for (var i = 0; i < ek.length; i++) {
-        if (RESERVED_END_SESSION_PARAMS[ek[i]]) {
-          throw new OAuthError("auth-oauth/end-session-reserved-extra-param",
-            "endSessionUrl: extraParams key '" + ek[i] + "' collides with a first-class " +
-            "RP-Init Logout parameter — pass it through the named field instead");
-        }
-        params.set(ek[i], String(uopts.extraParams[ek[i]]));
-      }
+      for (var i = 0; i < ek.length; i++) params.set(ek[i], String(uopts.extraParams[ek[i]]));
     }
     var qs = params.toString();
     if (qs.length === 0) return endpoint;
@@ -2092,6 +2162,11 @@ function create(opts) {
         : JSON.stringify(requestedAuthzDetails);   // form param — JSON string
     }
     if (uopts.extraParams && typeof uopts.extraParams === "object") {
+      // Same reserved-key guard as authorizationUrl — a PAR request pushes
+      // the identical security-critical parameter set, so extraParams may
+      // not shadow redirect_uri / state / code_challenge here either.
+      _assertNoReservedExtraParams(uopts.extraParams, RESERVED_AUTHZ_PARAMS,
+        "auth-oauth/reserved-extra-param", "pushAuthorizationRequest");
       var ek = Object.keys(uopts.extraParams);
       for (var i = 0; i < ek.length; i++) authzParams[ek[i]] = String(uopts.extraParams[ek[i]]);
     }
@@ -2168,7 +2243,7 @@ function create(opts) {
         "parseFrontchannelLogoutRequest: req with url required");
     }
     var u;
-    try { u = new URL(req.url, "http://placeholder.invalid"); }                                  // allow:raw-new-url — req.url is the framework-normalized path; placeholder base provides a synthetic origin for relative-path parse
+    try { u = new URL(req.url, "http://placeholder.invalid"); }                                  // allow:raw-new-url-parse-only — req.url is the framework-normalized path; placeholder base provides a synthetic origin for relative-path parse
     catch (_e) {
       throw new OAuthError("auth-oauth/bad-frontchannel-logout-url",
         "parseFrontchannelLogoutRequest: malformed request URL");
@@ -2338,7 +2413,10 @@ function create(opts) {
           "verifyBackchannelLogoutToken: atomicReplayStore.checkAndInsert threw: " +
           ((e && e.message) || String(e)));
       }
-      if (inserted === false) {
+      // Fail closed on ANY non-truthy result. A store fronting SETNX / an
+      // ON-CONFLICT INSERT returns 0 (falsy, not `false`) on a duplicate,
+      // so an `=== false` compare would miss the replay.
+      if (!inserted) {
         throw new OAuthError("auth-oauth/logout-token-replay",
           "verifyBackchannelLogoutToken: jti '" + claims.jti +
           "' already seen — replay refused (atomic)");
@@ -2354,7 +2432,10 @@ function create(opts) {
         throw new OAuthError("auth-oauth/seen-callback-failed",
           "verifyBackchannelLogoutToken: seen() callback threw: " + ((e && e.message) || String(e)));
       }
-      if (first === false) {
+      // Fail closed on ANY non-truthy result — `seen()` returns truthy the
+      // first time it sees the (jti, iss) pair; a store returning 0 for a
+      // duplicate must still refuse, which an `=== false` compare would miss.
+      if (!first) {
         throw new OAuthError("auth-oauth/logout-token-replay",
           "verifyBackchannelLogoutToken: jti already seen — replay refused");
       }

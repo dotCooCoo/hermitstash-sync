@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.mail.arc.sign — RFC 8617 ARC chain construction.
@@ -51,6 +53,7 @@
 var nodeCrypto = require("node:crypto");
 var lazyRequire = require("./lazy-require");
 var validateOpts = require("./validate-opts");
+var numericBounds = require("./numeric-bounds");
 var safeBuffer = require("./safe-buffer");
 var dkim = require("./mail-dkim");
 var { defineClass } = require("./framework-error");
@@ -176,7 +179,7 @@ function sign(opts) {
   validateOpts(opts, [
     "rfc822", "instance", "authservId", "domain", "selector",
     "privateKey", "algorithm", "cv", "authResults",
-    "headersToSign", "timestamp", "audit",
+    "headersToSign", "timestamp", "audit", "excludeAarFromAms",
   ], "mail.arc.sign");
 
   validateOpts.requireNonEmptyString(opts.rfc822, "sign: rfc822",
@@ -187,12 +190,21 @@ function sign(opts) {
     throw new MailAuthError("arc-sign/bad-instance",
       "sign: instance must be an integer in [1, 50] — got " + JSON.stringify(opts.instance));
   }
-  validateOpts.requireNonEmptyString(opts.authservId,
-    "sign: authservId", MailAuthError, "arc-sign/bad-authserv");
-  validateOpts.requireNonEmptyString(opts.domain,
-    "sign: domain", MailAuthError, "arc-sign/bad-domain");
-  validateOpts.requireNonEmptyString(opts.selector,
-    "sign: selector", MailAuthError, "arc-sign/bad-selector");
+  // authservId / domain / selector / authResults are required non-empty
+  // strings AND are interpolated verbatim into the ARC header block
+  // (ARC-Authentication-Results / ARC-Seal / ARC-Message-Signature), so they
+  // can never carry a CR / LF / NUL — that would smuggle a header.
+  var arcHeaderFields = [
+    ["authservId",  opts.authservId,  "arc-sign/bad-authserv"],
+    ["domain",      opts.domain,      "arc-sign/bad-domain"],
+    ["selector",    opts.selector,    "arc-sign/bad-selector"],
+    ["authResults", opts.authResults, "arc-sign/bad-auth-results"],
+  ];
+  for (var fi = 0; fi < arcHeaderFields.length; fi += 1) {
+    var af = arcHeaderFields[fi];
+    validateOpts.requireNonEmptyString(af[1], "sign: " + af[0], MailAuthError, af[2]);
+    safeBuffer.assertHeaderSafe(af[1], af[0], MailAuthError, af[2]);
+  }
   if (!opts.privateKey || (typeof opts.privateKey !== "string" &&
       typeof opts.privateKey !== "object")) {
     throw new MailAuthError("arc-sign/missing-private-key",
@@ -214,12 +226,6 @@ function sign(opts) {
   if (opts.instance >= 2 && opts.cv === "none") {                                       // RFC 8617 chain rule
     throw new MailAuthError("arc-sign/cv-rule",
       "sign: i>=2 disallows cv=none — must be cv=pass or cv=fail (per RFC 8617 §5.1.1)");
-  }
-  validateOpts.requireNonEmptyString(opts.authResults, "sign: authResults",
-    MailAuthError, "arc-sign/bad-auth-results");
-  if (safeBuffer.hasCrlf(opts.authResults)) {
-    throw new MailAuthError("arc-sign/bad-auth-results",
-      "sign: authResults contains CR/LF (header injection refused)");
   }
   var headersToSign = opts.headersToSign || DEFAULT_HEADERS;
   if (!Array.isArray(headersToSign) || headersToSign.length === 0) {
@@ -246,8 +252,11 @@ function sign(opts) {
         "sign: headersToSign[" + hi + "] must be a non-empty string");
     }
   }
-  var timestamp = (typeof opts.timestamp === "number" && opts.timestamp > 0)            // allow:numeric-opt-Infinity
-    ? Math.floor(opts.timestamp) : Math.floor(Date.now() / 1000);                       // Unix epoch seconds divisor
+  // A present t= timestamp must be a positive finite integer (NumericDate
+  // seconds) — an Infinity / NaN value would serialize into a malformed t= tag.
+  numericBounds.requirePositiveFiniteIntIfPresent(opts.timestamp, "arc.sign: opts.timestamp", MailAuthError, "arc-sign/bad-timestamp");
+  var timestamp = (typeof opts.timestamp === "number")
+    ? opts.timestamp : Math.floor(Date.now() / 1000);                                   // Unix epoch seconds divisor
   var auditOn = opts.audit !== false;
 
   var keyObject;
@@ -306,10 +315,23 @@ function sign(opts) {
   // Synthesize a virtual entry at the top of parsedHeaders so the
   // header-name lookup below sees it; the canonicalizer reads
   // parsedHeaders[idx] like any other header.
+  //
+  // The AMS covers only THIS hop's AAR ("most recent" per §5.1.1). Prior
+  // hops' ARC-* headers must be excluded: the h= lookup picks the last
+  // matching header, so a prior-hop AAR left in scope would be signed
+  // instead of this hop's, and arc.verify — which strips every prior ARC
+  // header and keeps only the current instance's AAR — would reconstruct a
+  // different input and the AMS would never verify past the first hop.
+  var priorArcStripped = parsedHeaders.filter(function (ph2) {
+    var lc = ph2.name.toLowerCase();
+    return lc !== "arc-authentication-results" &&
+           lc !== "arc-message-signature" &&
+           lc !== "arc-seal";
+  });
   var amsParsedHeaders = [{
     name:  "ARC-Authentication-Results",
     value: " " + aarValue,
-  }].concat(parsedHeaders);
+  }].concat(priorArcStripped);
   var canonHeaders = "";
   var headerNamesLc = amsParsedHeaders.map(function (h) { return h.name.toLowerCase(); });
   for (var j = 0; j < headersToSign.length; j += 1) {

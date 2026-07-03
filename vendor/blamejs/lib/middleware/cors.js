@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * CORS middleware — allow-list-only by default. No '*' wildcard support
@@ -52,6 +54,7 @@
 var C = require("../constants");
 var lazyRequire = require("../lazy-require");
 var audit = lazyRequire(function () { return require("../audit"); });
+var guardRegex = lazyRequire(function () { return require("../guard-regex"); });
 var requestHelpers = require("../request-helpers");
 var safeUrl = require("../safe-url");
 var validateOpts = require("../validate-opts");
@@ -237,6 +240,10 @@ function create(opts) {
       }
       origins.push({ kind: "string", canonical: canonEntry, original: entry });
     } else if (entry instanceof RegExp) {
+      // Screen the operator's RegExp once at create() time for
+      // catastrophic-backtracking (ReDoS) shapes before it ever runs
+      // .test() against an attacker-controlled Origin header per request.
+      guardRegex().assertSafe(entry, "middleware.cors: origins[" + oi + "]", CorsError, "cors/unsafe-pattern");
       origins.push({ kind: "regex", pattern: entry });
     } else {
       throw new CorsError("cors/bad-origin",

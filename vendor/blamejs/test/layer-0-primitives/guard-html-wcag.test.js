@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Tests for b.guardHtml.wcag.audit (WCAG 2.2 audit-only scanner).
@@ -844,7 +846,7 @@ function testFormsStandalone() {
 
 // ---- Run all ----
 
-(function run() {
+function run() {
   testHtmlLangMissing();
   testHtmlLangPresent();
   testPageTitleMissing();
@@ -915,4 +917,7 @@ function testFormsStandalone() {
   testInputEmailNoAutocomplete();
   testSkipForms();
   testFormsStandalone();
-})();
+}
+
+module.exports = { run: run };
+if (require.main === module) run();

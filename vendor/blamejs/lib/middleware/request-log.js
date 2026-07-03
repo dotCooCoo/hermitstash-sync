@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * request-log — HTTP access-log middleware. Captures method, path,
@@ -29,6 +31,7 @@
  * for fully custom logic (e.g. "warn" only on slow-path requests).
  */
 var C = require("../constants");
+var guardRegex = require("../guard-regex");
 var requestHelpers = require("../request-helpers");
 var validateOpts = require("../validate-opts");
 
@@ -94,6 +97,9 @@ function create(opts) {
   for (var i = 0; i < skipPaths.length; i++) {
     if (typeof skipPaths[i] !== "string" && !(skipPaths[i] instanceof RegExp)) {
       throw new Error("middleware.requestLog: skipPaths[" + i + "] must be a string prefix or RegExp");
+    }
+    if (skipPaths[i] instanceof RegExp) {
+      guardRegex.assertSafe(skipPaths[i], "middleware.requestLog: skipPaths[" + i + "]");
     }
   }
   var trustProxy = opts.trustProxy === true || typeof opts.trustProxy === "number"

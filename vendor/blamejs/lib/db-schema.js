@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Schema reconciler + imperative migration runner + shared SQL
@@ -605,7 +607,7 @@ function runMigrations(database, migrationDir) {
       // Operator-supplied migration file — by definition not statically
       // require-able by a bundler. Anyone bundling this surface into SEA
       // accepts that runtime migration loading won't resolve.
-      mig = require(fullPath);   // allow:dynamic-require — operator-supplied migration
+      mig = require(fullPath);   // allow:dynamic-require-operator-module — operator-supplied migration
     } catch (e) {
       throw new Error("migration '" + file + "' failed to load: " + e.message);
     }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * FIDO Metadata Service v3 (MDS3) — authenticator metadata BLOB
@@ -234,14 +236,16 @@ function _validateChain(x5c, rootPems) {
     }
   }
   for (var c = 0; c < chain.length - 1; c++) {
-    if (!chain[c].checkIssued(chain[c + 1])) {
+    // issuerValidlyIssued enforces basicConstraints cA:TRUE on the issuing cert
+    // (chain[c+1]) in addition to the issuance + signature linkage — a non-CA
+    // cert spliced in as an intermediate cannot issue the next link (the classic
+    // basicConstraints bypass, CVE-2002-0862 class). Mirrors mdoc / tsa / bimi /
+    // content-credentials, which enforce cA:TRUE on every hop; only the
+    // tail-to-root anchor below previously did so.
+    if (!x509Chain.issuerValidlyIssued(chain[c + 1], chain[c])) {
       throw new FidoMds3Error("fido-mds3/chain-broken",
-        "x5c[" + c + "] not issued by x5c[" + (c + 1) + "]");
-    }
-    var issuerKey = chain[c + 1].publicKey;
-    if (!chain[c].verify(issuerKey)) {
-      throw new FidoMds3Error("fido-mds3/chain-bad-signature",
-        "x5c[" + c + "] signature does not verify against x5c[" + (c + 1) + "] public key");
+        "x5c[" + c + "] not validly issued by x5c[" + (c + 1) +
+        "] (issuer must be a CA whose signature over the subject verifies)");
     }
   }
   var tail = chain[chain.length - 1];
@@ -420,7 +424,7 @@ function _verifyAndParseBlob(token) {
  *   typeof blob.entries.length === "number";
  *   // → true
  */
-async function fetch(opts) {   // allow:raw-outbound-http — function name is fetch, internal call routes through b.httpClient
+async function fetch(opts) {   // allow:raw-outbound-http-framework-internal — function name is fetch, internal call routes through b.httpClient
   opts = opts || {};
   validateOpts(opts, ["url", "caCertificate", "force", "timeoutMs"], "auth.fido_mds3.fetch");
 

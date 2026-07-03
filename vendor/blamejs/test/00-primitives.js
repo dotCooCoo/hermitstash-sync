@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * Layer 0 — pure primitive smoke tests.
@@ -393,7 +395,7 @@ async function testAsyncSafeCircuitBreakerStateTransitions() {
   try { await br.wrap(async function () { return "ok"; }); }
   catch (e) { fastFail = e; }
   check("CircuitBreaker: open state fast-fails",            fastFail && fastFail.code === "CIRCUIT_OPEN");
-  await new Promise(function (r) { setTimeout(r, 50); });
+  await helpers.passiveObserve(50, "CircuitBreaker: cooldownMs(30) lapses before half-open probe");
   var probe = await br.wrap(async function () { return "ok"; });
   check("CircuitBreaker: half-open probe success",          probe === "ok");
   check("CircuitBreaker: closes after success threshold",   br.getState() === "closed");
@@ -528,7 +530,17 @@ function testAsyncSafeWithTimeoutSignalCases() {
 
 async function testAsyncSafeWithTimeoutSignalTimeoutFires() {
   var sig = b.safeAsync.withTimeoutSignal(null, 30);
-  await new Promise(function (r) { setTimeout(r, 80); });
+  // Tight bound, not a loose 5s window: the 30ms timeout must fire well within
+  // 500ms even under SMOKE_PARALLEL contention (the prior fixed 80ms wait this
+  // replaced proved sub-80ms is the norm). waitUntil exits early on fast
+  // platforms and THROWS when the budget is exceeded, so a regression that
+  // stretches the 30ms deadline into hundreds / thousands of ms (or never)
+  // overruns the 500ms budget and fails the test — the "fires near its
+  // configured deadline" guarantee is preserved, not lost to a loose window.
+  await helpers.waitUntil(function () { return sig.aborted === true; }, {
+    timeoutMs: 500,
+    label:     "withTimeoutSignal: timeout-only signal aborts within its 30ms deadline",
+  });
   check("withTimeoutSignal: timeout-only signal fires after ms", sig.aborted === true);
 }
 
@@ -3326,6 +3338,15 @@ async function testStaticServeBandwidthQuotaPerActor() {
   var fakeCache = {
     get: async function (k) { return store.get(k); },
     set: async function (k, v) { store.set(k, v); return true; },
+    // Atomic-on-single-thread RMW (mirrors b.cache's memory backend contract):
+    // the static quota counters accumulate via cache.update, so the stub must
+    // implement it — read + mutate + write with no await between.
+    update: async function (k, fn) {
+      var dec = fn(store.has(k) ? store.get(k) : null);
+      if (dec && dec.abort !== undefined) return { aborted: dec.abort };
+      store.set(k, dec.value);
+      return { updated: true, value: dec.value };
+    },
   };
   var ctx = await _staticTestServer({
     files: { "a.bin": "1234567890" },          // 10 bytes
@@ -3350,6 +3371,15 @@ async function testStaticServeConcurrencyCap() {
   var fakeCache = {
     get: async function (k) { return store.get(k); },
     set: async function (k, v) { store.set(k, v); return true; },
+    // Atomic-on-single-thread RMW (mirrors b.cache's memory backend contract):
+    // the static quota counters accumulate via cache.update, so the stub must
+    // implement it — read + mutate + write with no await between.
+    update: async function (k, fn) {
+      var dec = fn(store.has(k) ? store.get(k) : null);
+      if (dec && dec.abort !== undefined) return { aborted: dec.abort };
+      store.set(k, dec.value);
+      return { updated: true, value: dec.value };
+    },
   };
   var ctx = await _staticTestServer({
     files: { "a.bin": "x" },
@@ -3604,6 +3634,15 @@ function testFormsValidateTypes() {
     f.validate({ fields: [{ name: "code", type: "text", pattern: "[A-Z]+" }]}, { code: "ABC" });
   } catch (e) { stringPatternThrew = /pre-compiled RegExp/.test(e.message); }
   check("validate: string pattern → throws clear config error", stringPatternThrew);
+
+  // A catastrophic-backtracking (ReDoS) pattern is refused at config time —
+  // the wrapped nested quantifier /((a)+)+$/ never reaches .test(). Input
+  // is kept short/harmless so the test can't actually backtrack.
+  var redosPatternThrew = false;
+  try {
+    f.validate({ fields: [{ name: "code", type: "text", pattern: /((a)+)+$/ }]}, { code: "a" });
+  } catch (e) { redosPatternThrew = /pattern rejected as unsafe|ReDoS/.test(e.message); }
+  check("validate: ReDoS-shaped pattern → refused at config", redosPatternThrew);
 
   // Select / radio enum
   r = f.validate({ fields: [
@@ -5235,7 +5274,7 @@ async function testRestoreListRollbacksAndPurge() {
     });
     // Two restores to create two rollback points
     await restore.run({ bundleId: bundleId });
-    await new Promise(function (r) { setTimeout(r, 5); });
+    await helpers.passiveObserve(5, "restore rollback: timestamps differ between two rollback points");
     await restore.run({ bundleId: bundleId });
 
     var rb = restore.listRollbacks();
@@ -5551,7 +5590,7 @@ async function testBackupRetentionPurgeOlder() {
     for (var i = 0; i < 4; i++) {
       var r = await backup.run();
       ids.push(r.bundleId);
-      await new Promise(function (rr) { setTimeout(rr, 5); });
+      await helpers.passiveObserve(5, "backup retention: timestamps differ between sequential backups");
     }
     var listed = await backup.list();
     check("4 bundles before purge",                 listed.length === 4);
@@ -5575,7 +5614,7 @@ async function testBackupRetentionAutoSweepOnRun() {
     for (var i = 0; i < 4; i++) {
       var r = await backup.run();
       ids.push(r.bundleId);
-      await new Promise(function (rr) { setTimeout(rr, 5); });
+      await helpers.passiveObserve(5, "backup auto-sweep: timestamps differ between sequential backups");
     }
     // After 4 runs with retention=2, only the 2 newest should remain
     var listed = await backup.list();
@@ -8560,13 +8599,10 @@ async function testCompressionPipedStreamLargerThanHighWaterMarkCompletes() {
   var payload = Buffer.alloc(256 * 1024, "A");
   var source  = stream.Readable.from([payload]);
 
-  // Race the pipe completion against a timeout. Pre-fix this hangs
-  // indefinitely; with the drain forward it completes promptly.
+  // Bound the pipe completion with a wall-clock ceiling. Pre-fix this
+  // hangs indefinitely; with the drain forward it completes promptly.
   var done = new Promise(function (resolve) {
     res.on("finish", function () { resolve("ok"); });
-  });
-  var timeout = new Promise(function (resolve) {
-    setTimeout(function () { resolve("timeout"); }, 3000);
   });
 
   await new Promise(function (resolve) {
@@ -8577,7 +8613,11 @@ async function testCompressionPipedStreamLargerThanHighWaterMarkCompletes() {
     });
   });
 
-  var outcome = await Promise.race([done, timeout]);
+  var outcome = await helpers.withTestTimeout(
+    "piped stream completes (no stall on backpressure)",
+    function () { return done; },
+    { timeoutMs: 3000 }
+  );
   check("piped stream completes (no stall on backpressure)", outcome === "ok");
   if (outcome !== "ok") return;
 
@@ -11784,7 +11824,7 @@ async function testSessionRotateExpiredReturnsNull() {
   try {
     await setupTestDb(tmpDir);
     var s = await b.session.create({ userId: "u-4", ttlMs: 1 }); // 1ms TTL
-    await new Promise(function (r) { setTimeout(r, 30); });
+    await helpers.passiveObserve(30, "session rotate: 1ms TTL lapses before rotate");
     var rotated = await b.session.rotate(s.token);
     check("rotate: expired session returns null",       rotated === null);
   } finally {
@@ -13632,6 +13672,41 @@ function testJsonParse() {
   // Buffer input
   var fromBuf = b.safeJson.parse(Buffer.from('{"y":2}', "utf8"));
   check("parse accepts Buffer input",                     fromBuf.y === 2);
+}
+
+function testJsonParseStringOrObject() {
+  // String → parsed through parse() (proto strip + caps); valid input is
+  // byte-identical to a raw JSON.parse.
+  var fromStr = b.safeJson.parseStringOrObject('{"a":1,"b":[2,3]}');
+  check("parseStringOrObject parses a string",            fromStr.a === 1 && fromStr.b[1] === 3);
+  // Object → passed through unchanged (same reference).
+  var obj = { openapi: "3.0.0" };
+  check("parseStringOrObject passes an object through",   b.safeJson.parseStringOrObject(obj) === obj);
+  // The proto-pollution defense applies to the STRING path (a raw JSON.parse
+  // would keep "__proto__" as an own key); the marker'd hand-rolls bypassed it.
+  var stripped = b.safeJson.parseStringOrObject('{"__proto__":{"isAdmin":true},"name":"alice"}');
+  check("parseStringOrObject strips __proto__ from a string", stripped.isAdmin === undefined && stripped.name === "alice");
+  check("parseStringOrObject does not pollute Object.prototype", ({}).isAdmin === undefined);
+  // maxBytes is enforced on the string path.
+  var capped = false;
+  try { b.safeJson.parseStringOrObject('{"x":"' + new Array(2000).join("y") + '"}', { maxBytes: 100 }); }
+  catch (e) { capped = e.code === "json/too-large"; }
+  check("parseStringOrObject enforces maxBytes",          capped);
+  // A typed errorClass wraps invalid JSON / wrong input type with the caller's codes.
+  function MyErr(code, msg) { this.code = code; this.message = msg; }
+  var jc = null;
+  try { b.safeJson.parseStringOrObject("{not json", { errorClass: MyErr, jsonCode: "x/bad-json", inputCode: "x/bad-input" }); }
+  catch (e) { jc = e.code; }
+  check("parseStringOrObject wraps invalid JSON via errorClass",   jc === "x/bad-json");
+  var ic = null;
+  try { b.safeJson.parseStringOrObject(42, { errorClass: MyErr, jsonCode: "x/bad-json", inputCode: "x/bad-input" }); }
+  catch (e) { ic = e.code; }
+  check("parseStringOrObject wraps wrong input via errorClass",    ic === "x/bad-input");
+  // Without errorClass, a non-string/non-object throws the framework SafeJsonError.
+  var sje = false;
+  try { b.safeJson.parseStringOrObject(123); }
+  catch (e) { sje = e.code === "json/wrong-input-type"; }
+  check("parseStringOrObject throws SafeJsonError without errorClass", sje);
 }
 
 function testJsonStringify() {
@@ -17876,7 +17951,12 @@ async function testFileUploadPathTraversalRejected() {
   var b = require("./../index");
   var u = b.fileUpload.create({ stagingDir: _fuTmpDir("traversal") });
   var bad = ["../escape", "/abs", "with/slash", "with\\backslash",
-             "with\0null", "with spaces", "with*glob", ""];
+             "with\0null", "with spaces", "with*glob", "",
+             // the bare path tokens: the char-class allows dots, so "." / ".."
+             // pass the regex but resolve to the staging dir / its PARENT —
+             // path.join(stagingDir, "..") escapes and a later rmSync would
+             // recursively delete the parent.
+             "..", "."];
   var allRejected = true;
   for (var i = 0; i < bad.length; i++) {
     var threw = false;
@@ -18994,6 +19074,7 @@ async function run() {
   // json-safe primitive
   testJsonModuleSurface();
   testJsonParse();
+  testJsonParseStringOrObject();
   testJsonStringify();
   testJsonCanonical();
   testJsonValidate();
@@ -19587,6 +19668,7 @@ module.exports = {
   testLazyRequire:                           testLazyRequire,
   testJsonModuleSurface:                     testJsonModuleSurface,
   testJsonParse:                             testJsonParse,
+  testJsonParseStringOrObject:               testJsonParseStringOrObject,
   testJsonStringify:                         testJsonStringify,
   testJsonCanonical:                         testJsonCanonical,
   testJsonValidate:                          testJsonValidate,

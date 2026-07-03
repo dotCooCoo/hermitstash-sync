@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) blamejs contributors
 "use strict";
 /**
  * b.network.smtp.policy — MTA-STS + DANE + TLS-RPT operator surface.
@@ -177,11 +179,13 @@ async function testTlsRptSubmitMixedRua() {
     policies: [{ type: "sts", domain: "example.com" }],
   });
   // Mock httpClient — capture the request rather than going to the wire.
+  // The framework httpClient resolves { statusCode, headers, body }; the
+  // fake mirrors that real contract so a 2xx is reported as success.
   var captured = null;
   var fakeHttp = {
     request: async function (req) {
       captured = req;
-      return { status: 202, body: Buffer.from("") };
+      return { statusCode: 202, headers: {}, body: Buffer.from("") };
     },
   };
   var rv = await b.network.smtp.tlsRpt.submit(report, {
