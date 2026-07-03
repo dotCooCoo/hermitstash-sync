@@ -1,5 +1,5 @@
 {
-  "version": "0.10.2",
+  "version": "0.10.3",
   "date": "2026-07-03",
   "headline": "Restores Linux/macOS self-update, hardens sync recovery, config validation, and the support bundle",
   "summary": "A correctness and security release. It restores in-daemon self-update on Linux and macOS, makes the Node.js version gate actually enforce its floor, stops a reconcile pass from overwriting a newer local edit with the server's older copy, ends several transfer-retry and reconnect loops, refuses a plaintext non-loopback server URL, closes support-bundle information leaks, and emits a schema-valid release SBOM. No configuration changes are required, though maxFileSize in config.json is now enforced.",
