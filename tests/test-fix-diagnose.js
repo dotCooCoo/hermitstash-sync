@@ -29,6 +29,7 @@ const diagnose = require('../lib/diagnose');
 
 const CONFIG_FILE = constants.CONFIG_FILE;
 const CONFIG_DIR = constants.CONFIG_DIR;
+const STATE_DB_FILE = constants.STATE_DB_FILE;
 const LOG_FILE = constants.LOG_FILE;
 const LOG_DIR = nodePath.dirname(LOG_FILE);
 const LOG_BASE = nodePath.basename(LOG_FILE, nodePath.extname(LOG_FILE));
@@ -68,6 +69,11 @@ function _clearLogs() {
 }
 function _rmMarker() {
   try { nodeFs.unlinkSync(nodePath.join(CONFIG_DIR, 'update-pending.json')); } catch { /* ignore */ }
+}
+function _rmStateDb() {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    try { nodeFs.unlinkSync(STATE_DB_FILE + suffix); } catch { /* ignore */ }
+  }
 }
 
 // Minimal ZIP central-directory reader. blamejs's b.archive ships a zip WRITER
@@ -407,5 +413,148 @@ describe('#45 — unparseable config.json surfaces as unreadable + still scrubs 
     const logText = _bundleEntry(out, 'log/' + logName).toString('utf8');
     assert.ok(!logText.includes(token), 'keyed literal scrub still fires for a valid config');
     nodeFs.unlinkSync(out);
+  });
+});
+
+const internals = diagnose._internals;
+
+describe('#36 — state-db-schema.json never ships the absolute STATE_DB_FILE path', () => {
+  it('the _absent branch reports only the basename (no separators, no OS username, no CONFIG_DIR)', () => {
+    _rmStateDb(); // ensure the absent branch fires
+    _writeConfig({ server: 'https://example.test' });
+    const out = nodePath.join(TMP_CONFIG_DIR, 'bundle-36.zip');
+    diagnose.buildBundle(out);
+    const schema = JSON.parse(_bundleEntry(out, 'state-db-schema.json').toString('utf8'));
+
+    assert.equal(schema._absent, true, 'no state.db → _absent');
+    // The load-bearing assertion: only the basename ships, never the abs path.
+    assert.equal(schema.path, nodePath.basename(STATE_DB_FILE));
+    assert.equal(schema.path, 'state.db');
+    assert.ok(!String(schema.path).includes('/'), 'no forward slash');
+    assert.ok(!String(schema.path).includes('\\'), 'no backslash');
+    const blob = JSON.stringify(schema);
+    assert.ok(!blob.includes(CONFIG_DIR), 'CONFIG_DIR (home-dir layout) must not leak');
+    assert.ok(!blob.includes(STATE_DB_FILE), 'absolute STATE_DB_FILE must not leak');
+    const username = nodeOs.userInfo().username;
+    if (username && username.length > 2 && CONFIG_DIR.includes(username)) {
+      assert.ok(!blob.includes(username), 'OS username must not leak via the DB-schema entry');
+    }
+    nodeFs.unlinkSync(out);
+  });
+
+  it('_scrubAbsolutePaths strips an absolute DB path out of an error message but keeps the basename', () => {
+    // The catch branch (a corrupt-DB open error under recovery:refuse) routes
+    // err.message through this. A node:sqlite/localdb error embeds the full path.
+    const msg = 'SqliteError: unable to open database file ' + STATE_DB_FILE + ' (SQLITE_CORRUPT)';
+    const scrubbed = internals._scrubAbsolutePaths(msg);
+    assert.ok(!scrubbed.includes(STATE_DB_FILE), 'absolute STATE_DB_FILE must be stripped');
+    assert.ok(!scrubbed.includes(CONFIG_DIR), 'CONFIG_DIR must be stripped');
+    assert.ok(scrubbed.includes('state.db'), 'the basename stays for diagnostic value');
+    assert.ok(scrubbed.includes('SQLITE_CORRUPT'), 'the actionable error detail is preserved');
+    const username = nodeOs.userInfo().username;
+    if (username && username.length > 2 && CONFIG_DIR.includes(username)) {
+      assert.ok(!scrubbed.includes(username), 'OS username must not survive');
+    }
+  });
+
+  it('_scrubAbsolutePaths is null/type safe', () => {
+    assert.equal(internals._scrubAbsolutePaths(undefined), undefined);
+    assert.equal(internals._scrubAbsolutePaths(''), '');
+    assert.equal(internals._scrubAbsolutePaths('no path here'), 'no path here');
+  });
+});
+
+describe('#37 — a resolved bearer credential in a free-form log line is scrubbed by shape', () => {
+  it('scrubs an Authorization: Bearer <token> the config-literal list never held (keychain credential)', () => {
+    // The bearer credential lives in the OS keychain; config.json holds only the
+    // non-secret reference. So the token is NOT in secretLiterals — only the
+    // shape scrub can catch it.
+    const realKey = 'A1b2C3d4E5f6G7h8J9k0LmNpQrSt';
+    _writeConfig({ server: 'https://example.test', apiKeyRef: 'keychain:hermitstash-sync' });
+    const logName = LOG_BASE + '.log';
+    nodeFs.writeFileSync(
+      nodePath.join(LOG_DIR, logName),
+      JSON.stringify({ ts: 1, level: 'error',
+        message: 'server rejected request, sent header Authorization: Bearer ' + realKey }) + '\n');
+
+    const out = nodePath.join(TMP_CONFIG_DIR, 'bundle-37.zip');
+    diagnose.buildBundle(out);
+    const logText = _bundleEntry(out, 'log/' + logName).toString('utf8');
+    assert.ok(!logText.includes(realKey), 'the resolved bearer credential must NOT survive');
+    assert.ok(logText.includes('Bearer [REDACTED]'), 'the Bearer scheme keyword stays for triage');
+    nodeFs.unlinkSync(out);
+  });
+
+  it('_scrubBearerCredentials masks the token after a bare or Authorization-prefixed Bearer', () => {
+    const key = 'ZxCvBnMaSdFgHjKl1234567890';
+    assert.equal(
+      internals._scrubBearerCredentials('using Bearer ' + key + ' now'),
+      'using Bearer [REDACTED] now');
+    assert.equal(
+      internals._scrubBearerCredentials('Authorization: Bearer ' + key),
+      'Authorization: Bearer [REDACTED]');
+    // Case-insensitive on the scheme keyword.
+    assert.equal(
+      internals._scrubBearerCredentials('bearer ' + key),
+      'bearer [REDACTED]');
+  });
+
+  it('_scrubBearerCredentials does NOT over-scrub a short non-token word', () => {
+    // "bonds" is 5 chars — below the 8-char floor — so it is left intact.
+    assert.equal(internals._scrubBearerCredentials('Bearer bonds'), 'Bearer bonds');
+    assert.equal(internals._scrubBearerCredentials('plain prose, no credential'),
+      'plain prose, no credential');
+  });
+});
+
+describe('#38 — literal scrub matches a secret with JSON-escapable characters', () => {
+  it('scrubs a config password containing a double-quote out of a JSON log record', () => {
+    // A JSON log line escapes the quote on disk (ab\"cd...); the config value is
+    // parse-DECODED (ab"cd...). The two-form expansion must cover both.
+    const tail = nodeCrypto.randomBytes(8).toString('hex');
+    const secret = 'ab"cd' + tail; // contains a JSON-escapable double-quote
+    _writeConfig({ server: 'https://example.test', password: secret });
+    const logName = LOG_BASE + '.log';
+    nodeFs.writeFileSync(
+      nodePath.join(LOG_DIR, logName),
+      JSON.stringify({ ts: 1, level: 'error', message: 'auth failed pw=' + secret }) + '\n');
+
+    const out = nodePath.join(TMP_CONFIG_DIR, 'bundle-38.zip');
+    diagnose.buildBundle(out);
+    const logText = _bundleEntry(out, 'log/' + logName).toString('utf8');
+    // The unique random tail proves the whole secret was scrubbed, not just a
+    // coincidental prefix. Pre-fix this survived because includes(decoded) missed
+    // the escaped on-disk form.
+    assert.ok(!logText.includes(tail), 'a quote-bearing secret must be scrubbed from a JSON log line');
+    nodeFs.unlinkSync(out);
+  });
+
+  it('_expandSecretForms yields both the decoded value and its JSON-escaped inner form', () => {
+    const forms = internals._expandSecretForms(['ab"cd12345']);
+    assert.ok(forms.includes('ab"cd12345'), 'decoded form present (raw / non-JSON lines)');
+    assert.ok(forms.includes('ab\\"cd12345'), 'JSON-escaped inner form present (JSON records)');
+  });
+
+  it('_expandSecretForms normalizes a raw-harvested (already-escaped) literal to the same pair', () => {
+    // A literal harvested from an unparseable config carries its on-disk escapes.
+    const forms = internals._expandSecretForms(['ab\\"cd12345']);
+    assert.ok(forms.includes('ab"cd12345'), 'decoded form (matches a raw line)');
+    assert.ok(forms.includes('ab\\"cd12345'), 'escaped form (matches a JSON record)');
+  });
+
+  it('_redactLogLine scrubs the escaped secret inside a re-stringified JSON record', () => {
+    const forms = internals._expandSecretForms(['ab"cd12345']);
+    const line = JSON.stringify({ ts: 1, level: 'info', message: 'pw=ab"cd12345 end' });
+    const redacted = internals._redactLogLine(line, forms);
+    assert.ok(!redacted.includes('ab"cd12345'), 'decoded form gone');
+    assert.ok(!redacted.includes('ab\\"cd12345'), 'escaped form gone');
+    assert.ok(redacted.includes('[REDACTED]'), 'replaced with the marker');
+  });
+
+  it('_redactLogLine still scrubs the secret in a non-JSON (raw string) line', () => {
+    const forms = internals._expandSecretForms(['ab"cd12345']);
+    const redacted = internals._redactLogLine('raw line pw=ab"cd12345 tail', forms);
+    assert.ok(!redacted.includes('ab"cd12345'), 'raw fallback branch scrubs the decoded form');
+    assert.ok(redacted.includes('[REDACTED]'));
   });
 });

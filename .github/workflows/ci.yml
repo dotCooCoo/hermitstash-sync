@@ -7,9 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege by default: the lint job runs untrusted PR code, so it
+# gets read-only. The PR-comment write is granted narrowly on the separate
+# `comment` job below, which never checks out PR code.
 permissions:
   contents: read
-  pull-requests: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -18,6 +20,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Expose the rendered summary + verdict so the separate `comment` job
+    # (which holds the PR-comment write scope) can post it, without this
+    # untrusted-code job ever holding write.
+    outputs:
+      summary_body: ${{ steps.summary.outputs.body }}
+      all_ok: ${{ steps.summary.outputs.all_ok }}
 
     steps:
       - name: Checkout
@@ -425,8 +433,32 @@ jobs:
           echo "| Hadolint | $HADOLINT_ICON |" >> "$GITHUB_STEP_SUMMARY"
           echo "| ShellCheck | $SHELLCHECK_ICON |" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Fail if any linter failed
+        if: always()
+        env:
+          SUMMARY_ALL_OK: ${{ steps.summary.outputs.all_ok }}
+        run: |
+          if [ "$SUMMARY_ALL_OK" != "true" ]; then
+            echo "One or more linters failed"
+            exit 1
+          fi
+
+  # PR-comment posting is isolated in its own job so pull-requests:write
+  # never applies to the lint job that runs untrusted PR code, and this job
+  # never checks out that code. Guarded to same-repo PRs: a fork PR gets a
+  # read-only GITHUB_TOKEN, so a comment write would 403 and turn the check
+  # red even when every linter passed. Skipping it there keeps fork-PR CI
+  # honest — the required `lint` job is the sole verdict.
+  comment:
+    needs: lint
+    if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
       - name: Comment on PR
-        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -455,14 +487,4 @@ jobs:
               });
             }
         env:
-          PR_BODY: ${{ steps.summary.outputs.body }}
-
-      - name: Fail if any linter failed
-        if: always()
-        env:
-          SUMMARY_ALL_OK: ${{ steps.summary.outputs.all_ok }}
-        run: |
-          if [ "$SUMMARY_ALL_OK" != "true" ]; then
-            echo "One or more linters failed"
-            exit 1
-          fi
+          PR_BODY: ${{ needs.lint.outputs.summary_body }}

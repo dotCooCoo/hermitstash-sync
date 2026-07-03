@@ -332,3 +332,230 @@ describe('scripts#53 — generate-changelog-entry.js load-time version cross-che
     assert.match(cl, /0\.9\.11/, 'rebuilt CHANGELOG should contain the release: ' + cl.slice(0, 200));
   });
 });
+
+// ---------------------------------------------------------------------------
+// scripts#39 — build-sbom.js keeps metadata.lifecycles[] schema-valid and
+// carries the GH-Actions build-run pointer on the app component instead.
+// ---------------------------------------------------------------------------
+describe('scripts#39 — build-sbom.js CycloneDX 1.6 lifecycle has no externalReferences', () => {
+  function seedSbom(root) {
+    linkBlamejs(root);
+    copyScript(root, 'build-sbom.js');
+    writeConstants(root, '0.9.11');
+    const top = {
+      packages: {
+        blamejs: {
+          version: '0.15.15',
+          transitive_manifest: 'vendor/blamejs/lib/vendor/MANIFEST.json',
+        },
+      },
+    };
+    nodeFs.writeFileSync(nodePath.join(root, 'vendor', 'MANIFEST.json'),
+      JSON.stringify(top, null, 2) + '\n');
+    const transDir = nodePath.join(root, 'vendor', 'blamejs', 'lib', 'vendor');
+    nodeFs.mkdirSync(transDir, { recursive: true });
+    nodeFs.writeFileSync(nodePath.join(transDir, 'MANIFEST.json'),
+      JSON.stringify({ packages: {} }, null, 2) + '\n');
+  }
+
+  // Spawn with the three GH_* vars scrubbed first, then apply the requested set,
+  // so a run inside GitHub Actions can't leak an ambient run URL into the
+  // "off-CI" case.
+  function runSbom(root, ghEnv) {
+    const env = Object.assign({}, process.env);
+    delete env.GITHUB_SERVER_URL;
+    delete env.GITHUB_REPOSITORY;
+    delete env.GITHUB_RUN_ID;
+    Object.assign(env, ghEnv || {});
+    return childProcess.spawnSync(process.execPath,
+      [nodePath.join(root, 'scripts', 'build-sbom.js'), '--out', nodePath.join(root, 'build')],
+      { cwd: root, encoding: 'utf8', env });
+  }
+
+  function readSbom(root) {
+    return JSON.parse(nodeFs.readFileSync(
+      nodePath.join(root, 'build', 'hermitstash-sync-v0.9.11.cdx.json'), 'utf8'));
+  }
+
+  it('emits a bare {phase:"build"} lifecycle even when a GH Actions run URL is present', () => {
+    const root = mkTempRepo();
+    seedSbom(root);
+    const rv = runSbom(root, {
+      GITHUB_SERVER_URL: 'https://github.com',
+      GITHUB_REPOSITORY: 'dotCooCoo/hermitstash-sync',
+      GITHUB_RUN_ID: '123456',
+    });
+    assert.equal(rv.status, 0, 'build must succeed: ' + ((rv.stdout || '') + (rv.stderr || '')));
+    const doc = readSbom(root);
+    // The lifecycle item must be phase-only — a CycloneDX 1.6 lifecycles[] item
+    // forbids externalReferences (additionalProperties:false on both oneOf
+    // branches), so a stray key there fails strict validators.
+    assert.deepEqual(doc.metadata.lifecycles, [{ phase: 'build' }],
+      'metadata.lifecycles[] must stay schema-valid (phase only)');
+    // The build-run pointer rides the application component instead.
+    const refs = doc.metadata.component.externalReferences || [];
+    const buildMeta = refs.filter((r) => r.type === 'build-meta');
+    assert.equal(buildMeta.length, 1, 'exactly one build-meta ref must ride the app component');
+    assert.equal(buildMeta[0].url, 'https://github.com/dotCooCoo/hermitstash-sync/actions/runs/123456');
+    assert.ok(refs.some((r) => r.type === 'vcs'), 'the existing vcs ref must be preserved');
+  });
+
+  it('omits the build-meta ref entirely when no GH Actions run URL is set', () => {
+    const root = mkTempRepo();
+    seedSbom(root);
+    const rv = runSbom(root, {});
+    assert.equal(rv.status, 0, 'build must succeed: ' + ((rv.stdout || '') + (rv.stderr || '')));
+    const doc = readSbom(root);
+    assert.deepEqual(doc.metadata.lifecycles, [{ phase: 'build' }]);
+    const refs = doc.metadata.component.externalReferences || [];
+    assert.ok(!refs.some((r) => r.type === 'build-meta'), 'no build-meta ref off-CI');
+    assert.ok(refs.some((r) => r.type === 'vcs'), 'the vcs ref is always present');
+  });
+
+  it('source no longer attaches externalReferences to the lifecycle object', () => {
+    const src = nodeFs.readFileSync(nodePath.join(SCRIPTS_DIR, 'build-sbom.js'), 'utf8');
+    assert.doesNotMatch(src, /buildLifecycle\.externalReferences/,
+      'the build-meta ref must not hang off the CycloneDX lifecycle item');
+    assert.match(src, /appComponent\.externalReferences\.push/,
+      'the build-meta ref must ride the app component externalReferences');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared git fixture for the release.js commit-path tests (scripts#40 / #41).
+// ---------------------------------------------------------------------------
+function git(root, args) {
+  return childProcess.spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+}
+
+function initGitRepo(root) {
+  git(root, ['-c', 'init.defaultBranch=main', 'init']);
+  git(root, ['config', 'user.email', 'fixture@example.com']);
+  git(root, ['config', 'user.name', 'Fixture']);
+  // Never sign in the temp fixture — the commit path aborts before `git commit`
+  // in both tests, but disabling signing keeps the fixture independent of the
+  // host's signing config.
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['config', 'tag.gpgsign', 'false']);
+}
+
+// Build a temp repo skeleton on `main` carrying a valid release-notes tree, a
+// matching CHANGELOG, and a clean initial commit — the state `commit` expects.
+function seedReleaseRepo(root, version) {
+  linkBlamejs(root);
+  copyScript(root, 'release.js');
+  copyScript(root, 'generate-changelog-entry.js');
+  copyScript(root, 'check-changelog-extract.js');
+  writeConstants(root, version);
+  nodeFs.writeFileSync(nodePath.join(root, 'package.json'),
+    JSON.stringify({ name: 'hermitstash-sync', version: version }, null, 2) + '\n');
+  nodeFs.writeFileSync(nodePath.join(root, 'release-notes', 'v' + version + '.json'),
+    JSON.stringify(minimalReleaseNote(version), null, 2) + '\n');
+  // Rebuild CHANGELOG so the drift gate that `commit` now runs passes.
+  const rebuild = runScript(root, 'generate-changelog-entry.js', ['--rebuild']);
+  assert.equal(rebuild.status, 0,
+    'setup: CHANGELOG rebuild must succeed: ' + ((rebuild.stdout || '') + (rebuild.stderr || '')));
+  initGitRepo(root);
+  git(root, ['add', '-A']);
+  const c = git(root, ['commit', '-m', 'initial fixture']);
+  assert.equal(c.status, 0, 'setup: initial commit must succeed: ' + ((c.stdout || '') + (c.stderr || '')));
+}
+
+// ---------------------------------------------------------------------------
+// scripts#40 — release.js `commit` refuses a pre-staged non-release file that
+// the worktree-only stray scan would miss.
+// ---------------------------------------------------------------------------
+describe('scripts#40 — release.js commit staged-index allowlist', () => {
+  it('refuses a pre-staged non-release file instead of folding it into the release commit', () => {
+    const root = mkTempRepo();
+    seedReleaseRepo(root, '0.9.11');
+    // Operator stages an unrelated WIP change (clean worktree afterwards), then
+    // runs `commit` directly. This shows as "A  lib/foo.js" — the worktree
+    // column is a space, so the old scan missed it.
+    nodeFs.writeFileSync(nodePath.join(root, 'lib', 'foo.js'), "'use strict';\nmodule.exports = 1;\n");
+    git(root, ['add', 'lib/foo.js']);
+
+    const rv = runScript(root, 'release.js', ['commit']);
+    const out = (rv.stdout || '') + (rv.stderr || '');
+    assert.notEqual(rv.status, 0, 'commit must refuse a pre-staged stray file: ' + out);
+    assert.match(out, /the git index has staged changes outside the release set/i, out);
+    assert.match(out, /lib\/foo\.js/, 'the offending path must be named: ' + out);
+    // No release commit may have been created.
+    const head = git(root, ['log', '-1', '--pretty=%s']).stdout.trim();
+    assert.equal(head, 'initial fixture', 'no release commit should exist: ' + head);
+  });
+
+  it('source enumerates the staged index against the allowlist', () => {
+    const src = nodeFs.readFileSync(nodePath.join(SCRIPTS_DIR, 'release.js'), 'utf8');
+    assert.ok(src.indexOf("'--cached'") !== -1 && src.indexOf("'--name-only'") !== -1,
+      'commit must inspect the staged index via `git diff --cached --name-only`');
+    assert.match(src, /staged changes outside the release set/,
+      'commit must carry the staged-stray refusal message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scripts#41 — release.js `commit` re-runs the leak-vocabulary/drift gate
+// before composing the signed commit body.
+// ---------------------------------------------------------------------------
+describe('scripts#41 — release.js commit re-validates release-notes before composing the body', () => {
+  it('fails the leak-vocabulary gate on a post-prepare hand-edit rather than committing it', () => {
+    const root = mkTempRepo();
+    seedReleaseRepo(root, '0.9.11');
+    // Operator hand-edits the release-notes JSON AFTER prepare validated it,
+    // injecting a forbidden co-authorship trailer, then runs `commit` directly.
+    const rnPath = nodePath.join(root, 'release-notes', 'v0.9.11.json');
+    const rn = JSON.parse(nodeFs.readFileSync(rnPath, 'utf8'));
+    rn.sections[0].items[0].body = 'A fixture body carrying a Co-Authored-By trailer that must be rejected.';
+    nodeFs.writeFileSync(rnPath, JSON.stringify(rn, null, 2) + '\n');
+
+    const rv = runScript(root, 'release.js', ['commit']);
+    const out = (rv.stdout || '') + (rv.stderr || '');
+    assert.notEqual(rv.status, 0, 'commit must fail the leak gate: ' + out);
+    assert.match(out, /leak-vocabulary tokens found/i,
+      'the leak sweep must be what rejects the commit: ' + out);
+    // No leaked release commit may exist.
+    const head = git(root, ['log', '-1', '--pretty=%s']).stdout.trim();
+    assert.equal(head, 'initial fixture', 'no release commit should exist: ' + head);
+  });
+
+  it('source runs check-changelog-extract.js in the commit path (not only in regen)', () => {
+    const src = nodeFs.readFileSync(nodePath.join(SCRIPTS_DIR, 'release.js'), 'utf8');
+    const hits = (src.match(/check-changelog-extract\.js/g) || []).length;
+    assert.ok(hits >= 2,
+      'check-changelog-extract.js must run in BOTH regen and commit (>=2 refs, saw ' + hits + ')');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scripts#42 — generate-changelog-entry.js exports _leakPatterns as the single
+// source of truth and is safe to require (main() guarded).
+// ---------------------------------------------------------------------------
+describe('scripts#42 — generate-changelog-entry.js require-safe + exports _leakPatterns', () => {
+  it('requiring the module does not run the CLI and exposes _leakPatterns()', () => {
+    // With the require.main guard in place, importing must be side-effect-free:
+    // no version read, no validation, no process.exit.
+    const mod = require(nodePath.join(SCRIPTS_DIR, 'generate-changelog-entry.js'));
+    assert.equal(typeof mod._leakPatterns, 'function', 'must export _leakPatterns');
+    const pats = mod._leakPatterns();
+    assert.ok(Array.isArray(pats) && pats.length > 0, 'must return a non-empty pattern array');
+    assert.ok(pats.every((p) => p instanceof RegExp), 'every entry must be a RegExp');
+    // Spot-check a representative token so a gutted list is caught.
+    assert.ok(pats.some((p) => p.test('Co-Authored-By: someone')),
+      'the exported list must cover the co-authorship trailer');
+    assert.ok(pats.some((p) => p.test('phase 3 cleanup')),
+      'the exported list must cover phase numbering');
+  });
+
+  it('source guards main() and exports the pattern list', () => {
+    const src = nodeFs.readFileSync(nodePath.join(SCRIPTS_DIR, 'generate-changelog-entry.js'), 'utf8');
+    assert.match(src, /if \(require\.main === module\) \{/,
+      'the bottom-of-file main() call must be guarded so require() is safe');
+    assert.match(src, /module\.exports\s*=\s*\{[^}]*_leakPatterns/,
+      'the module must export _leakPatterns as the single source of truth');
+    assert.doesNotMatch(src, /the\s+codebase-patterns gate fails if the two lists drift/,
+      'the false "drift gate exists" claim must be gone');
+    assert.doesNotMatch(src, /global CLAUDE\.md/,
+      'the comment must not reference the local CLAUDE.md');
+  });
+});

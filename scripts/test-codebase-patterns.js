@@ -212,6 +212,7 @@ var VALID_ALLOW_CLASSES = {
   'raw-headers-distinct':       1,
   'vendor-deny':                1,
   'internal-narrative-comment': 1,
+  'bitwise-int-coerce':         1,
 };
 
 // CVE-2026-25639 / 42033 / 42041 / 40175 — axios prototype-pollution.
@@ -448,6 +449,36 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     var matches = _scan(/\b(nodeCrypto|crypto)\.timingSafeEqual\(/);
     matches = _filterMarkers(matches, 'raw-timing-safe-equal');
     _assertClean('raw-timing-safe-equal', matches);
+  });
+
+  it('no bitwise `| 0` integer coercion (ToInt32 truncation; use Math.trunc(Number(...)))', () => {
+    // class: bitwise-int-coerce
+    // `x | 0` is the ToInt32-truncation idiom. On a config-derived or otherwise
+    // large value it wraps anything >= 2^31 to a NEGATIVE int32, silently
+    // corrupting a byte-rate throttle, a size cap, or a concurrency clamp
+    // (surfaced as int32-truncation-throttle-bypass / bitwise-int-coerce on the
+    // upload-throttle and upload-concurrency paths). Math.trunc(Number(v)) keeps
+    // the full 2^53 integer domain. The regex targets a SINGLE `|` immediately
+    // left of a literal `0` operand — it deliberately does NOT match the logical
+    // default `|| 0`, nor a flag-OR whose right operand is a non-zero literal
+    // (`FLAG_A | 0x100`), nor a decimal (`x | 0.5`).
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+        if (/[^|]\|\s*0(?![\w.])/.test(line)) {
+          bad.push({ file: _relPath(files[fi]), line: li + 1, content: line.trim() });
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'bitwise-int-coerce');
+    _assertClean('bitwise-int-coerce', bad);
   });
 
   it('parseInt(...) called with explicit radix', () => {
@@ -1214,44 +1245,15 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
 
   it('no leak-vocabulary tokens in operator-facing docs (README / SECURITY / RELEASING / CHANGELOG)', () => {
     // class: docs-leak-vocab
-    // Mirrors the regex set in scripts/generate-changelog-entry.js's
-    // `_leakPatterns()` so freehand prose in the adjacent docs holds
-    // the same operator-facing discipline that the structured release-
-    // notes JSON tree already enforces. Per the global CLAUDE.md
-    // preferences: phase/sweep/tier/batch/slice/pass numbering,
-    // AI-tooling vocab, conversation residue, and the recurring
-    // "all tests passing" / "ci green" tautologies are all forbidden
-    // in operator-facing surface.
-    var patterns = [
-      // [\s-]+ catches both the spaced and hyphenated spellings ("phase 9" AND
-      // "phase-9"), mirroring scripts/generate-changelog-entry.js#_leakPatterns.
-      /\bphase[\s-]+\d/i,
-      /\bsweep[\s-]+\d/i,
-      /\btier[- ]?[abc]\b/i,
-      /\bbatch[\s-]+\d/i,
-      /\bgroup\s+[a-h]\s+remainder\b/i,
-      /\bslice[\s-]+\d/i,
-      /\bpass[\s-]+\d/i,
-      /\bdrift[- ]?audit\s+sweep\b/i,
-      /\bacross\s+the\s+slice\b/i,
-      /\bdrift[- ]audit\s+pass\b/i,
-      /\b\d+[- ]gap\s+closure\b/i,
-      /\baudit[- ]derived\b/i,
-      /\bpost[- ]audit\b/i,
-      /\bfolded in pre-merge\b/i,
-      /\bcaught by (?:the )?reviewer\b/i,
-      /\b(?:multi-agent|agent)\s+fan-?out\b/i,
-      /\b(?:anthropic|chatgpt|openai|copilot|claude|sonnet|opus|haiku|gemini|co[- ]authored[- ]by|llm[- ]generated|ai[- ]generated)\b/i,
-      /\bai[- ](?:assisted|discovered|derived)\b/i,
-      /\bas\s+discussed\b/i,
-      /\bper\s+(?:your|the)\s+earlier\s+note\b/i,
-      /\boperator[- ]confirmed\b/i,
-      /\ball\s+tests\s+passing\b/i,
-      /\bci\s+green\b/i,
-      /\bclaude\.md\b/i,
-      /\bper\s+rule\s+§\d/i,
-      /\bper\s+project\s+rule\s+§/i,
-    ];
+    // Imports the SAME regex set the release-notes validator sweeps, from
+    // scripts/generate-changelog-entry.js#_leakPatterns — the single source of
+    // truth. Importing (rather than re-listing the array here) means the docs
+    // gate and the structured-notes gate can never drift: there is no second
+    // hand-copied array to fall out of sync. Per the global operator-facing
+    // discipline: phase/sweep/tier/batch/slice/pass numbering, AI-tooling vocab,
+    // conversation residue, and the "all tests passing" / "ci green" tautologies
+    // are all forbidden in operator-facing surface.
+    var patterns = require('./generate-changelog-entry.js')._leakPatterns();
     var hits = _scanDocs(patterns, 'docs-leak-vocab');
     _assertClean('docs-leak-vocab', hits);
   });

@@ -60,7 +60,9 @@ jobs:
         with:
           python-version: '3.x'
       - name: Install zizmor
-        run: pipx install zizmor
+        # Version-pinned (not floating latest) so a compromised newer release
+        # can't silently enter this security-events:write job; bump deliberately.
+        run: pipx install zizmor==1.26.1
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -95,7 +97,9 @@ jobs:
         with:
           python-version: '3.x'
       - name: Install Semgrep
-        run: pipx install semgrep
+        # Version-pinned (not floating latest) so a compromised newer release
+        # can't silently enter this security-events:write job; bump deliberately.
+        run: pipx install semgrep==1.168.0
       - name: Run Semgrep
         run: |
           semgrep scan \
@@ -135,14 +139,35 @@ jobs:
         run: node scripts/build-sbom.js --out build
       - name: Install OSV-Scanner
         id: osv_install
+        env:
+          # Pinned release + committed SHA-256 of osv-scanner_linux_amd64.
+          # Bump both together when moving to a newer osv-scanner; the SUMS
+          # file lives at the release's osv-scanner_SHA256SUMS asset.
+          OSV_VERSION: v2.4.0
+          OSV_SHA256: 15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
         run: |
-          if curl -sSfL "https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64" -o "${RUNNER_TEMP}/osv-scanner"; then
-            chmod +x "${RUNNER_TEMP}/osv-scanner"
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
+          # This job holds security-events:write, so a scanner binary pulled
+          # from the mutable releases/latest path and run unverified could
+          # execute attacker bytes and suppress the very code-scanning findings
+          # this gate exists to surface. Pin to a specific release tag and
+          # verify the asset's SHA-256 before chmod+exec — matching the SHA-pin
+          # posture of every other executable input in this repo's CI.
+          #
+          # A network/download failure is an availability problem: warn + skip
+          # the scan (SARIF is report-only). A checksum MISMATCH is an integrity
+          # problem (tag-republish / asset swap): fail loudly rather than run or
+          # silently skip, so a swapped binary can never emit a fake-clean SARIF.
+          if ! curl -sSfL "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64" -o "${RUNNER_TEMP}/osv-scanner"; then
             echo "::warning::osv-scanner download failed; skipping scan"
             echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if ! echo "${OSV_SHA256}  ${RUNNER_TEMP}/osv-scanner" | sha256sum -c -; then
+            echo "::error::osv-scanner ${OSV_VERSION} checksum mismatch; refusing to execute"
+            exit 1
+          fi
+          chmod +x "${RUNNER_TEMP}/osv-scanner"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
       - name: Scan SBOM
         if: ${{ steps.osv_install.outputs.ok == 'true' }}
         run: |

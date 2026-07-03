@@ -127,7 +127,11 @@ describe('Stash Features', { timeout: 30000 }, () => {
     runDbScript(ctx.dbPath, script);
 
     const ws = newTestWsClient(ctx.url, scopedToken);
-    const hbP = waitFor(ws, 'message', m => m.type === MSG.HEARTBEAT, 2000);
+    // The server emits an immediate heartbeat on connect, but under the parallel
+    // test pool (server + up to 4 concurrent suites sharing the CPU) the TLS+PQC
+    // handshake and first frame can take well over 2s. A generous timeout keeps
+    // this a reliability check on "a heartbeat arrives", not a race with load.
+    const hbP = waitFor(ws, 'message', m => m.type === MSG.HEARTBEAT, 15000);
     await connectWsClient(ws, bundle.bundleId, 0);
     const hb = await hbP;
     assert.equal(hb.type, MSG.HEARTBEAT);

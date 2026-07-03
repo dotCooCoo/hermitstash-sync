@@ -12,7 +12,11 @@
 // installs on a stale runtime.
 (function _enforceNodeFloor() {
   var FLOOR = { major: 24, minor: 18, patch: 0 }; // allow:raw-byte-literal — semver triple (Node 24.18.0), not byte sizes
-  var m = /^v(\d+)\.(\d+)\.(\d+)/.exec(process.versions.node);
+  // process.versions.node is the bare triple ("24.18.0") with NO leading 'v'
+  // (only process.version carries the 'v'). The prefix is optional so the
+  // parse matches either shape, and the unanchored tail ignores any
+  // prerelease/nightly suffix (e.g. "25.0.0-nightly...").
+  var m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(process.versions.node);
   if (!m) return;                                   // unparseable — let it through
   var major = parseInt(m[1], 10);
   var minor = parseInt(m[2], 10);

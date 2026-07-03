@@ -368,6 +368,19 @@ function cmdCommit() {
     throw new Error('release: nothing staged to commit — did `prepare` run? (working tree is clean)');
   }
 
+  // Re-run the leak-vocabulary + CHANGELOG-drift gate before composing the
+  // signed commit body. `commit` is an independently-dispatchable subcommand,
+  // so the release-notes JSON may have been hand-edited AFTER `prepare`
+  // validated it (or `prepare` may have been skipped). The commit message is
+  // operator-facing and is built from that JSON below, so validate it here with
+  // the same gate `prepare` runs — this renders + validates the current
+  // version's release-notes (leak-vocabulary sweep over the whole tree) and
+  // confirms CHANGELOG.md is in sync — rather than trusting a prior, possibly
+  // stale validation. The normal prepare -> test -> commit flow is unaffected
+  // since prepare already left the tree validated (this is a read-only re-check).
+  _run('node', ['scripts/check-changelog-extract.js']);
+  _ok('release-notes + CHANGELOG re-validated before composing the commit message');
+
   // Compose the commit body from the release-notes JSON, mirroring the
   // CHANGELOG entry shape. Operators can amend post-commit.
   var rn = JSON.parse(fs.readFileSync(_releaseNotesPath(next), 'utf8'));
@@ -398,6 +411,35 @@ function cmdCommit() {
     'CHANGELOG.md',
     'release-notes',
   ]);
+
+  // Refuse to proceed if the git INDEX carries anything outside the release
+  // set. The worktree scan below only inspects the worktree column of
+  // `git status`, so a file the operator staged BEFORE running `commit` (an
+  // index change with a clean worktree — e.g. `git add lib/foo.js` then
+  // `commit`) shows as "M " (index flag set, worktree flag a space) and slips
+  // past that scan, getting folded into the signed, pushed release commit.
+  // Enumerate the staged paths directly and refuse any outside the allowlist.
+  // `git diff --cached --name-only` prints repo-root-relative, forward-slashed
+  // paths; a path with unusual bytes may be quoted, which only ever fails the
+  // allowlist (the safe direction) — the release files are plain ASCII.
+  var stagedStray = _capture('git', ['diff', '--cached', '--name-only']).stdout
+    .split('\n')
+    .map(function (p) { return p.trim(); })
+    .filter(function (p) { return p.length > 0; })
+    .filter(function (p) {
+      return p !== 'package.json' &&
+        p !== 'lib/constants.js' &&
+        p !== 'CHANGELOG.md' &&
+        p !== 'release-notes' &&
+        p.indexOf('release-notes/') !== 0;
+    });
+  if (stagedStray.length > 0) {
+    throw new Error('release: the git index has staged changes outside the release set ' +
+      '(package.json / lib/constants.js / CHANGELOG.md / release-notes/):\n' +
+      stagedStray.join('\n') +
+      '\nUnstage them with `git restore --staged <path>` before committing — the ' +
+      'signed release commit must contain only release output.');
+  }
 
   // Refuse to proceed if anything OUTSIDE that set is still dirty. A surviving
   // unstaged/untracked change means the tree carried edits the release doesn't

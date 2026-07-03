@@ -267,9 +267,17 @@ function build() {
     dependencies.push({ ref: p, dependsOn: byParent[p] });
   }
 
+  // A metadata.lifecycles[] item is schema-constrained in CycloneDX 1.6: each
+  // is a oneOf of a phase-only or a name+description shape, both with
+  // additionalProperties:false. Hanging an externalReferences array off the
+  // lifecycle object makes it match neither branch, so a strict validator
+  // (cyclonedx validate, Dependency-Track BOM validation) rejects the whole
+  // document. Keep the lifecycle bare and carry the build-run pointer on the
+  // application component's externalReferences instead — a schema-legal array
+  // that accepts the 'build-meta' reference type.
   const buildLifecycle = { phase: 'build' };
   const runUrl = githubActionsRunUrl();
-  if (runUrl) buildLifecycle.externalReferences = [{ type: 'build-meta', url: runUrl }];
+  if (runUrl) appComponent.externalReferences.push({ type: 'build-meta', url: runUrl });
 
   const doc = {
     $schema:      'http://cyclonedx.org/schema/bom-1.6.schema.json',

@@ -14,7 +14,7 @@ node tests/run-all.js
 
 | | |
 |---|---|
-| Node.js | ≥ 24.14.1 (same floor as the sync client) |
+| Node.js | ≥ 24.18.0 (same floor as the sync client) |
 | `openssl` on PATH | for the per-run test-CA + cert generation |
 | `docker` on PATH | only `test-docker-e2e.js` requires it; suite skips when absent |
 | Sibling checkout of the server repo | required for any test that uses `startServer()` — see below |

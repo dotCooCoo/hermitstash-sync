@@ -422,7 +422,13 @@ jobs:
     if: ${{ !inputs.dry_run }}
     permissions:
       id-token: write    # OIDC token for Sigstore-keyless signing
-      contents: write    # SLSA caller example default; harmless with upload-assets:false
+      # Least privilege: with upload-assets:false the generator only reads
+      # contents (its upload-assets job, the sole contents:write consumer, is
+      # skipped). The `publish` job owns the contents:write for release-create.
+      # This matters because the reusable workflow is tag-pinned, not SHA-pinned
+      # (SLSA constraint below) — a needless write would widen the blast radius
+      # of a tag-republish compromise of slsa-github-generator.
+      contents: read     # generator reads workflow contents; no write needed here
       actions: read      # introspect this workflow run for the attestation
     # IMPORTANT: Tag-pinned, NOT SHA-pinned. SLSA's internal builder-
     # fetch step expects `BUILDER_REF` in `refs/tags/vX.Y.Z` form and

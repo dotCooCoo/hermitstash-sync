@@ -34,17 +34,18 @@ var CONSTANTS_JS  = path.join(ROOT, 'lib', 'constants.js');
 var CHANGELOG     = path.join(ROOT, 'CHANGELOG.md');
 var NOTES_DIR     = path.join(ROOT, 'release-notes');
 
-// LEAK_PATTERNS — tokens that signal internal-process narrative
-// instead of operator-facing description. The list mirrors the
-// "Forbidden in operator-facing text" rules in the global CLAUDE.md
-// preferences (phase/pass/slice/batch/sweep/tier numbering,
-// AI-tooling vocabulary, conversation residue, audit-attribution
-// shorthand).
-// Kept byte-identical to the `docs-leak-vocab` mirror in
-// scripts/test-codebase-patterns.js so freehand prose in the adjacent
-// docs holds the same discipline the structured JSON tree enforces.
-// When you add a pattern here, add the same one there (the
-// codebase-patterns gate fails if the two lists drift).
+// LEAK_PATTERNS — tokens that signal internal-process narrative instead of
+// operator-facing description: internal sequencing numbers (phase / pass /
+// slice / batch / sweep / tier), AI-tooling vocabulary and co-authorship
+// trailers, conversation residue, and audit-attribution shorthand. Every
+// release-notes string field is swept against this list before the markdown
+// emitter, so that vocabulary can never reach the operator-facing CHANGELOG or
+// release page.
+//
+// This function is exported (see `module.exports` at the foot of the file) so
+// the `docs-leak-vocab` check in scripts/test-codebase-patterns.js can import
+// the SAME list as its single source of truth, instead of keeping a second
+// hand-copied array that could silently drift out of sync with this one.
 function _leakPatterns() {
   return [
     // Phase / sweep / tier numbering — internal sequencing the
@@ -634,4 +635,12 @@ function main() {
     '--check to gate drift, --release-page to emit GH-release-page markdown.\n');
 }
 
-main();
+// Run the CLI only when invoked directly. Guarding this lets other maintainer
+// tooling (the docs-leak-vocab gate) `require()` this file to reuse
+// `_leakPatterns` as the single source of truth without triggering a version
+// read, release-notes validation, stdout emission, or process.exit at import.
+if (require.main === module) {
+  main();
+}
+
+module.exports = { _leakPatterns };

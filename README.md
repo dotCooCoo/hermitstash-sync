@@ -200,9 +200,22 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
   "autoUpdateChannel": "stable",
   "uploadConcurrency": 4,
   "uploadBytesPerSec": 0,
-  "downloadBytesPerSec": 0
+  "downloadBytesPerSec": 0,
+  "maxFileSize": 0
 }
 ```
+
+`server` must be an `https://` URL. A plaintext `http://` server is refused at
+config-load for any non-loopback host — it would ship the API key and every
+file over an unencrypted, non-post-quantum connection. A loopback target
+(`http://127.0.0.1`, `::1`, `localhost` — e.g. a TLS-terminating sidecar on the
+same host) stays allowed; to reach a trusted non-loopback proxy over plaintext
+deliberately, set `HERMITSTASH_ALLOW_PLAINTEXT=1`.
+
+`maxFileSize` (bytes, `0` = no extra cap) refuses any file larger than it before
+an upload or download starts. It can only *tighten* the built-in per-file
+memory-safety ceiling (`HERMITSTASH_MAX_FILE_BYTES`, default 256 GiB), never
+raise it — set the env var to change the ceiling itself.
 
 Every numeric / enum / array field is also exposed as an env var so container deployments can tune without editing `config.json` in a mounted volume:
 

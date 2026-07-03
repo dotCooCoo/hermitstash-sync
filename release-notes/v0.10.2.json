@@ -1,0 +1,76 @@
+{
+  "version": "0.10.2",
+  "date": "2026-07-03",
+  "headline": "Restores Linux/macOS self-update, hardens sync recovery, config validation, and the support bundle",
+  "summary": "A correctness and security release. It restores in-daemon self-update on Linux and macOS, makes the Node.js version gate actually enforce its floor, stops a reconcile pass from overwriting a newer local edit with the server's older copy, ends several transfer-retry and reconnect loops, refuses a plaintext non-loopback server URL, closes support-bundle information leaks, and emits a schema-valid release SBOM. No configuration changes are required, though maxFileSize in config.json is now enforced.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "In-daemon self-update installs again on Linux and macOS",
+          "body": "The self-replace step now passes the verified SHA3-512 of the downloaded binary to the install call, which recently began requiring it. Without the hash the call was rejected before any file was touched, so a bare-binary daemon downloaded and verified an update but silently never installed it. Windows now also re-hashes the downloaded binary against the verified digest immediately before it replaces the running image."
+        },
+        {
+          "title": "The Node.js version gate now enforces the 24.18.0 floor",
+          "body": "The startup check that refuses to run on an unsupported Node.js parsed the running version with a pattern that never matched the real version string, so it always fell through and enforced nothing. It now parses the version correctly and refuses to start below 24.18.0 with an actionable message. Prebuilt binaries embed a matching runtime and are unaffected."
+        },
+        {
+          "title": "A stranded local edit is no longer overwritten by the server's older copy",
+          "body": "After an upload exhausted its retries, a later reconcile pass could re-download the server's older version over the newer local edit. The reconcile path now preserves the local bytes as a conflict copy first — the same protection the live-change paths already apply — so an edit that outran a failed upload is never lost."
+        },
+        {
+          "title": "Over-cap files and permanently-rejected transfers are no longer retried every cycle",
+          "body": "A file larger than the effective per-file limit, or an upload the server permanently rejects, was re-attempted on every reconcile pass indefinitely. Such a transfer is now recorded once and skipped until a later success or a reconnect, ending the repeated wasted requests and error-log noise."
+        },
+        {
+          "title": "A stalled catch-up no longer reconnects in a loop",
+          "body": "When a change at the top of a catch-up batch could not be applied (a locked or unreadable local file), the client could reconnect on every reconcile tick. It now reconnects to advance the cursor only when a pass actually recovered stranded data, so an unappliable change no longer drives an endless reconnect loop."
+        },
+        {
+          "title": "Bandwidth and concurrency limits above ~2 GB/s are no longer silently disabled",
+          "body": "The upload/download rate limits and the upload-concurrency setting were coerced with a 32-bit truncation that wrapped a value at or above 2^31 to a negative number, silently disabling the limit or clamping concurrency to one. They now use the full integer range."
+        },
+        {
+          "title": "The support bundle no longer leaks the home-directory path or a credential",
+          "body": "The diagnostic support bundle could include the absolute state-database path (revealing the OS user and home layout) and, in a free-form log line, a bearer credential. The path is now reduced to a basename, a bearer token is redacted by shape, and secret literals containing quotes or backslashes are matched in both their raw and JSON-escaped forms."
+        },
+        {
+          "title": "Config.json validation is stricter and clearer",
+          "body": "A config.json whose top level is not an object, or whose server / bundle / share / folder fields are the wrong type, is now rejected at load with a message that names the real problem instead of failing opaquely later."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Plaintext http:// to a non-loopback server is refused",
+          "body": "A plaintext http:// server URL disables TLS, mTLS, and the post-quantum group pinning, sending the API key and all traffic in the clear. It is now refused at config-load for any non-loopback host. A loopback target (a TLS-terminating sidecar on the same host, or a dev target) stays allowed; a deliberate non-loopback plaintext hop now requires HERMITSTASH_ALLOW_PLAINTEXT=1."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "maxFileSize in config.json is now enforced",
+          "body": "The maxFileSize setting, previously accepted but ignored, now refuses a file larger than it before an upload or download begins. It can only lower the built-in per-file ceiling (HERMITSTASH_MAX_FILE_BYTES, default 256 GiB), never raise it. If you set a non-zero maxFileSize expecting it to have no effect, files above it will now be skipped with an actionable error."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "The release SBOM is now a schema-valid CycloneDX 1.6 document",
+          "body": "The generated CycloneDX SBOM placed externalReferences on a lifecycle entry, which the 1.6 schema forbids, so every release shipped a technically-invalid document. The references now sit on a valid component, so CycloneDX-aware scanners parse the SBOM cleanly."
+        },
+        {
+          "title": "The release and image pipelines pin their remaining tool downloads",
+          "body": "The container-image build and code-scanning workflows now pin the vulnerability scanner and workflow linters to verified versions (with a checksum on the scanner binary) rather than a floating latest, and the image build checks out the exact commit its provenance names. This closes the gaps where a compromised upstream tool release could enter a privileged build step."
+        }
+      ]
+    }
+  ]
+}

@@ -7,12 +7,20 @@
 //   node --test tests/test-fix-updater.js
 //
 // Findings covered:
-//   updater#18 — beta-channel asset/signature regex (prerelease tail)
+//   updater#18 (regex) — beta-channel asset/signature regex (prerelease tail)
 //   updater#21 — expired-signed-URL retry classifier on downloadTo
 //   updater#23 — probation timer re-reads the marker before the destructive unlink
+//   updater#16 — b.selfUpdate.swap now REQUIRES expectedHash; the verified
+//                SHA3-512 is threaded through performInstall (POSIX install
+//                path previously threw and silently never installed)
+//   updater#17 — the win32 self-replace re-hashes the asset against the verified
+//                digest and installs the in-memory bytes (verify->install bind)
+//   updater#18 (cap) — the signature download uses a small (64 KiB) cap, not the
+//                256 MiB asset cap
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const nodeCrypto = require('node:crypto');
 const nodeFs = require('node:fs');
 const nodePath = require('node:path');
 const nodeOs = require('node:os');
@@ -235,5 +243,223 @@ describe('updater#23 — probation timer re-reads the marker before the destruct
     await wait(300);
 
     assert.equal(nodeFs.existsSync(snapPrev), true, 'no marker => no unlink target');
+  });
+});
+
+// ---- shared fixtures for the install-path findings ----
+
+function tmpDir(tag) {
+  return nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'hs-upd-' + (tag || 'x') + '-'));
+}
+// SHA3-512 lowercase hex — byte-identical to what the standalone verifier
+// returns (verifyResult.sha3_512) and to what b.selfUpdate.swap / fdSafeReadSync
+// recompute internally. Never derive the "verified" hash from the same bytes the
+// production code re-reads in a way that would mask a real mismatch — these tests
+// pass the digest of the ORIGINAL asset bytes, exactly as checkOnce does.
+function sha3hex(buf) {
+  return nodeCrypto.createHash('sha3-512').update(buf).digest('hex');
+}
+function withPlatform(value, fn) {
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value, configurable: true });
+  try { return fn(); } finally { Object.defineProperty(process, 'platform', real); }
+}
+
+describe('updater#16 — POSIX install threads the verified digest into b.selfUpdate.swap', () => {
+  // The v0.10.1 vendored refresh made expectedHash a REQUIRED opt on
+  // b.selfUpdate.swap. performInstall must pass verifyResult.sha3_512, or every
+  // Linux/macOS in-daemon install throws selfupdate/bad-expected-hash and
+  // silently never installs. These drive the real _internals.performInstall
+  // through the real vendored swap primitive (no network) with process.platform
+  // stubbed to a POSIX value so the else-branch runs on any host.
+
+  it('installs the new bytes and backs up the old when the digest matches', async () => {
+    await withPlatform('linux', async () => {
+      const dir = tmpDir('posix');
+      const currentPath = nodePath.join(dir, 'hs');
+      const assetPath = nodePath.join(dir, 'asset');
+      const OLD = Buffer.from('OLD BINARY v0.4.6');
+      const NEW = Buffer.from('NEW BINARY v9.9.9 with more bytes');
+      nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
+      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
+      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+
+      const u = newUpdater({
+        currentVersion: '0.4.6',
+        markerPath,
+        getExecPath: () => currentPath,
+        getArgv: () => [],
+        exitFn: () => {},
+        spawnFn: () => ({ unref() {} }),
+      });
+
+      const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
+
+      assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current binary must be the new bytes');
+      assert.ok(prevPath.endsWith('.prev'), `expected a .prev backup, got ${prevPath}`);
+      assert.ok(nodeFs.readFileSync(prevPath).equals(OLD), 'backup must hold the old bytes');
+      const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
+      assert.equal(marker.newVersion, '9.9.9');
+      assert.equal(marker.prevBinaryPath, prevPath);
+    });
+  });
+
+  it('refuses to install and leaves the current binary untouched when the digest mismatches', async () => {
+    await withPlatform('linux', async () => {
+      const dir = tmpDir('posix');
+      const currentPath = nodePath.join(dir, 'hs');
+      const assetPath = nodePath.join(dir, 'asset');
+      const OLD = Buffer.from('OLD BINARY');
+      const NEW = Buffer.from('NEW BINARY');
+      nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
+      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
+      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+
+      const u = newUpdater({
+        currentVersion: '0.4.6', markerPath,
+        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
+      });
+
+      const wrong = sha3hex(Buffer.from('some other content the signature never covered'));
+      await assert.rejects(
+        u._internals.performInstall('9.9.9', assetPath, wrong),
+        (err) => { assert.match(err.message, /expectedHash|hash-mismatch|refusing to install/i); return true; }
+      );
+      assert.ok(nodeFs.readFileSync(currentPath).equals(OLD), 'current binary must be untouched after a refused swap');
+      assert.equal(nodeFs.existsSync(markerPath), false, 'no marker on a failed install');
+    });
+  });
+
+  it('regression guard: the vendored swap REQUIRES expectedHash (omitting it throws)', async () => {
+    // This is exactly the v0.10.1 break — a 2-arg performInstall (no digest)
+    // reaches b.selfUpdate.swap with expectedHash undefined and is refused. The
+    // production caller (checkOnce) always threads the digest, so this asserts
+    // the vendored contract the fix satisfies rather than a reachable path.
+    await withPlatform('linux', async () => {
+      const dir = tmpDir('posix');
+      const currentPath = nodePath.join(dir, 'hs');
+      const assetPath = nodePath.join(dir, 'asset');
+      nodeFs.writeFileSync(currentPath, 'OLD', { mode: 0o755 });
+      nodeFs.writeFileSync(assetPath, 'NEW', { mode: 0o644 });
+      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+      const u = newUpdater({
+        currentVersion: '0.4.6', markerPath,
+        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
+      });
+      await assert.rejects(
+        u._internals.performInstall('9.9.9', assetPath /* no expectedHash */),
+        (err) => { assert.match(err.message, /expectedHash|bad-expected-hash/i); return true; }
+      );
+    });
+  });
+});
+
+describe('updater#17 — win32 self-replace binds the installed bytes to the verified digest', () => {
+  // Drive the win32 branch on any host by stubbing process.platform. The swap
+  // renames whatever getExecPath() points at, so a temp file stands in for the
+  // running .exe. The fix re-reads the asset with O_NOFOLLOW and refuses unless
+  // it still matches the verified SHA3-512 BEFORE the rename-away, then installs
+  // the verified in-memory bytes.
+
+  it('renames the running image to .old and installs the verified new bytes', async () => {
+    await withPlatform('win32', async () => {
+      const dir = tmpDir('winswap');
+      const currentPath = nodePath.join(dir, 'hs.exe');
+      const assetPath = nodePath.join(dir, 'asset.exe');
+      const RUNNING = Buffer.from('RUNNING IMAGE v0.4.6');
+      const NEW = Buffer.from('NEW IMAGE v9.9.9');
+      nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
+      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
+      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+
+      const u = newUpdater({
+        currentVersion: '0.4.6', markerPath,
+        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
+      });
+
+      const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
+
+      assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current path must hold the new bytes');
+      assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
+      assert.ok(nodeFs.readFileSync(prevPath).equals(RUNNING), 'backup must hold the running image');
+      const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
+      assert.equal(marker.prevBinaryPath, prevPath);
+    });
+  });
+
+  it('refuses a tampered asset and never disturbs the running image', async () => {
+    await withPlatform('win32', async () => {
+      const dir = tmpDir('winswap');
+      const currentPath = nodePath.join(dir, 'hs.exe');
+      const assetPath = nodePath.join(dir, 'asset.exe');
+      const RUNNING = Buffer.from('RUNNING IMAGE');
+      const NEW = Buffer.from('NEW IMAGE');
+      nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
+      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
+      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+
+      const u = newUpdater({
+        currentVersion: '0.4.6', markerPath,
+        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
+      });
+
+      // The verified digest is for RUNNING's-successor NEW, but an attacker
+      // swapped assetPath to different bytes after verify. The re-check must fire.
+      const verifiedButStale = sha3hex(Buffer.from('the bytes the signature actually covered'));
+      await assert.rejects(
+        u._internals.performInstall('9.9.9', assetPath, verifiedButStale),
+        (err) => { assert.match(err.message, /integrity re-check|refusing to install/i); return true; }
+      );
+
+      // Read-first ordering: the running image is intact, no .old backup was
+      // created, and no marker was written.
+      assert.ok(nodeFs.readFileSync(currentPath).equals(RUNNING), 'running image must be untouched');
+      const oldPath = currentPath.replace(/\.exe$/, '.old.exe');
+      assert.equal(nodeFs.existsSync(oldPath), false, 'no rename-away must have happened');
+      assert.equal(nodeFs.existsSync(markerPath), false, 'no marker on a refused install');
+    });
+  });
+});
+
+describe('updater#18 (cap) — the signature download uses a small cap, the asset uses the 256 MiB cap', () => {
+  // downloadTo is shared by the asset leg and the signature leg. The fix gives it
+  // a per-call maxBytes so the sub-100-byte detached signature is not fetched
+  // under the 256 MiB asset ceiling. Stub the b.httpClient transport at its
+  // boundary and capture the maxBytes the REAL downloadTo forwards — no network,
+  // no reimplementation of the fix.
+  const MIB_256 = b.constants.BYTES.mib(256);
+  const KIB_64 = b.constants.BYTES.kib(64);
+
+  async function captureCap(callDownloadTo) {
+    const realRequest = b.httpClient.request;
+    const realDownload = b.httpClient.downloadStream;
+    let captured;
+    b.httpClient.request = async () => ({ body: { destroy() {} } });       // resolveFinalUrl: no redirect, drained
+    b.httpClient.downloadStream = async (opts) => { captured = opts.maxBytes; };
+    try {
+      const u = newUpdater({ currentVersion: '0.4.6' });
+      await callDownloadTo(u);
+    } finally {
+      b.httpClient.request = realRequest;
+      b.httpClient.downloadStream = realDownload;
+    }
+    return captured;
+  }
+
+  it('the signature leg forwards a 64 KiB cap', async () => {
+    const cap = await captureCap((u) =>
+      u._internals.downloadTo('https://example.invalid/asset.sig', nodePath.join(tmpDir('sig'), 'a.sig'), KIB_64));
+    assert.equal(cap, KIB_64, 'signature download must cap at 64 KiB, not the 256 MiB asset ceiling');
+    assert.ok(cap < MIB_256, 'the signature cap must be far below the asset cap');
+  });
+
+  it('the asset leg (and any unspecified caller) keeps the 256 MiB cap', async () => {
+    const explicit = await captureCap((u) =>
+      u._internals.downloadTo('https://example.invalid/asset', nodePath.join(tmpDir('asset'), 'a'), MIB_256));
+    assert.equal(explicit, MIB_256, 'explicit asset download must keep the 256 MiB cap');
+
+    const defaulted = await captureCap((u) =>
+      u._internals.downloadTo('https://example.invalid/asset', nodePath.join(tmpDir('asset'), 'b')));
+    assert.equal(defaulted, MIB_256, 'an unspecified cap must default to the asset ceiling (never less bounded)');
   });
 });
