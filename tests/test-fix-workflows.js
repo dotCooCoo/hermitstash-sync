@@ -99,16 +99,21 @@ test('docker-publish.yml: all code checkouts pin the resolved immutable SHA', fu
   assert.ok(/COMMIT_SHA=\$\{\{\s*needs\.resolve-tag\.outputs\.sha/.test(text));
 });
 
-// ── workflows#45 — release.yml: least-privilege provenance job ───────────────
-test('release.yml: provenance job does not hold contents:write', function () {
+// ── release.yml: provenance job grants the SLSA reusable workflow contents:write
+// GitHub validates a caller against the permissions a called reusable workflow
+// DECLARES: the SLSA generator (generator_generic_slsa3.yml) declares
+// contents:write in its own permissions block, so a caller that grants less
+// fails the ENTIRE run at startup (startup_failure), before any job runs —
+// regardless of upload-assets:false. The write must be present.
+test('release.yml: provenance job grants the SLSA reusable workflow contents:write', function () {
   var text = readWf('release.yml');
   var block = jobBlock(text, 'provenance');
-  assert.ok(/contents:\s+read/.test(block), 'provenance must keep contents:read for the generator');
-  assert.ok(!/contents:\s+write/.test(block), 'provenance must NOT grant contents:write (upload-assets:false)');
-  assert.ok(/id-token:\s+write/.test(block), 'id-token:write is still required for Sigstore-keyless');
-  assert.ok(/actions:\s+read/.test(block), 'actions:read is still required to introspect the run');
+  assert.ok(/contents:\s+write/.test(block), 'provenance MUST grant contents:write — the SLSA reusable workflow declares it and GitHub startup-fails a caller that under-grants');
+  assert.ok(!/contents:\s+read/.test(block), 'provenance must not down-grant contents to read (fails the run at startup)');
+  assert.ok(/id-token:\s+write/.test(block), 'id-token:write is required for Sigstore-keyless');
+  assert.ok(/actions:\s+read/.test(block), 'actions:read is required to introspect the run');
 
-  // The write that actually attaches the release still lives on `publish`.
+  // The write that attaches the release lives on `publish`.
   var publish = jobBlock(text, 'publish');
   assert.ok(/contents:\s+write/.test(publish), 'publish job retains contents:write for gh release create');
 });
