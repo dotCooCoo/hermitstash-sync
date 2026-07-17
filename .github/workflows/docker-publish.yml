@@ -105,7 +105,7 @@ jobs:
           ref: ${{ needs.resolve-tag.outputs.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '>=24.18.0'
 
@@ -240,7 +240,7 @@ jobs:
 
       - name: Set up Node.js
         # zizmor: ignore[cache-poisoning] no cache input set, so setup-node caches nothing.
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '>=24.18.0'
 
@@ -281,7 +281,7 @@ jobs:
 
       - name: Generate image tags and labels
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
