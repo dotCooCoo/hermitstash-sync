@@ -428,6 +428,40 @@ describe('A failed server DELETE is re-driven, not silently undone by the downlo
 });
 
 // ---------------------------------------------------------------------------
+// sync-engine — a temporarily-unreadable sync root does not storm-delete
+// ---------------------------------------------------------------------------
+describe('A local delete is refused while the sync root is unreadable (mount blip)', { timeout: 30000 }, () => {
+  it('does not issue a server DELETE when the sync folder itself is gone', async () => {
+    const content = 'file on an unmounted volume';
+    const sum = sha3(content);
+    const rel = 'onvolume.txt';
+    let deleteAttempts = 0;
+    const h = makeEngine({});
+    h.engine._http.deleteFile = async () => { deleteAttempts++; return true; };
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      stateDb.upsertFile({
+        relativePath: rel, serverFileId: 'F', serverChecksum: sum,
+        localChecksum: sum, size: content.length, serverSeq: 5, status: FILE_STATUS.SYNCED,
+      });
+      // Simulate the sync root becoming unreadable (unmounted): point the
+      // engine's syncFolder at a path that does not exist.
+      h.engine._config.syncFolder = path.join(h.root, 'vanished-mount');
+
+      const outcome = await h.engine._executeDelete(rel, stateDb.getFile(rel));
+      assert.equal(outcome, 'skipped', 'the delete is refused while the root is unreadable');
+      assert.equal(deleteAttempts, 0, 'no server DELETE is issued during a mount blip');
+
+      // _handleLocalDelete also drops the event early without buffering.
+      await h.engine._handleLocalDelete(rel);
+      assert.equal(h.engine._pendingDeletes.size, 0, 'no delete is buffered while the root is unreadable');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sync-engine — a converged PENDING_UPLOAD row is flipped to SYNCED
 // ---------------------------------------------------------------------------
 describe('Reconcile flips a converged PENDING_UPLOAD row to SYNCED (no permanent re-hash blind spot)', { timeout: 30000 }, () => {

@@ -56,6 +56,22 @@ describe('cli+daemon+bin#15 — enrollment accepts any 2xx success', () => {
       /code expired/);
   });
 
+  it('refuses a non-loopback plaintext http:// enrollment target BEFORE the exchange (no credential leak)', async () => {
+    let requested = false;
+    b.httpClient.request = async () => { requested = true; return { statusCode: 200, body: Buffer.from('{}') }; };
+    await assert.rejects(
+      cli.exchangeEnrollmentCode('http://sync.example.test', 'HSTASH-AAAA-BBBB-CCCC'),
+      /plaintext http|cleartext/i,
+      'a non-loopback http:// enrollment must be refused before any request is sent');
+    assert.equal(requested, false, 'the enrollment POST must NOT be sent over plaintext (the API key + mTLS key would leak)');
+  });
+
+  it('allows a loopback plaintext http:// enrollment target (TLS-terminating sidecar)', async () => {
+    stubResponse(200, { success: true, apiKey: 'k-loopback' });
+    const data = await cli.exchangeEnrollmentCode('http://127.0.0.1:8080', 'HSTASH-AAAA-BBBB-CCCC');
+    assert.equal(data.apiKey, 'k-loopback', 'loopback plaintext is permitted for a same-host TLS terminator');
+  });
+
   it('rejects a 2xx body with no fields without throwing on null access', async () => {
     // success absent → treated as failure with the generic message; the null
     // guard (`!data || !data.success`) must not NPE on a sparse body.
