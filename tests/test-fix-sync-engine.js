@@ -428,6 +428,66 @@ describe('A failed server DELETE is re-driven, not silently undone by the downlo
 });
 
 // ---------------------------------------------------------------------------
+// sync-engine — a converged PENDING_UPLOAD row is flipped to SYNCED
+// ---------------------------------------------------------------------------
+describe('Reconcile flips a converged PENDING_UPLOAD row to SYNCED (no permanent re-hash blind spot)', { timeout: 30000 }, () => {
+  it('a PENDING_UPLOAD row whose disk already matches serverChecksum becomes SYNCED', async () => {
+    const content = 'landed server-side but the SYNCED upsert never ran (crash)';
+    const sum = sha3(content);
+    const rel = 'converged-pu.txt';
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      fs.writeFileSync(path.join(h.syncFolder, rel), content);
+      stateDb.upsertFile({
+        relativePath: rel, serverFileId: 'F', serverChecksum: sum,
+        localChecksum: sum, size: content.length, serverSeq: 9, status: FILE_STATUS.PENDING_UPLOAD,
+      });
+
+      await h.engine._recoverPending();
+
+      assert.equal(h.uploadLog.length, 0, 'a converged row is not re-uploaded');
+      assert.equal(stateDb.getFile(rel).status, FILE_STATUS.SYNCED,
+        'the converged PENDING_UPLOAD row is flipped to SYNCED so it stops re-hashing and becomes visible to delete-detection');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sync-engine — a local rename mutates the fold-resolved row, not the raw key
+// ---------------------------------------------------------------------------
+describe('A local rename removes the fold-resolved old row (no stale leak on a folding volume)', { timeout: 30000 }, () => {
+  it('renameFile targets the tracked casing, not the watcher-emitted key', async () => {
+    const content = 'fold-rename-body';
+    const sum = sha3(content);
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      h.engine._fsCaseFolds = true;
+      // Row tracked under the server's casing 'Foo.txt'.
+      stateDb.upsertFile({
+        relativePath: 'Foo.txt', serverFileId: 'F', serverChecksum: sum,
+        localChecksum: sum, size: content.length, serverSeq: 3, status: FILE_STATUS.SYNCED,
+      });
+      const tracked = stateDb.getFile('Foo.txt');
+      fs.writeFileSync(path.join(h.syncFolder, 'renamed.txt'), content);
+
+      // The watcher surfaces the rename under a different casing of the source.
+      const pending = { checksum: sum, size: content.length, fileId: 'F', existing: tracked };
+      await h.engine._handleLocalRename('foo.txt', 'renamed.txt', pending, sum, content.length, Date.now());
+
+      assert.equal(stateDb.getFile('Foo.txt'), undefined,
+        'the fold-resolved old row is removed (no stale SYNCED row leaks under the tracked casing)');
+      assert.ok(stateDb.getFile('renamed.txt'), 'the row is tracked under the new path');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sync-engine — a phantom "delete" of content this client never held is refused
 // ---------------------------------------------------------------------------
 describe('A buffered delete of a never-held (download-phantom) row is refused, not propagated', { timeout: 30000 }, () => {
