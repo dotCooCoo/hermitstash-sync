@@ -246,6 +246,154 @@ describe('Reconcile re-drives a stranded new-file upload (ERROR, no serverFileId
 });
 
 // ---------------------------------------------------------------------------
+// sync-engine — a crash-stranded PENDING_UPLOAD row is actually re-uploaded
+// (the reconcile sweep used to route it through _handleLocalModify, whose
+// no-change guard dead-ended a row whose disk bytes still matched its
+// recorded localChecksum — so the upload never happened).
+// ---------------------------------------------------------------------------
+describe('Reconcile re-drives a crash-stranded PENDING_UPLOAD row (disk matches its recorded checksum)', { timeout: 30000 }, () => {
+  it('a PENDING_UPLOAD row whose disk bytes match localChecksum is uploaded, not skipped as "no change"', async () => {
+    const content = 'bytes written then the daemon was SIGKILLed before the upload finished';
+    const sum = sha3(content);
+    const rel = 'stranded.txt';
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      fs.writeFileSync(path.join(h.syncFolder, rel), content);
+      // The crash-stranded marker: PENDING_UPLOAD with localChecksum == the
+      // on-disk bytes and no server copy yet.
+      stateDb.upsertFile({
+        relativePath: rel,
+        serverFileId: null,
+        serverChecksum: null,
+        localChecksum: sum,
+        size: content.length,
+        serverSeq: 0,
+        status: FILE_STATUS.PENDING_UPLOAD,
+      });
+
+      await h.engine._recoverPending();
+      for (let i = 0; i < 50 && stateDb.getFile(rel).status !== FILE_STATUS.SYNCED; i++) await sleep(10);
+
+      assert.equal(h.uploadLog.length, 1, 'the stranded PENDING_UPLOAD row is uploaded exactly once (not dead-ended by the no-change guard)');
+      assert.equal(h.uploadLog[0].serverChecksum, sum, 'the server receives the on-disk bytes');
+      assert.equal(stateDb.getFile(rel).status, FILE_STATUS.SYNCED, 'the row converges to SYNCED');
+    } finally {
+      cleanup(h);
+    }
+  });
+
+  it('a converged PENDING_UPLOAD row (disk already matches serverChecksum) is not re-uploaded', async () => {
+    const content = 'already on the server';
+    const sum = sha3(content);
+    const rel = 'converged.txt';
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      fs.writeFileSync(path.join(h.syncFolder, rel), content);
+      stateDb.upsertFile({
+        relativePath: rel,
+        serverFileId: 'F',
+        serverChecksum: sum,   // disk already matches the server
+        localChecksum: sum,
+        size: content.length,
+        serverSeq: 4,
+        status: FILE_STATUS.PENDING_UPLOAD,
+      });
+
+      await h.engine._recoverPending();
+      await sleep(30);
+
+      assert.equal(h.uploadLog.length, 0, 'a converged row must not thrash the server with a redundant upload');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sync-engine — a failed server DELETE is retried, never resurrected
+// ---------------------------------------------------------------------------
+describe('A failed server DELETE is re-driven, not silently undone by the download sweep', { timeout: 30000 }, () => {
+  it('a transient DELETE failure lands PENDING_DELETE and the next sweep re-issues the DELETE (the file is not re-downloaded)', async () => {
+    const content = 'user deleted this locally';
+    const sum = sha3(content);
+    const rel = 'deleted.txt';
+    let deleteAttempts = 0;
+    const h = makeEngine({ downloads: { F: { content } } });
+    // Fail the first server DELETE, succeed the retry.
+    h.engine._http.deleteFile = async () => {
+      deleteAttempts++;
+      if (deleteAttempts === 1) throw new Error('transient 503 on delete');
+      return true;
+    };
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      // Synced row; the local file is already gone (the user deleted it).
+      stateDb.upsertFile({
+        relativePath: rel,
+        serverFileId: 'F',
+        serverChecksum: sum,
+        localChecksum: sum,
+        size: content.length,
+        serverSeq: 5,
+        status: FILE_STATUS.SYNCED,
+      });
+
+      // First delete attempt fails -> PENDING_DELETE, file stays gone.
+      const outcome = await h.engine._executeDelete(rel, stateDb.getFile(rel));
+      assert.equal(outcome, 'failed');
+      assert.equal(stateDb.getFile(rel).status, FILE_STATUS.PENDING_DELETE,
+        'a failed delete lands PENDING_DELETE, not ERROR (ERROR would be resurrected by the download sweep)');
+
+      // The reconcile sweep must re-drive the DELETE — and must NOT download
+      // the file back onto disk.
+      await h.engine._recoverPending();
+      for (let i = 0; i < 50 && stateDb.getFile(rel); i++) await sleep(10);
+
+      assert.equal(deleteAttempts, 2, 'the server DELETE was retried by the reconcile sweep');
+      assert.equal(stateDb.getFile(rel), undefined, 'the row is removed after the successful retry');
+      assert.equal(fs.existsSync(path.join(h.syncFolder, rel)), false, 'the deleted file was NOT resurrected on disk');
+      assert.equal(h.downloadLog.length, 0, 'the download sweep never touched the pending-delete row');
+    } finally {
+      cleanup(h);
+    }
+  });
+
+  it('a PENDING_DELETE whose local file re-appeared (a recreate) is not deleted from the server', async () => {
+    const content = 'recreated after the delete failed';
+    const sum = sha3(content);
+    const rel = 'recreated.txt';
+    let deleteAttempts = 0;
+    const h = makeEngine({});
+    h.engine._http.deleteFile = async () => { deleteAttempts++; return true; };
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      // The file is back on disk (the user recreated it) while the row still
+      // records a stranded delete intent.
+      fs.writeFileSync(path.join(h.syncFolder, rel), content);
+      stateDb.upsertFile({
+        relativePath: rel,
+        serverFileId: 'F',
+        serverChecksum: sum,
+        localChecksum: sum,
+        size: content.length,
+        serverSeq: 6,
+        status: FILE_STATUS.PENDING_DELETE,
+      });
+
+      await h.engine._recoverPending();
+      await sleep(30);
+
+      assert.equal(deleteAttempts, 0, 'the recreated file must not be deleted from the server');
+      assert.ok(fs.existsSync(path.join(h.syncFolder, rel)), 'the recreated file stays on disk');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sync-engine#4 — buffered delete mutates the fold-resolved row, not the raw key
 // ---------------------------------------------------------------------------
 describe('Buffered delete removes the tracked row under its fold-resolved casing', { timeout: 30000 }, () => {
@@ -729,6 +877,62 @@ describe('The sync cursor stops at a fail-closed gap (contiguous watermark)', { 
       h.engine._lowestUnappliedSeq = 0;
       h.engine._updateSeq(11);
       assert.equal(stateDb.getLastSeq(), 11, 'no gap -> normal advance');
+    } finally { cleanup(h); }
+  });
+
+  it('the gap clears when the gap event itself finally applies (cursor is not frozen for the session)', () => {
+    const h = makeEngine({});
+    try {
+      stateDb.setLastSeq(9);
+      h.engine._lowestUnappliedSeq = 10;   // seq 10 failed closed earlier
+      // The re-delivered seq 10 now applies successfully.
+      h.engine._updateSeq(10);
+      assert.equal(h.engine._lowestUnappliedSeq, 0, 'the watermark clears once its own event lands');
+      assert.equal(stateDb.getLastSeq(), 10, 'the cursor advances to the now-applied gap seq');
+      // A later event advances normally instead of being frozen at 9.
+      h.engine._updateSeq(12);
+      assert.equal(stateDb.getLastSeq(), 12, 'subsequent events advance past the cleared gap');
+    } finally { cleanup(h); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// a failed case-rename pins the cursor so the event is re-delivered
+// ---------------------------------------------------------------------------
+describe('A failed _reconcileCaseRename pins the cursor below the event', { timeout: 30000 }, () => {
+  it('notes the un-applied seq so a later event cannot leapfrog the failed case rename', async () => {
+    const content = 'case-rename-with-lock';
+    const sum = sha3(content);
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      h.engine._fsCaseFolds = true;
+      // A tracked row under the old casing whose on-disk file we force the
+      // two-step rename to fail on (the source exists, but renameWithRetry
+      // throws — simulate an AV/indexer lock by removing write access to the
+      // move via a stubbed fs is heavy; instead point the row at a source path
+      // that exists and make the destination rename fail by pre-creating a
+      // directory at the temp/destination is fragile — so drive the catch via
+      // a non-existent source that still satisfies existsSync is impossible.
+      // Simplest deterministic trigger: seed the row, then call the handler
+      // with a source that exists and monkeypatch renameWithRetry to throw.
+      const rel = 'Foo.txt';
+      fs.writeFileSync(path.join(h.syncFolder, 'foo.txt'), content);
+      stateDb.upsertFile({
+        relativePath: 'foo.txt', serverFileId: 'F', serverChecksum: sum,
+        localChecksum: sum, size: content.length, serverSeq: 40, status: FILE_STATUS.SYNCED,
+      });
+      const existing = stateDb.getFile('foo.txt');
+      const b = require('../vendor/blamejs');
+      const realRename = b.atomicFile.renameWithRetry;
+      b.atomicFile.renameWithRetry = () => { throw new Error('simulated indexer lock during case rename'); };
+      try {
+        await h.engine._reconcileCaseRename(existing, rel, path.join(h.syncFolder, rel), 'F', sum, content.length, 100);
+      } finally {
+        b.atomicFile.renameWithRetry = realRename;
+      }
+      assert.equal(h.engine._lowestUnappliedSeq, 100,
+        'the failed case rename pins the cursor at its seq so the reconnect re-delivers it');
     } finally { cleanup(h); }
   });
 });

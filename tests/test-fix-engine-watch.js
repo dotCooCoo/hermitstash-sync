@@ -248,7 +248,10 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
       e._http = { deleteFile: async () => { throw new Error('boom'); } };
       stateDb.upsertFile({ relativePath: 'f.txt', serverFileId: 'fid', status: FILE_STATUS.SYNCED, size: 1 });
       assert.equal(await e._executeDelete('f.txt', existing), 'failed');
-      assert.equal(stateDb.getFile('f.txt').status, FILE_STATUS.ERROR, 'old path marked ERROR on failure');
+      // A failed delete lands PENDING_DELETE (not ERROR): ERROR would be
+      // resurrected by the download-recovery sweep; PENDING_DELETE re-drives
+      // the DELETE instead.
+      assert.equal(stateDb.getFile('f.txt').status, FILE_STATUS.PENDING_DELETE, 'old path marked PENDING_DELETE on failure');
 
       // deleted: server DELETE succeeds
       e._http = { deleteFile: async () => ({}) };
@@ -286,7 +289,7 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
     }
   });
 
-  it('_recoverPending re-drives a stranded PENDING_UPLOAD row whose bytes differ from the server', async () => {
+  it('_recoverPending re-drives a stranded PENDING_UPLOAD row directly through the upload pool (not the dead-ended _handleLocalModify route)', async () => {
     const tmp = mkTmp('hs-fix4c-');
     const dbPath = nodePath.join(tmp, 'state.db');
     stateDb.open(dbPath);
@@ -304,10 +307,17 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
         status: FILE_STATUS.PENDING_UPLOAD,
       });
 
-      let modified = null;
-      e._handleLocalModify = async (rel) => { modified = rel; };
+      // The recovery must push the bytes directly through _uploadFile (the
+      // pool path) — NOT _handleLocalModify, whose no-change guard silently
+      // dead-ended a stranded row whose disk still matched its recorded
+      // localChecksum. Fail if the old broken route is used.
+      let modifyCalled = false;
+      e._handleLocalModify = async () => { modifyCalled = true; };
+      let uploaded = null;
+      e._uploadFile = async (rel) => { uploaded = rel; };
       await e._recoverPending();
-      assert.equal(modified, 'stranded.txt', 'reconcile re-routed the stranded upload through _handleLocalModify');
+      assert.equal(uploaded, 'stranded.txt', 'reconcile pushed the stranded upload directly through the pool');
+      assert.equal(modifyCalled, false, 'the stranded upload must NOT route through the no-change-guarded _handleLocalModify');
     } finally {
       stateDb.close();
       rm(tmp);
