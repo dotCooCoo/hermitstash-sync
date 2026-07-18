@@ -31,7 +31,7 @@ function createStashViaDb(opts = {}) {
   const now = new Date().toISOString();
 
   const script = [
-    `var users = db.prepare("SELECT _id FROM users LIMIT 1").all();`,
+    `var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();`,
     `var userId = users.length > 0 ? users[0]._id : 'system';`,
     `db.prepare("INSERT INTO customer_stash (_id, slug, slugHash, name, title, subtitle, enabled, syncEnabled, syncBundleId, accessMode, createdBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")`,
     `  .run(`,
@@ -118,7 +118,7 @@ describe('Stash Features', { timeout: 30000 }, () => {
     // Create scoped API key (boundStashId is sealed in api_keys)
     const scopedToken = 'hs_' + b.crypto.generateToken(32);
     const script = [
-      `var users = db.prepare("SELECT _id FROM users LIMIT 1").all();`,
+      `var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();`,
       `var userId = users.length > 0 ? users[0]._id : 'system';`,
       `db.prepare("INSERT INTO api_keys (_id, name, keyHash, prefix, permissions, userId, boundStashId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")`,
       `  .run(${JSON.stringify(b.crypto.generateToken(32))}, 'stash-scoped', ${JSON.stringify(sha3(scopedToken))}, ${JSON.stringify(scopedToken.substring(0, 7))}, 'sync,upload,read', userId, ${JSON.stringify(stash.stashId)}, ${JSON.stringify(new Date().toISOString())});`,
@@ -298,7 +298,7 @@ describe('Stash Features', { timeout: 30000 }, () => {
 
     const scopedToken = 'hs_' + b.crypto.generateToken(32);
     runDbScript(ctx.dbPath, [
-      `var users = db.prepare("SELECT _id FROM users LIMIT 1").all();`,
+      `var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();`,
       `var userId = users.length > 0 ? users[0]._id : 'system';`,
       `db.prepare("INSERT INTO api_keys (_id, name, keyHash, prefix, permissions, userId, boundStashId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")`,
       `  .run(${JSON.stringify(b.crypto.generateToken(32))}, 'stash1-key', ${JSON.stringify(sha3(scopedToken))}, ${JSON.stringify(scopedToken.substring(0, 7))}, 'sync,upload,read', userId, ${JSON.stringify(stash1.stashId)}, ${JSON.stringify(new Date().toISOString())});`,

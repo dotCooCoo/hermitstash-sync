@@ -64,7 +64,7 @@ describe('Vault: User Field Encryption', { timeout: 30000 }, function () {
 
   it('vaultEnabled field is sealed in the raw DB', function () {
     var script = [
-      'var rows = db.prepare("SELECT vaultEnabled FROM users LIMIT 1").all();',
+      'var rows = db.prepare("SELECT vaultEnabled FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'process.stdout.write(JSON.stringify(rows));',
     ].join('\n');
     var rows = JSON.parse(runDbScript(dbPath, script));
@@ -83,7 +83,7 @@ describe('Vault: User Field Encryption', { timeout: 30000 }, function () {
 
   it('vaultPublicKey field is sealed in the raw DB', function () {
     var script = [
-      'var rows = db.prepare("SELECT vaultPublicKey FROM users LIMIT 1").all();',
+      'var rows = db.prepare("SELECT vaultPublicKey FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'process.stdout.write(JSON.stringify(rows));',
     ].join('\n');
     var rows = JSON.parse(runDbScript(dbPath, script));
@@ -99,7 +99,7 @@ describe('Vault: User Field Encryption', { timeout: 30000 }, function () {
 
   it('vaultSeed field is sealed in the raw DB (if present)', function () {
     var script = [
-      'var rows = db.prepare("SELECT vaultSeed FROM users LIMIT 1").all();',
+      'var rows = db.prepare("SELECT vaultSeed FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'process.stdout.write(JSON.stringify(rows));',
     ].join('\n');
     var rows = JSON.parse(runDbScript(dbPath, script));

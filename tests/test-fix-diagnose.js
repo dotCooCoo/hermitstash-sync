@@ -481,7 +481,12 @@ describe('#37 — a resolved bearer credential in a free-form log line is scrubb
     diagnose.buildBundle(out);
     const logText = _bundleEntry(out, 'log/' + logName).toString('utf8');
     assert.ok(!logText.includes(realKey), 'the resolved bearer credential must NOT survive');
-    assert.ok(logText.includes('Bearer [REDACTED]'), 'the Bearer scheme keyword stays for triage');
+    // The scheme keyword stays for triage; the token is masked by whichever
+    // pass fires first — the process-wide bearer-in-string redaction detector
+    // ([REDACTED-CREDENTIAL], registered in lib/logger.js) or the bundle-time
+    // shape scrub ([REDACTED]). Either keeps `Bearer ` and drops the token.
+    assert.match(logText, /Bearer \[REDACTED(-CREDENTIAL)?\]/,
+      'the Bearer scheme keyword stays for triage with the token masked');
     nodeFs.unlinkSync(out);
   });
 

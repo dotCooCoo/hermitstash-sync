@@ -259,11 +259,10 @@ function tmpDir(tag) {
 function sha3hex(buf) {
   return nodeCrypto.createHash('sha3-512').update(buf).digest('hex');
 }
-function withPlatform(value, fn) {
-  const real = Object.getOwnPropertyDescriptor(process, 'platform');
-  Object.defineProperty(process, 'platform', { value, configurable: true });
-  try { return fn(); } finally { Object.defineProperty(process, 'platform', real); }
-}
+// Platform is forced per-test via createUpdater's injectable `platform` opt —
+// never by stubbing the global process.platform: an Object.defineProperty
+// stub restored in `finally` clobbers concurrently-running tests' view of
+// the platform under node:test's async execution.
 
 describe('updater#16 — POSIX install threads the verified digest into b.selfUpdate.swap', () => {
   // The v0.10.1 vendored refresh made expectedHash a REQUIRED opt on
@@ -274,60 +273,62 @@ describe('updater#16 — POSIX install threads the verified digest into b.selfUp
   // stubbed to a POSIX value so the else-branch runs on any host.
 
   it('installs the new bytes and backs up the old when the digest matches', async () => {
-    await withPlatform('linux', async () => {
-      const dir = tmpDir('posix');
-      const currentPath = nodePath.join(dir, 'hs');
-      const assetPath = nodePath.join(dir, 'asset');
-      const OLD = Buffer.from('OLD BINARY v0.4.6');
-      const NEW = Buffer.from('NEW BINARY v9.9.9 with more bytes');
-      nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
-      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
-      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+    const dir = tmpDir('posix');
+    const currentPath = nodePath.join(dir, 'hs');
+    const assetPath = nodePath.join(dir, 'asset');
+    const OLD = Buffer.from('OLD BINARY v0.4.6');
+    const NEW = Buffer.from('NEW BINARY v9.9.9 with more bytes');
+    nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
+    nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
+    const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
 
-      const u = newUpdater({
-        currentVersion: '0.4.6',
-        markerPath,
-        getExecPath: () => currentPath,
-        getArgv: () => [],
-        exitFn: () => {},
-        spawnFn: () => ({ unref() {} }),
-      });
-
-      const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
-
-      assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current binary must be the new bytes');
-      assert.ok(prevPath.endsWith('.prev'), `expected a .prev backup, got ${prevPath}`);
-      assert.ok(nodeFs.readFileSync(prevPath).equals(OLD), 'backup must hold the old bytes');
-      const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
-      assert.equal(marker.newVersion, '9.9.9');
-      assert.equal(marker.prevBinaryPath, prevPath);
+    const u = newUpdater({
+      currentVersion: '0.4.6',
+      platform: 'linux',
+      markerPath,
+      getExecPath: () => currentPath,
+      getArgv: () => [],
+      exitFn: () => {},
+      spawnFn: () => ({ unref() {} }),
     });
+
+    const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
+
+    assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current binary must be the new bytes');
+    assert.ok(prevPath.endsWith('.prev'), `expected a .prev backup, got ${prevPath}`);
+    assert.ok(nodeFs.readFileSync(prevPath).equals(OLD), 'backup must hold the old bytes');
+    const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
+    assert.equal(marker.newVersion, '9.9.9');
+    assert.equal(marker.prevBinaryPath, prevPath);
   });
 
   it('refuses to install and leaves the current binary untouched when the digest mismatches', async () => {
-    await withPlatform('linux', async () => {
-      const dir = tmpDir('posix');
-      const currentPath = nodePath.join(dir, 'hs');
-      const assetPath = nodePath.join(dir, 'asset');
-      const OLD = Buffer.from('OLD BINARY');
-      const NEW = Buffer.from('NEW BINARY');
-      nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
-      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
-      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+    const dir = tmpDir('posix');
+    const currentPath = nodePath.join(dir, 'hs');
+    const assetPath = nodePath.join(dir, 'asset');
+    const OLD = Buffer.from('OLD BINARY');
+    const NEW = Buffer.from('NEW BINARY');
+    nodeFs.writeFileSync(currentPath, OLD, { mode: 0o755 });
+    nodeFs.writeFileSync(assetPath, NEW, { mode: 0o644 });
+    const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
 
-      const u = newUpdater({
-        currentVersion: '0.4.6', markerPath,
-        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
-      });
-
-      const wrong = sha3hex(Buffer.from('some other content the signature never covered'));
-      await assert.rejects(
-        u._internals.performInstall('9.9.9', assetPath, wrong),
-        (err) => { assert.match(err.message, /expectedHash|hash-mismatch|refusing to install/i); return true; }
-      );
-      assert.ok(nodeFs.readFileSync(currentPath).equals(OLD), 'current binary must be untouched after a refused swap');
-      assert.equal(nodeFs.existsSync(markerPath), false, 'no marker on a failed install');
+    const u = newUpdater({
+      currentVersion: '0.4.6', platform: 'linux', markerPath,
+      getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
     });
+
+    const wrong = sha3hex(Buffer.from('some other content the signature never covered'));
+    await assert.rejects(
+      u._internals.performInstall('9.9.9', assetPath, wrong),
+      (err) => { assert.match(err.message, /expectedHash|hash-mismatch|refusing to install/i); return true; }
+    );
+    assert.ok(nodeFs.readFileSync(currentPath).equals(OLD), 'current binary must be untouched after a refused swap');
+    // Marker-before-swap contract: the marker for the refused install exists
+    // (recording the attempted version) and the next boot of the still-current
+    // binary clears it via checkRollback's version-mismatch stale branch.
+    assert.equal(nodeFs.existsSync(markerPath), true, 'marker precedes the swap; refused swap leaves it for stale-clear');
+    assert.equal(await u.checkRollback(), 'stale-cleared');
+    assert.equal(nodeFs.existsSync(markerPath), false);
   });
 
   it('regression guard: the vendored swap REQUIRES expectedHash (omitting it throws)', async () => {
@@ -335,22 +336,20 @@ describe('updater#16 — POSIX install threads the verified digest into b.selfUp
     // reaches b.selfUpdate.swap with expectedHash undefined and is refused. The
     // production caller (checkOnce) always threads the digest, so this asserts
     // the vendored contract the fix satisfies rather than a reachable path.
-    await withPlatform('linux', async () => {
-      const dir = tmpDir('posix');
-      const currentPath = nodePath.join(dir, 'hs');
-      const assetPath = nodePath.join(dir, 'asset');
-      nodeFs.writeFileSync(currentPath, 'OLD', { mode: 0o755 });
-      nodeFs.writeFileSync(assetPath, 'NEW', { mode: 0o644 });
-      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
-      const u = newUpdater({
-        currentVersion: '0.4.6', markerPath,
-        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
-      });
-      await assert.rejects(
-        u._internals.performInstall('9.9.9', assetPath /* no expectedHash */),
-        (err) => { assert.match(err.message, /expectedHash|bad-expected-hash/i); return true; }
-      );
+    const dir = tmpDir('posix');
+    const currentPath = nodePath.join(dir, 'hs');
+    const assetPath = nodePath.join(dir, 'asset');
+    nodeFs.writeFileSync(currentPath, 'OLD', { mode: 0o755 });
+    nodeFs.writeFileSync(assetPath, 'NEW', { mode: 0o644 });
+    const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+    const u = newUpdater({
+      currentVersion: '0.4.6', platform: 'linux', markerPath,
+      getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
     });
+    await assert.rejects(
+      u._internals.performInstall('9.9.9', assetPath /* no expectedHash */),
+      (err) => { assert.match(err.message, /expectedHash|bad-expected-hash/i); return true; }
+    );
   });
 });
 
@@ -362,62 +361,62 @@ describe('updater#17 — win32 self-replace binds the installed bytes to the ver
   // the verified in-memory bytes.
 
   it('renames the running image to .old and installs the verified new bytes', async () => {
-    await withPlatform('win32', async () => {
-      const dir = tmpDir('winswap');
-      const currentPath = nodePath.join(dir, 'hs.exe');
-      const assetPath = nodePath.join(dir, 'asset.exe');
-      const RUNNING = Buffer.from('RUNNING IMAGE v0.4.6');
-      const NEW = Buffer.from('NEW IMAGE v9.9.9');
-      nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
-      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
-      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+    const dir = tmpDir('winswap');
+    const currentPath = nodePath.join(dir, 'hs.exe');
+    const assetPath = nodePath.join(dir, 'asset.exe');
+    const RUNNING = Buffer.from('RUNNING IMAGE v0.4.6');
+    const NEW = Buffer.from('NEW IMAGE v9.9.9');
+    nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
+    nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
+    const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
 
-      const u = newUpdater({
-        currentVersion: '0.4.6', markerPath,
-        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
-      });
-
-      const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
-
-      assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current path must hold the new bytes');
-      assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
-      assert.ok(nodeFs.readFileSync(prevPath).equals(RUNNING), 'backup must hold the running image');
-      const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
-      assert.equal(marker.prevBinaryPath, prevPath);
+    const u = newUpdater({
+      currentVersion: '0.4.6', platform: 'win32', markerPath,
+      getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
     });
+
+    const { prevPath } = await u._internals.performInstall('9.9.9', assetPath, sha3hex(NEW));
+
+    assert.ok(nodeFs.readFileSync(currentPath).equals(NEW), 'current path must hold the new bytes');
+    assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
+    assert.ok(nodeFs.readFileSync(prevPath).equals(RUNNING), 'backup must hold the running image');
+    const marker = JSON.parse(nodeFs.readFileSync(markerPath, 'utf8'));
+    assert.equal(marker.prevBinaryPath, prevPath);
   });
 
   it('refuses a tampered asset and never disturbs the running image', async () => {
-    await withPlatform('win32', async () => {
-      const dir = tmpDir('winswap');
-      const currentPath = nodePath.join(dir, 'hs.exe');
-      const assetPath = nodePath.join(dir, 'asset.exe');
-      const RUNNING = Buffer.from('RUNNING IMAGE');
-      const NEW = Buffer.from('NEW IMAGE');
-      nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
-      nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
-      const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
+    const dir = tmpDir('winswap');
+    const currentPath = nodePath.join(dir, 'hs.exe');
+    const assetPath = nodePath.join(dir, 'asset.exe');
+    const RUNNING = Buffer.from('RUNNING IMAGE');
+    const NEW = Buffer.from('NEW IMAGE');
+    nodeFs.writeFileSync(currentPath, RUNNING, { mode: 0o755 });
+    nodeFs.writeFileSync(assetPath, NEW, { mode: 0o755 });
+    const markerPath = nodePath.join(tmpDir('marker'), 'update-pending.json');
 
-      const u = newUpdater({
-        currentVersion: '0.4.6', markerPath,
-        getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
-      });
-
-      // The verified digest is for RUNNING's-successor NEW, but an attacker
-      // swapped assetPath to different bytes after verify. The re-check must fire.
-      const verifiedButStale = sha3hex(Buffer.from('the bytes the signature actually covered'));
-      await assert.rejects(
-        u._internals.performInstall('9.9.9', assetPath, verifiedButStale),
-        (err) => { assert.match(err.message, /integrity re-check|refusing to install/i); return true; }
-      );
-
-      // Read-first ordering: the running image is intact, no .old backup was
-      // created, and no marker was written.
-      assert.ok(nodeFs.readFileSync(currentPath).equals(RUNNING), 'running image must be untouched');
-      const oldPath = currentPath.replace(/\.exe$/, '.old.exe');
-      assert.equal(nodeFs.existsSync(oldPath), false, 'no rename-away must have happened');
-      assert.equal(nodeFs.existsSync(markerPath), false, 'no marker on a refused install');
+    const u = newUpdater({
+      currentVersion: '0.4.6', platform: 'win32', markerPath,
+      getExecPath: () => currentPath, getArgv: () => [], exitFn: () => {}, spawnFn: () => ({ unref() {} }),
     });
+
+    // The verified digest is for RUNNING's-successor NEW, but an attacker
+    // swapped assetPath to different bytes after verify. The re-check must fire.
+    const verifiedButStale = sha3hex(Buffer.from('the bytes the signature actually covered'));
+    await assert.rejects(
+      u._internals.performInstall('9.9.9', assetPath, verifiedButStale),
+      (err) => { assert.match(err.message, /integrity re-check|refusing to install/i); return true; }
+    );
+
+    // Read-first ordering: the running image is intact and no .old backup was
+    // created. Marker-before-swap contract: the marker for the refused
+    // install exists and the next boot of the still-current binary clears it
+    // via checkRollback's version-mismatch stale branch.
+    assert.ok(nodeFs.readFileSync(currentPath).equals(RUNNING), 'running image must be untouched');
+    const oldPath = currentPath.replace(/\.exe$/, '.old.exe');
+    assert.equal(nodeFs.existsSync(oldPath), false, 'no rename-away must have happened');
+    assert.equal(nodeFs.existsSync(markerPath), true, 'marker precedes the swap; refused swap leaves it for stale-clear');
+    assert.equal(await u.checkRollback(), 'stale-cleared');
+    assert.equal(nodeFs.existsSync(markerPath), false);
   });
 });
 

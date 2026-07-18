@@ -61,7 +61,7 @@ function createStashViaDb(opts) {
   var now = new Date().toISOString();
 
   var script = [
-    'var users = db.prepare("SELECT _id FROM users LIMIT 1").all();',
+    'var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();',
     'var userId = users.length > 0 ? users[0]._id : "system";',
     'db.prepare("INSERT INTO customer_stash (_id, slug, slugHash, name, title, subtitle, enabled, syncEnabled, syncBundleId, accessMode, createdBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")',
     '  .run(',
@@ -97,7 +97,7 @@ function createBoundApiKey(stashId, bundleId) {
   var now = new Date().toISOString();
 
   var script = [
-    'var users = db.prepare("SELECT _id FROM users LIMIT 1").all();',
+    'var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();',
     'var userId = users.length > 0 ? users[0]._id : "system";',
     'db.prepare("INSERT INTO api_keys (_id, name, keyHash, prefix, permissions, userId, boundStashId, boundBundleId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")',
     '  .run(' + JSON.stringify(keyId) + ', "fix-test", ' + JSON.stringify(keyHash) + ', ' + JSON.stringify(prefix) + ', "sync,upload,read", userId, ' + JSON.stringify(stashId) + ', ' + (bundleId ? JSON.stringify(bundleId) : 'null') + ', ' + JSON.stringify(now) + ');',
@@ -510,7 +510,7 @@ describe('Fix #4: api_keys table has cert tracking columns', { timeout: 30000 },
     var now = new Date().toISOString();
 
     var result = runDbScript(ctx.dbPath, [
-      'var users = db.prepare("SELECT _id FROM users LIMIT 1").all();',
+      'var users = db.prepare("SELECT _id FROM users ORDER BY createdAt ASC LIMIT 1").all();',
       'var userId = users.length > 0 ? users[0]._id : "system";',
       'db.prepare("INSERT INTO api_keys (_id, name, keyHash, prefix, permissions, userId, certIssuedAt, certExpiresAt, certFingerprint, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")',
       '  .run(' + JSON.stringify(keyId) + ', "cert-col-test", ' + JSON.stringify(keyHash) + ', "hs_col", "sync", userId, ' + JSON.stringify(now) + ', ' + JSON.stringify(now) + ', "fp-test-hash", ' + JSON.stringify(now) + ');',

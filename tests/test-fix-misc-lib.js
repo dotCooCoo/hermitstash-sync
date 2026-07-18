@@ -12,11 +12,13 @@
 //   state-db#26  lib/checksum.js     -- oversize discriminator no longer fires on the path
 //   keychain#35  lib/daemon.js       -- uncaughtException drains the log to disk before exit
 //
-// primitive-lens#52 (lib/metrics.js) is intentionally NOT converted: the
-// b.metrics.snapshot.render primitive renders only the flat numeric snap.fields
-// and has no path for the labeled snap.metrics registry, so the hand-rolled
-// exposition must stay until an upstream primitive lands. Structural
-// convergence is already guarded by tests/test-observability.js (F35).
+// primitive-lens#52 (lib/metrics.js) is CONVERTED as of blamejs v0.17.9:
+// b.metrics.snapshot.render now walks the labeled snap.metrics registry with
+// the same family encoder the live exposition() uses, so renderPrometheus
+// delegates to it (fields passed empty on the registry path — the vendored
+// renderer would otherwise also emit prefix-qualified flat fields the sidecar
+// never carries). Series-name convergence with the sidecar is guarded by
+// tests/test-observability.js (F35).
 //
 // Run standalone:  node --test tests/test-fix-misc-lib.js
 

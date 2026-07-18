@@ -31,6 +31,10 @@ function mkTempRepo() {
   nodeFs.mkdirSync(nodePath.join(root, 'scripts'), { recursive: true });
   nodeFs.mkdirSync(nodePath.join(root, 'lib'), { recursive: true });
   nodeFs.mkdirSync(nodePath.join(root, 'release-notes'), { recursive: true });
+  // Every release script now loads the vendored framework (compareTags /
+  // safeJson), so every sandbox needs the re-export shim — cheaper to
+  // provision unconditionally than to chase each new call site.
+  linkBlamejs(root);
   return root;
 }
 

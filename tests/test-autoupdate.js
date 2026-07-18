@@ -156,13 +156,30 @@ function createMockServer(state) {
   };
   const server = http2.createSecureServer(tlsOpts);
 
-  function handle(reqPath, send) {
+  function handle(reqPath, send, reqHeaders) {
     if (state.statusOverride && state.statusOverride[reqPath]) {
       send(state.statusOverride[reqPath]);
       return;
     }
     if (reqPath.endsWith('/releases/latest')) {
       const port = server.address().port;
+      // ETag / If-None-Match fast path: when state.etag is set, echo it and
+      // answer a matching conditional request with 304 (no body), letting the
+      // updater's poll short-circuit. Count conditional hits so a test can
+      // assert the header was sent.
+      if (state.etag) {
+        if (reqHeaders && reqHeaders['if-none-match'] === state.etag) {
+          state.conditionalHits = (state.conditionalHits || 0) + 1;
+          send(304);
+          return;
+        }
+        const assets304 = Object.keys(state.assets).map(name => ({
+          name,
+          browser_download_url: `https://127.0.0.1:${port}/download/${encodeURIComponent(name)}`,
+        }));
+        send(200, JSON.stringify({ tag_name: `v${state.version}`, assets: assets304 }), 'application/json', { ETag: state.etag });
+        return;
+      }
       const assets = Object.keys(state.assets).map(name => ({
         name,
         browser_download_url: `https://127.0.0.1:${port}/download/${encodeURIComponent(name)}`,
@@ -182,7 +199,7 @@ function createMockServer(state) {
 
   server.on('request', (req, res) => {
     const url = new URL(req.url, 'https://127.0.0.1');
-    handle(url.pathname, (status, body, contentType) => {
+    handle(url.pathname, (status, body, contentType, extraHeaders) => {
       // Guard: in http2-compat mode the response stream can be torn down
       // by GOAWAY (e.g. server.close() during a keep-alive teardown)
       // between event dispatch and our send. Writing to a destroyed/
@@ -194,9 +211,10 @@ function createMockServer(state) {
       try {
         res.statusCode = status;
         if (contentType) res.setHeader('Content-Type', contentType);
+        if (extraHeaders) for (const k of Object.keys(extraHeaders)) res.setHeader(k, extraHeaders[k]);
         res.end(body);
       } catch (_e) { /* response committed mid-write — drop */ }
-    });
+    }, req.headers);
   });
 
   return server;
@@ -399,6 +417,78 @@ describe('Auto-update — signature verification', { timeout: 20000 }, () => {
       assert.equal(result.status, 'ready',
         `expected the platform-anchored .sig to be selected + verified; got ${result.status}${result.error ? ': ' + result.error.message : ''}`);
       assert.ok(installed, 'install hand-off should have fired with the correct signature selected');
+    });
+  });
+
+  it('etag fast path: a second poll sends If-None-Match and the 304 reports up-to-date', async () => {
+    // Give the feed an ETag; the first poll captures it, the second sends it
+    // back as If-None-Match and the mock answers 304 (no body). Both polls
+    // must report up-to-date (currentVersion === feed version), and the
+    // conditional-request counter proves the header round-tripped.
+    const saved = { version: state.version, etag: state.etag, conditionalHits: state.conditionalHits };
+    state.version = '9.9.9';
+    state.etag = '"feed-etag-v9.9.9"';
+    state.conditionalHits = 0;
+    try {
+      const up = mkUpdater({ currentVersion: '9.9.9' });
+      const first = await up.checkOnce();
+      assert.equal(first.status, 'up-to-date');
+      assert.equal(state.conditionalHits, 0, 'first poll has no prior etag to send');
+      const second = await up.checkOnce();
+      assert.equal(second.status, 'up-to-date');
+      assert.equal(state.conditionalHits, 1, 'second poll must send If-None-Match and hit the 304 branch');
+    } finally {
+      state.version = saved.version;
+      state.etag = saved.etag;
+      state.conditionalHits = saved.conditionalHits;
+    }
+  });
+
+  it('successor spawn failure clears the marker and never throws out of performInstall', async () => {
+    // The detached successor is spawned with only unref() historically; a
+    // spawn 'error' (EACCES from a blocked chmod, AV interference) escaped as
+    // an uncaughtException and left the probation marker ticking, so a later
+    // manual restart spuriously rolled back a correctly-installed build.
+    // performInstall must now await spawn/error, log, and clear the marker.
+    const version = '9.9.9';
+    const binary = Buffer.from('fake binary payload v9.9.9');
+    await swapState(buildReleaseState(version, binary), async () => {
+      const execDir = tempDir('exec');
+      const currentPath = path.join(execDir, process.platform === 'win32' ? 'hs.exe' : 'hs');
+      fs.writeFileSync(currentPath, 'OLD BINARY', { mode: 0o755 });
+      const markerPath = path.join(tempDir('marker'), 'update-pending.json');
+      const up = createUpdater({
+        currentVersion: '0.4.6',
+        pubkeyPem: PUBKEY_PEM,
+        apiBase: `https://127.0.0.1:${port}`,
+        httpsAgent: new https.Agent({ keepAlive: true }),
+        isSeaBinary: () => true,
+        markerPath,
+        getExecPath: () => currentPath,
+        getArgv: () => [],
+        exitFn: () => {},
+        // spawnFn returns an EventEmitter that asynchronously emits 'error'.
+        spawnFn: () => {
+          const { EventEmitter } = require('node:events');
+          const child = new EventEmitter();
+          child.unref = () => {};
+          setImmediate(() => {
+            const e = new Error('EACCES: permission denied, spawn');
+            e.code = 'EACCES';
+            child.emit('error', e);
+          });
+          return child;
+        },
+      });
+      // Must resolve (not reject) even though the spawn errors.
+      await up.checkOnce(async (install) => { await install(); });
+      // The new binary installed, but the marker was cleared on spawn failure
+      // so the next boot of the installed binary starts clean instead of
+      // spuriously rolling back.
+      assert.equal(fs.readFileSync(currentPath, 'utf8'), binary.toString(),
+        'the new binary must have installed before the spawn error');
+      assert.equal(fs.existsSync(markerPath), false,
+        'the probation marker must be cleared when the successor spawn fails');
     });
   });
 
@@ -609,32 +699,29 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
     fs.writeFileSync(assetPath, 'NEW IMAGE', { mode: 0o755 });
     const markerPath = path.join(tempDir('marker'), 'update-pending.json');
 
-    // Force the win32 branch regardless of host OS by stubbing platform.
-    const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
-    try {
-      const up = createUpdater({
-        currentVersion: '0.4.6',
-        pubkeyPem: PUBKEY_PEM,
-        httpsAgent: new https.Agent({ keepAlive: true }),
-        isSeaBinary: () => true,
-        markerPath,
-        getExecPath: () => currentPath,
-        getArgv: () => [],
-        exitFn: () => {},
-        spawnFn: () => ({ unref() {} }),
-      });
-      const { prevPath } = await up._internals.performInstall('9.9.9', assetPath);
+    // Force the win32 branch regardless of host OS via the injectable
+    // platform opt — never by stubbing the global process.platform, which
+    // clobbers concurrently-running tests' view of the platform.
+    const up = createUpdater({
+      currentVersion: '0.4.6',
+      pubkeyPem: PUBKEY_PEM,
+      httpsAgent: new https.Agent({ keepAlive: true }),
+      isSeaBinary: () => true,
+      platform: 'win32',
+      markerPath,
+      getExecPath: () => currentPath,
+      getArgv: () => [],
+      exitFn: () => {},
+      spawnFn: () => ({ unref() {} }),
+    });
+    const { prevPath } = await up._internals.performInstall('9.9.9', assetPath);
 
-      assert.equal(fs.readFileSync(currentPath, 'utf8'), 'NEW IMAGE');
-      assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
-      assert.equal(fs.readFileSync(prevPath, 'utf8'), 'RUNNING IMAGE');
+    assert.equal(fs.readFileSync(currentPath, 'utf8'), 'NEW IMAGE');
+    assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
+    assert.equal(fs.readFileSync(prevPath, 'utf8'), 'RUNNING IMAGE');
 
-      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-      assert.equal(marker.prevBinaryPath, prevPath);
-    } finally {
-      Object.defineProperty(process, 'platform', realPlatform);
-    }
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    assert.equal(marker.prevBinaryPath, prevPath);
   });
 
   it('surfaces an actionable error when Windows blocks the rename-away (EPERM)', async () => {
@@ -645,9 +732,11 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
     fs.writeFileSync(assetPath, 'NEW IMAGE', { mode: 0o755 });
     const markerPath = path.join(tempDir('marker'), 'update-pending.json');
 
-    const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    // Platform forced via the injectable opt (no global process.platform
+    // stub). The fs.renameSync patch below stays global but delegates to the
+    // real function for every path except this test's unique temp path, so a
+    // concurrently-running test's renames pass through unaffected.
     const realRename = fs.renameSync;
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
     // Simulate Windows refusing to rename the running image away.
     fs.renameSync = (from, to) => {
       if (from === currentPath) {
@@ -663,6 +752,7 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
         pubkeyPem: PUBKEY_PEM,
         httpsAgent: new https.Agent({ keepAlive: true }),
         isSeaBinary: () => true,
+        platform: 'win32',
         markerPath,
         getExecPath: () => currentPath,
         getArgv: () => [],
@@ -677,12 +767,32 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
           return true;
         }
       );
-      // No marker written on a failed install — the daemon stays on the
-      // current version.
+      // The marker is written BEFORE the swap (so a marker-write failure can
+      // never install a binary with no rollback protection). A marker whose
+      // swap then failed is expected on disk here — it records the attempted
+      // version, which the next boot of the still-current binary clears via
+      // checkRollback's version-mismatch stale branch.
+      assert.equal(fs.existsSync(markerPath), true);
+      const failedMarker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+      assert.equal(failedMarker.newVersion, '9.9.9');
+      // The running image was never touched.
+      assert.equal(fs.readFileSync(currentPath, 'utf8'), 'RUNNING IMAGE');
+      const upAfter = createUpdater({
+        currentVersion: '0.4.6',
+        pubkeyPem: PUBKEY_PEM,
+        httpsAgent: new https.Agent({ keepAlive: true }),
+        isSeaBinary: () => true,
+        platform: 'win32',
+        markerPath,
+        getExecPath: () => currentPath,
+        getArgv: () => [],
+        exitFn: () => {},
+        spawnFn: () => ({ unref() {} }),
+      });
+      assert.equal(await upAfter.checkRollback(), 'stale-cleared');
       assert.equal(fs.existsSync(markerPath), false);
     } finally {
       fs.renameSync = realRename;
-      Object.defineProperty(process, 'platform', realPlatform);
     }
   });
 });

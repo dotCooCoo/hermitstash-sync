@@ -274,3 +274,31 @@ test('stop() sets a non-zero exit code on a genuine failure but not on no-daemon
     process.exitCode = realExitCode;
   }
 });
+
+test('daemonize builds the detached child argv SEA-aware (no argv.slice(1) on a SEA binary)', () => {
+  // Regression guard for the flagship-mode break: in a SEA binary Node
+  // inserts execPath at argv[1], so a child argv built from slice(1) makes
+  // the re-spawned worker parse the exec path as its command and die with
+  // "Unknown command" while the parent prints success. This asserts against
+  // the source shape rather than packing a real SEA (the suite runs in
+  // source mode), matching the static gate but proving it at the unit level.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'daemon.js'), 'utf8');
+  assert.equal(/process\.argv\.slice\(1\)/.test(src), false,
+    'daemonize must not feed process.argv.slice(1) to the detached child — SEA inserts execPath at argv[1]');
+  assert.match(src, /isSeaBinary\(\)/,
+    'daemonize must branch on isSeaBinary() when building the child argv');
+  // The SEA branch passes user args verbatim; the source branch re-prepends
+  // the entry script (process.argv[1]).
+  assert.match(src, /isSeaBinary\(\)\s*\?\s*userArgs\s*:\s*\[process\.argv\[1\]/,
+    'the child argv must be userArgs in SEA mode and [entry, ...userArgs] in source mode');
+});
+
+test('cmdStart already-running guard exempts the child\'s own PID (parent handoff)', () => {
+  // In `start --daemon` the parent atomically writes the CHILD's PID into the
+  // pidfile before the child re-runs; the child's already-running guard must
+  // not treat its own PID as a second instance, or the flagship daemon mode
+  // never yields a running daemon. Assert the source carries the exemption.
+  const cliSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'cli.js'), 'utf8');
+  assert.match(cliSrc, /running === process\.pid/,
+    'cmdStart must exempt the child\'s own PID from the already-running guard');
+});
