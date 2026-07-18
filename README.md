@@ -74,7 +74,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP3
 ## Requirements
 
 - Node.js 24.18.0+ (vendored blamejs's effective floor; also covers `node:sqlite` and OpenSSL 3.5+ PQC support)
-- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.17.9) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
+- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.17.10) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 - The encrypted control-plane routes — file rename and public-uploader bundle init/finalize — additionally require a server built on a matching v0.17.x blamejs. Its per-session api-encrypt envelope binds the request fields into the AEAD, and a server on an older framework rejects the request. Upload, download, metadata, delete, and the WebSocket sync stream are unaffected by this requirement.
 
 ## Install
@@ -262,7 +262,7 @@ Every TLS handshake (HTTPS + WebSocket) must produce a leaf cert whose SPKI hash
 
 The pin binds to the public-key bytes, not the cert. Cert rotation that reuses the same keypair keeps the pin valid (the deliberate key-continuity property). Planned key rotations are supported by listing both old + new pins during the cutover window.
 
-To compute your server's pin: run `hermitstash-sync diagnose` and read the `spkiPin` field from `cert-info.json` inside the bundle. Or with openssl:
+To compute your server's pin, run openssl against the **server's** certificate (`server.crt`, or whatever leaf your HermitStash server presents). Do not use the `spkiPin` field from `hermitstash-sync diagnose`'s `cert-info.json` — that value is the pin of your enrolled mTLS *client* certificate (included to identify the cert for support), a different keypair; installing it as the server pin makes the daemon refuse every connection.
 
 ```bash
 openssl x509 -in server.crt -pubkey -noout \
