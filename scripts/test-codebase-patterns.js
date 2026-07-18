@@ -1116,7 +1116,7 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
       var lines = content.split(/\r?\n/);
       var tables = {};
       for (var li = 0; li < lines.length; li++) {
-        var m = lines[li].match(/^\s*(?:const|var|let)\s+([A-Z_a-z$][\w$]*)\s*=\s*(?:Object\.freeze\(\s*)?\{/);
+        var m = lines[li].match(/^[ \t]*(?:const|var|let)[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:Object\.freeze\()?[ \t]*\{/);
         if (m && !/Object\.create\(null\)/.test(lines[li])) tables[m[1]] = true;
       }
       var names = Object.keys(tables);
