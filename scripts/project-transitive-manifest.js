@@ -71,16 +71,12 @@ function readJson(absPath) {
   return b.safeJson.parse(fs.readFileSync(absPath, 'utf8'), { maxBytes: b.constants.BYTES.mib(1) });
 }
 
-// Stable, recursively key-sorted serialization, so the committed projection and
-// a freshly-built one compare equal regardless of object key order.
+// Stable, recursively key-sorted serialization via the framework primitive,
+// so the committed projection and a freshly-built one compare equal
+// regardless of object key order. Comparison-only — the serialized form is
+// never persisted, so the serializer choice cannot shift any on-disk bytes.
 function canonical(value) {
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value && typeof value === 'object') {
-    return '{' + Object.keys(value).sort().map(
-      (k) => JSON.stringify(k) + ':' + canonical(value[k])
-    ).join(',') + '}';
-  }
-  return JSON.stringify(value);
+  return b.canonicalJson.stringify(value);
 }
 
 // Build the projected transitive-bundle map from blamejs's authoritative

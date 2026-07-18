@@ -196,7 +196,7 @@
   try {
     // node:sea is only available on Node ≥21; older Nodes throw on
     // require. Wrap so a non-SEA Node without the module still proceeds
-    // to the gate (the Node-floor gate above already enforces ≥24.14).
+    // to the gate (the Node-floor gate above already enforces ≥24.18).
     var sea;
     try { sea = require('node:sea'); } catch (_e) { sea = null; }
     if (sea && typeof sea.isSea === 'function' && sea.isSea()) return;

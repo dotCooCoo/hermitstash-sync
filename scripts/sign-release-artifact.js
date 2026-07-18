@@ -45,7 +45,9 @@ function readPubKey() {
   try { raw = fs.readFileSync(pubPath, 'utf8'); }
   catch (e) { fail('cannot read ' + pubPath + ': ' + (e && e.message || e)); }
   var doc;
-  try { doc = JSON.parse(raw); }
+  // b.safeJson.parse for the size/depth/prototype-pollution caps every
+  // sibling manifest read applies (build-sbom, build-vex, vendor-hash).
+  try { doc = b.safeJson.parse(raw, { maxBytes: b.constants.BYTES.mib(1) }); }
   catch (e) { fail('malformed ' + pubPath + ': ' + (e && e.message || e)); }
   if (doc.algorithm !== 'ml-dsa-65') {
     fail('unexpected algorithm in pubkey: ' + JSON.stringify(doc.algorithm) +

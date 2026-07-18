@@ -135,7 +135,7 @@ function _bumpMinor(version) {
 // pushed; surfacing it locally turns a pushed-but-unbuildable tag into an
 // early, fixable error. Reads from disk (not require) to stay cache-free.
 function _readVersion() {
-  var pkg = JSON.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'));
+  var pkg = b.safeJson.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'), { maxBytes: b.constants.BYTES.mib(1) });
   var constSrc = fs.readFileSync(CONSTANTS_PATH, 'utf8');
   var m = constSrc.match(/const VERSION = '([^']+)'/);
   if (!m) {
@@ -190,7 +190,7 @@ function _writeVersion(next) {
         'restore package.json by hand before re-running.');
     }
     throw new Error('release: lib/constants.js version write failed (' + (e && e.message || e) +
-      '); rolled package.json back to ' + JSON.parse(pkgSrc).version + ' so the two stay in lockstep — re-run prepare.');
+      '); rolled package.json back to ' + b.safeJson.parse(pkgSrc, { maxBytes: b.constants.BYTES.mib(1) }).version + ' so the two stay in lockstep — re-run prepare.');
   }
 }
 
@@ -383,7 +383,7 @@ function cmdCommit() {
 
   // Compose the commit body from the release-notes JSON, mirroring the
   // CHANGELOG entry shape. Operators can amend post-commit.
-  var rn = JSON.parse(fs.readFileSync(_releaseNotesPath(next), 'utf8'));
+  var rn = b.safeJson.parse(fs.readFileSync(_releaseNotesPath(next), 'utf8'), { maxBytes: b.constants.BYTES.mib(1) });
   var lines = ['release: v' + next + ' — ' + rn.headline, '', rn.summary];
   if (Array.isArray(rn.sections)) {
     rn.sections.forEach(function (s) {
@@ -571,7 +571,7 @@ function cmdStatus() {
     versionLine = 'MISMATCH — ' + e.message;
   }
   console.log('version:         ' + versionLine);
-  var pkg = JSON.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'));
+  var pkg = b.safeJson.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'), { maxBytes: b.constants.BYTES.mib(1) });
   console.log('release-notes:   ' + (fs.existsSync(_releaseNotesPath(pkg.version)) ? 'present for v' + pkg.version : 'missing for v' + pkg.version));
   var run = _capture('gh', ['run', 'list', '--workflow=release.yml', '--limit', '1',
     '--json', 'headBranch,status,conclusion', '--jq', '.[0]']);

@@ -57,7 +57,10 @@ function readVersion() {
 function licenseBlock(entry) {
   if (!entry || !entry.license) return null;
   if (entry.license_is_spdx === false) return [{ license: { name: entry.license } }];
-  if (SPDX_LICENSE_IDS[entry.license]) return [{ license: { id: entry.license } }];
+  // Own-property membership: a license string colliding with an inherited
+  // object member ('constructor') would otherwise read truthy and emit an
+  // invalid CycloneDX license.id that strict SBOM validators reject.
+  if (Object.hasOwn(SPDX_LICENSE_IDS, entry.license)) return [{ license: { id: entry.license } }];
   return [{ license: { name: entry.license } }];
 }
 

@@ -28,6 +28,11 @@
 
 var fs   = require('node:fs');
 var path = require('node:path');
+// Vendored framework — release ordering delegates to b.selfUpdate.compareTags
+// so the repo has ONE semver comparator (lib/updater.js and
+// consolidate-release-notes.js use the same one). In-repo script: vendor/ is
+// always present, both locally and in release.yml after checkout.
+var b    = require('../vendor/blamejs');
 
 var ROOT          = path.resolve(__dirname, '..');
 var CONSTANTS_JS  = path.join(ROOT, 'lib', 'constants.js');
@@ -213,7 +218,10 @@ function validate(notes, version) {
   if (!Array.isArray(notes.sections) || notes.sections.length === 0) {
     errs.push('`sections` must be a non-empty array');
   } else {
-    var seenHeadings = {};
+    // Null-prototype so a heading colliding with an inherited object member
+    // ('constructor') can't read truthy and add a spurious duplicate-heading
+    // diagnostic on top of the allowlist error it already gets.
+    var seenHeadings = Object.create(null);
     for (var s = 0; s < notes.sections.length; s += 1) {
       var sec = notes.sections[s];
       var pfx = 'sections[' + s + ']';
@@ -518,14 +526,10 @@ function _loadAllReleases() {
     byVersion[pv] = perPatch[p];
   }
   var all = Object.keys(byVersion).map(function (v) { return byVersion[v].rel; });
-  all.sort(function (a, b) {
-    var ap = String(a.version).split('.').map(Number);
-    var bp = String(b.version).split('.').map(Number);
-    for (var k = 0; k < 3; k += 1) {
-      if (ap[k] !== bp[k]) return bp[k] - ap[k];
-    }
-    return 0;
-  });
+  // Newest-first via the framework comparator. Every version reaching this
+  // sort has already passed the strict-triple gates above, so ordering is
+  // byte-identical to the previous inline comparator for all valid inputs.
+  all.sort(function (x, y) { return b.selfUpdate.compareTags(y.version, x.version); });
   return all;
 }
 

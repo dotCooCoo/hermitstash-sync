@@ -44,6 +44,10 @@
 
 var fs   = require('node:fs');
 var path = require('node:path');
+// Vendored framework — release ordering delegates to b.selfUpdate.compareTags
+// so the repo has ONE semver comparator (lib/updater.js and the changelog
+// generator use the same one). In-repo script: vendor/ is always present.
+var b    = require('../vendor/blamejs');
 
 var ROOT         = path.resolve(__dirname, '..');
 var NOTES_DIR    = path.join(ROOT, 'release-notes');
@@ -79,13 +83,11 @@ function _currentMinor() {
   return m[1] + '.' + m[2];
 }
 
-function _compareVersionsDesc(a, b) {
-  var ap = a.split('.').map(Number);
-  var bp = b.split('.').map(Number);
-  for (var i = 0; i < 3; i += 1) {
-    if (ap[i] !== bp[i]) return bp[i] - ap[i];
-  }
-  return 0;
+// Descending order via the framework comparator (strict -1/0/+1; degrades
+// deterministically on a malformed component instead of NaN-poisoning the
+// sort). Params deliberately not (a, b) — the outer `b` is the framework.
+function _compareVersionsDesc(x, y) {
+  return b.selfUpdate.compareTags(y, x);
 }
 
 function _scan() {
@@ -155,8 +157,11 @@ function main() {
       }
       for (var e = 0; e < existing.releases.length; e += 1) {
         var rel = existing.releases[e];
-        if (!rel || typeof rel.version !== 'string') {
-          _exit('existing ' + conName + ' releases[' + e + '] has no string `version` — refusing to overwrite');
+        // Strict-triple gate (mirrors generate-changelog-entry.js): a
+        // hand-corrupted rollup version like "0.8" would otherwise reach the
+        // merged sort and land at an arbitrary position.
+        if (!rel || typeof rel.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(rel.version)) {
+          _exit('existing ' + conName + ' releases[' + e + '] has no strict `X.Y.Z` string `version` — refusing to overwrite');
         }
         byVersion[rel.version] = rel;
         existingCount += 1;

@@ -213,6 +213,8 @@ var VALID_ALLOW_CLASSES = {
   'vendor-deny':                1,
   'internal-narrative-comment': 1,
   'bitwise-int-coerce':         1,
+  'proto-member-lookup':        1,
+  'case-sensitive-token':       1,
 };
 
 // CVE-2026-25639 / 42033 / 42041 / 40175 — axios prototype-pollution.
@@ -1092,6 +1094,146 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     }
     bad = _filterMarkers(bad, 'vendor-deny');
     _assertClean('vendor-deny', bad);
+  });
+
+  it('object-literal lookup tables are read with an own-property guard', () => {
+    // class: proto-member-lookup
+    // A plain-object lookup table indexed by an untrusted name with a
+    // truthiness / !== undefined read resolves inherited Object.prototype
+    // members ('constructor', 'toString', '__proto__') — the fail-open class
+    // behind a long run of upstream framework CVE-grade fixes. Detection:
+    // collect same-file `const/var NAME = {` object-literal tables (skipping
+    // Object.create(null)), then flag any guard-shaped `NAME[<expr>]` read
+    // (inside if/ternary/&&/|| or compared to undefined) whose surrounding
+    // ±2-line window carries no Object.hasOwn / hasOwnProperty guard. The
+    // fix is Object.hasOwn(TABLE, name) or a null-prototype table.
+    var files = _sourceFiles();
+    var bad = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var content;
+      try { content = fs.readFileSync(files[fi], 'utf8'); }
+      catch (_e) { continue; }
+      var lines = content.split(/\r?\n/);
+      var tables = {};
+      for (var li = 0; li < lines.length; li++) {
+        var m = lines[li].match(/^\s*(?:const|var|let)\s+([A-Z_a-z$][\w$]*)\s*=\s*(?:Object\.freeze\(\s*)?\{/);
+        if (m && !/Object\.create\(null\)/.test(lines[li])) tables[m[1]] = true;
+      }
+      var names = Object.keys(tables);
+      if (names.length === 0) continue;
+      for (var lj = 0; lj < lines.length; lj++) {
+        var line = lines[lj];
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+        for (var ni = 0; ni < names.length; ni++) {
+          var n = names[ni];
+          // Bracket read with a NON-string-literal index (variable/property).
+          var readRe = new RegExp('\\b' + n + '\\[(?!\\s*[\'"`])[^\\]]+\\]');   // allow:dynamic-regex — table name collected from this file's own declarations
+          if (!readRe.test(line)) continue;
+          // Guard-shaped usage only: truthiness or undefined-comparison.
+          if (!/(?:if\s*\(|&&|\|\||\?|!==?\s*undefined|===?\s*undefined)/.test(line)) continue;
+          // Assignments create OWN properties (shadowing any inherited
+          // member) — only reads can resolve the prototype chain.
+          var assignRe = new RegExp('\\b' + n + '\\[[^\\]]+\\]\\s*=(?!=)');    // allow:dynamic-regex — same collected table name
+          if (assignRe.test(line)) continue;
+          // A typeof-equality read fails closed: inherited members are
+          // functions/objects, so a 'string'/'number'/'boolean' type test
+          // refuses them without an own-property check.
+          var typeofRe = new RegExp('typeof\\s+' + n + '\\[[^\\]]+\\]\\s*[!=]==?\\s*[\'"](?:string|number|boolean)');  // allow:dynamic-regex — same collected table name
+          if (typeofRe.test(line)) continue;
+          var winStart = Math.max(0, lj - 2);
+          var win = lines.slice(winStart, lj + 3).join('\n');
+          if (/Object\.hasOwn|hasOwnProperty\.call|Object\.create\(null\)/.test(win)) continue;
+          bad.push({ file: _relPath(files[fi]), line: lj + 1, content: line.trim() });
+        }
+      }
+    }
+    bad = _filterMarkers(bad, 'proto-member-lookup');
+    _assertClean('proto-member-lookup', bad);
+  });
+
+  it('security-token comparisons are case-insensitive where the protocol is', () => {
+    // class: case-sensitive-token
+    // HTTP auth schemes (RFC 9110 §11.1), media types, and URL schemes match
+    // case-insensitively downstream; a single-case (or two-case-character-
+    // class) comparison silently misses the variants a peer or attacker can
+    // legally send — the diagnose bundle's `[Bb]earer` scrub was the live
+    // instance. Flags [Bb]earer/[Bb]asic char-class regexes without a /i
+    // flag on the same line, and === comparisons against 'Bearer'/'Basic'/
+    // 'Digest' literals without a .toLowerCase() in the ±1-line window.
+    var bad = [];
+    var charClass = _scan(/\[Bb\]earer|\[Bb\]asic/);
+    for (var ci = 0; ci < charClass.length; ci++) {
+      if (!/\/[a-z]*i[a-z]*(?:[,;)\]]|$)/.test(charClass[ci].content)) bad.push(charClass[ci]);
+    }
+    var eqCmp = _scan(/===?\s*['"](Bearer|Basic|Digest)['"]/);
+    for (var ei = 0; ei < eqCmp.length; ei++) {
+      if (!/toLowerCase\(\)/.test(eqCmp[ei].content)) bad.push(eqCmp[ei]);
+    }
+    bad = _filterMarkers(bad, 'case-sensitive-token');
+    _assertClean('case-sensitive-token', bad);
+  });
+
+  it('daemonize builds the detached child argv SEA-aware (never argv.slice(1))', () => {
+    // class: sea-child-argv (no marker — there is no legitimate exception)
+    // In a SEA binary Node inserts execPath at argv[1], so slice(1) fed to a
+    // detached re-spawn makes the child parse the exec path as its command
+    // and die with "Unknown command" while the parent prints success — the
+    // defect that silently broke `start --daemon` in every release binary.
+    // The child argv must derive from argv.slice(2) with an isSeaBinary()
+    // branch re-adding the entry script only in source mode.
+    var daemonSrc = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'daemon.js'), 'utf8');
+    assert.equal(/process\.argv\.slice\(1\)/.test(daemonSrc), false,
+      'lib/daemon.js must not build child argv from process.argv.slice(1) — SEA inserts execPath at argv[1]');
+    assert.equal(/isSeaBinary/.test(daemonSrc), true,
+      'lib/daemon.js daemonize must branch on isSeaBinary() when building the child argv');
+  });
+
+  it('watcher ignore-cap mirrors match the vendored source values', () => {
+    // class: watcher-cap-drift (no marker — re-pin on every vendor refresh)
+    // lib/watcher.js pins WATCHER_IGNORE_MAX_LEN / WATCHER_IGNORE_MAX_STARS
+    // as mirrors of vendor watcher.js's unexported caps. If an upstream
+    // refresh changes either, the local pre-filter passes a pattern
+    // b.watcher.create then refuses, and the synchronous watcher/bad-ignore
+    // throw aborts start() — exactly the failure the pre-filter prevents.
+    // Only a LOWERING is dangerous, but any drift forces a conscious re-pin.
+    var localSrc = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'watcher.js'), 'utf8');
+    var vendorSrc = fs.readFileSync(path.join(REPO_ROOT, 'vendor', 'blamejs', 'lib', 'watcher.js'), 'utf8');
+    var localLen = localSrc.match(/WATCHER_IGNORE_MAX_LEN\s*=\s*(\d+)/);
+    var localStars = localSrc.match(/WATCHER_IGNORE_MAX_STARS\s*=\s*(\d+)/);
+    var vendLen = vendorSrc.match(/MAX_IGNORE_PATTERN_LEN\s*=\s*(\d+)/);
+    var vendStars = vendorSrc.match(/MAX_IGNORE_STAR_COUNT\s*=\s*(\d+)/);
+    assert.ok(localLen && localStars, 'lib/watcher.js must pin WATCHER_IGNORE_MAX_LEN / WATCHER_IGNORE_MAX_STARS');
+    assert.ok(vendLen && vendStars, 'vendor watcher.js caps not found — upstream renamed/moved them; re-derive the local mirrors');
+    assert.equal(localLen[1], vendLen[1], 'WATCHER_IGNORE_MAX_LEN drifted from vendor MAX_IGNORE_PATTERN_LEN — re-pin lib/watcher.js');
+    assert.equal(localStars[1], vendStars[1], 'WATCHER_IGNORE_MAX_STARS drifted from vendor MAX_IGNORE_STAR_COUNT — re-pin lib/watcher.js');
+  });
+
+  it('test fixtures never pick a user with an unordered LIMIT 1', () => {
+    // class: users-limit-1 (no marker — always a latent flake)
+    // Admin suites insert/delete users, so `SELECT ... FROM users LIMIT 1`
+    // with no ORDER BY returns an arbitrary row and downstream ownership
+    // checks 403 intermittently. tests/ is developer-local (gitignored), so
+    // this gate only runs where the directory exists.
+    var testsDir = path.join(REPO_ROOT, 'tests');
+    if (!fs.existsSync(testsDir)) return;
+    var entries;
+    try { entries = fs.readdirSync(testsDir); } catch (_e) { return; }
+    var bad = [];
+    for (var ti = 0; ti < entries.length; ti++) {
+      if (!entries[ti].endsWith('.js')) continue;
+      var tContent;
+      try { tContent = fs.readFileSync(path.join(testsDir, entries[ti]), 'utf8'); }
+      catch (_e) { continue; }
+      var tLines = tContent.split(/\r?\n/);
+      for (var tl = 0; tl < tLines.length; tl++) {
+        if (/FROM users LIMIT 1/.test(tLines[tl])) {
+          bad.push({ file: 'tests/' + entries[ti], line: tl + 1, content: tLines[tl].trim() });
+        }
+      }
+    }
+    assert.equal(bad.length, 0,
+      'users-limit-1: unordered `FROM users LIMIT 1` in test fixtures (add ORDER BY createdAt ASC):\n' +
+      bad.map(function (x) { return '    ' + x.file + ':' + x.line + ': ' + x.content; }).join('\n'));
   });
 
   it('every // allow:<class> marker names a registered detector class', () => {
