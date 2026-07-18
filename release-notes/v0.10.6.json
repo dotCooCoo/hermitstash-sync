@@ -1,0 +1,91 @@
+{
+  "version": "0.10.6",
+  "date": "2026-07-17",
+  "headline": "Restores background-daemon mode in the pre-built binaries and fixes a broad set of sync data-loss and recovery edge cases",
+  "summary": "A correctness and hardening release. It restores `start --daemon` in the pre-built binaries (it silently never started a daemon while reporting success), refuses to enroll over plaintext HTTP so an API key and mTLS private key can no longer leak, and closes a broad set of rare but real sync-engine edge cases that could drop a delete, revert or destroy an un-uploaded edit, delete a just-recreated file, leak a file on the server, or wedge the client in a permanent catching-up state. Nested build and repository directories (a project checked out inside the synced folder) are now correctly ignored. No configuration changes are required.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "`start --daemon` works again in the pre-built binaries",
+          "body": "In the released single-file binaries the background daemon never actually started — the parent printed \"Daemon started\" and exited while the detached worker died immediately parsing its own path as a command, leaving a stale PID file and no syncing. It now starts correctly on every platform, and a worker that dies during startup is reported instead of masked as success. Running from source was unaffected."
+        },
+        {
+          "title": "A failed auto-update install resumes syncing instead of going idle",
+          "body": "If an update download verified but the install step failed (for example an anti-virus scanner holding the binary open on Windows), the daemon stopped its sync engine for the swap and then, on failure, left it stopped — syncing silently ceased until the process was restarted. A failed install now restarts the sync engine (re-reading any live pattern changes) and continues on the running version, and the auto-update recovery path was hardened against several rare states that could roll a healthy update back or strand a partially-installed one."
+        },
+        {
+          "title": "A delete is no longer silently undone by a single failed server request",
+          "body": "When a local delete's server request failed once (a transient network blip), the file was later re-downloaded by the recovery pass and reappeared on every device — the delete was dropped. A failed delete is now retried on its own rather than being mistaken for a failed download, and a delete for content the client never actually held (a download that never landed) is no longer propagated to the server."
+        },
+        {
+          "title": "An un-uploaded local edit is preserved across a rename",
+          "body": "Renaming a file whose most recent edit had not yet reached the server (a failed or in-flight upload) could mark it as fully synced under the new name — so the edit was never sent — or, when the rename coincided with a remote change, overwrite the edit outright. The renamed file now keeps its pending upload so the edit is sent, and a colliding remote change preserves the local edit as a conflict copy."
+        },
+        {
+          "title": "Deleting then quickly recreating a file no longer deletes the new file",
+          "body": "Recreating a file within a second of deleting it (common with tool-regenerated output) could let the buffered delete fire after the recreate's upload and remove the new file from the server. A same-path recreate now supersedes the pending delete, and the delete step additionally skips any path whose file has reappeared."
+        },
+        {
+          "title": "Deleting a file mid-upload no longer leaks it on the server",
+          "body": "Deleting a brand-new file while its first upload was still in flight left the file on the server forever and a permanent stuck record locally. The vanished file is now recognized as a delete and removed from the server."
+        },
+        {
+          "title": "The client no longer gets stuck in a permanent catching-up state",
+          "body": "After an event that could not be applied at the moment (a momentarily locked file), the change cursor could freeze for the rest of the session — the client reported catching-up indefinitely and its last-sync time went stale even though data was flowing. The cursor now clears once the delayed event finally applies, and a failed case-only rename no longer lets a later event skip past it."
+        },
+        {
+          "title": "A temporarily-unreadable synced folder no longer deletes everything",
+          "body": "If the synced folder itself became briefly unreadable — an unmounted network or removable volume — every tracked file looked deleted and those deletes could propagate to the server and every device. Local deletes are now ignored while the synced folder is unreadable and reconsidered once it returns."
+        },
+        {
+          "title": "A project checked out inside the synced folder is correctly ignored",
+          "body": "The default ignores for repository and build directories (.git, node_modules, __pycache__, and similar) only applied at the top of the synced folder, so a project cloned into a subfolder uploaded its entire .git and node_modules trees. These directories are now ignored at any depth. Ignore and include patterns also now accept a Windows-style backslash separator and match regardless of Unicode composition."
+        },
+        {
+          "title": "Smaller correctness fixes",
+          "body": "A crash-interrupted upload is now actually re-sent by the recovery pass rather than silently skipped; shutdown waits for in-flight downloads before closing so it no longer logs spurious errors; a manually-entered API key is trimmed and an empty one refused; the credential file is read without a race that could report a spurious error during a concurrent re-enrollment; and a routine save-then-delete during hashing no longer logs at error level."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Enrollment refuses plaintext HTTP to a non-loopback server",
+          "body": "The enrollment exchange sends your enrollment code and receives your API key and mTLS private key. Over plaintext http:// to a non-loopback host these travelled in the clear, and the existing refusal only ran later when the daemon started — after the credentials had already been exposed. Enrollment now refuses a non-loopback http:// server before sending anything. A loopback address (a TLS-terminating sidecar) is still allowed, and HERMITSTASH_ALLOW_PLAINTEXT=1 remains the explicit opt-out."
+        },
+        {
+          "title": "Lookups keyed on untrusted names reject inherited object members",
+          "body": "Several internal lookups (log level, license identifier, changelog heading, configuration keys) resolved a name against a table without an own-property check, so a name matching a built-in object member could slip a validation. All now use own-property checks. A support-bundle credential scrub also matches the authorization scheme case-insensitively, and an in-string bearer-token detector now redacts a credential embedded in a log message in the live log and on standard output, not only in the support bundle."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Adopted newly hardened framework primitives",
+          "body": "The auto-update signature verifier, the metrics exposition renderer, the post-quantum TLS agent's group configuration (now validated), release-time version ordering, and several internal reads now route through the vendored framework's hardened primitives instead of local re-implementations, and the loopback-host and certificate-pin derivations are consolidated to single implementations. No behavior visible to operators changes."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored framework advanced to blamejs v0.17.10",
+          "body": "Carries upstream security and correctness fixes across the wire, crypto, and process layers, including a WebSocket client that connects to wss:// hosts given as IP literals, a shared HTTP cache that no longer serves an authenticated response across principals, safe-decompression that refuses an unknown algorithm instead of returning input unchanged, and a family of lookup guards that reject prototype-member names."
+        },
+        {
+          "title": "Refreshed the pinned GitHub Actions",
+          "body": "The commit-pinned actions in the release and container-publish workflows were advanced to their current releases (still pinned by commit hash with a version comment)."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "blamejs framework", "url": "https://github.com/blamejs/blamejs" }
+  ]
+}
