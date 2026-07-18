@@ -428,6 +428,73 @@ describe('A failed server DELETE is re-driven, not silently undone by the downlo
 });
 
 // ---------------------------------------------------------------------------
+// sync-engine — a phantom "delete" of content this client never held is refused
+// ---------------------------------------------------------------------------
+describe('A buffered delete of a never-held (download-phantom) row is refused, not propagated', { timeout: 30000 }, () => {
+  it('a row with no localChecksum (a never-landed download) is not deleted from the server', async () => {
+    // A conflict-copy rename followed by a fast download failure leaves an
+    // ERROR/PENDING_DOWNLOAD row whose serverChecksum is another device's
+    // content this client never received, and whose localChecksum is null.
+    // The watcher's flush-time ENOENT then buffers a "delete". Issuing the
+    // server DELETE would remove that other device's newest content for
+    // everyone. The row-never-held-content guard must refuse it.
+    const rel = 'phantom.txt';
+    let deleteAttempts = 0;
+    const h = makeEngine({});
+    h.engine._http.deleteFile = async () => { deleteAttempts++; return true; };
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      // No local file on disk; the row carries a serverFileId + serverChecksum
+      // (another device's content) but NO localChecksum (never downloaded).
+      stateDb.upsertFile({
+        relativePath: rel, serverFileId: 'F', serverChecksum: sha3('other-device-content'),
+        localChecksum: null, size: 10, serverSeq: 8, status: FILE_STATUS.ERROR,
+      });
+
+      const outcome = await h.engine._executeDelete(rel, stateDb.getFile(rel));
+      assert.equal(outcome, 'skipped', 'a never-held row is not deleted from the server');
+      assert.equal(deleteAttempts, 0, 'no server DELETE is issued for content this client never held');
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sync-engine — deleting a file during its first upload does not leak it
+// ---------------------------------------------------------------------------
+describe('A file deleted mid-first-upload is removed from the server, not left as a zombie', { timeout: 30000 }, () => {
+  it('the just-uploaded copy is deleted server-side and the row is dropped (no immortal PENDING_UPLOAD)', async () => {
+    const rel = 'churn-upload.txt';
+    const content = 'first upload in flight when the user deleted it';
+    const filePath = path.join(process.cwd(), rel); // placeholder; real path below
+    let deletedFileId = null;
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      const realPath = path.join(h.syncFolder, rel);
+      fs.writeFileSync(realPath, content);
+      // Upload stub: record the server file id, and DELETE the file from disk
+      // mid-upload to simulate the user removing it while the stream ran.
+      h.engine._http.uploadFile = async () => {
+        try { fs.unlinkSync(realPath); } catch { /* already gone */ }
+        return { fileId: 'srv-up-1', checksum: sha3(content), seq: 200 };
+      };
+      h.engine._http.deleteFile = async (fid) => { deletedFileId = fid; return true; };
+
+      await h.engine._uploadFile(rel, realPath, sha3(content));
+
+      assert.equal(deletedFileId, 'srv-up-1', 'the just-uploaded copy is deleted from the server');
+      assert.equal(stateDb.getFile(rel), undefined, 'no immortal PENDING_UPLOAD zombie row remains');
+      assert.equal(fs.existsSync(realPath), false, 'the file stays deleted locally');
+      void filePath;
+    } finally {
+      cleanup(h);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sync-engine#4 — buffered delete mutates the fold-resolved row, not the raw key
 // ---------------------------------------------------------------------------
 describe('Buffered delete removes the tracked row under its fold-resolved casing', { timeout: 30000 }, () => {

@@ -237,7 +237,9 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
     try {
       const e = new SyncEngine({ syncFolder: tmp }, 'k');
       e._state = SYNC_STATE.SYNCED;
-      const existing = { serverFileId: 'fid' };
+      // A tracked synced file always carries a localChecksum — the delete only
+      // propagates for content this client actually held.
+      const existing = { serverFileId: 'fid', localChecksum: 'c', serverChecksum: 'c' };
 
       // skipped: suppression
       e._suppressPath('s.txt');
@@ -246,7 +248,7 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
 
       // failed: server DELETE throws
       e._http = { deleteFile: async () => { throw new Error('boom'); } };
-      stateDb.upsertFile({ relativePath: 'f.txt', serverFileId: 'fid', status: FILE_STATUS.SYNCED, size: 1 });
+      stateDb.upsertFile({ relativePath: 'f.txt', serverFileId: 'fid', localChecksum: 'c', serverChecksum: 'c', status: FILE_STATUS.SYNCED, size: 1 });
       assert.equal(await e._executeDelete('f.txt', existing), 'failed');
       // A failed delete lands PENDING_DELETE (not ERROR): ERROR would be
       // resurrected by the download-recovery sweep; PENDING_DELETE re-drives
@@ -255,7 +257,7 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
 
       // deleted: server DELETE succeeds
       e._http = { deleteFile: async () => ({}) };
-      stateDb.upsertFile({ relativePath: 'g.txt', serverFileId: 'fid', status: FILE_STATUS.SYNCED, size: 1 });
+      stateDb.upsertFile({ relativePath: 'g.txt', serverFileId: 'fid', localChecksum: 'c', serverChecksum: 'c', status: FILE_STATUS.SYNCED, size: 1 });
       assert.equal(await e._executeDelete('g.txt', existing), 'deleted');
       assert.equal(stateDb.getFile('g.txt'), undefined, 'deleted row removed');
     } finally {
@@ -277,7 +279,9 @@ describe('sync-engine#4 — local-rename fallback leaves a recoverable marker', 
         deleteFile: async () => { throw new Error('delete failed'); },
       };
       nodeFs.writeFileSync(nodePath.join(tmp, 'new.txt'), 'bytes');
-      const pending = { fileId: 'fid', existing: { serverFileId: 'fid' } };
+      // A real tracked file being renamed always carries a localChecksum (it
+      // was synced) — the delete-of-content-we-held guard requires it.
+      const pending = { fileId: 'fid', existing: { serverFileId: 'fid', localChecksum: 'csum', serverChecksum: 'csum' } };
       await e._handleLocalRename('old.txt', 'new.txt', pending, 'csum', 5, Date.now());
 
       const row = stateDb.getFile('new.txt');
