@@ -305,6 +305,8 @@ Add custom patterns in:
 
 Supported pattern syntax: exact filename (`file.txt`), extension (`*.log`), directory recursion (`build/**`), and a plain folder path (`build/cache`) — which excludes that folder and everything under it, the same as `build/cache/**` (matched only at a path-segment boundary, so a sibling `build/cache.txt` is unaffected).
 
+A single-segment directory pattern (`node_modules/**`, `.git/**`, or a bare `node_modules`) matches that directory at **any depth**, so a project checked out inside the synced folder has its `.git` and `node_modules` excluded wherever it sits — not only at the top level. A multi-segment pattern (`src/build/**`) stays anchored to that exact location. Patterns accept a Windows-style backslash separator (`build\out`) and match regardless of Unicode composition.
+
 ### API key storage
 
 The API key is stored in your OS keychain:
