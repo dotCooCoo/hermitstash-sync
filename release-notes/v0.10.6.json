@@ -75,8 +75,8 @@
       "heading": "Supply chain",
       "items": [
         {
-          "title": "Vendored framework advanced to blamejs v0.17.10",
-          "body": "Carries upstream security and correctness fixes across the wire, crypto, and process layers, including a WebSocket client that connects to wss:// hosts given as IP literals, a shared HTTP cache that no longer serves an authenticated response across principals, safe-decompression that refuses an unknown algorithm instead of returning input unchanged, and a family of lookup guards that reject prototype-member names."
+          "title": "Vendored framework advanced to blamejs v0.17.11",
+          "body": "Carries upstream security and correctness fixes across the wire, crypto, and process layers, including a DER decoder that rejects a non-minimal length encoding (closing a parser differential under every certificate parse), a WebSocket client that connects to wss:// hosts given as IP literals, a shared HTTP cache that no longer serves an authenticated response across principals, safe-decompression that refuses an unknown algorithm instead of returning input unchanged, and a family of lookup guards that reject prototype-member names."
         },
         {
           "title": "Refreshed the pinned GitHub Actions",
