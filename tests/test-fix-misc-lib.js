@@ -93,6 +93,30 @@ describe('watcher#22 -- [ ] ? ! patterns are inert in both classify and match', 
     assert.doesNotThrow(() => pathFilter.isIgnored('a/b/c', [123, null, {}]));
     assert.equal(pathFilter.isIgnored('a/b/c', [123, null, {}]), false);
   });
+
+  it('a single-segment recursive-dir ignore matches the named directory at ANY depth', () => {
+    // The default ignores (.git/**, node_modules/**, __pycache__/**) must
+    // exclude a repo or dependency tree nested in a SUBFOLDER, not only at the
+    // sync-folder root — otherwise a project checked out under the sync folder
+    // uploads its entire .git/node_modules.
+    assert.equal(pathFilter.isIgnored('.git/config', ['.git/**']), true, 'root-level .git contents');
+    assert.equal(pathFilter.isIgnored('myproject/.git/config', ['.git/**']), true, 'nested .git contents');
+    assert.equal(pathFilter.isIgnored('a/b/node_modules/pkg/index.js', ['node_modules/**']), true, 'deeply nested node_modules');
+    assert.equal(pathFilter.isIgnored('src/__pycache__/mod.pyc', ['__pycache__/**']), true, 'nested __pycache__');
+    // A sibling directory whose name merely CONTAINS the segment must not match.
+    assert.equal(pathFilter.isIgnored('foo.git/x', ['.git/**']), false, 'foo.git is not .git');
+    assert.equal(pathFilter.isIgnored('mynode_modules/x', ['node_modules/**']), false, 'mynode_modules is not node_modules');
+    // A MULTI-segment recursive-dir stays anchored (no depth widening).
+    assert.equal(pathFilter.isIgnored('build/out/x', ['build/**']), true);
+    assert.equal(pathFilter.isIgnored('a/src/build/x', ['src/build/**']), false, 'multi-segment head stays anchored');
+  });
+
+  it('a Windows-style backslash pattern is normalized, not silently inert', () => {
+    assert.equal(pathFilter.classifyPattern('src\\build\\**'), 'recursive-dir',
+      'a backslash pattern classifies as its forward-slash equivalent');
+    assert.equal(pathFilter.isIgnored('src/build/x', ['src\\build\\**']), true,
+      'a backslash-separated pattern matches the forward-slash path');
+  });
 });
 
 // ---------------------------------------------------------------------------
