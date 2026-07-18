@@ -360,6 +360,40 @@ describe('A failed server DELETE is re-driven, not silently undone by the downlo
     }
   });
 
+  it('a buffered delete whose path re-appeared on disk (delete then recreate) does not delete the recreated file from the server', async () => {
+    // The user deletes a.txt (buffered with a rename-detection timer) then
+    // recreates it before the timer fires. When the timer's _executeDelete
+    // runs, the file is back on disk (the recreate's upload has replaced the
+    // server-side file) — deleting now would remove the recreated file from
+    // the server and every device. The existsSync guard must skip it.
+    const content = 'recreated content, different from the deleted one';
+    const sum = sha3(content);
+    const rel = 'churned.txt';
+    let deleteAttempts = 0;
+    const h = makeEngine({});
+    h.engine._http.deleteFile = async () => { deleteAttempts++; return true; };
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      // The file is on disk (recreated) and the row carries a fresh server id
+      // from the recreate's upload.
+      fs.writeFileSync(path.join(h.syncFolder, rel), content);
+      stateDb.upsertFile({
+        relativePath: rel, serverFileId: 'F-fresh', serverChecksum: sum,
+        localChecksum: sum, size: content.length, serverSeq: 7, status: FILE_STATUS.SYNCED,
+      });
+
+      // The stale buffered delete fires against the now-recreated path.
+      const outcome = await h.engine._executeDelete(rel, { serverFileId: 'F-old' });
+
+      assert.equal(outcome, 'skipped', 'the delete is skipped because the local file re-appeared');
+      assert.equal(deleteAttempts, 0, 'the recreated file must NOT be deleted from the server');
+      assert.ok(fs.existsSync(path.join(h.syncFolder, rel)), 'the recreated file stays on disk');
+      assert.ok(stateDb.getFile(rel), 'the row for the recreated file is intact');
+    } finally {
+      cleanup(h);
+    }
+  });
+
   it('a PENDING_DELETE whose local file re-appeared (a recreate) is not deleted from the server', async () => {
     const content = 'recreated after the delete failed';
     const sum = sha3(content);
@@ -565,6 +599,100 @@ describe('Server rename that also changes content makes no spurious conflict cop
         'unrelated destination bytes are preserved as a conflict copy');
       assert.equal(fs.readFileSync(path.join(h.syncFolder, 'dest.txt'), 'utf8'), cnew,
         'the new content lands at the destination');
+    } finally {
+      cleanup(h);
+    }
+  });
+
+  it('a pure rename of a file with an un-uploaded local edit keeps it PENDING_UPLOAD (never a false SYNCED)', async () => {
+    // The row is diverged: localChecksum=v2 (a local edit whose upload failed),
+    // serverChecksum=v1 (what the server actually holds). A pure server rename
+    // (no content change) must relocate the file AND keep the pending upload,
+    // not stamp SYNCED over the divergence — otherwise v2 never reaches the
+    // server and the reconcile sweep, which skips SYNCED rows, never re-drives it.
+    const v1 = 'server-holds-this';
+    const v2 = 'local-edit-that-never-uploaded';
+    const v1sum = sha3(v1);
+    const v2sum = sha3(v2);
+    const h = makeEngine({});
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      const oldPath = path.join(h.syncFolder, 'old.txt');
+      fs.writeFileSync(oldPath, v2);   // disk carries the un-uploaded edit
+      stateDb.upsertFile({
+        relativePath: 'old.txt',
+        serverFileId: 'F',
+        serverChecksum: v1sum,   // server has v1
+        localChecksum: v2sum,    // disk has v2 (diverged)
+        size: v2.length,
+        serverSeq: 1,
+        status: FILE_STATUS.PENDING_UPLOAD,
+      });
+
+      // Pure rename: no checksum on the event.
+      await h.engine._handleFileRenamed({
+        oldRelativePath: 'old.txt',
+        relativePath: 'new.txt',
+        fileId: 'F',
+        size: v2.length,
+        seq: 2,
+      });
+
+      assert.ok(!fs.existsSync(oldPath), 'the file moved to the new path');
+      assert.equal(fs.readFileSync(path.join(h.syncFolder, 'new.txt'), 'utf8'), v2,
+        'the un-uploaded local bytes moved with the rename (not destroyed)');
+      const row = stateDb.getFile('new.txt');
+      assert.equal(row.status, FILE_STATUS.PENDING_UPLOAD,
+        'the diverged row stays PENDING_UPLOAD so the reconcile sweep re-uploads the moved edit');
+      assert.equal(row.localChecksum, v2sum, 'localChecksum reflects the real on-disk bytes');
+      assert.equal(row.serverChecksum, v1sum, 'serverChecksum reflects what the server actually holds');
+      assert.equal(conflictFiles(h.syncFolder).length, 0, 'no conflict copy for a pure rename');
+    } finally {
+      cleanup(h);
+    }
+  });
+
+  it('a rename+content-change of a diverged file preserves the local edit as a conflict copy', async () => {
+    // Diverged row (localChecksum=v2, serverChecksum=v1); the server renames
+    // AND changes content to v3. movedChecksum must be the server-confirmed v1
+    // (not the local v2) so the conflict-copy guard sees disk(v2) != v1 and
+    // preserves v2 as a conflict before the v3 download — not silently destroy it.
+    const v1 = 'server-old';
+    const v2 = 'local-unuploaded-edit';
+    const v3 = 'server-brand-new-after-rename';
+    const v1sum = sha3(v1);
+    const v2sum = sha3(v2);
+    const v3sum = sha3(v3);
+    const h = makeEngine({ downloads: { F3: { content: v3 } } });
+    try {
+      h.engine._setState(SYNC_STATE.SYNCED);
+      const oldPath = path.join(h.syncFolder, 'old.txt');
+      fs.writeFileSync(oldPath, v2);
+      stateDb.upsertFile({
+        relativePath: 'old.txt',
+        serverFileId: 'F',
+        serverChecksum: v1sum,
+        localChecksum: v2sum,
+        size: v2.length,
+        serverSeq: 1,
+        status: FILE_STATUS.PENDING_UPLOAD,
+      });
+
+      await h.engine._handleFileRenamed({
+        oldRelativePath: 'old.txt',
+        relativePath: 'new.txt',
+        fileId: 'F3',
+        checksum: v3sum,
+        size: v3.length,
+        seq: 2,
+      });
+
+      const conflicts = conflictFiles(h.syncFolder);
+      assert.equal(conflicts.length, 1, 'the un-uploaded local edit is preserved as a conflict copy');
+      assert.equal(fs.readFileSync(path.join(h.syncFolder, conflicts[0]), 'utf8'), v2,
+        'the conflict copy holds the local edit v2 (not destroyed)');
+      assert.equal(fs.readFileSync(path.join(h.syncFolder, 'new.txt'), 'utf8'), v3,
+        'the new server content lands at the new path');
     } finally {
       cleanup(h);
     }
