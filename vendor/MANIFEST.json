@@ -2,14 +2,14 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.17.11",
+      "version": "0.17.23",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.17.11",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.17.11:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.17.11",
+      "tag": "v0.17.23",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.17.23:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.17.23",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -38,17 +38,17 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:09c4debf5250369bef272ee70c724617e88e9d52354a4e8e265a90a393299be4",
+        "index": "sha256:c54ff6ce2a55f24ad9078dc309740a582f305cf89ceeb4dc59b62a4f4da50274",
         "safe-json": "sha256:43e54c1fc90a524e1f5cb58a1bea60072b132a75b5f658e2bf66efef71702243",
         "safe-url": "sha256:d6024d0e64936b25833cc1a0a3113d8d5c9f3048ba7452ebcbbebb581c41cd4d",
-        "pqc-agent": "sha256:59ec1f35897d1e9e53e45cb95a5f1c1a4df1c614701c5f3f1eb522581cc08864",
+        "pqc-agent": "sha256:2b050109a917b6938f4c5fcf0237c7120604387cdf72ba9f9adbcb6f99f13db5",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
         "http-client": "sha256:2986584d45eb554571bc960eb0516a34bebc9ee8711a5b08816fd39e0cfd6bf2",
-        "ws-client": "sha256:f7c6d592918171c2d2ccab98e5e406305a39608f061b6778eadbd41c169a0e62",
-        "log-stream": "sha256:55b020eea9609359b06d62ede8d9f2beb1ef916eb4a3fa5be94a75fdde7687a3",
+        "ws-client": "sha256:9c6969e68f025a3f4ee440ca7d53e0f44477e16709d2f549aa4a4b50d79cce67",
+        "log-stream": "sha256:2f9d5173b0f03071718103387570754b343d399a13ed9f6959221ccc550eb989",
         "log-stream-local": "sha256:c589a6d39de96877f4fa81fc2f5650679e2768ee0e0c607883aceaab4abce940",
         "atomic-file": "sha256:06e412123a3b76d6a874d87ebee320f07497fb4f9a38c4cea9b4329d9ea9c2d4",
-        "app-shutdown": "sha256:7a14fb38536da95c9920679c270ea428b8cb6a5ca582f5fc02140f4dbbebdf32",
+        "app-shutdown": "sha256:f43d402302fea92b48840b8bd477a05d6b26520f3d8e92b494eed28afcf08094",
         "retry": "sha256:3c474b166b896745aa85252037de0c4ef1113cebd9cac56fa1b247ebeabd8303",
         "framework-error": "sha256:a62f496ac8ff910008b08f90889c107cbf2094bb2e3e81213b6ad4b30b61989b",
         "process-spawn": "sha256:0d0f2943ff174da48bb555cf189d9aae0120ecee43cf536072544706039acc6b",
@@ -158,10 +158,10 @@
               "data_js": "lib/vendor/public-suffix-list.data.js"
             },
             "hashes": {
-              "server": "sha256:57323947e6a49f93c98cf417bc8dabbc99833d548add7b4fb1528382d2469c2b",
-              "data_js": "sha256:e3ab29993abf04b4a89c2ad55fa7057c234076fb078a32daecf05d3f8ed379eb"
+              "server": "sha256:0240b3f1e8c90ecd4af5b94597afb5ba89997ad395f292f87318caefb7e10413",
+              "data_js": "sha256:7994e24e1865f197540a988783de567fe20fb29e7f6c3a5c142766bb0cfd9bfd"
             },
-            "bundledAt": "2026-07-15T00:00:00Z"
+            "bundledAt": "2026-07-25T00:00:00Z"
           },
           "peculiar-pki": {
             "version": "2.0.0+pkijs-3.4.0",

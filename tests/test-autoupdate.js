@@ -714,7 +714,11 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
       exitFn: () => {},
       spawnFn: () => ({ unref() {} }),
     });
-    const { prevPath } = await up._internals.performInstall('9.9.9', assetPath);
+    // performInstall now routes both platforms through b.selfUpdate.swap, which
+    // requires the SHA3-512 the standalone verifier returned (production always
+    // threads it from checkOnce); pass the real digest of the asset bytes.
+    const expectedHash = crypto.createHash('sha3-512').update(fs.readFileSync(assetPath)).digest('hex');
+    const { prevPath } = await up._internals.performInstall('9.9.9', assetPath, expectedHash);
 
     assert.equal(fs.readFileSync(currentPath, 'utf8'), 'NEW IMAGE');
     assert.ok(prevPath.endsWith('.old.exe'), `expected an .old.exe backup, got ${prevPath}`);
@@ -759,8 +763,12 @@ describe('Auto-update — Windows in-use swap', { timeout: 20000 }, () => {
         exitFn: () => {},
         spawnFn: () => ({ unref() {} }),
       });
+      // swap re-hashes the asset before the move-aside, so pass the real digest
+      // (production always threads it) — otherwise it would reject on the hash
+      // check rather than reaching the EPERM move-aside path under test.
+      const expectedHash = crypto.createHash('sha3-512').update(fs.readFileSync(assetPath)).digest('hex');
       await assert.rejects(
-        up._internals.performInstall('9.9.9', assetPath),
+        up._internals.performInstall('9.9.9', assetPath, expectedHash),
         (err) => {
           assert.match(err.message, /not supported|external updater|installer manually/i);
           assert.match(err.message, /EPERM/);
@@ -892,6 +900,84 @@ describe('Auto-update — rollback & probation', { timeout: 10000 }, () => {
     assert.equal(fs.existsSync(markerPath), false);
     assert.equal(spawns.length, 1);
     assert.equal(spawns[0].cmd, execPath);
+    assert.deepEqual(exits, [0]);
+  });
+
+  it('POSIX rollback restores a backup larger than the 64 MiB atomic-file copy cap', async () => {
+    const dir = tempDir('rb-big');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    // A backup larger than b.selfUpdate.rollback's internal 64 MiB
+    // atomicFile.copy read cap — the size class a real Node SEA binary lands at.
+    // The old code routed POSIX rollback through b.selfUpdate.rollback and failed
+    // 'too-large' here, silently defeating auto-recovery on Linux/macOS; the
+    // in-process fdSafeReadSync(MAX_ASSET_BYTES)+write restore handles it.
+    const bigLen = 70 * 1024 * 1024; // 70 MiB > 64 MiB cap
+    const bigPrev = Buffer.alloc(bigLen, 0x41);
+    bigPrev.write('GOOD OLD >64MiB BACKUP', 0);
+    fs.writeFileSync(execPath, 'BROKEN NEW', { mode: 0o755 });
+    fs.writeFileSync(prevPath, bigPrev, { mode: 0o755 });
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9', prevBinaryPath: prevPath, installedAt: Date.now() - 60_000,
+    }));
+    const spawns = []; const exits = [];
+    const up = createUpdater({
+      currentVersion: '9.9.9', pubkeyPem: PUBKEY_PEM,
+      pollMs: 60_000, initialDelayMs: 60_000, probationMs: 1000,
+      markerPath, getExecPath: () => execPath, getArgv: () => [], isSeaBinary: () => true,
+      platform: 'linux', // force the POSIX rollback branch even on a Windows host
+      httpsAgent: new https.Agent({ keepAlive: true }),
+      spawnFn: (cmd) => { spawns.push({ cmd }); return { unref() {} }; },
+      exitFn: (code) => { exits.push(code); },
+    });
+    assert.equal(await up.checkRollback(), 'rolled-back');
+    const restored = fs.readFileSync(execPath);
+    assert.equal(restored.length, bigLen, 'restored binary must be the full 70 MiB backup');
+    assert.ok(restored.equals(bigPrev), 'restored bytes must equal the backup byte-for-byte');
+    assert.equal(fs.existsSync(prevPath), false, 'prev removed after rollback');
+    assert.equal(fs.existsSync(markerPath), false);
+    assert.deepEqual(exits, [0]);
+  });
+
+  it('does NOT roll back when the on-disk binary is not the probationary build (hash guard)', async () => {
+    const dir = tempDir('rb-hash');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    fs.writeFileSync(execPath, 'REPLACED BY SOMETHING ELSE', { mode: 0o755 });
+    fs.writeFileSync(prevPath, 'GOOD OLD', { mode: 0o755 });
+    // The marker records a probationary digest that does NOT match the on-disk
+    // binary (something replaced it between the crashed boot and now).
+    const wrongHash = crypto.createHash('sha3-512').update('the-probationary-bytes').digest('hex');
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9', prevBinaryPath: prevPath, installedAt: Date.now() - 60_000, expectedHash: wrongHash,
+    }));
+    const spawns = []; const exits = [];
+    const up = mkRollbackUpdater({ currentVersion: '9.9.9', markerPath, execPath, spawnCapture: spawns, exitCapture: exits });
+    assert.equal(await up.checkRollback(), 'probation-complete');
+    assert.equal(fs.readFileSync(execPath, 'utf8'), 'REPLACED BY SOMETHING ELSE', 'must NOT clobber the replacement binary');
+    assert.equal(fs.existsSync(markerPath), false, 'marker cleared');
+    assert.equal(spawns.length, 0);
+    assert.equal(exits.length, 0);
+  });
+
+  it('rolls back when the on-disk binary DOES match the probationary hash', async () => {
+    const dir = tempDir('rb-hash-match');
+    const markerPath = path.join(dir, 'update-pending.json');
+    const execPath = path.join(dir, 'hs');
+    const prevPath = path.join(dir, 'hs.prev');
+    const probBytes = 'THE PROBATIONARY BUILD';
+    fs.writeFileSync(execPath, probBytes, { mode: 0o755 });
+    fs.writeFileSync(prevPath, 'GOOD OLD', { mode: 0o755 });
+    const matchHash = crypto.createHash('sha3-512').update(probBytes).digest('hex');
+    fs.writeFileSync(markerPath, JSON.stringify({
+      newVersion: '9.9.9', prevBinaryPath: prevPath, installedAt: Date.now() - 60_000, expectedHash: matchHash,
+    }));
+    const spawns = []; const exits = [];
+    const up = mkRollbackUpdater({ currentVersion: '9.9.9', markerPath, execPath, spawnCapture: spawns, exitCapture: exits });
+    assert.equal(await up.checkRollback(), 'rolled-back');
+    assert.equal(fs.readFileSync(execPath, 'utf8'), 'GOOD OLD');
     assert.deepEqual(exits, [0]);
   });
 

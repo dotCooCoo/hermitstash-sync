@@ -674,7 +674,7 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
   // Literal NUL (0x00) bytes in source files. ESLint catches it in CI
   // but Windows local lint may not — and any literal NUL in a string
   // is almost always a copy-paste artifact or a hostile-paste attempt.
-  // Use ` ` escape if a NUL is genuinely needed. From blamejs's
+  // Use `\u0000` escape if a NUL is genuinely needed. From blamejs's
   // testNoLiteralNulBytesInSource.
   it('no literal NUL (0x00) bytes in source files', () => {
     var bad = [];
@@ -697,6 +697,40 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
       }
     }
     _assertClean('literal-nul-byte', bad);
+  });
+
+  // The scan above covers bin/ + lib/, but the detector file itself lives
+  // under scripts/ (excluded from _sourceFiles so its needle strings don't
+  // self-match every other detector). A literal NUL is never a legitimate
+  // detector fixture — the \u0000 escape always works — so the scripts/ tree
+  // is safe to scan for THIS class alone. This closes the gap where a
+  // copy-paste NUL in a script (including this file) went undetected because
+  // the general scan skips scripts/.
+  it('no literal NUL (0x00) bytes in scripts/*.js', () => {
+    var bad = [];
+    var dir = path.join(REPO_ROOT, 'scripts');
+    var entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (_e) { entries = []; }
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      if (!e.isFile() || !e.name.endsWith('.js')) continue;
+      var abs = path.join(dir, e.name);
+      var buf;
+      try { buf = fs.readFileSync(abs); }
+      catch (_e2) { continue; }
+      var idx = buf.indexOf(0);
+      if (idx >= 0) {
+        var lineNo = 1;
+        for (var k = 0; k < idx; k++) if (buf[k] === 0x0a) lineNo += 1;
+        bad.push({
+          file: _relPath(abs),
+          line: lineNo,
+          content: 'literal NUL byte at byte offset ' + idx + ' (use \\u0000 escape if needed)',
+        });
+      }
+    }
+    _assertClean('literal-nul-byte-scripts', bad);
   });
 
   // Every `(const|let|var) <name> = require('<target>')` binding for a
@@ -1188,24 +1222,74 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
       'lib/daemon.js daemonize must branch on isSeaBinary() when building the child argv');
   });
 
-  it('watcher ignore-cap mirrors match the vendored source values', () => {
-    // class: watcher-cap-drift (no marker — re-pin on every vendor refresh)
-    // lib/watcher.js pins WATCHER_IGNORE_MAX_LEN / WATCHER_IGNORE_MAX_STARS
-    // as mirrors of vendor watcher.js's unexported caps. If an upstream
-    // refresh changes either, the local pre-filter passes a pattern
-    // b.watcher.create then refuses, and the synchronous watcher/bad-ignore
-    // throw aborts start() — exactly the failure the pre-filter prevents.
-    // Only a LOWERING is dangerous, but any drift forces a conscious re-pin.
+  it('watcher ignore caps are consumed from the exported b.watcher constants, not re-pinned', () => {
+    // class: watcher-cap-drift (no marker — consume the exported value, never a literal)
+    // b.watcher exports MAX_IGNORE_PATTERN_LEN / MAX_IGNORE_STAR_COUNT
+    // (blamejs v0.17.13+). lib/watcher.js must consume those exported
+    // constants directly rather than re-pinning a numeric literal that could
+    // silently drift from the vendored source: if the local pre-filter's cap
+    // fell below b.watcher.create's, it would forward a pattern the framework
+    // then refuses, and the synchronous watcher/bad-ignore throw aborts
+    // start(). Consuming the export makes drift impossible. Guard both that the
+    // export exists on the vendored surface and that the wrapper binds to it.
     var localSrc = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'watcher.js'), 'utf8');
-    var vendorSrc = fs.readFileSync(path.join(REPO_ROOT, 'vendor', 'blamejs', 'lib', 'watcher.js'), 'utf8');
-    var localLen = localSrc.match(/WATCHER_IGNORE_MAX_LEN\s*=\s*(\d+)/);
-    var localStars = localSrc.match(/WATCHER_IGNORE_MAX_STARS\s*=\s*(\d+)/);
-    var vendLen = vendorSrc.match(/MAX_IGNORE_PATTERN_LEN\s*=\s*(\d+)/);
-    var vendStars = vendorSrc.match(/MAX_IGNORE_STAR_COUNT\s*=\s*(\d+)/);
-    assert.ok(localLen && localStars, 'lib/watcher.js must pin WATCHER_IGNORE_MAX_LEN / WATCHER_IGNORE_MAX_STARS');
-    assert.ok(vendLen && vendStars, 'vendor watcher.js caps not found — upstream renamed/moved them; re-derive the local mirrors');
-    assert.equal(localLen[1], vendLen[1], 'WATCHER_IGNORE_MAX_LEN drifted from vendor MAX_IGNORE_PATTERN_LEN — re-pin lib/watcher.js');
-    assert.equal(localStars[1], vendStars[1], 'WATCHER_IGNORE_MAX_STARS drifted from vendor MAX_IGNORE_STAR_COUNT — re-pin lib/watcher.js');
+    var b = require('../vendor/blamejs');
+    assert.equal(typeof b.watcher.MAX_IGNORE_PATTERN_LEN, 'number',
+      'vendored b.watcher must export MAX_IGNORE_PATTERN_LEN — upstream renamed/removed it; update lib/watcher.js');
+    assert.equal(typeof b.watcher.MAX_IGNORE_STAR_COUNT, 'number',
+      'vendored b.watcher must export MAX_IGNORE_STAR_COUNT — upstream renamed/removed it; update lib/watcher.js');
+    assert.ok(/WATCHER_IGNORE_MAX_LEN\s*=\s*b\.watcher\.MAX_IGNORE_PATTERN_LEN\b/.test(localSrc),
+      'lib/watcher.js must bind WATCHER_IGNORE_MAX_LEN to b.watcher.MAX_IGNORE_PATTERN_LEN, not a numeric literal');
+    assert.ok(/WATCHER_IGNORE_MAX_STARS\s*=\s*b\.watcher\.MAX_IGNORE_STAR_COUNT\b/.test(localSrc),
+      'lib/watcher.js must bind WATCHER_IGNORE_MAX_STARS to b.watcher.MAX_IGNORE_STAR_COUNT, not a numeric literal');
+    assert.equal(/WATCHER_IGNORE_MAX_LEN\s*=\s*\d/.test(localSrc), false,
+      'lib/watcher.js must NOT re-pin WATCHER_IGNORE_MAX_LEN to a numeric literal — consume b.watcher.MAX_IGNORE_PATTERN_LEN');
+    assert.equal(/WATCHER_IGNORE_MAX_STARS\s*=\s*\d/.test(localSrc), false,
+      'lib/watcher.js must NOT re-pin WATCHER_IGNORE_MAX_STARS to a numeric literal — consume b.watcher.MAX_IGNORE_STAR_COUNT');
+  });
+
+  it('the cleartext gate uses isExactLoopbackName, never the widening isLoopbackHost', () => {
+    // class: loopback-widening (no marker — a security regression, never allowed)
+    // b.ssrfGuard.isLoopbackHost matches the RFC 6761 *.localhost subdomain
+    // reservation (evil.localhost === true), which an attacker can register in a
+    // resolver to point at a public IP. The client's plaintext-http /
+    // cleartext-enrollment gate (config.isLoopbackHost) MUST compose
+    // b.ssrfGuard.isExactLoopbackName (exact "localhost" or a loopback IP literal
+    // only). Any use of the widening variant would let evil.localhost speak
+    // plaintext http:// / enroll the mTLS PRIVATE KEY in the clear.
+    var matches = _scan(/\bb\.ssrfGuard\.isLoopbackHost\b/, { skipComments: true });
+    _assertClean('loopback-widening', matches);
+  });
+
+  it('the file watcher wrapper classifies a fatal backend error by err.fatal + the fatal-code roster', () => {
+    // class: watcher-fatal-classify (no marker — a dropped fatal classification
+    // silently turns local change detection off after a native-handle death)
+    // b.watcher raises watcher/handle-dead + watcher/root-lost via onError with
+    // err.fatal===true. _onWatcherError must treat err.fatal (future-proof) AND
+    // those two codes as fatal (recover), not transient — otherwise a dead handle
+    // is logged as a transient blip, never re-created, and detection stays off
+    // until a full daemon restart.
+    var w = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'watcher.js'), 'utf8');
+    assert.ok(/err\s*&&\s*err\.fatal\s*===\s*true/.test(w),
+      'lib/watcher.js _onWatcherError must treat err.fatal===true as fatal');
+    assert.ok(/['"]watcher\/handle-dead['"]/.test(w),
+      'FATAL_WATCHER_CODES must include watcher/handle-dead');
+    assert.ok(/['"]watcher\/root-lost['"]/.test(w),
+      'FATAL_WATCHER_CODES must include watcher/root-lost');
+  });
+
+  it('the server-event apply-chain catch records the failed seq (no silent cursor skip)', () => {
+    // class: seq-desync (no marker — a dropped watermark silently loses a server
+    // event on reconnect)
+    // A handler throw caught in _onServerMessage must call _noteUnappliedSeq so
+    // _updateSeq caps the cursor one below the gap; without it a later successful
+    // event advances lastSeq past the failed seq and the server never re-delivers
+    // it (silent add/replace/remove loss).
+    var se = fs.readFileSync(path.join(REPO_ROOT, 'lib', 'sync-engine.js'), 'utf8');
+    // The _onServerMessage apply-chain (.then(_applyServerMessage).catch(...))
+    // must reference _noteUnappliedSeq within the catch that follows it.
+    assert.ok(/_applyServerMessage\(msg\)\)[\s\S]{0,300}_noteUnappliedSeq/.test(se),
+      'the _onServerMessage apply-chain catch must call this._noteUnappliedSeq(msg && msg.seq) so a thrown handler does not skip the cursor (silent event loss)');
   });
 
   it('test fixtures never pick a user with an unordered LIMIT 1', () => {

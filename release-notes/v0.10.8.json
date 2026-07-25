@@ -1,0 +1,63 @@
+{
+  "version": "0.10.8",
+  "date": "2026-07-25",
+  "headline": "Restores auto-rollback for the full-size binaries, adds a cooperative Windows daemon stop, and hardens sync recovery",
+  "summary": "This release refreshes the vendored security framework and fixes several correctness and robustness issues across the auto-update, daemon, file-watch, and sync-reconcile paths. Auto-update rollback now works for the full-size platform binaries on Linux and macOS, Windows `stop` performs a cooperative graceful shutdown instead of a forced terminate, and secrets embedded in log messages are masked before they reach the log file. No configuration changes are required.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "Auto-update rollback restored for the full-size binaries on Linux and macOS",
+          "body": "A failed auto-update could not automatically roll back to the previous binary on Linux or macOS: the restore step refused any backup larger than 64 MiB, and the platform binaries exceed that size, so a build that failed its post-install probation stayed installed with no automatic recovery. The restore now handles the full binary size, so a bad update is reverted to the prior working binary as intended. It also now confirms the on-disk binary is still the probationary build before restoring, so a binary replaced by another mechanism is left in place."
+        },
+        {
+          "title": "Windows stop performs a graceful shutdown",
+          "body": "On Windows, `hermitstash-sync stop` previously waited out a timeout and then forcibly terminated the daemon, cutting any in-flight upload and skipping the orderly state-database close. It now signals the running daemon to drain and shut down cleanly — the same teardown performed on other platforms — and only escalates to a forced stop if the daemon does not respond in time."
+        },
+        {
+          "title": "File watcher recovers from a native handle failure",
+          "body": "If the operating system file-change backend died (for example on inotify exhaustion, or when the watched folder was removed and recreated), the watcher treated the failure as transient and never restarted, silently leaving local changes undetected until the daemon was restarted. It now recognizes a dead handle and re-creates the watcher automatically."
+        },
+        {
+          "title": "Windows ignore rules written with backslashes now prune folders",
+          "body": "A subtree ignore pattern written with Windows path separators (for example `data\\cache\\**`) was not applied when skipping folders during the periodic scan, so a large ignored subtree could still be walked. Such patterns are now normalized and pruned correctly."
+        },
+        {
+          "title": "A failed server change event is re-delivered after reconnect instead of being skipped",
+          "body": "If applying a change event from the server failed (for example a transient local-database error), a later successful event could advance the sync position past the failed one, so the server would not re-send it on the next reconnect and the change could be missed. A failed event now holds the sync position so the reconnect re-delivers it."
+        },
+        {
+          "title": "The periodic reconcile no longer races a live transfer",
+          "body": "The background reconcile that re-drives stranded transfers could act on a file that a live download or upload was already handling, occasionally producing a spurious conflict copy or a transient mismatch. The reconcile now skips any path a live transfer owns and is serialized against live server events."
+        },
+        {
+          "title": "Upload metrics stay live after an internal engine restart",
+          "body": "The upload queue-depth and in-flight gauges could freeze after the sync engine restarted itself following a failed auto-update install. They are now re-registered on restart so telemetry stays accurate."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Secrets embedded in a log message are masked before they reach disk",
+          "body": "A credential interpolated into the middle of a log message — a token, an API key, a URL with an embedded password — could reach the log file and console unmasked. Log messages are now scrubbed with word-boundary matching so an embedded secret is redacted while the surrounding message stays readable, and the support-diagnostic bundle applies the same scrubbing to older log lines."
+        },
+        {
+          "title": "The status and stats commands no longer alter daemon state",
+          "body": "The `status` and `stats` commands — commonly used as container and service health probes — could remove a stale PID file as a side effect, which could then make a following `stop` report that no daemon was running. They are now read-only and never modify the PID file."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored security framework updated to blamejs v0.17.23",
+          "body": "The vendored blamejs framework is updated from v0.17.11 to v0.17.23, bringing its latest post-quantum TLS, redaction, self-update, file-watch, and daemon hardening plus a refreshed public-suffix list for domain classification. Several client components now consume its shared primitives directly (the TLS certificate-pin derivation, the loopback-host classification for the plaintext-transport gate, the free-text log redactor, and the file-watch ignore caps), reducing duplicated security-relevant code."
+        }
+      ]
+    }
+  ]
+}

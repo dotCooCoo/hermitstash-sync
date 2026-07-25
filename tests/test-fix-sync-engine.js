@@ -1225,3 +1225,77 @@ describe('A failed _reconcileCaseRename pins the cursor below the event', { time
     } finally { cleanup(h); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// A thrown server-event handler must hold the sync cursor so the reconnect
+// re-delivers the failed event (no silent event skip).
+// ---------------------------------------------------------------------------
+describe('A thrown server-event handler holds the sync cursor (no silent skip)', { timeout: 30000 }, () => {
+  it('caps lastSeq below the failed event so a later success cannot advance past it', async () => {
+    const h = makeEngine();
+    try {
+      const { engine } = h;
+      const realUpsert = stateDb.upsertFile;
+      let throwOnce = true;
+      stateDb.upsertFile = function (...args) {
+        if (throwOnce) { throwOnce = false; throw new Error('simulated transient DB error'); }
+        return realUpsert.apply(this, args);
+      };
+      try {
+        // seq=5: its handler throws (the first upsert fails) — the cursor must NOT advance.
+        engine._onServerMessage({
+          type: MSG.FILE_ADDED, relativePath: 'a.txt', fileId: 'f5',
+          checksum: sha3(Buffer.from('content-f5')), size: 10, seq: 5,
+        });
+        await engine._applyChain;
+        // seq=6: applies cleanly — WITHOUT the watermark this would advance
+        // lastSeq to 6 and the reconnect would dial since=6, skipping seq=5.
+        engine._onServerMessage({
+          type: MSG.FILE_ADDED, relativePath: 'b.txt', fileId: 'f6',
+          checksum: sha3(Buffer.from('content-f6')), size: 10, seq: 6,
+        });
+        await engine._applyChain;
+      } finally {
+        stateDb.upsertFile = realUpsert;
+      }
+      assert.ok(stateDb.getLastSeq() < 5,
+        `lastSeq must be held below the failed seq 5, got ${stateDb.getLastSeq()}`);
+    } finally { cleanup(h); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The periodic reconcile must skip a path a live transfer owns (it runs off
+// the apply chain, so acting on a suppressed path can conflict-copy/overwrite
+// a file a live download or upload is mid-stream on).
+// ---------------------------------------------------------------------------
+describe('The periodic reconcile skips a path a live transfer owns', { timeout: 30000 }, () => {
+  it('does not conflict-copy or re-download a suppressed path, but resumes after release', async () => {
+    const h = makeEngine();
+    try {
+      const { engine } = h;
+      const rel = 'live.txt';
+      const sum = sha3(Buffer.from('content-Flive')); // the download stub writes content-<fileId>
+      stateDb.upsertFile({
+        relativePath: rel, status: FILE_STATUS.ERROR,
+        serverFileId: 'Flive', serverChecksum: sum, localChecksum: null, size: 13, serverSeq: 10,
+      });
+
+      // A live op owns the path.
+      engine._suppressPath(rel);
+      let conflictCalls = 0;
+      const realConflict = engine._maybeSaveConflictCopy.bind(engine);
+      engine._maybeSaveConflictCopy = async (...a) => { conflictCalls++; return realConflict(...a); };
+
+      const before = h.downloadLog.length;
+      await engine._recoverPending();
+      assert.equal(h.downloadLog.length, before, 'a suppressed path must not be re-downloaded by the reconcile');
+      assert.equal(conflictCalls, 0, 'a suppressed path must not be conflict-copied by the reconcile');
+
+      // Once the live op releases the path, the next reconcile re-drives the row.
+      engine._releasePath(rel);
+      await engine._recoverPending();
+      assert.ok(h.downloadLog.length > before, 'after release the reconcile re-drives the stranded row');
+    } finally { cleanup(h); }
+  });
+});
