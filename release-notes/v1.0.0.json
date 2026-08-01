@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "date": "2026-07-30",
+  "headline": "Post-quantum sync certificate-authority interoperability and a refreshed certificate stack",
+  "summary": "hermitstash-sync 1.0.0 interoperates with a HermitStash server whose sync certificate authority signs with ML-DSA-87 (FIPS 204) — the post-quantum default in server 1.14.0 — as well as with a classical ECDSA P-384 authority. Enrollment and the mutual-TLS channel are signature-algorithm agnostic, so no configuration change is needed to connect to either. The vendored framework moves to the @blamejs/pki certificate stack.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Interoperate with a post-quantum sync certificate authority",
+          "body": "A HermitStash server on 1.14.0 issues sync client certificates from an ML-DSA-87 (FIPS 204) certificate authority by default, or from a classical ECDSA P-384 authority when the operator supplies one. The client authenticates the mutual-TLS channel by pinning the server's leaf public key and verifying the certificate identity, both of which are signature-algorithm agnostic — so enrollment and reconnection succeed against either authority with no configuration change."
+        },
+        {
+          "title": "Gate a certificate-authority algorithm change on a runtime handshake check",
+          "body": "When the server rotates its sync certificate authority to a new signature algorithm and pushes replacement credentials to a connected client, the client now runs an in-process loopback handshake to confirm its own TLS runtime can present and verify that algorithm before replacing its identity. A build too old to complete the handshake keeps its current certificate, logs the algorithm it cannot yet use, and stays connected on the existing authority, so a future algorithm upgrade cannot strand a client on credentials it is unable to present. The incoming credentials are validated — key match plus issuer chain with a certificate-authority basic-constraint check — and staged atomically, so a rejected or interrupted rotation leaves the working identity untouched."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Refresh the vendored framework and move the mTLS certificate stack to @blamejs/pki",
+          "body": "The vendored blamejs bundle advances to 0.18.3, which replaces the previous certificate-handling library with @blamejs/pki. Certificate parsing, chain validation, and the SPKI pin comparison applied to the server's TLS leaf run through the refreshed stack. The CycloneDX software bill of materials attached to each release lists @blamejs/pki in place of the former peculiar-pki bundle."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "FIPS 204 (ML-DSA)", "url": "https://csrc.nist.gov/pubs/fips/204/final" }
+  ]
+}
