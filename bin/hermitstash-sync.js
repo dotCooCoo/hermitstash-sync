@@ -97,7 +97,7 @@
       // relative to the package directory (e.g. "lib/vendor/noble-curves.cjs").
       _checkFiles(pkg.files, pkg.hashes, root);
       var transitiveBase = nodePath.join(root, (typeof pkg.directory === 'string' ? pkg.directory : ('vendor/' + name)));
-      // Also verify the transitive bundles (noble-curves, peculiar-pki,
+      // Also verify the transitive bundles (noble-curves, @blamejs/pki,
       // simplewebauthn-server, …) that blamejs require()s at load time. Their
       // per-file hashes live under transitive.packages (projected for the
       // SBOM); without this they would execute at boot BEFORE any integrity

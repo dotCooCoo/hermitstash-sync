@@ -215,6 +215,7 @@ var VALID_ALLOW_CLASSES = {
   'bitwise-int-coerce':         1,
   'proto-member-lookup':        1,
   'case-sensitive-token':       1,
+  'tls-verify-disabled':        1,
 };
 
 // CVE-2026-25639 / 42033 / 42041 / 40175 — axios prototype-pollution.
@@ -1318,6 +1319,22 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     assert.equal(bad.length, 0,
       'users-limit-1: unordered `FROM users LIMIT 1` in test fixtures (add ORDER BY createdAt ASC):\n' +
       bad.map(function (x) { return '    ' + x.file + ':' + x.line + ': ' + x.content; }).join('\n'));
+  });
+
+  it('no disabled TLS certificate verification (rejectUnauthorized:false / checkServerIdentity stub) without a documented allow marker', () => {
+    // class: tls-verify-disabled — turning off chain/identity verification makes
+    // a connection MITM-able. The client has exactly two legitimate uses: the
+    // first-contact enrollment agent (before a CA exists) and the in-process
+    // CA-rotation capability probe (a throwaway 127.0.0.1 loopback carrying no
+    // data). Both carry an allow marker with a written justification; the gate
+    // exists so any NEW site is a conscious, reviewed decision rather than a
+    // copy-paste that silently ships a plaintext-or-MITM-able channel. The
+    // checkServerIdentity form is matched only in its verification-defeating
+    // `() => undefined` shape — a real SPKI-pinning override (a named function)
+    // is the correct pattern and is intentionally not flagged.
+    var bad = _scan(/rejectUnauthorized\s*[:=]\s*false|checkServerIdentity\s*:\s*\(\s*\)\s*=>\s*undefined/);
+    bad = _filterMarkers(bad, 'tls-verify-disabled');
+    _assertClean('tls-verify-disabled', bad);
   });
 
   it('every // allow:<class> marker names a registered detector class', () => {

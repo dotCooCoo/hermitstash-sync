@@ -30,6 +30,7 @@ const b = require('../vendor/blamejs');
 const {
   createTempDir, rmrf, sleep, ApiClient,
   runDbScript, uploadFile, countBundleFiles,
+  httpRequest,
 } = require('./test-helpers');
 const { VERSION: LOCAL_VERSION } = require('../lib/constants');
 
@@ -127,36 +128,62 @@ async function seedEnrollmentCode() {
   }
   const stashId = resp.json.stash._id;
 
-  // 2. Toggle syncEnabled. /stash/:slug/init reads syncEnabled === "true"
-  //    when deciding whether to mint a sync bundle vs a snapshot.
+  // 2. Toggle syncEnabled so the stash participates in the shared persistent
+  //    sync channel.
   resp = await client.request('/admin/stash/' + stashId + '/update', 'POST', { syncEnabled: true });
   if (resp.statusCode !== 200) {
     throw new Error('admin/stash/:id/update failed: HTTP ' + resp.statusCode + ' ' + (resp.body || ''));
   }
 
-  // 3. /stash/:slug/init creates the persistent sync bundle and writes
-  //    syncBundleId back onto the stash row in one call.
-  resp = await client.request('/stash/' + slug + '/init', 'POST', { fileCount: 0 });
-  if (resp.statusCode !== 200 || !resp.json || !resp.json.bundleId) {
-    throw new Error('stash/:slug/init failed: HTTP ' + resp.statusCode + ' ' + (resp.body || ''));
-  }
-  const bundleId = resp.json.bundleId;
-
-  // 4. Mint the enrollment code. The server issues a fresh client cert
-  //    via b.mtlsCa.generateClientCert and binds its fingerprint onto the
-  //    api_keys row, which is exactly the state /sync/enroll redeems into.
+  // 3. Mint the first sync-token. On a sync-enabled stash with no bundle yet,
+  //    the server provisions the shared persistent sync bundle and records it
+  //    as stash.syncBundleId at this admin-provisioning step, so /sync/enroll
+  //    can hand the client a resolvable bundleId. Redeeming the code here also
+  //    yields the stash-bound sync principal (API key + issued client cert)
+  //    used below for the "server -> host" push — the shared sync bundle
+  //    refuses an anonymous/browser caller. This drives the real production
+  //    provisioning + enrollment path end to end: bundle creation, cert
+  //    issuance (b.mtlsCa.generateClientCert), and cert-fingerprint binding.
   resp = await client.request('/admin/stash/' + stashId + '/sync-token', 'POST', {});
   if (resp.statusCode !== 200 || !resp.json || !resp.json.enrollmentCode) {
-    throw new Error('admin/stash/:id/sync-token failed: HTTP ' + resp.statusCode + ' ' + (resp.body || ''));
+    throw new Error('admin/stash/:id/sync-token (push identity) failed: HTTP ' + resp.statusCode + ' ' + (resp.body || ''));
+  }
+  const pushEnroll = await httpRequest(CTX.url + '/sync/enroll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: resp.json.enrollmentCode }),
+    timeout: 15000,
+  });
+  if (pushEnroll.statusCode !== 200 || !pushEnroll.json || !pushEnroll.json.clientCert) {
+    throw new Error('push-identity /sync/enroll failed: HTTP ' + pushEnroll.statusCode + ' ' + (pushEnroll.body || ''));
+  }
+  // The server resolved the provisioned sync bundle onto the enroll response —
+  // this is the bundle the container syncs against. A null bundleId means the
+  // admin sync-token step did not provision stash.syncBundleId.
+  const bundleId = pushEnroll.json.bundleId;
+  if (!bundleId) {
+    throw new Error('enroll response carried no bundleId — stash.syncBundleId was not provisioned: ' + (pushEnroll.body || ''));
+  }
+  const push = {
+    key:    pushEnroll.json.apiKey,
+    cert:   pushEnroll.json.clientCert,
+    keyPem: pushEnroll.json.clientKey,
+    ca:     pushEnroll.json.caCert,
+  };
+
+  // 4. Mint the enrollment code the container redeems on its first boot.
+  resp = await client.request('/admin/stash/' + stashId + '/sync-token', 'POST', {});
+  if (resp.statusCode !== 200 || !resp.json || !resp.json.enrollmentCode) {
+    throw new Error('admin/stash/:id/sync-token (container) failed: HTTP ' + resp.statusCode + ' ' + (resp.body || ''));
   }
 
-  return { code: resp.json.enrollmentCode, bundleId: bundleId, stashId: stashId, slug: slug };
+  return { code: resp.json.enrollmentCode, bundleId: bundleId, stashId: stashId, slug: slug, push: push };
 }
 
 // Push a file through /stash/:slug/file/:bundleId — the only path that's
 // allowed to write into a stash-bound bundle (by design; /drop/* refuses
 // stash bundles to keep per-stash caps + access checks effective).
-async function uploadFileViaStash(slug, bundleId, name, content) {
+async function uploadFileViaStash(slug, bundleId, name, content, push) {
   const u = new URL(CTX.url + '/stash/' + slug + '/file/' + bundleId);
   const boundary = '----boundary' + b.crypto.generateToken(8);
   const payload = Buffer.concat([
@@ -169,15 +196,20 @@ async function uploadFileViaStash(slug, bundleId, name, content) {
     Buffer.from('\r\n--' + boundary + '--\r\n', 'utf8'),
   ]);
   return new Promise(function (resolve, reject) {
+    // The shared sync bundle only accepts writes from the stash's sync
+    // principal (Bearer sync key + its bound client cert), so present the
+    // redeemed push identity — not the admin cert, which is not a sync
+    // principal for this stash and would be refused with a 404.
     const req = require('https').request({
       hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
       rejectUnauthorized: false,
-      ca: fs.readFileSync(CTX.caCertPath),
-      cert: fs.readFileSync(CTX.clientCertPath),
-      key: fs.readFileSync(CTX.clientKeyPath),
+      ca: push.ca,
+      cert: push.cert,
+      key: push.keyPem,
       headers: {
         'Content-Type':   'multipart/form-data; boundary=' + boundary,
         'Content-Length': payload.length,
+        'Authorization':  'Bearer ' + push.key,
       },
     }, function (res) {
       const chunks = [];
@@ -249,6 +281,7 @@ describe('Docker client — end-to-end', { timeout: 300000 }, function () {
   let enrollmentCode;
   let bundleId;
   let stashSlug;
+  let pushIdentity;
 
   before(async function () {
     console.log('[docker-e2e] Building image ' + IMAGE_TAG + ' for linux/amd64 ...');
@@ -273,6 +306,7 @@ describe('Docker client — end-to-end', { timeout: 300000 }, function () {
     enrollmentCode = seeded.code;
     bundleId = seeded.bundleId;
     stashSlug = seeded.slug;
+    pushIdentity = seeded.push;
     console.log('[docker-e2e] Seeded enrollment code for bundle ' + bundleId);
   });
 
@@ -314,7 +348,7 @@ describe('Docker client — end-to-end', { timeout: 300000 }, function () {
     // Stash-bound bundles only accept writes through /stash/:slug/file/:bundleId.
     // /drop/* refuses by design (per-stash caps + access checks live on the
     // stash route, including for admin keys — see test-stash-drop-bypass.js).
-    const res = await uploadFileViaStash(stashSlug, bundleId, name, 'pushed by server');
+    const res = await uploadFileViaStash(stashSlug, bundleId, name, 'pushed by server', pushIdentity);
     assert.equal(res.statusCode, 200, 'upload failed: ' + res.body);
     await waitForHostFile(path.join(hostSyncDir, name), 'pushed by server', 20000);
   });

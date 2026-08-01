@@ -12,7 +12,7 @@
  *
  * Coverage:
  *   - GET /admin/api/mtls-ca/status reports legacy detection (openssl-
- *     generated test CA is untagged → generation 1 → legacy vs current 2).
+ *     generated test CA is untagged → generation 1 → legacy vs the current generation).
  *   - POST /admin/api/mtls-ca/regenerate rejects missing REGEN confirm.
  *   - Fast path: no live clients → summary returned immediately.
  *   - Full rotation path: connected sync WS client receives ca:rotation
@@ -154,10 +154,10 @@ describe('mTLS CA Regeneration', { timeout: 30000 }, function () {
     assert.ok(rot.newKeyPem && rot.newKeyPem.indexOf('PRIVATE KEY') !== -1, 'newKeyPem is a PEM private key');
     assert.ok(typeof rot.restartInMs === 'number' && rot.restartInMs > 0, 'restartInMs is positive number');
 
-    // New CA has the CAv2 marker in its subject DN
+    // New CA carries the current-generation marker (OU=CAv{N}) in its subject DN
     var { X509Certificate } = require('node:crypto');
     var newCaParsed = new X509Certificate(rot.newCaPem);
-    assert.ok(/CAv2/.test(newCaParsed.subject), 'New CA subject DN contains CAv2 marker: ' + newCaParsed.subject);
+    assert.ok(/CAv\d+/.test(newCaParsed.subject), 'New CA subject DN contains a CAv generation marker: ' + newCaParsed.subject);
 
     // Ack the rotation manually (emulating sync-engine._handleCaRotation's
     // dryRun path: ack without file writes).

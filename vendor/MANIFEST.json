@@ -2,14 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.17.23",
+      "version": "0.18.3",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.17.23",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.17.23:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.17.23",
+      "tag": "v0.18.3",
+      "bundledAt": "2026-08-01T00:00:00Z",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.3:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.3",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -39,7 +40,7 @@
       },
       "hashes": {
         "index": "sha256:c54ff6ce2a55f24ad9078dc309740a582f305cf89ceeb4dc59b62a4f4da50274",
-        "safe-json": "sha256:43e54c1fc90a524e1f5cb58a1bea60072b132a75b5f658e2bf66efef71702243",
+        "safe-json": "sha256:3ebfbf8e5d9e4a19063eeed7518ca19f2e4f898792bea9602c4bf138e506df6f",
         "safe-url": "sha256:d6024d0e64936b25833cc1a0a3113d8d5c9f3048ba7452ebcbbebb581c41cd4d",
         "pqc-agent": "sha256:2b050109a917b6938f4c5fcf0237c7120604387cdf72ba9f9adbcb6f99f13db5",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
@@ -163,28 +164,19 @@
             },
             "bundledAt": "2026-07-25T00:00:00Z"
           },
-          "peculiar-pki": {
-            "version": "2.0.0+pkijs-3.4.0",
-            "license": "MIT",
-            "author": "Peculiar Ventures",
-            "source": "https://github.com/PeculiarVentures",
+          "@blamejs/pki": {
+            "version": "0.3.27",
+            "license": "Apache-2.0",
+            "author": "blamejs",
+            "source": "https://github.com/blamejs/pki",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.3.27:*:*:*:*:node.js:*:*",
             "files": {
-              "server": "lib/vendor/pki.cjs"
+              "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:2307ef65e070757ffb13442b377e45efb9fa1a10432d9b39618387720ab990ed"
+              "server": "sha256:28b53546b062fef30e9fe5569036fcf51b6669cbd0a910542a52064eb4814e81"
             },
-            "bundledAt": "2026-07-13T00:00:00Z",
-            "components": {
-              "@peculiar/x509": {
-                "url": "https://github.com/PeculiarVentures/x509",
-                "version": "2.0.0"
-              },
-              "pkijs": {
-                "url": "https://github.com/PeculiarVentures/PKI.js",
-                "version": "3.4.0"
-              }
-            }
+            "bundledAt": "2026-08-01T00:00:00Z"
           }
         }
       }

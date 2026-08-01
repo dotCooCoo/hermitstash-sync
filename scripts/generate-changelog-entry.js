@@ -560,11 +560,12 @@ function rebuildChangelog() {
   parts.push('');
   parts.push('One entry per released tag, grouped by minor. Latest first.');
   parts.push('');
-  parts.push('Pre-1.0 the surface is intentionally evolving — every release may');
-  parts.push('change something operators depend on. Read each entry before');
-  parts.push('upgrading across more than a few patches at a time. Releases');
-  parts.push('older than the first structured entry below live in the git log');
-  parts.push('and on the GitHub Releases page.');
+  parts.push('The project follows semantic versioning from 1.0 onward: a major');
+  parts.push('release may change behaviour operators depend on, while minor and');
+  parts.push('patch releases do not. Read each entry before upgrading across more');
+  parts.push('than a few releases at a time. Releases older than the first');
+  parts.push('structured entry below live in the git log and on the GitHub');
+  parts.push('Releases page.');
   parts.push('');
   for (var m = 0; m < minorOrder.length; m += 1) {
     parts.push('## v' + minorOrder[m] + '.x');

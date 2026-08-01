@@ -186,9 +186,10 @@ describe('project-transitive-manifest — SBOM consumes the projection', () => {
     for (const key of Object.keys(proj)) {
       const ref = `blamejs/${key}@${proj[key].version}`;
       assert.ok(refs.has(ref), `SBOM is missing transitive component ${ref}`);
-      // A meta-bundle's nested packages (e.g. peculiar-pki -> @peculiar/x509,
-      // pkijs) must each be enumerated so a CVE scanner can key on their own
-      // version, not just the aggregate bundle.
+      // A meta-bundle that vendors its own sub-packages must enumerate each so
+      // a CVE scanner can key on the nested package's own version, not just the
+      // aggregate bundle. Carried only when a bundle declares `components`; no
+      // shipped bundle nests today, so this loop is a no-op on the current tree.
       const components = proj[key].components;
       if (components && typeof components === 'object') {
         for (const nestedKey of Object.keys(components)) {
@@ -208,13 +209,16 @@ describe('project-transitive-manifest — SBOM consumes the projection', () => {
     assert.equal(doc.components.length, 1 + Object.keys(proj).length + nestedCount);
   });
 
-  it('enumerates the peculiar-pki nested packages with their own purls', () => {
+  it('enumerates @blamejs/pki (the mTLS cert stack) as a distinct component', () => {
     const { doc } = sbom.build();
-    const x509 = doc.components.find(c => c.name === '@peculiar/x509');
-    const pkijs = doc.components.find(c => c.name === 'pkijs');
-    assert.ok(x509, '@peculiar/x509 must be a distinct SBOM component');
-    assert.ok(pkijs, 'pkijs must be a distinct SBOM component');
-    assert.match(x509.purl, /^pkg:github\/peculiarventures\/x509@/);
-    assert.match(pkijs.purl, /^pkg:github\/peculiarventures\/pki\.js@/);
+    const pki = doc.components.find(c => c.name === '@blamejs/pki');
+    assert.ok(pki, '@blamejs/pki must be a distinct SBOM component');
+    assert.match(pki.purl, /^pkg:github\/blamejs\/pki@/);
+    assert.match(pki.cpe, /^cpe:2\.3:a:blamejs:pki:/);
+    // The certificate stack ships as the single @blamejs/pki bundle now; the
+    // former peculiar-pki bundle and its @peculiar/x509 + pkijs sub-packages
+    // are gone from the shipped surface.
+    assert.ok(!doc.components.some(c => /peculiar|pkijs/i.test(c.name)),
+      'no peculiar/pkijs components should remain — replaced by @blamejs/pki');
   });
 });
