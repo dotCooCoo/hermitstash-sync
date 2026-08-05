@@ -17,6 +17,12 @@
 //   3. A 5xx handshake rejection stays TRANSIENT: no upgrade_rejected, _closing
 //      stays false, the wrapper self-heals by arming a reconnect. This is the
 //      availability path the fix must not break.
+//   4. A 429 Too Many Requests upgrade rejection stays TRANSIENT: the server
+//      throttles /sync/ws (per-IP window OR per-key ceiling counting a not-yet-
+//      reaped ghost connection) with a 429 that clears on its own. Treating it
+//      as terminal — as "any non-5xx is terminal" once did — wedged the daemon
+//      into a sticky ERROR that never recovered after the limit reset. It must
+//      self-heal exactly like a 5xx (and 408 for symmetry with http-client.js).
 
 const net = require('node:net');
 const { describe, it, before, after } = require('node:test');
@@ -64,7 +70,7 @@ function runDial(port, config) {
 }
 
 describe('ws-client terminal-error routing (server-independent)', () => {
-  let badStatusLine, notFound, unavailable;
+  let badStatusLine, notFound, unavailable, tooManyRequests;
 
   before(async () => {
     // Malformed status line -> ws-client/bad-status-line (terminal, no HTTP status).
@@ -73,10 +79,13 @@ describe('ws-client terminal-error routing (server-independent)', () => {
     notFound = await startFakeWsServer('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n');
     // 5xx handshake rejection -> ws-client/bad-status, status 503 (TRANSIENT).
     unavailable = await startFakeWsServer('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n');
+    // 429 handshake rejection -> ws-client/bad-status, status 429 (TRANSIENT):
+    // the rate-limit / connection-ceiling reset case the daemon must recover from.
+    tooManyRequests = await startFakeWsServer('HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n');
   });
 
   after(() => {
-    for (const s of [badStatusLine, notFound, unavailable]) {
+    for (const s of [badStatusLine, notFound, unavailable, tooManyRequests]) {
       if (s && s.server) { try { s.server.close(); } catch { /* ignore */ } }
     }
   });
@@ -107,5 +116,16 @@ describe('ws-client terminal-error routing (server-independent)', () => {
     assert.equal(r.upgradeRejected, null, 'a 5xx must NOT emit upgrade_rejected (that would pin a sticky ERROR)');
     assert.equal(r.closing, false, '_closing must stay false so the close handler can reconnect');
     assert.equal(r.reconnectTimerArmed, true, 'a 5xx must self-heal by scheduling a reconnect');
+  });
+
+  it('keeps a 429 upgrade rejection TRANSIENT — self-heals after the limit resets (rate-limit / connection-ceiling recovery)', async () => {
+    // The server 429s /sync/ws on a per-IP handshake throttle (window resets) or
+    // a per-key connection ceiling still counting a not-yet-reaped ghost (reaped
+    // within a heartbeat). Both clear on their own, so the daemon MUST back off
+    // and redial rather than wedge into a sticky ERROR. reconnect left enabled.
+    const r = await runDial(tooManyRequests.port, {});
+    assert.equal(r.upgradeRejected, null, 'a 429 must NOT emit upgrade_rejected — that would pin a sticky ERROR and never recover after the limit reset');
+    assert.equal(r.closing, false, '_closing must stay false so the close handler can reconnect once the limit clears');
+    assert.equal(r.reconnectTimerArmed, true, 'a 429 must self-heal by scheduling a reconnect (backoff ladder rides out the throttle window)');
   });
 });
