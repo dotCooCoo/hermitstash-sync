@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.13",
+      "version": "0.18.14",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.13",
+      "tag": "v0.18.14",
       "bundledAt": "2026-08-06T00:00:00Z",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.13:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.13",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.14:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.14",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -77,18 +77,18 @@
             "bundledAt": "2026-07-13T00:00:00Z"
           },
           "@noble/curves": {
-            "version": "2.2.0",
+            "version": "2.3.0",
             "license": "MIT",
             "author": "Paul Miller",
             "source": "https://github.com/paulmillr/noble-curves",
-            "cpe": "cpe:2.3:a:paulmillr:noble-curves:2.2.0:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:paulmillr:noble-curves:2.3.0:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/noble-curves.cjs"
             },
             "hashes": {
-              "server": "sha256:2880c288b1285ef51d356d057bee6f0c8a00de36638cf47b47617e8c1faf10d5"
+              "server": "sha256:b5fe88d1ea780d0581dee6145d666f89d46fc9531b5db35db2e5b16627840890"
             },
-            "bundledAt": "2026-07-13T00:00:00Z"
+            "bundledAt": "2026-08-06T00:00:00Z"
           },
           "@noble/post-quantum": {
             "version": "0.6.1",
@@ -165,18 +165,18 @@
             "bundledAt": "2026-07-25T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.3.32",
+            "version": "0.3.33",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.3.32:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.3.33:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:275a0ef678a74e9ce035658ae95b18c05dcf69200bf934f609f149d1c8e739e3"
+              "server": "sha256:2c297ccbbb48e04306bd6cb681e80f41549fd12267dde9db2a771d55d688745b"
             },
-            "bundledAt": "2026-08-05T00:00:00Z"
+            "bundledAt": "2026-08-06T00:00:00Z"
           }
         }
       }
