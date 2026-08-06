@@ -1455,6 +1455,40 @@ async function testSymlinkEscapeRefused() {
   }
 }
 
+// A symlink AT THE FINAL path component (an in-root `link.txt -> real.txt`, the
+// atomic-deploy `latest.js -> app.<hash>.js` pattern) passes the lexical
+// _assertInsideRoot check but is refused by _readMeta's O_NOFOLLOW open (ELOOP —
+// the CWE-22/CWE-367 final-component TOCTOU defense). That rejection must fall
+// back like the stat read-error above it — a clean NOT_FOUND — not propagate as
+// a raw, uncaught ELOOP out of _readMeta (which surfaces raw from integrity()
+// and hangs the middleware request). O_NOFOLLOW is POSIX-only (a no-op on
+// Windows, which follows the link), so this only exercises on POSIX.
+async function testSymlinkFinalComponentFailsClosed() {
+  if (process.platform === "win32") {
+    check("final-component symlink: skipped on win32 (O_NOFOLLOW is a no-op)", true);
+    return;
+  }
+  var ctx = await _server();
+  _writeFile(ctx.dir, "real.txt", "hello");
+  var linkPath = path.join(ctx.dir, "link.txt");
+  var linkMade = false;
+  try { fs.symlinkSync(path.join(ctx.dir, "real.txt"), linkPath, "file"); linkMade = true; }
+  catch (_e) { linkMade = false; }
+  try {
+    if (linkMade) {
+      var e = null;
+      try { await b.staticServe.integrity(linkPath); } catch (err) { e = err; }
+      check("final-component symlink: integrity() fails closed with NOT_FOUND, not a raw ELOOP",
+            e && e.code === "NOT_FOUND");
+    } else {
+      check("final-component symlink: link creation unsupported on this host", true);
+    }
+  } finally {
+    try { if (linkMade) fs.unlinkSync(linkPath); } catch (_e) { /* best-effort teardown */ }
+    ctx.cleanup();
+  }
+}
+
 // An authenticated principal on the request makes extractActorContext derive
 // userId, so the quota actor key becomes "id:<userId>" instead of "ip:<addr>".
 // Seeding the id-keyed concurrency counter above the cap forces a deterministic
@@ -1560,6 +1594,424 @@ function testParseRangeHeaderGuard() {
         b.staticServe._parseRangeHeader(null, 10) === null);
 }
 
+// A non-GET/HEAD method is not the download surface — the middleware ignores
+// it and hands off to next() (here the fixture's 404 fall-through) rather than
+// serving or refusing the asset.
+async function testNonGetMethodFallsThrough() {
+  var ctx = await _ctx({ contentSafety: null }, { "a.txt": "abc" });
+  try {
+    // The 404 must come from the fixture's own next() handler (body "nf"), not
+    // an opaque 404 the middleware itself could emit — that proves the request
+    // fell THROUGH the static handler rather than being handled+refused by it.
+    var post = await _req(ctx.port, "POST", "/a.txt");
+    check("method: POST is not served (falls through to next → 404 'nf')",
+          post.statusCode === 404 && post.body.toString("utf8") === "nf");
+    var del = await _req(ctx.port, "DELETE", "/a.txt");
+    check("method: DELETE is not served (falls through to next → 404 'nf')",
+          del.statusCode === 404 && del.body.toString("utf8") === "nf");
+    // Sanity: GET on the same asset still serves — the method gate did not
+    // break the download path.
+    var get = await _get(ctx.port, "/a.txt");
+    check("method: GET on the same asset still serves 200",
+          get.statusCode === 200 && get.body.toString("utf8") === "abc");
+  } finally { ctx.close(); }
+}
+
+// A permissions gate whose check() THROWS (backend outage) fails closed: the
+// error is swallowed into { ok: false } and the request is refused 403 — the
+// same refusal a plain `false` produces, never a 500 or an open serve.
+async function testPermissionCheckThrows() {
+  var ctx = await _ctx({
+    contentSafety: null,
+    permissions: { check: async function () { throw new Error("authz backend down"); } },
+  }, { "secret.txt": "classified" });
+  try {
+    var r = await _get(ctx.port, "/secret.txt");
+    check("permission: a throwing check() fails closed → 403 (never 500 / never served)",
+          r.statusCode === 403 && r.body.toString("utf8").indexOf("classified") === -1);
+  } finally { ctx.close(); }
+}
+
+// contentSafety:null records the opt-out via audit.safeEmit at create() time.
+// A safeEmit that THROWS must not abort create() — the emission is best-effort
+// and the swallowed throw still yields a working serve handle.
+async function testContentSafetyDisabledAuditThrows() {
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-static-audit-throw-"));
+  _writeFile(dir, "a.txt", "abc");
+  b.staticServe._resetCacheForTest();
+  var createThrew = null;
+  var fn = null;
+  var throwingAudit = { safeEmit: function () { throw new Error("audit sink down"); } };
+  try {
+    fn = b.staticServe.create({ root: dir, contentSafety: null, audit: throwingAudit });
+  } catch (e) { createThrew = e; }
+  check("contentSafety:null: a throwing audit.safeEmit does not abort create()",
+        createThrew === null && typeof fn === "function");
+  // The handle still serves — the swallowed audit throw left the instance intact.
+  var server = http.createServer(function (req, res) {
+    fn(req, res, function () { res.writeHead(404); res.end("nf"); });
+  });
+  var port = await listenOnRandomPort(server);
+  try {
+    var r = await _get(port, "/a.txt");
+    check("contentSafety:null: handle serves normally after the swallowed audit throw",
+          r.statusCode === 200 && r.body.toString("utf8") === "abc");
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// safeAttachmentForRiskyMimes forces download for a risky MIME whose
+// Content-Type carries NO parameter (image/svg+xml has no "; charset=...") —
+// exercises the semicolon-absent branch of the risky-MIME classifier.
+async function testSafeAttachmentRiskyMimeNoParam() {
+  var ctx = await _ctx({ contentSafety: null, safeAttachmentForRiskyMimes: true },
+    { "icon.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>" });
+  try {
+    var r = await _get(ctx.port, "/icon.svg");
+    check("safeAttachmentForRiskyMimes: parameter-less image/svg+xml forced to attachment",
+          r.statusCode === 200 &&
+          /^attachment;/.test(r.headers["content-disposition"] || ""));
+    check("safeAttachmentForRiskyMimes: svg content-type advertised without a charset param",
+          (r.headers["content-type"] || "").indexOf(";") === -1);
+  } finally { ctx.close(); }
+}
+
+// forceAttachmentForNonText with a contentSafety MAP that is a real object but
+// carries no ".svg" gate: an SVG is forced to download because no sanitizer
+// vouches for it (distinct from contentSafety:null, which is the not-an-object
+// branch). This is the "object present, .svg gate absent" refusal.
+async function testForceAttachmentSvgMapMissingSvgGate() {
+  var csvGate = { check: async function () { return { ok: true, action: "serve" }; } };
+  var ctx = await _ctx({
+    forceAttachmentForNonText: true,
+    contentSafety: { ".csv": csvGate },
+  }, { "evil.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>" });
+  try {
+    var r = await _get(ctx.port, "/evil.svg");
+    check("force-attachment: svg with a contentSafety map lacking a .svg gate is forced to download",
+          /^attachment;/.test(r.headers["content-disposition"] || "") &&
+          r.headers["x-content-type-options"] === "nosniff");
+  } finally { ctx.close(); }
+}
+
+// A blank req.ip must NOT shadow the socket fallback: extractActorContext falls
+// through to the real peer address, so the actor key resolves and the per-actor
+// concurrency cap is ENFORCED. A proxy/middleware that blanks req.ip when it
+// can't resolve a forwarded address must not silently disable the quota
+// (fail-open). Seed the actor at the cap and prove the request is refused 429.
+async function testEmptyReqIpFallsBackToSocketAndEnforcesQuota() {
+  var cache = b.cache.create({ namespace: "static-emptyip-" + process.pid, backend: "memory" });
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-static-emptyip-"));
+  _writeFile(dir, "f.txt", "body");
+  b.staticServe._resetCacheForTest();
+  var fn = b.staticServe.create({
+    root: dir, contentSafety: null, cache: cache, maxConcurrentDownloadsPerActor: 1,
+  });
+  var server = http.createServer(function (req, res) {
+    // A blank req.ip must fall through to req.socket.remoteAddress, not yield a
+    // null (quota-disabling) actor key.
+    req.ip = "";
+    fn(req, res, function () { res.writeHead(404); res.end("nf"); });
+  });
+  var port = await listenOnRandomPort(server);
+  try {
+    // Seed every plausible localhost socket-address key above the cap; the empty
+    // req.ip resolves to one of them, so the cap must bite regardless of its form.
+    var ipCands = ["127.0.0.1", "::1", "::ffff:127.0.0.1"];
+    for (var i = 0; i < ipCands.length; i++) {
+      await cache.set("static:conc:ip:" + ipCands[i], 5);
+    }
+    var r = await _get(port, "/f.txt");
+    check("actor-key: a blank req.ip falls back to the socket address so the concurrency cap is enforced → 429",
+          r.statusCode === 429);
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (typeof cache.close === "function") await cache.close();
+  }
+}
+
+// A client that disconnects mid-stream triggers the cancellation-propagation
+// path: the file stream is destroyed, the idle timer cleared, and the actor's
+// concurrency slot released while all are still live (the normal-completion path
+// clears them first, so this only runs on an abort). To prove the RELEASE is the
+// abort path and not eventual normal completion, the stream is STALLED: a large
+// file plus a client that stops reading backpressures the server so the download
+// never finishes. With concurrency capped at 1, the slot is provably held while
+// the stall is parked (a concurrent request is refused 429), and only aborting
+// the stalled stream can free it (a follow-up then serves 200). A regressed abort
+// path leaves the slot pinned forever.
+async function testClientAbortMidStream() {
+  // 48 MiB comfortably exceeds loopback socket + kernel buffers, so pausing the
+  // client after the first bytes stalls the server mid-stream rather than letting
+  // it drain to completion. small.txt keeps the probe requests cheap (a 429 short-
+  // circuits before the file opens; the release probe serves a few bytes).
+  var big = Buffer.alloc(48 * 1024 * 1024, 0x61);
+  var cache = b.cache.create({ namespace: "static-abort-" + process.pid, backend: "memory" });
+  var ctx = await _ctx(
+    { contentSafety: null, cache: cache, maxConcurrentDownloadsPerActor: 1 },
+    { "big.dat": big, "small.txt": Buffer.from("ok") });
+  var net = require("node:net");
+  var sock = null;
+  try {
+    // Request 1: start the download, read the first bytes, then STOP reading so
+    // TCP backpressure stalls the server mid-stream while it holds the only slot.
+    await new Promise(function (resolve, reject) {
+      sock = net.connect(ctx.port, "127.0.0.1", function () {
+        sock.write("GET /big.dat HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+      });
+      var started = false;
+      sock.on("data", function () {
+        if (started) return;
+        started = true;
+        sock.pause();   // stop draining → backpressure → the server stream stalls, slot stays held
+        resolve();
+      });
+      sock.on("error", reject);
+    });
+
+    // While the stall is parked, the only slot is held: a concurrent request is
+    // refused 429. (This also proves the file is large enough to actually stall —
+    // a fully-drained stream would release the slot and answer 200 here.)
+    var held = null;
+    for (var i = 0; i < 50; i += 1) {
+      held = await _get(ctx.port, "/small.txt");
+      if (held.statusCode === 429) break;
+    }
+    check("client-abort: a stalled download holds its concurrency slot (a concurrent request is refused 429)",
+          held !== null && held.statusCode === 429);
+
+    // Abort the stalled stream. Because it never completed, ONLY the abort-cleanup
+    // path can release the slot.
+    sock.destroy();
+
+    // The slot must now be free: a fresh request serves 200. A regressed abort path
+    // leaves the slot pinned and this exhausts its retries still at 429.
+    var served = null;
+    for (var j = 0; j < 50; j += 1) {
+      served = await _get(ctx.port, "/small.txt");
+      if (served.statusCode === 200) break;
+    }
+    check("client-abort: aborting the stalled stream releases its slot (a fresh request then serves 200)",
+          served !== null && served.statusCode === 200 && served.body.toString() === "ok");
+  } finally {
+    try { if (sock) sock.destroy(); } catch (_d) { /* already gone */ }
+    ctx.close();
+    if (typeof cache.close === "function") await cache.close();
+  }
+}
+
+// integrity() on a path carrying a NUL byte: nodePath.resolve preserves the
+// embedded NUL, so the confinement barrier refuses it at the candidate-has-NUL
+// arm and _readMeta returns null → NOT_FOUND, never touching the filesystem.
+async function testIntegrityNulPathRefused() {
+  var threw = null;
+  try { await b.staticServe.integrity("\u0000abc"); } catch (e) { threw = e; }
+  check("integrity: a NUL-byte path is refused before any fs op → NOT_FOUND",
+        threw && threw.code === "NOT_FOUND");
+}
+
+// A request naming a DIFFERENT drive than the served root's (a Windows drive-
+// letter absolute like /D:/...) makes the confinement barrier's post-strip
+// residue check fire: path.relative across volumes yields an absolute remainder,
+// so _assertInsideRoot refuses it and _resolveSafe returns null → 404 (no escape
+// to another volume). On POSIX the same string is a nonexistent in-root name and
+// also 404s. Either way the request is refused and nothing outside root leaks.
+async function testCrossDriveRequestRefused() {
+  var ctx = await _ctx({ contentSafety: null }, { "ok.txt": "in-root" });
+  try {
+    var rootDrive = (path.parse(ctx.dir).root || "C:\\").charAt(0).toUpperCase();
+    var otherDrive = rootDrive === "D" ? "E" : "D";
+    var r = await _get(ctx.port, "/" + otherDrive + ":/Windows/win.ini");
+    check("cross-drive: an absolute other-volume path is refused → 404",
+          r.statusCode === 404);
+    var ok = await _get(ctx.port, "/ok.txt");
+    check("cross-drive: an in-root file still serves after the refusal",
+          ok.statusCode === 200 && ok.body.toString("utf8") === "in-root");
+  } finally { ctx.close(); }
+}
+
+// A request with no resolvable actor identity (blank req.ip AND no socket /
+// connection remoteAddress) yields a null actor key, so the per-actor
+// concurrency cap simply does not apply — there is no actor to key it to — and
+// the file still serves. Contrast testEmptyReqIpFallsBackToSocketAndEnforces-
+// Quota, where a socket address IS present so the cap bites: this is the arm
+// where extractActorContext resolves neither a userId nor an ip.
+async function testNoActorIdentityStillServes() {
+  var cache = b.cache.create({ namespace: "static-noactor-" + process.pid, backend: "memory" });
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-static-noactor-"));
+  _writeFile(dir, "f.txt", "body");
+  b.staticServe._resetCacheForTest();
+  var fn = b.staticServe.create({
+    root: dir, contentSafety: null, cache: cache, maxConcurrentDownloadsPerActor: 1,
+  });
+  var server = http.createServer(function (req, res) {
+    // No forwarded ip and no peer address → ctx.ip is null and there is no
+    // userId, so _actorKeyFromContext returns null.
+    req.ip = "";
+    req.socket = { remoteAddress: undefined };
+    req.connection = { remoteAddress: undefined };
+    fn(req, res, function () { res.writeHead(404); res.end("nf"); });
+  });
+  var port = await listenOnRandomPort(server);
+  try {
+    // Seed every plausible actor key above the cap; because the actor key is
+    // null, none of them applies and the request is NOT rejected.
+    var ipCands = ["127.0.0.1", "::1", "::ffff:127.0.0.1"];
+    for (var i = 0; i < ipCands.length; i++) {
+      await cache.set("static:conc:ip:" + ipCands[i], 5);
+    }
+    var r = await _get(port, "/f.txt");
+    check("no-actor: a request without a resolvable actor key bypasses the per-actor cap and serves 200",
+          r.statusCode === 200 && r.body.toString("utf8") === "body");
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (typeof cache.close === "function") await cache.close();
+  }
+}
+
+// A request whose url was blanked by upstream middleware (req.url = "") resolves
+// to an empty path: the split yields "", _resolveSafe refuses the empty request
+// path, and the middleware falls through to next() (404) rather than serving the
+// root index.
+async function testBlankUrlFallsThrough() {
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-static-blankurl-"));
+  _writeFile(dir, "index.html", "<h1>root</h1>");
+  b.staticServe._resetCacheForTest();
+  var fn = b.staticServe.create({ root: dir, contentSafety: null });
+  var server = http.createServer(function (req, res) {
+    req.url = "";  // upstream blanked the request target
+    fn(req, res, function () { res.writeHead(404); res.end("nf"); });
+  });
+  var port = await listenOnRandomPort(server);
+  try {
+    var r = await _get(port, "/index.html");
+    check("blank-url: an empty request url falls through to next → 404 (root not served)",
+          r.statusCode === 404 && r.body.toString("utf8") === "nf");
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A request whose headers object was dropped upstream (req.headers = undefined)
+// still serves: the conditional (If-None-Match / If-Modified-Since) and Range
+// readers default safely off a {} fallback rather than throwing.
+async function testBlankHeadersServes() {
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-static-noheaders-"));
+  _writeFile(dir, "a.txt", "abc");
+  b.staticServe._resetCacheForTest();
+  var fn = b.staticServe.create({ root: dir, contentSafety: null });
+  var server = http.createServer(function (req, res) {
+    // IncomingMessage.headers is a getter that rebuilds from the raw bag, so a
+    // plain assignment is ignored — shadow it with an own undefined property to
+    // simulate upstream middleware that dropped the header object.
+    Object.defineProperty(req, "headers", { value: undefined, writable: true, configurable: true });
+    fn(req, res, function () { res.writeHead(404); res.end("nf"); });
+  });
+  var port = await listenOnRandomPort(server);
+  try {
+    var r = await _get(port, "/a.txt");
+    check("no-headers: a request with a dropped headers object still serves 200",
+          r.statusCode === 200 && r.body.toString("utf8") === "abc");
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Idle-timeout teardown: a client that stops reading mid-download stalls the
+// server stream; after maxIdleMs the idle deadline fires, destroys the file
+// stream with an IDLE_TIMEOUT error (driving the stream "error" handler) and the
+// response, so the connection closes with the body only partially delivered.
+async function testIdleTimeoutTearsDownStalledStream() {
+  // 48 MiB exceeds the loopback socket buffers, so a paused client backpressures
+  // the server and its stream stalls: no more "data" events reset the deadline,
+  // so it fires.
+  var big = Buffer.alloc(48 * 1024 * 1024, 0x62);
+  var ctx = await _ctx({ contentSafety: null, maxIdleMs: 300 }, { "big.dat": big });
+  var net = require("node:net");
+  var sock = null;
+  var received = 0;
+  var started = false;
+  try {
+    await new Promise(function (resolve, reject) {
+      sock = net.connect(ctx.port, "127.0.0.1", function () {
+        sock.write("GET /big.dat HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+      });
+      sock.on("data", function (c) {
+        received += c.length;
+        if (started) return;
+        started = true;
+        sock.pause();  // stop reading → backpressure → the server stream stalls
+        resolve();
+      });
+      sock.on("error", function (e) { if (!started) { started = true; reject(e); } });
+    });
+    // The client stopped reading; after maxIdleMs the idle deadline fires,
+    // destroys the file stream with an IDLE_TIMEOUT error (the stream "error"
+    // handler bumps stats.failures) and the response. Detect it server-side via
+    // the failure counter — a paused client socket does not surface the peer
+    // teardown promptly.
+    await helpers.waitUntil(function () { return ctx.fn.stats().failures >= 1; }, {
+      timeoutMs: 5000,
+      label: "idle-timeout: stalled stream torn down after maxIdleMs (stats.failures)",
+    });
+    check("idle-timeout: a stalled download is torn down after maxIdleMs (failure recorded)",
+          ctx.fn.stats().failures >= 1);
+    check("idle-timeout: the full body was not delivered (stream aborted mid-flight)",
+          received < big.length);
+  } finally {
+    try { if (sock) sock.destroy(); } catch (_d) { /* already gone */ }
+    ctx.close();
+  }
+}
+
+// The served-bytes bandwidth charge at stream end is fire-and-forget: if the
+// cluster counter update rejects (a cache-backend hiccup), the .catch swallows
+// it so a charging failure never tears down an already-delivered 200. The stub
+// cache throws on the bandwidth key but delegates the concurrency key to a real
+// memory cache so inc/dec still work.
+async function testBandwidthChargeFailureSwallowed() {
+  var real = b.cache.create({ namespace: "static-bwfail-" + process.pid, backend: "memory" });
+  var bwUpdateThrew = false;
+  var stub = {
+    get: function (k) { return real.get(k); },
+    set: function (k, v, o) { return real.set(k, v, o); },
+    update: async function (k, fn, o) {
+      if (k.indexOf("static:bw:") === 0) {
+        bwUpdateThrew = true;
+        var e = new Error("bandwidth counter backend down");
+        e.code = "SINK_DOWN";
+        throw e;
+      }
+      return real.update(k, fn, o);
+    },
+  };
+  var ctx = await _ctx({
+    contentSafety: null, cache: stub, maxBytesAllActorsPerWindowMs: 1000000,
+  }, { "f.txt": "0123456789" });
+  try {
+    var r = await _get(ctx.port, "/f.txt");
+    check("bandwidth-charge-fail: the response is a full 200 despite the charge sink failing",
+          r.statusCode === 200 && r.body.toString("utf8") === "0123456789");
+    // The charge runs fire-and-forget after stream end; poll until it has been
+    // attempted (and thrown), exercising the swallow path.
+    await helpers.waitUntil(function () { return bwUpdateThrew; }, {
+      timeoutMs: 5000,
+      label: "bandwidth-charge-fail: the post-serve bandwidth charge was attempted and threw",
+    });
+    check("bandwidth-charge-fail: the failing post-serve charge is swallowed (response stays intact)",
+          bwUpdateThrew === true);
+  } finally {
+    ctx.close();
+    if (typeof real.close === "function") await real.close();
+  }
+}
+
 // The _get helper drives each fixture server with a default-agent http.request
 // (keep-alive), and srv.close() runs fire-and-forget. The kept-alive client
 // sockets, the servers' accept sockets, and any in-flight static-file read
@@ -1644,12 +2096,27 @@ async function run() {
     await testDirectoryWithoutIndexFallsThrough();
     await testBasenameGuardRefused();
     await testSymlinkEscapeRefused();
+    await testSymlinkFinalComponentFailsClosed();
     await testActorKeyUserIdBranch();
     await testSafeAttachmentNonRiskyInline();
     await testForceAttachmentPdfOctetStreamInline();
     await testHeadSanitizeOverride();
     await testIntegrityOnDirectory();
     testParseRangeHeaderGuard();
+    await testNonGetMethodFallsThrough();
+    await testPermissionCheckThrows();
+    await testContentSafetyDisabledAuditThrows();
+    await testSafeAttachmentRiskyMimeNoParam();
+    await testForceAttachmentSvgMapMissingSvgGate();
+    await testEmptyReqIpFallsBackToSocketAndEnforcesQuota();
+    await testClientAbortMidStream();
+    await testIntegrityNulPathRefused();
+    await testCrossDriveRequestRefused();
+    await testNoActorIdentityStillServes();
+    await testBlankUrlFallsThrough();
+    await testBlankHeadersServes();
+    await testIdleTimeoutTearsDownStalledStream();
+    await testBandwidthChargeFailureSwallowed();
   } finally {
     await _drainTcpHandles();
   }

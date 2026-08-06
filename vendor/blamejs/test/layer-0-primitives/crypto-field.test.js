@@ -386,6 +386,12 @@ function testColumnResidencyGate() {
   check("assertColumnResidency returns null for an undeclared table",
     b.cryptoField.assertColumnResidency("cf_cov_res_none", { addressLine1: "x" }, { backendTag: "us" }) === null);
 
+  // A missing backendTag defaults to "unrestricted", which satisfies any
+  // region-bound column (the write boundary can't refuse what it can't place).
+  check("assertColumnResidency treats a missing backendTag as unrestricted (passes)",
+    b.cryptoField.assertColumnResidency("cf_cov_res",
+      { id: 1, addressLine1: "10 Rue de Rivoli" }, {}) === null);
+
   // Config-time fail-loud on malformed declarations.
   check("declareColumnResidency throws on an empty table name",
     _try(function () { return b.cryptoField.declareColumnResidency("", { columnResidency: {} }); })
@@ -399,6 +405,16 @@ function testColumnResidencyGate() {
   check("declareColumnResidency throws on an empty residency tag",
     _try(function () { return b.cryptoField.declareColumnResidency("cf_cov_res2", { columnResidency: { c: "" } }); })
       .err.code === "crypto-field/residency-tag-empty");
+
+  // A columnResidency map whose entries live ONLY on the prototype: the
+  // own-property guard skips inherited keys, so nothing tagged is registered
+  // (a prototype-polluted input can't smuggle a residency tag into the gate).
+  var inheritedMap = Object.create({ ghostCol: "eu" });
+  var protoRes = b.cryptoField.declareColumnResidency("cf_cov_res_proto", { columnResidency: inheritedMap });
+  check("declareColumnResidency skips inherited (non-own) columnResidency keys",
+    protoRes && JSON.stringify(protoRes.columnResidency) === "{}");
+  check("getColumnResidency reflects only own keys (inherited skipped)",
+    JSON.stringify(b.cryptoField.getColumnResidency("cf_cov_res_proto")) === "{}");
 }
 
 // ---- per-row residency + per-row-key config guards, eraseRow tombstone ----
@@ -536,6 +552,16 @@ async function testMalformedEnvelopesFailClosed() {
     check("unsealRow refuses a plain vault: cell on an aad table (downgrade nulled)",
       downgrade.x === null);
 
+    // Empty-string cell on an aad column where NEITHER the rowId column nor _id
+    // is present on the row: the audit metadata's rowId falls back to null. The
+    // cell still fails closed (an empty string in a sealed aad column is an
+    // envelope downgrade), never surfaced as a valid empty value.
+    var emptyNoRowId = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_malformed_aad", { x: "" }, "seam");
+    });
+    check("an empty-string aad cell with no rowId/_id fails closed (nulled), audit rowId null-safe",
+      emptyNoRowId.ok === true && emptyNoRowId.value.x === null);
+
     // Type fidelity: a plain Uint8Array (not a Buffer) round-trips as bytes —
     // the distinct _encodeTyped Uint8Array branch, separate from Buffer.
     b.cryptoField.registerTable("cf_cov_u8", { sealedFields: ["bytes"] });
@@ -554,6 +580,597 @@ async function testMalformedEnvelopesFailClosed() {
   }
 }
 
+// ---- seal-envelope floor gate (registerTable, compliance-pinned) ----
+
+function testSealEnvelopeFloorGate() {
+  // The floor gate fires only when a compliance posture that declares a
+  // sealEnvelopeFloor is globally pinned. hipaa / pci-dss pin "aad": a table
+  // that seals columns under the weaker "plain" envelope is refused at
+  // registration so PHI/PCI never ships under a relocatable seal.
+  b.compliance._resetForTest();
+  b.compliance.set("hipaa");
+  try {
+    var belowFloor = _try(function () {
+      return b.cryptoField.registerTable("cf_cov_floor_plain", { sealedFields: ["pan"] });
+    });
+    check("registerTable refuses a plain-envelope sealing table under a pinned aad floor",
+      belowFloor.ok === false && belowFloor.err &&
+      belowFloor.err.code === "crypto-field/seal-envelope-below-floor");
+
+    // An AAD-bound table meets the "aad" floor exactly → registers.
+    var atFloorAad = _try(function () {
+      return b.cryptoField.registerTable("cf_cov_floor_aad",
+        { sealedFields: ["pan"], aad: true, rowIdField: "id" });
+    });
+    check("registerTable accepts an aad table at the pinned aad floor", atFloorAad.ok === true);
+
+    // A per-row-key table outranks the aad floor (crypto-shred > aad) →
+    // registers. declarePerRowKey must run BEFORE registerTable so the gate
+    // sees the stronger declared envelope.
+    b.cryptoField.declarePerRowKey("cf_cov_floor_krow");
+    var atFloorKrow = _try(function () {
+      return b.cryptoField.registerTable("cf_cov_floor_krow", { sealedFields: ["pan"] });
+    });
+    check("registerTable accepts a per-row-key table above the pinned aad floor",
+      atFloorKrow.ok === true);
+  } finally {
+    b.compliance._resetForTest();
+  }
+
+  // A posture that declares NO sealEnvelopeFloor (gdpr) is a pass-through:
+  // the gate reads an undefined floor and registers any envelope unchanged.
+  b.compliance._resetForTest();
+  b.compliance.set("gdpr");
+  try {
+    var noFloor = _try(function () {
+      return b.cryptoField.registerTable("cf_cov_floor_none", { sealedFields: ["ssn"] });
+    });
+    check("registerTable is a pass-through under a posture with no sealEnvelopeFloor",
+      noFloor.ok === true);
+  } finally {
+    b.compliance._resetForTest();
+    b.cryptoField.clearResidencyForTest();
+  }
+}
+
+// ---- eraseRow vacuum cascade when no db is initialized (skip + audit) ----
+
+function testErasePostureVacuumSkip() {
+  // With a regulated posture recorded (gdpr sets requireVacuumAfterErase),
+  // eraseRow schedules b.db.vacuumAfterErase. When the db isn't initialized
+  // (this sync context), the vacuum is best-effort: it's skipped and audited
+  // as cryptofield.vacuum.skipped rather than crashing the erase.
+  var info = b.cryptoField.applyPosture("gdpr");
+  check("applyPosture records a regulated posture and reports the vacuum requirement",
+    info && info.posture === "gdpr" && info.requireVacuumAfterErase === true);
+  check("getActivePosture returns the recorded posture", b.cryptoField.getActivePosture() === "gdpr");
+
+  b.cryptoField.registerTable("cf_cov_erase_vac", {
+    sealedFields: ["ssn"], derivedHashes: { ssnHash: { from: "ssn" } },
+  });
+  var erased = _try(function () {
+    return b.cryptoField.eraseRow("cf_cov_erase_vac",
+      { id: 1, ssn: "vault:x", ssnHash: "h", keep: "k" });
+  });
+  check("eraseRow under a vacuum-requiring posture does not throw when the db is uninitialized",
+    erased.ok === true);
+  check("eraseRow still tombstones the sealed column when the vacuum is skipped",
+    erased.value.ssn === null && erased.value.ssnHash === null && erased.value.keep === "k");
+}
+
+// ---- namespaced/derived hash computation (vault-backed) ----
+
+async function testHashComputation() {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-cf-hash-"));
+  try {
+    try { b.vault._resetForTest(); } catch (_e) { /* fresh init below */ }
+    await b.vault.init({ dataDir: tmp, mode: "plaintext" });
+
+    // computeNamespacedHash: default salted-sha3 is 128 hex; the keyed
+    // hmac-shake256 mode truncated to N bytes is 2N hex.
+    var ns = "bj-mail_messages-body:fts:";
+    var hDefault = b.cryptoField.computeNamespacedHash(ns, "kubernetes");
+    check("computeNamespacedHash default (salted-sha3) is a 128-hex digest",
+      typeof hDefault === "string" && /^[0-9a-f]{128}$/.test(hDefault));
+    var hMac = b.cryptoField.computeNamespacedHash(ns, "kubernetes",
+      { mode: "hmac-shake256", truncateBytes: 8 });
+    check("computeNamespacedHash hmac-shake256 truncated to 8 bytes is 16 hex",
+      /^[0-9a-f]{16}$/.test(hMac));
+    check("computeNamespacedHash keyed digest differs from the salted digest",
+      hMac !== hDefault.slice(0, 16));
+
+    // Config-time refusals: bad mode / non-positive-integer truncateBytes.
+    var badMode = _try(function () {
+      return b.cryptoField.computeNamespacedHash(ns, "x", { mode: "md5" });
+    });
+    check("computeNamespacedHash throws on an unknown mode",
+      badMode.ok === false && badMode.err &&
+      badMode.err.code === "crypto-field/bad-namespaced-hash-mode");
+    var badTrunc = _try(function () {
+      return b.cryptoField.computeNamespacedHash(ns, "x", { truncateBytes: -1 });
+    });
+    check("computeNamespacedHash throws on a non-positive truncateBytes",
+      badTrunc.ok === false && badTrunc.err &&
+      badTrunc.err.code === "crypto-field/bad-truncate-bytes");
+
+    // computeDerived on a keyed-MAC (default) table: returns { field, value }
+    // and, since the active mode is the keyed MAC, a distinct legacyValue.
+    b.cryptoField.registerTable("cf_cov_derive", {
+      sealedFields: ["email"], derivedHashes: { emailHash: { from: "email" } },
+    });
+    var d = b.cryptoField.computeDerived("cf_cov_derive", "email", "Alice@Example.com");
+    check("computeDerived returns the derived field name + a string digest",
+      d && d.field === "emailHash" && typeof d.value === "string");
+    check("computeDerived null for a null source value",
+      b.cryptoField.computeDerived("cf_cov_derive", "email", null) === null);
+    check("computeDerived null for an unregistered table",
+      b.cryptoField.computeDerived("cf_cov_derive_none", "email", "x") === null);
+    check("computeDerived null for a source field with no declared derived hash",
+      b.cryptoField.computeDerived("cf_cov_derive", "name", "x") === null);
+
+    // lookupHash / lookupHashCandidates: the query-translation siblings. The
+    // candidate list carries BOTH the keyed digest and the legacy salted one.
+    var lh = b.cryptoField.lookupHash("cf_cov_derive", "email", "Alice@Example.com");
+    check("lookupHash returns the derived column + digest", lh && lh.field === "emailHash" && !!lh.value);
+    check("lookupHash null when no derived hash is declared for the field",
+      b.cryptoField.lookupHash("cf_cov_derive", "name", "x") === null);
+    check("lookupHash null for an unregistered table",
+      b.cryptoField.lookupHash("cf_cov_lookup_never_registered", "email", "x") === null);
+    var lc = b.cryptoField.lookupHashCandidates("cf_cov_derive", "email", "Alice@Example.com");
+    check("lookupHashCandidates carries the keyed + legacy digests (dual-read)",
+      lc && lc.field === "emailHash" && Array.isArray(lc.values) && lc.values.length === 2);
+    check("lookupHashCandidates null when no derived hash is declared",
+      b.cryptoField.lookupHashCandidates("cf_cov_derive", "name", "x") === null);
+
+    // namespaceFor branches: explicit hashNamespaces override wins; a known
+    // HASH_PREFIX field maps to its registry namespace; otherwise the
+    // per-table bj-<table>-<field>: namespace is synthesized.
+    b.cryptoField.registerTable("cf_cov_ns_override", {
+      sealedFields: ["email"], hashNamespaces: { email: "custom-ns:" },
+      derivedHashes: { emailHash: { from: "email" } },
+    });
+    var over = b.cryptoField.computeDerived("cf_cov_ns_override", "email", "a@b.com");
+    check("computeDerived honours an explicit hashNamespaces override", over && typeof over.value === "string");
+    b.cryptoField.registerTable("cf_cov_ns_fallback", {
+      sealedFields: ["medicalNote"], derivedHashes: { noteHash: { from: "medicalNote" } },
+    });
+    var fb = b.cryptoField.computeDerived("cf_cov_ns_fallback", "medicalNote", "confidential");
+    check("computeDerived synthesizes a per-table namespace for an unknown field",
+      fb && fb.field === "noteHash" && typeof fb.value === "string");
+
+    // sealRow computes derived hashes from ALREADY-SEALED sources: a plain
+    // vault: source is unsealed for hashing, and (on an aad table) an
+    // aad-sealed source is unsealed with its column AAD.
+    var plainSource = b.vault.seal("bob@x.com");
+    var sealedFromPlain = b.cryptoField.sealRow("cf_cov_derive", { email: plainSource });
+    check("sealRow derives the hash from an already plain-vault-sealed source",
+      typeof sealedFromPlain.emailHash === "string" && sealedFromPlain.emailHash.length > 0);
+
+    b.cryptoField.registerTable("cf_cov_derive_aad", {
+      aad: true, sealedFields: ["email"], rowIdField: "id",
+      derivedHashes: { emailHash: { from: "email" } },
+    });
+    var aadSealedEmail = b.cryptoField.sealRow("cf_cov_derive_aad", { id: "u1", email: "a@b.com" }).email;
+    check("control: the aad source is a vault.aad: envelope",
+      typeof aadSealedEmail === "string" && aadSealedEmail.indexOf("vault.aad:") === 0);
+    var reseal = b.cryptoField.sealRow("cf_cov_derive_aad", { id: "u1", email: aadSealedEmail });
+    check("sealRow derives the hash from an already aad-sealed source (aad-unseal for hashing)",
+      typeof reseal.emailHash === "string" && reseal.emailHash.length > 0);
+    check("sealRow leaves an already aad-sealed value unchanged (idempotent)",
+      reseal.email === aadSealedEmail);
+  } finally {
+    try { b.vault._resetForTest(); } catch (_e) { /* leave vault state clean for siblings */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best-effort */ }
+  }
+}
+
+// ---- seal-side edge branches + unseal pass-through (vault-backed) ----
+
+async function testSealSideEdgeBranches() {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-cf-sealedge-"));
+  try {
+    try { b.vault._resetForTest(); } catch (_e) { /* fresh init below */ }
+    await b.vault.init({ dataDir: tmp, mode: "plaintext" });
+    b.cryptoField.clearRateCapForTest();
+    b.cryptoField.clearResidencyForTest();
+
+    // The per-row residency tag column must stay PLAINTEXT even under a K_row
+    // seal — the write gate reads it before sealRow and reads surface it
+    // verbatim. Declare residency first (the guard permits it while the table
+    // is unregistered), then register with that column also sealed; sealRow
+    // under a K_row must skip the residency column.
+    b.cryptoField.declarePerRowResidency("cf_cov_krow_res", {
+      residencyColumn: "region", allowedTags: ["eu", "global"],
+    });
+    b.cryptoField.registerTable("cf_cov_krow_res", { sealedFields: ["region", "ssn"] });
+    var kout = b.cryptoField.sealRow("cf_cov_krow_res",
+      { _id: "r1", region: "eu", ssn: "secret" }, { kRow: Buffer.alloc(32, 7), rowId: "r1" });
+    check("K_row seal keeps the residency tag column in plaintext", kout.region === "eu");
+    check("K_row seal wraps a non-residency sealed column as a vault.row: cell",
+      b.cryptoField.isRowSealed(kout.ssn));
+    // Idempotent: re-sealing an already-K_row-sealed value passes it through.
+    var kout2 = b.cryptoField.sealRow("cf_cov_krow_res",
+      { _id: "r1", region: "eu", ssn: kout.ssn }, { kRow: Buffer.alloc(32, 7), rowId: "r1" });
+    check("K_row seal is idempotent on an already-row-sealed value", kout2.ssn === kout.ssn);
+
+    // K_row seal deriving the AAD rowId from the row's _id when opts.rowId is
+    // omitted (the out._id fallback of the rowId term).
+    var koutIdInput = { _id: "r2", region: "eu", ssn: "secret2" };
+    var koutId = b.cryptoField.sealRow("cf_cov_krow_res", koutIdInput, { kRow: Buffer.alloc(32, 9) });
+    check("K_row seal derives the AAD rowId from the row's _id when opts.rowId is omitted",
+      b.cryptoField.isRowSealed(koutId.ssn) && koutId.region === "eu");
+    check("K_row seal does not mutate the input row (rowId from _id)", koutIdInput.ssn === "secret2");
+
+    // K_row seal on a table whose schemaVersion is the empty string: the cell
+    // AAD's schemaVersion term falls back to the default "1" (the (schema &&
+    // schema.schemaVersion) || "1" fallback). The cell is still a real
+    // authenticated vault.row: envelope and the input row is untouched.
+    b.cryptoField.registerTable("cf_cov_krow_sv", { sealedFields: ["ssn"], schemaVersion: "" });
+    var svInput = { _id: "sv1", ssn: "sv-secret" };
+    var svOut = b.cryptoField.sealRow("cf_cov_krow_sv", svInput, { kRow: Buffer.alloc(32, 3), rowId: "sv1" });
+    check("K_row seal with an empty schemaVersion falls back to the default AAD schema version",
+      b.cryptoField.isRowSealed(svOut.ssn));
+    check("K_row seal does not mutate the input row (empty-schemaVersion table)",
+      svInput.ssn === "sv-secret");
+
+    // A keyed table whose wrapped-secret lookup throws mid-read (a broken db
+    // handle): _kRowOnce swallows the error and returns no key, so the cell
+    // fails closed (nulled) rather than surfacing the attacker-visible
+    // ciphertext or crashing the read.
+    b.cryptoField.registerTable("cf_cov_krow_catch", { sealedFields: ["ssn"] });
+    b.cryptoField.declarePerRowKey("cf_cov_krow_catch", { keySize: 32 });
+    var throwingLookupHandle = { prepare: function () { throw new Error("prepare exploded"); } };
+    var caughtLookup = b.cryptoField.unsealRow("cf_cov_krow_catch",
+      { _id: "z1", ssn: "vault.row:AAAA" }, "actor", throwingLookupHandle);
+    check("a K_row wrapped-secret lookup that throws fails closed (cell nulled, ciphertext not surfaced)",
+      caughtLookup.ssn === null);
+
+    // unsealRow pass-through: a truthy, non-sealed value on a sealed table is
+    // returned unchanged (not routed through any unseal branch).
+    b.cryptoField.registerTable("cf_cov_passthru", { sealedFields: ["x"] });
+    var passthru = b.cryptoField.unsealRow("cf_cov_passthru", { x: "just-plaintext" }, "seam");
+    check("unsealRow passes a non-sealed plaintext value through unchanged",
+      passthru.x === "just-plaintext");
+
+    b.cryptoField.clearRateCapForTest();
+    b.cryptoField.clearResidencyForTest();
+  } finally {
+    try { b.vault._resetForTest(); } catch (_e) { /* leave vault state clean for siblings */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best-effort */ }
+  }
+}
+
+// ---- unseal-failure rate cap (CWE-307) ----
+
+async function testUnsealRateCap() {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-cf-ratecap-"));
+  try {
+    try { b.vault._resetForTest(); } catch (_e) { /* fresh init below */ }
+    await b.vault.init({ dataDir: tmp, mode: "plaintext" });
+    b.cryptoField.registerTable("cf_cov_rate", { sealedFields: ["x"] });
+    var forged = "vault:@@@not-valid-base64@@@";
+
+    // Disabled cap: forged-ciphertext reads still fail closed (nulled) but
+    // never throw and never accrue a cooldown.
+    b.cryptoField.configureUnsealRateCap(null);
+    var disabled = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "anon");
+    });
+    check("with the cap disabled a forged cell nulls without throwing",
+      disabled.ok === true && disabled.value.x === null);
+
+    // Armed cap with an injected clock + audit sink: two forged failures trip
+    // the threshold (emitting one transition audit), the third read is refused
+    // during cooldown, and once the cooldown expires reads proceed again.
+    var audits = [];
+    var clock = { t: 1000000 };
+    var armed = b.cryptoField.configureUnsealRateCap({
+      threshold: 2, windowMs: 1000, cooldownMs: 5000,
+      now: function () { return clock.t; },
+      onAudit: function (m) { audits.push(m); },
+    });
+    check("configureUnsealRateCap echoes the armed thresholds",
+      armed && armed.threshold === 2 && armed.windowMs === 1000 && armed.cooldownMs === 5000);
+
+    var f1 = b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "attacker");
+    var f2 = b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "attacker");
+    check("forged reads null the cell while accruing failures", f1.x === null && f2.x === null);
+    check("the threshold-tripping failure emits exactly one rate-exceeded audit",
+      audits.length === 1);
+
+    var refused = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "attacker");
+    });
+    check("a read during cooldown is refused with CryptoFieldRateError",
+      refused.ok === false && refused.err &&
+      refused.err.code === "crypto-field/unseal-rate-exceeded");
+    check("the in-cooldown refusal emits a second rate-exceeded audit", audits.length === 2);
+
+    // Advance past the cooldown: the tuple's cooldown is pruned and the read
+    // proceeds (fails closed again, but no longer refused).
+    clock.t = 1005001;
+    var afterCooldown = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "attacker");
+    });
+    check("once the cooldown expires the read proceeds again (nulled, not refused)",
+      afterCooldown.ok === true && afterCooldown.value.x === null);
+
+    // Sliding-window prune: a lone failure that ages out of the window before
+    // the next failure is dropped, so the threshold isn't reached.
+    var clock2 = { t: 2000 };
+    b.cryptoField.configureUnsealRateCap({
+      threshold: 5, windowMs: 1000, cooldownMs: 5000, now: function () { return clock2.t; },
+    });
+    b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "pruner");   // window: [2000]
+    clock2.t = 4000;                                                    // > windowMs later
+    var pruned = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "pruner");   // prunes 2000
+    });
+    check("an aged-out failure is pruned from the sliding window (no cooldown armed)",
+      pruned.ok === true && pruned.value.x === null);
+
+    // Config-time refusal: threshold is required (no default).
+    var noThreshold = _try(function () {
+      return b.cryptoField.configureUnsealRateCap({ windowMs: 1000 });
+    });
+    check("configureUnsealRateCap throws when threshold is omitted",
+      noThreshold.ok === false && noThreshold.err &&
+      noThreshold.err.code === "crypto-field/bad-threshold");
+
+    // Defaults: windowMs defaults to 60000, cooldownMs defaults to windowMs,
+    // and now defaults to Date.now (no injected clock).
+    b.cryptoField.clearRateCapForTest();
+    var defaults = b.cryptoField.configureUnsealRateCap({ threshold: 3 });
+    check("configureUnsealRateCap defaults windowMs to 60000 and cooldownMs to windowMs",
+      defaults && defaults.threshold === 3 && defaults.windowMs === 60000 && defaults.cooldownMs === 60000);
+
+    // No injected onAudit sink: the transition + refusal audits route through
+    // the framework audit chain (audit().safeEmit), not an operator sink.
+    var clock3 = { t: 5000 };
+    b.cryptoField.configureUnsealRateCap({
+      threshold: 2, windowMs: 10000, cooldownMs: 10000, now: function () { return clock3.t; },
+    });
+    b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "noaudit");
+    var tripNA = b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "noaudit");   // trips the cap
+    check("forged reads with no onAudit sink still null the cell", tripNA.x === null);
+    var refusedNA = _try(function () {
+      return b.cryptoField.unsealRow("cf_cov_rate", { x: forged }, "noaudit");
+    });
+    check("a no-onAudit cap still refuses during cooldown (audit routes through the framework chain)",
+      refusedNA.ok === false && refusedNA.err &&
+      refusedNA.err.code === "crypto-field/unseal-rate-exceeded");
+
+    b.cryptoField.clearRateCapForTest();
+  } finally {
+    try { b.vault._resetForTest(); } catch (_e) { /* leave vault state clean for siblings */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best-effort */ }
+  }
+}
+
+// ---- upgrade-on-read micro-branches: legacy-digest detect + persist paths ----
+
+async function testUpgradeOnReadMicroBranches() {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-cf-upg-"));
+  try {
+    try { b.vault._resetForTest(); } catch (_e) { /* fresh init below */ }
+    await b.vault.init({ dataDir: tmp, mode: "plaintext" });
+    b.cryptoField.clearRateCapForTest();
+
+    // hmac-shake256 table (default) WITH a normalize fn; hmac WITHOUT normalize;
+    // and a salted-sha3 opt-out table. The upgrade-on-read pass fires only for
+    // the keyed-MAC mode, and only re-hashes a stored digest that matches the
+    // pre-flip legacy salted-sha3 form.
+    b.cryptoField.registerTable("cf_upg_norm", {
+      sealedFields: ["email"],
+      derivedHashes: { emailHash: { from: "email", normalize: function (v) { return String(v).toLowerCase(); } } },
+    });
+    b.cryptoField.registerTable("cf_upg_nonorm", {
+      sealedFields: ["email"], derivedHashes: { emailHash: { from: "email" } },
+    });
+    b.cryptoField.registerTable("cf_upg_salted", {
+      sealedFields: ["email"], derivedHashes: { emailHash: { from: "email" } },
+      derivedHashMode: "salted-sha3",
+    });
+
+    // salted-sha3 table: the upgrade pass skips every column (mode is not the
+    // keyed MAC), so the stored digest is left exactly as sealed.
+    var salted = b.cryptoField.sealRow("cf_upg_salted", { _id: "S1", email: "dan@example.com" });
+    var saltedOut = b.cryptoField.unsealRow("cf_upg_salted", Object.assign({}, salted), "actor");
+    check("upgrade-on-read is a no-op on a salted-sha3 table (email round-trips, hash untouched)",
+      saltedOut.email === "dan@example.com" && saltedOut.emailHash === salted.emailHash);
+
+    // Derived-hash column absent on the read row: nothing to migrate (stored is
+    // not a non-empty string).
+    var missHash = b.cryptoField.unsealRow("cf_upg_norm", { _id: "M1", email: "eve@example.com" }, "actor");
+    check("upgrade-on-read skips a row whose derived-hash column is absent",
+      missHash.email === "eve@example.com" && missHash.emailHash === undefined);
+
+    // Source column absent on the read row: nothing to re-hash from, so the
+    // stored derived hash is left untouched.
+    var missSource = b.cryptoField.unsealRow("cf_upg_norm", { _id: "M2", emailHash: "abcdef" }, "actor");
+    check("upgrade-on-read leaves the derived hash untouched when the source is absent",
+      missSource.emailHash === "abcdef");
+
+    // A stored digest that is NEITHER the keyed nor the legacy form (random) is
+    // left untouched — the no-normalize table exercises the String(plain) path.
+    var randomKept = b.cryptoField.unsealRow("cf_upg_nonorm",
+      { _id: "M3", email: "zoe@example.com", emailHash: "0123456789abcdef" }, "actor");
+    check("upgrade-on-read leaves a non-legacy, non-keyed stored digest untouched",
+      randomKept.email === "zoe@example.com" && randomKept.emailHash === "0123456789abcdef");
+
+    // A row already carrying the keyed-MAC digest is left as-is (round-trips).
+    var already = b.cryptoField.sealRow("cf_upg_norm", { _id: "K1", email: "kate@example.com" });
+    var alreadyOut = b.cryptoField.unsealRow("cf_upg_norm", Object.assign({}, already), "actor");
+    check("upgrade-on-read leaves an already keyed-indexed row unchanged (email round-trips)",
+      alreadyOut.email === "kate@example.com" && alreadyOut.emailHash === already.emailHash);
+
+    // A legacy-indexed row with NO _id: the keyed digest is surfaced on the
+    // returned row, but no durable rewrite is attempted (no row identity).
+    var baseNoId = b.cryptoField.sealRow("cf_upg_norm", { _id: "L2", email: "bob@example.com" });
+    var lcNoId = b.cryptoField.lookupHash("cf_upg_norm", "email", "bob@example.com");
+    var noIdOut = b.cryptoField.unsealRow("cf_upg_norm",
+      { email: baseNoId.email, emailHash: lcNoId.legacyValue }, "actor");
+    check("upgrade-on-read surfaces the keyed digest in-memory for a legacy row with no _id",
+      noIdOut.email === "bob@example.com" && noIdOut.emailHash === lcNoId.value);
+
+    // A legacy-indexed row + a writable handle whose prepare THROWS: the
+    // durable rewrite is best-effort (swallowed), and the returned row still
+    // carries the upgraded keyed digest.
+    var baseThrow = b.cryptoField.sealRow("cf_upg_norm", { _id: "L1", email: "alice@example.com" });
+    var lcThrow = b.cryptoField.lookupHash("cf_upg_norm", "email", "alice@example.com");
+    baseThrow.emailHash = lcThrow.legacyValue;
+    var throwHandle = { prepare: function () { throw new Error("db down"); } };
+    var throwOut = b.cryptoField.unsealRow("cf_upg_norm", Object.assign({}, baseThrow), "actor", throwHandle);
+    check("upgrade-on-read surfaces the keyed digest even when the durable rewrite throws",
+      throwOut.email === "alice@example.com" && throwOut.emailHash === lcThrow.value);
+
+    // A legacy-indexed row + a postgres-dialect handle: the durable rewrite
+    // quotes for that dialect and runs. The captured statement proves the
+    // non-sqlite dialect branch executed; the row carries the upgraded digest.
+    var basePg = b.cryptoField.sealRow("cf_upg_norm", { _id: "Lpg", email: "carol@example.com" });
+    var lcPg = b.cryptoField.lookupHash("cf_upg_norm", "email", "carol@example.com");
+    basePg.emailHash = lcPg.legacyValue;
+    var pgCaptured = [];
+    var pgHandle = { dialect: "postgres", prepare: function (s) { pgCaptured.push(s); return { run: function () {} }; } };
+    var pgOut = b.cryptoField.unsealRow("cf_upg_norm", Object.assign({}, basePg), "actor", pgHandle);
+    check("upgrade-on-read persists via a postgres-dialect handle (branch executed, digest upgraded)",
+      pgOut.email === "carol@example.com" && pgOut.emailHash === lcPg.value && pgCaptured.length === 1);
+
+    // Same via a mysql-dialect handle: the identifier quoting differs
+    // (backticks), proving the mysql dialect branch executed.
+    var baseMy = b.cryptoField.sealRow("cf_upg_norm", { _id: "Lmy", email: "erin@example.com" });
+    var lcMy = b.cryptoField.lookupHash("cf_upg_norm", "email", "erin@example.com");
+    baseMy.emailHash = lcMy.legacyValue;
+    var myCaptured = [];
+    var myHandle = { dialect: "mysql", prepare: function (s) { myCaptured.push(s); return { run: function () {} }; } };
+    var myOut = b.cryptoField.unsealRow("cf_upg_norm", Object.assign({}, baseMy), "actor", myHandle);
+    check("upgrade-on-read persists via a mysql-dialect handle (branch executed, digest upgraded)",
+      myOut.email === "erin@example.com" && myOut.emailHash === lcMy.value &&
+      myCaptured.length === 1 && myCaptured[0].indexOf("`") !== -1);
+
+    b.cryptoField.clearRateCapForTest();
+  } finally {
+    try { b.vault._resetForTest(); } catch (_e) { /* leave vault state clean for siblings */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best-effort */ }
+  }
+}
+
+// ---- deep K_row consumer path + crypto-shred + upgrade-on-read (db-backed) ----
+
+async function testKRowConsumerPathDeep() {
+  var dir = fs.mkdtempSync(path.join(os.tmpdir(), "blamejs-cf-krow-deep-"));
+  try {
+    await setupTestDb(dir, [
+      {
+        name:    "cf_krow_deep",
+        columns: { _id: "TEXT PRIMARY KEY", subjectId: "TEXT", ssn: "TEXT", dl: "TEXT" },
+        sealedFields: ["ssn", "dl"],
+        subjectField: "subjectId",
+      },
+      {
+        name:    "cf_hash_deep",
+        columns: { _id: "TEXT PRIMARY KEY", email: "TEXT", emailHash: "TEXT", name: "TEXT" },
+        indexes: ["emailHash"],
+        sealedFields:  ["email"],
+        derivedHashes: { emailHash: { from: "email", normalize: function (v) { return String(v).toLowerCase(); } } },
+      },
+    ]);
+    b.cryptoField.clearResidencyForTest();
+    b.cryptoField.declarePerRowKey("cf_krow_deep", { keySize: 32 });
+
+    // Two sealed columns on one keyed row: the first derives K_row, the second
+    // hits the per-call K_row cache. Both are vault.row: cells on disk.
+    b.db.from("cf_krow_deep").insertOne({ _id: "k1", subjectId: "s1", ssn: "123-45-6789", dl: "D-999" });
+    var rawK = b.db.prepare('SELECT ssn, dl FROM cf_krow_deep WHERE _id = ?').get("k1");
+    check("K_row insert stores both sealed columns as vault.row: cells on disk",
+      String(rawK.ssn).indexOf("vault.row:") === 0 && String(rawK.dl).indexOf("vault.row:") === 0);
+    var gotK = b.db.from("cf_krow_deep").where({ _id: "k1" }).first();
+    check("K_row read decrypts both cells (second cell via the per-call K_row cache)",
+      gotK.ssn === "123-45-6789" && gotK.dl === "D-999");
+
+    // Direct unsealRow with NO dbHandle on a keyed table resolves the local db
+    // itself to fetch the wrapped secret (the b.breakGlass path).
+    var directOut = b.cryptoField.unsealRow("cf_krow_deep", { _id: "k1", ssn: rawK.ssn }, "direct");
+    check("unsealRow with no dbHandle resolves the local db for the K_row lookup",
+      directOut.ssn === "123-45-6789");
+
+    // A keyed vault.row: cell with NO row identity (_id absent) can't build the
+    // K_row lookup → the cell nulls (fails closed) rather than decrypting.
+    var noRowId = b.cryptoField.unsealRow("cf_krow_deep", { ssn: rawK.ssn }, "direct");
+    check("a K_row cell with no row identity fails closed (nulled)", noRowId.ssn === null);
+
+    // materializePerRowKey is idempotent on an already-materialized row: the
+    // existing wrapped secret is unwrapped + re-derived to the SAME K_row (the
+    // UPSERT path), never re-generated.
+    var kRowA = b.cryptoField.materializePerRowKey("cf_krow_deep", "k1", b.db);
+    var kRowB = b.cryptoField.materializePerRowKey("cf_krow_deep", "k1", b.db);
+    check("materializePerRowKey re-derives the same K_row from the existing wrapped secret",
+      Buffer.isBuffer(kRowA) && Buffer.isBuffer(kRowB) && kRowA.equals(kRowB));
+
+    // Crypto-shred: destroy the wrapped secret, then reads null the cells
+    // (mathematically undecryptable — the shredded-key read exit).
+    var destroyed = b.cryptoField.destroyPerRowKey("cf_krow_deep", "k1", b.db);
+    check("destroyPerRowKey removes the wrapped row-secret", destroyed.destroyed === 1);
+    // Destroying again (or any (table,rowId) with no wrapped secret) reports
+    // zero rows destroyed — the (result.changes) || 0 fallback.
+    var destroyedAgain = b.cryptoField.destroyPerRowKey("cf_krow_deep", "k1", b.db);
+    check("destroyPerRowKey a second time reports zero rows destroyed (no wrapped secret)",
+      destroyedAgain.destroyed === 0);
+    var shredRead = b.db.from("cf_krow_deep").where({ _id: "k1" }).first();
+    check("a K_row read after crypto-shred nulls the cells (residue undecryptable)",
+      shredRead.ssn === null && shredRead.dl === null);
+
+    // Upgrade-on-read: a row whose derived-hash column still holds the legacy
+    // salted-sha3 digest is rewritten to the keyed-MAC form on read, both on
+    // the returned row and durably in the db.
+    b.db.from("cf_hash_deep").insertOne({ _id: "h1", email: "Alice@Example.com", name: "Alice" });
+    var lc1 = b.cryptoField.lookupHash("cf_hash_deep", "email", "Alice@Example.com");
+    check("control: the keyed-MAC lookup carries a distinct legacy digest", !!lc1.legacyValue);
+    b.db.prepare('UPDATE cf_hash_deep SET emailHash = ? WHERE _id = ?').run(lc1.legacyValue, "h1");
+    var beforeUpg = b.db.prepare('SELECT emailHash AS h FROM cf_hash_deep WHERE _id = ?').get("h1");
+    check("the row now stores the legacy salted digest", beforeUpg.h === lc1.legacyValue);
+    var upgRead = b.db.from("cf_hash_deep").where({ _id: "h1" }).first();
+    check("upgrade-on-read returns the keyed-MAC digest for a legacy-indexed row",
+      upgRead.emailHash === lc1.value);
+    var afterUpg = b.db.prepare('SELECT emailHash AS h FROM cf_hash_deep WHERE _id = ?').get("h1");
+    check("upgrade-on-read durably rewrites the legacy digest to the keyed-MAC form (dbHandle path)",
+      afterUpg.h === lc1.value);
+
+    // Upgrade-on-read via the NO-dbHandle path resolves the local db itself to
+    // persist the rewrite.
+    b.db.from("cf_hash_deep").insertOne({ _id: "h2", email: "Bob@Example.com", name: "Bob" });
+    var lc2 = b.cryptoField.lookupHash("cf_hash_deep", "email", "Bob@Example.com");
+    b.db.prepare('UPDATE cf_hash_deep SET emailHash = ? WHERE _id = ?').run(lc2.legacyValue, "h2");
+    var rawH2 = b.db.prepare('SELECT _id, email, emailHash FROM cf_hash_deep WHERE _id = ?').get("h2");
+    var directUpg = b.cryptoField.unsealRow("cf_hash_deep",
+      { _id: "h2", email: rawH2.email, emailHash: rawH2.emailHash });
+    check("upgrade-on-read (no dbHandle) surfaces the keyed digest on the returned row",
+      directUpg.emailHash === lc2.value);
+    var persistedH2 = b.db.prepare('SELECT emailHash AS h FROM cf_hash_deep WHERE _id = ?').get("h2");
+    check("upgrade-on-read (no dbHandle) resolves the local db and persists the rewrite",
+      persistedH2.h === lc2.value);
+
+    // Empty-string cell on a KEYED column is an envelope downgrade (shape
+    // "row"): failed closed (nulled), never surfaced as a valid empty value.
+    var emptyKeyed = b.cryptoField.unsealRow("cf_krow_deep", { _id: "k1", ssn: "" }, "actor-e");
+    check("an empty-string cell on a keyed column fails closed (envelope downgrade)",
+      emptyKeyed.ssn === null);
+
+    // eraseRow under a vacuum-requiring posture, db initialized: the vacuum
+    // cascade actually runs (b.db.vacuumAfterErase) after the tombstone.
+    b.cryptoField.applyPosture("gdpr");
+    var ev = _try(function () {
+      return b.cryptoField.eraseRow("cf_hash_deep",
+        { _id: "h1", email: "vault:x", emailHash: "h", name: "keep" });
+    });
+    check("eraseRow runs the vacuum cascade without throwing when the db is initialized",
+      ev.ok === true && ev.value.email === null && ev.value.emailHash === null && ev.value.name === "keep");
+  } finally {
+    try { b.cryptoField.clearResidencyForTest(); } catch (_e) { /* best-effort */ }
+    await teardownTestDb(dir);
+  }
+}
+
 async function run() {
   testReturnsDeclaredSealedFields();
   testUnregisteredTableIsEmpty();
@@ -562,14 +1179,23 @@ async function run() {
   testAccessorAndGuardBranches();
   testColumnResidencyGate();
   testPerRowConfigGuardsAndErase();
+  testSealEnvelopeFloorGate();
   await testSealUnsealSeams();
   await testConsumerPathEmptyAndKRow();
   await testMalformedEnvelopesFailClosed();
+  await testHashComputation();
+  await testUpgradeOnReadMicroBranches();
+  await testSealSideEdgeBranches();
+  await testUnsealRateCap();
+  await testKRowConsumerPathDeep();
+  // Posture-dependent erase runs LAST: applyPosture records a process-global
+  // posture, and this exercises the no-db vacuum-skip branch.
+  testErasePostureVacuumSkip();
 }
 
 module.exports = { run: run };
 
 if (require.main === module) {
-  run().then(function () { console.log("[crypto-field] OK"); })
+  run().then(function () { console.log("[crypto-field] OK — " + helpers.getChecks() + " checks passed"); })
        .catch(function (e) { console.error(e); process.exit(1); });
 }

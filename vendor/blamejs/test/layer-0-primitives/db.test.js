@@ -1565,7 +1565,384 @@ async function testDoubleInit() {
   }
 }
 
+// --- per-row residency gate wraps a raw write via prepare() -----------------
+async function testResidencyRawWriteGate() {
+  var tmpDir = _mkTmp("db-cov-resid-");
+  try {
+    await _plainInit(tmpDir, [{
+      name: "resid", columns: { _id: "TEXT PRIMARY KEY", region: "TEXT", v: "TEXT" },
+    }], { frameworkTables: false, auditSigning: false });
+    // Declaring per-row residency makes b.db.prepare() wrap any raw INSERT/UPDATE
+    // to the table with the residency gate (the _isRawWriteToResidencyTable arm).
+    b.cryptoField.declarePerRowResidency("resid", { residencyColumn: "region", allowedTags: ["eu"] });
+
+    // A raw INSERT omitting the mandatory residency-tag column is refused on
+    // .run() by the gated statement.
+    var missing = await _catch(function () {
+      return b.db.prepare("INSERT INTO resid (_id, v) VALUES ('r1', 'x')").run();
+    });
+    check("raw INSERT to a per-row-residency table without the tag is refused",
+      missing && missing.code === "db-query/row-residency-tag-missing");
+    check("the refused tag-less raw INSERT persisted no row",
+      !b.db.from("resid").where({ _id: "r1" }).first());
+
+    // A raw INSERT carrying an allowed tag passes the gate and lands the row.
+    // Capture the gated statement first to also drive the residency Proxy's
+    // pass-through get() arms: a non-EXEC method (bound-function arm) and a
+    // string property (return-value arm).
+    var gated = b.db.prepare("INSERT INTO resid (_id, region, v) VALUES ('r2', 'eu', 'y')");
+    check("gated statement pass-through get returns a non-EXEC method (bound)",
+      typeof gated.setReadBigInts === "function");
+    check("gated statement pass-through get returns a non-function property verbatim",
+      typeof gated.sourceSQL === "string");
+    gated.run();
+    check("raw INSERT with an allowed residency tag lands the row through the gate",
+      b.db.from("resid").where({ _id: "r2" }).first().v === "y");
+  } finally {
+    try { b.cryptoField.clearResidencyForTest(); } catch (_e) { /* best effort */ }
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- _resetForTest stops live encrypt/storage-probe timers + closes handle ---
+async function testResetForTestWithLiveTimers() {
+  var tmpDir = _mkTmp("db-cov-resettimers-");
+  try {
+    await _freshVault(tmpDir);
+    // Encrypted mode with a live statfs probe installs BOTH the periodic
+    // encrypt timer and the storage-probe timer. Calling _resetForTest while
+    // the handle is still open drives the timer-stop + live-handle-close arms
+    // (the teardown path normally close()s first, leaving them already null).
+    await b.db.init({
+      dataDir: tmpDir, tmpDir: path.join(tmpDir, "tmpfs"), allowNonTmpfsTmpDir: true,
+      frameworkTables: false, auditSigning: false, minFreeBytes: C.BYTES.mib(16),
+      _statfsForTest: function () { return { bavail: C.BYTES.mib(100), bsize: 1 }; },
+      schema: [{ name: "t", columns: { _id: "TEXT PRIMARY KEY" } }],
+    });
+    check("encrypted init with a live statfs probe is initialized",
+      b.db.getMode() === "encrypted");
+
+    b.db._resetForTest();                    // direct reset — no close() first
+    var guarded = await _catch(function () { return b.db.from("t"); });
+    check("_resetForTest with live timers leaves the db not-initialized",
+      guarded && guarded.code === "db/not-initialized");
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- exportCsv signer that throws a non-Error (falsy .message) ----------------
+async function testExportCsvSignerNonErrorThrow() {
+  var tmpDir = _mkTmp("db-cov-signstr-");
+  try {
+    await _plainInit(tmpDir, [{
+      name: "orders", columns: { _id: "TEXT PRIMARY KEY", note: "TEXT" },
+    }], { frameworkTables: false, auditSigning: false });
+    b.db.from("orders").insertOne({ _id: "o1", note: "hi" });
+    // A signer whose sign() throws a bare string (no `.message`) drives the
+    // `String(e)` fallback arm of the sign-failure message assembly.
+    var err = await _catch(function () {
+      return b.db.exportCsv({
+        table: "orders",
+        signWith: {
+          sign:                    function () { throw "raw-string-hsm-fault"; },   // eslint-disable-line no-throw-literal -- simulates a signer throwing a non-Error to exercise the String(err) fallback
+          getPublicKey:            function () { return ""; },
+          getAlgorithm:            function () { return "x"; },
+          getPublicKeyFingerprint: function () { return "y"; },
+        },
+      });
+    });
+    check("exportCsv signer throwing a non-Error surfaces db/sign-failed",
+      err && err.code === "db/sign-failed");
+    check("the non-Error throw is stringified into the sign-failed message",
+      err && err.message.indexOf("raw-string-hsm-fault") !== -1);
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- _checkDualControlGate before init returns null (not-initialized guard) ---
+async function testDualControlGatePreInit() {
+  // With no db open the gate consult short-circuits on the not-initialized
+  // guard and returns null rather than touching a null handle.
+  b.db._resetForTest();
+  check("_checkDualControlGate before init returns null",
+    b.db._checkDualControlGate("anytable") === null);
+}
+
+// --- subject table with a subjectField but no personalDataCategories ---------
+async function testSubjectFieldWithoutCategories() {
+  var tmpDir = _mkTmp("db-cov-subjnocats-");
+  try {
+    // A subject table declaring subjectField but omitting personalDataCategories
+    // drives the `st.personalDataCategories || {}` default on the subject-table
+    // registry write (the other fixtures always supply the map).
+    await _plainInit(tmpDir, [{
+      name: "people", columns: { _id: "TEXT PRIMARY KEY", uid: "TEXT" },
+      subjectField: "uid",
+    }], { frameworkTables: false, auditSigning: false });
+    check("init boots a subject table that omits personalDataCategories",
+      b.db.getTableMetadata("people").subjectField === "uid");
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- json-schema type mapping for a typeless (empty-DDL) column ---------------
+async function testJsonSchemaEmptyDdlColumn() {
+  var tmpDir = _mkTmp("db-cov-emptyddl-");
+  try {
+    // A column whose DDL is an empty string exercises the _ddlToJsonSchemaType
+    // guard's `return { type: "string" }` fallback for a typeless column.
+    await _plainInit(tmpDir, [{
+      name: "loose", columns: { _id: "TEXT PRIMARY KEY", untyped: "" },
+    }], { frameworkTables: false, auditSigning: false });
+    var js = b.db.getTableMetadata({ table: "loose", format: "json-schema-2020-12" });
+    check("a typeless (empty-DDL) column falls back to a string json-schema type",
+      js.properties.untyped.anyOf[0].type === "string");
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- stream() destroys on a runtime STEP error (not a prepare-time error) -----
+async function testStreamRuntimeStepError() {
+  var tmpDir = _mkTmp("db-cov-streamstep-");
+  try {
+    await _plainInit(tmpDir, [{ name: "nums", columns: { _id: "TEXT PRIMARY KEY", n: "INTEGER" } }],
+      { frameworkTables: false, auditSigning: false });
+    b.db.from("nums").insertOne({ _id: "n1", n: 1 });
+    // The statement prepares + iterates fine, but abs(INT64_MIN) overflows at
+    // STEP time — the per-row read catch destroys the stream with that error
+    // (distinct from the prepare-time destroy already covered by a bad table).
+    var res = await _drain(b.db.stream("SELECT abs(-9223372036854775808) AS x FROM nums"));
+    check("a runtime step error destroys the stream", res.error !== null);
+    check("the step-time error surfaces as an integer overflow",
+      res.error && /overflow/i.test(res.error.message));
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- encrypted boot: a DB key that unseals empty fails closed ---------------
+async function testEncryptedKeyUnsealEmpty() {
+  var tmpDir = _mkTmp("db-cov-keyempty-");
+  var tmpfs = path.join(tmpDir, "tmpfs");
+  fs.mkdirSync(tmpfs, { recursive: true });
+  try {
+    await _freshVault(tmpDir);
+    // A db.key.enc that unseals to an empty string (a truncated / zeroed key
+    // file, or a vault that can't unseal it) must fail closed at boot rather
+    // than deriving an all-zero encryption key from empty bytes.
+    fs.writeFileSync(path.join(tmpDir, "db.key.enc"), b.vault.seal(""));
+    var err = await _catch(function () {
+      return b.db.init({ dataDir: tmpDir, tmpDir: tmpfs, allowNonTmpfsTmpDir: true,
+        atRest: "encrypted", frameworkTables: false, auditSigning: false, minFreeBytes: 0, schema: [] });
+    });
+    check("encrypted boot with a key file that unseals empty throws db/key-unseal-empty",
+      err && err.code === "db/key-unseal-empty");
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- encrypted boot: a truncated db.enc fails closed, never starts fresh -----
+async function testEncryptedShortEnvelope() {
+  // A db.enc that EXISTS but is shorter than a valid AEAD envelope (a 1-byte
+  // version + a 24-byte nonce + a 16-byte tag = 41 bytes) is a truncated /
+  // corrupt durable snapshot — a real flush always writes a full envelope
+  // atomically. Boot must FAIL CLOSED across the WHOLE impossible-size range,
+  // not open a fresh database the next flush would persist over the corrupt
+  // copy (silent data loss). The operator restores db.enc from backup, or
+  // removes it to intentionally start empty. Both a tiny size (below the nonce)
+  // and a mid-range size (26-40, past the old 26-byte floor but still below a
+  // full envelope) must yield the typed db/enc-truncated, not a raw crypto error.
+  var sizes = [5, 30];
+  for (var i = 0; i < sizes.length; i++) {
+    var n = sizes[i];
+    var tmpDir = _mkTmp("db-cov-shortenc-" + n + "-");
+    var tmpfs = path.join(tmpDir, "tmpfs");
+    fs.mkdirSync(tmpfs, { recursive: true });
+    try {
+      await _freshVault(tmpDir);
+      fs.writeFileSync(path.join(tmpDir, "db.enc"), Buffer.alloc(n, 0x41));
+      var err = await _catch(function () {
+        return b.db.init({ dataDir: tmpDir, tmpDir: tmpfs, allowNonTmpfsTmpDir: true,
+          atRest: "encrypted", frameworkTables: false, auditSigning: false, minFreeBytes: 0,
+          schema: [{ name: "t", columns: { _id: "TEXT PRIMARY KEY" } }] });
+      });
+      check("encrypted boot with a " + n + "-byte (sub-envelope) db.enc fails closed with db/enc-truncated",
+        err && err.code === "db/enc-truncated");
+    } finally {
+      _teardownPlain(tmpDir);
+    }
+  }
+}
+
+// --- encrypted boot: pre-AAD db.enc decrypts via the no-AAD fallback ---------
+async function testEncryptedPreAadEnvelopeFallback() {
+  var tmpDir = _mkTmp("db-cov-preaad-");
+  var tmpfs = path.join(tmpDir, "tmpfs");
+  fs.mkdirSync(tmpfs, { recursive: true });
+  var encPath = path.join(tmpDir, "db.enc");
+  var rawKey = Buffer.alloc(32, 9);   // a key we control (seeded as a legacy plain seal)
+  var encOpts = {
+    dataDir: tmpDir, tmpDir: tmpfs, allowNonTmpfsTmpDir: true, atRest: "encrypted",
+    frameworkTables: false, auditSigning: false, minFreeBytes: 0,
+    schema: [{ name: "vr", columns: { _id: "TEXT PRIMARY KEY", v: "TEXT" } }],
+  };
+  try {
+    await _freshVault(tmpDir);
+    // Seed a legacy plain-sealed DB key so the boot-derived encKey is a value
+    // this test knows — that lets us re-encrypt db.enc WITHOUT the deployment-
+    // path AAD and confirm the one-release backwards-compat fallback still
+    // decrypts a pre-AAD envelope.
+    fs.writeFileSync(path.join(tmpDir, "db.key.enc"), b.vault.seal(rawKey.toString("base64")));
+    await b.db.init(encOpts);
+    b.db.from("vr").insertOne({ _id: "a", v: "persisted" });
+    b.db.flushToDisk();
+    b.db.close();
+
+    var plain = b.crypto.decryptPacked(fs.readFileSync(encPath), rawKey, b.db._dbEncAad(tmpDir));
+    check("pre-AAD fixture: the AAD envelope decrypts to a SQLite working copy",
+      plain.slice(0, 16).toString("latin1").indexOf("SQLite format 3") === 0);
+    // Overwrite db.enc with a pre-AAD envelope (encryptPacked with no AAD arg).
+    fs.writeFileSync(encPath, b.crypto.encryptPacked(plain, rawKey));
+
+    await b.db.init(encOpts);
+    var row = b.db.from("vr").where({ _id: "a" }).first();
+    check("encrypted boot decrypts a pre-AAD db.enc via the no-AAD fallback",
+      row && row.v === "persisted");
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- flushToDisk after close is a safe no-op --------------------------------
+async function testFlushToDiskAfterClose() {
+  var tmpDir = _mkTmp("db-cov-flushclosed-");
+  var tmpfs = path.join(tmpDir, "tmpfs");
+  fs.mkdirSync(tmpfs, { recursive: true });
+  try {
+    await _freshVault(tmpDir);
+    await b.db.init({ dataDir: tmpDir, tmpDir: tmpfs, allowNonTmpfsTmpDir: true,
+      atRest: "encrypted", frameworkTables: false, auditSigning: false, minFreeBytes: 0,
+      schema: [{ name: "t", columns: { _id: "TEXT PRIMARY KEY" } }] });
+    b.db.from("t").insertOne({ _id: "x" });
+    b.db.flushToDisk();   // persist the insert to db.enc while the handle is live
+    b.db.close();         // drops the live handle + removes the plaintext working copy
+    var encPath = path.join(tmpDir, "db.enc");
+    var encBefore = fs.readFileSync(encPath);   // the durable snapshot as of close
+    // flushToDisk (encryptToDisk) after close must be a silent no-op: the WAL
+    // checkpoint on the now-null handle is swallowed and the missing plaintext
+    // working copy short-circuits the re-encrypt. Critically it must NOT write —
+    // an empty/garbage re-encrypt over the good snapshot is the silent-data-loss
+    // class the sibling truncated-envelope guard also defends.
+    var threw = await _catch(function () { b.db.flushToDisk(); });
+    check("flushToDisk after close is a silent no-op (no throw)", threw === null);
+    check("flushToDisk after close leaves the durable db.enc snapshot byte-identical",
+      fs.readFileSync(encPath).equals(encBefore));
+    check("flushToDisk after close does not resurrect a plaintext working copy in tmpfs",
+      fs.readdirSync(tmpfs).filter(function (f) { return /\.db$/.test(f); }).length === 0);
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- rollback check against a NON-empty audit_log ---------------------------
+async function testRollbackCheckNonEmptyAuditLog() {
+  var tmpDir = _mkTmp("db-cov-rollbacknonempty-");
+  var opts = { dataDir: tmpDir, atRest: "plain", schema: [], auditSigning: false };
+  try {
+    await _freshVault(tmpDir);
+    await b.db.init(opts);
+    // Append a real audit-chain row so audit_log is non-empty, then anchor the
+    // rollback sidecar at that live counter. The other rollback fixture runs
+    // against an EMPTY audit_log (MAX(monotonicCounter) → null → 0); this drives
+    // the arm where the live MAX resolves to an actual row value.
+    try { b.audit.registerNamespace("test"); } catch (_e) { /* already registered */ }
+    await b.audit.record({ action: "test.event", outcome: "success", metadata: {} });
+    var live = b.db.prepare("SELECT MAX(monotonicCounter) AS m FROM audit_log").get();
+    check("an audit-chain row was recorded (audit_log non-empty)", live && live.m >= 1);
+    b.db._writeAuditTip({ atMonotonicCounter: live.m, rowHash: "seed", signedAt: new Date().toISOString() });
+    b.db.close();
+    b.db._resetForTest();
+    await b.db.init(opts);
+    check("boot passes the rollback check when the tip matches a non-empty audit_log's max",
+      b.db.getMode() === "plain");
+    var after = b.db.prepare("SELECT MAX(monotonicCounter) AS m FROM audit_log").get();
+    check("the recorded audit row survived the reboot", after && after.m === live.m);
+  } finally {
+    _teardownPlain(tmpDir);
+  }
+}
+
+// --- boot NTP drift check: env-driven server / timeout / threshold resolution -
+async function testNtpBootCheckResolution() {
+  var tmpDir = _mkTmp("db-cov-ntp-");
+  var NTP_ENV = ["BLAMEJS_SKIP_NTP_CHECK", "BLAMEJS_NTP_SERVERS", "BLAMEJS_NTP_TIMEOUT_MS",
+    "BLAMEJS_NTP_DRIFT_WARN_MS", "BLAMEJS_NTP_DRIFT_FATAL_MS", "BLAMEJS_NTP_STRICT"];
+  var saved = {};
+  NTP_ENV.forEach(function (k) { saved[k] = process.env[k]; });
+  // Capture the boot NTP-drift event so the assertion pins the intended
+  // unreachable -> warning branch, not merely "init did not throw" (which every
+  // NTP outcome satisfies under STRICT=0).
+  var ntpDrift = [];
+  var onNtpDrift = function (payload) { ntpDrift.push(payload); };
+  b.events.on(b.events.EVENTS.NTP_DRIFT, onNtpDrift);
+  try {
+    await _freshVault(tmpDir);   // sets BLAMEJS_SKIP_NTP_CHECK=1
+    // Un-skip the boot NTP check and point it at a guaranteed-unreachable
+    // endpoint with a tight timeout — the SNTP query fails fast (unreachable →
+    // soft "warning"), exercising the env-driven server / timeout / threshold
+    // resolution the skip-by-default fixtures never reach. 192.0.2.1 is
+    // RFC 5737 TEST-NET-1 (reserved for documentation, non-routable, no host
+    // will ever answer), so the unreachable branch fires DETERMINISTICALLY —
+    // unlike 127.0.0.1, which returns a valid response on a runner that happens
+    // to run a local NTP daemon. Huge thresholds + STRICT=0 keep the outcome
+    // non-fatal regardless of the host clock, so boot always completes on the
+    // soft-warning path rather than refusing on drift.
+    delete process.env.BLAMEJS_SKIP_NTP_CHECK;
+    process.env.BLAMEJS_NTP_SERVERS        = "192.0.2.1";
+    process.env.BLAMEJS_NTP_TIMEOUT_MS     = "150";
+    process.env.BLAMEJS_NTP_DRIFT_WARN_MS  = "999999999";
+    process.env.BLAMEJS_NTP_DRIFT_FATAL_MS = "999999999";
+    process.env.BLAMEJS_NTP_STRICT         = "0";
+    await b.db.init({ dataDir: tmpDir, atRest: "plain",
+      frameworkTables: false, auditSigning: false, schema: [] });
+    check("boot completes the NTP drift check (unreachable server, soft-warning path)",
+      b.db.getMode() === "plain");
+    // Pin the branch: an unreachable server yields severity "warning" with a
+    // null drift (no sample to measure) and emits NTP_DRIFT. If env-var server
+    // resolution regressed to a reachable pool this would be "info" (no event).
+    check("the unreachable NTP server emits a warning-severity NTP_DRIFT with null drift",
+      ntpDrift.length >= 1 &&
+      ntpDrift[ntpDrift.length - 1].severity === "warning" &&
+      ntpDrift[ntpDrift.length - 1].driftMs === null);
+  } finally {
+    b.events.off(b.events.EVENTS.NTP_DRIFT, onNtpDrift);
+    NTP_ENV.forEach(function (k) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    });
+    _teardownPlain(tmpDir);
+  }
+}
+
 async function run() {
+  await testEncryptedKeyUnsealEmpty();
+  await testEncryptedShortEnvelope();
+  await testEncryptedPreAadEnvelopeFallback();
+  await testFlushToDiskAfterClose();
+  await testRollbackCheckNonEmptyAuditLog();
+  await testNtpBootCheckResolution();
+  await testResidencyRawWriteGate();
+  await testResetForTestWithLiveTimers();
+  await testExportCsvSignerNonErrorThrow();
+  await testDualControlGatePreInit();
+  await testSubjectFieldWithoutCategories();
+  await testJsonSchemaEmptyDdlColumn();
+  await testStreamRuntimeStepError();
   await testJsonSchemaTypeAliases();
   await testMetadataBlamejsFormatAndPosture();
   await testExportCsvAdversarialInput();

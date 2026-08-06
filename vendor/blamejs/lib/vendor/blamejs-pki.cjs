@@ -1,4 +1,4 @@
-// @blamejs/pki v0.3.27 — vendored (Apache-2.0). Zero-dep pure CJS.
+// @blamejs/pki v0.3.29 — vendored (Apache-2.0). Zero-dep pure CJS.
 // https://github.com/blamejs/pki  Exports: x509, crl, pkcs12, key, webcrypto, schema, csr, cms, ...
 // Backs lib/mtls-engine-default.js (PQC-capable CA + PKCS#12 engine).
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -137,7 +137,7 @@ var require_package = __commonJS({
   "node_modules/@blamejs/pki/package.json"(exports2, module2) {
     module2.exports = {
       name: "@blamejs/pki",
-      version: "0.3.27",
+      version: "0.3.29",
       description: "Pure-JavaScript PKI toolkit that owns its stack \u2014 X.509, ASN.1/DER, CMS, PQC-first.",
       license: "Apache-2.0",
       author: "blamejs contributors",
@@ -314,6 +314,10 @@ var require_constants = __commonJS({
       // document plus multipart/header overhead (16 MiB * 4/3 ~= 21.3 MiB); 24 MiB
       // clears it. An operator may only tighten it DOWNWARD via opts.maxResponseBytes.
       HTTP_MAX_RESPONSE_BYTES: BYTES.mib(24),
+      // A single untrusted WWW-Authenticate challenge header, bounded BEFORE the string
+      // is copied/tokenized so a hostile server cannot drive unbounded work parsing it
+      // (CWE-770). 8 KiB clears any realistic multi-scheme Digest challenge.
+      HTTP_AUTH_HEADER_MAX_BYTES: BYTES.kib(8),
       // Deterministic-CBOR codec ceilings (RFC 8949), the DER neighbours' siblings:
       // a whole-document cap refused before the walk, a nesting cap, and a per-value
       // bignum ceiling the document cap can't provide. Unlike DER_MAX_INTEGER_BYTES,
@@ -5448,6 +5452,7 @@ var require_http_transport = __commonJS({
           try {
             req = nodeHttps.request(prep.options, function(res) {
               var proto = res.socket && res.socket.getProtocol ? res.socket.getProtocol() : null;
+              var cipher = res.socket && res.socket.getCipher ? res.socket.getCipher() : null;
               var peer = res.socket && res.socket.getPeerCertificate ? res.socket.getPeerCertificate() : null;
               var declared = parseInt((res.headers || {})["content-length"], 10);
               if (Number.isFinite(declared) && declared > prep.maxBytes) {
@@ -5484,7 +5489,7 @@ var require_http_transport = __commonJS({
                   status: res.statusCode,
                   headers: lower,
                   body: Buffer.from(buf.subarray(0, len)),
-                  tls: { protocol: proto, peerCertificate: peer && peer.raw ? peer.raw : null }
+                  tls: { protocol: proto, cipher, peerCertificate: peer && peer.raw ? peer.raw : null }
                 });
               });
               res.on("error", function(e) {
@@ -15757,16 +15762,33 @@ var require_http_retry_after = __commonJS({
       var out = { retryAfterSeconds: null, retryAfterDate: null };
       if (/^\d+$/.test(raStr)) {
         var n = parseInt(raStr, 10);
-        if (!Number.isSafeInteger(n) || n > MAX_RETRY_AFTER_SECONDS) throw _fail(opts, "the Retry-After delay is out of the supported range (0.." + MAX_RETRY_AFTER_SECONDS + " seconds)");
+        if (typeof opts.cap === "number" && n > opts.cap) {
+          out.retryAfterSeconds = opts.cap;
+          return out;
+        }
+        if (!Number.isSafeInteger(n) || n > MAX_RETRY_AFTER_SECONDS) {
+          if (opts.lenient) return out;
+          throw _fail(opts, "the Retry-After delay is out of the supported range (0.." + MAX_RETRY_AFTER_SECONDS + " seconds)");
+        }
         out.retryAfterSeconds = n;
         return out;
       }
       var when = httpDateMs(raStr, opts.now);
-      if (isNaN(when)) throw _fail(opts, "a Retry-After must be delay-seconds or a valid HTTP-date (RFC 7231 sec. 7.1.1.1/7.1.3), got " + JSON.stringify(raStr));
+      if (isNaN(when)) {
+        if (opts.lenient) return out;
+        throw _fail(opts, "a Retry-After must be delay-seconds or a valid HTTP-date (RFC 7231 sec. 7.1.1.1/7.1.3), got " + JSON.stringify(raStr));
+      }
       out.retryAfterDate = when;
       if (typeof opts.now === "number" && isFinite(opts.now)) {
         var d = Math.max(0, Math.ceil((when - opts.now) / constants.TIME.seconds(1)));
-        if (d > MAX_RETRY_AFTER_SECONDS) throw _fail(opts, "the Retry-After date is beyond the supported horizon (" + MAX_RETRY_AFTER_SECONDS + " seconds)");
+        if (typeof opts.cap === "number" && d > opts.cap) {
+          out.retryAfterSeconds = opts.cap;
+          return out;
+        }
+        if (d > MAX_RETRY_AFTER_SECONDS) {
+          if (opts.lenient) return out;
+          throw _fail(opts, "the Retry-After date is beyond the supported horizon (" + MAX_RETRY_AFTER_SECONDS + " seconds)");
+        }
         out.retryAfterSeconds = d;
       }
       return out;
@@ -25227,6 +25249,331 @@ var require_sigstore = __commonJS({
   }
 });
 
+// node_modules/@blamejs/pki/lib/http-digest.js
+var require_http_digest = __commonJS({
+  "node_modules/@blamejs/pki/lib/http-digest.js"(exports2, module2) {
+    "use strict";
+    var crypto = require("crypto");
+    var constants = require_constants();
+    var ALGS = {
+      "SHA-512-256": { hash: "sha512-256", rank: 3, sess: false },
+      "SHA-512-256-SESS": { hash: "sha512-256", rank: 3, sess: true },
+      "SHA-256": { hash: "sha256", rank: 2, sess: false },
+      "SHA-256-SESS": { hash: "sha256", rank: 2, sess: true },
+      "MD5": { hash: "md5", rank: 1, sess: false },
+      "MD5-SESS": { hash: "md5", rank: 1, sess: true }
+    };
+    var DEFAULT_CODES = {
+      unsupportedAlgorithm: "digest/unsupported-algorithm",
+      weakAlgorithm: "digest/weak-algorithm",
+      noQop: "digest/no-qop",
+      badChallenge: "digest/bad-challenge"
+    };
+    function H(hash, s) {
+      return crypto.createHash(hash).update(s, "latin1").digest("hex");
+    }
+    function KD(hash, secret, data) {
+      return H(hash, secret + ":" + data);
+    }
+    function _qstr(v) {
+      return '"' + String(v).replace(/(["\\])/g, "\\$1") + '"';
+    }
+    function _commaSplitOutsideQuotes(s) {
+      var out = [], buf = "", inQ = false, esc = false;
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charAt(i);
+        if (esc) {
+          buf += c;
+          esc = false;
+          continue;
+        }
+        if (inQ && c === "\\") {
+          buf += c;
+          esc = true;
+          continue;
+        }
+        if (c === '"') {
+          inQ = !inQ;
+          buf += c;
+          continue;
+        }
+        if (c === "," && !inQ) {
+          out.push(buf);
+          buf = "";
+          continue;
+        }
+        buf += c;
+      }
+      out.push(buf);
+      return out;
+    }
+    function _firstEqOutsideQuotes(s) {
+      var inQ = false, esc = false;
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charAt(i);
+        if (esc) {
+          esc = false;
+          continue;
+        }
+        if (inQ && c === "\\") {
+          esc = true;
+          continue;
+        }
+        if (c === '"') {
+          inQ = !inQ;
+          continue;
+        }
+        if (c === "=" && !inQ) return i;
+      }
+      return -1;
+    }
+    function _unq(s) {
+      return s.slice(1, -1).replace(/\\(.)/g, "$1");
+    }
+    function _closedQuote(s) {
+      if (s.length < 2 || s.charAt(0) !== '"') return false;
+      var esc = false;
+      for (var i = 1; i < s.length; i++) {
+        var c = s.charAt(i);
+        if (esc) {
+          esc = false;
+          continue;
+        }
+        if (c === "\\") {
+          esc = true;
+          continue;
+        }
+        if (c === '"') return i === s.length - 1;
+      }
+      return false;
+    }
+    function _hasCtl(s) {
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c < 32 && c !== 9 || c === 127) return true;
+      }
+      return false;
+    }
+    function _splitChallenges(s) {
+      var segs = _commaSplitOutsideQuotes(s);
+      var out = [], cur = null;
+      for (var i = 0; i < segs.length; i++) {
+        var seg = segs[i].replace(/^\s+|\s+$/g, "");
+        if (seg === "") continue;
+        var eq = _firstEqOutsideQuotes(seg);
+        var pre = (eq < 0 ? seg : seg.slice(0, eq)).replace(/^\s+|\s+$/g, "");
+        var ws = /^(\S+)\s+(\S[\s\S]*)$/.exec(pre);
+        if (eq < 0) {
+          cur = { scheme: seg, paramText: "" };
+          out.push(cur);
+        } else if (ws) {
+          cur = { scheme: ws[1], paramText: seg.replace(/^\s*\S+\s+/, "") };
+          out.push(cur);
+        } else if (cur) {
+          cur.paramText = cur.paramText ? cur.paramText + "," + seg : seg;
+        }
+      }
+      return out;
+    }
+    function _parseParams(paramText, E, code) {
+      var segs = _commaSplitOutsideQuotes(paramText), map = /* @__PURE__ */ Object.create(null);
+      for (var i = 0; i < segs.length; i++) {
+        var seg = segs[i].replace(/^\s+|\s+$/g, "");
+        if (seg === "") continue;
+        var eq = _firstEqOutsideQuotes(seg);
+        if (eq < 0) throw E(code, "malformed Digest auth-param (no '='): " + JSON.stringify(seg));
+        var key = seg.slice(0, eq).replace(/^\s+|\s+$/g, "").toLowerCase();
+        var rawVal = seg.slice(eq + 1).replace(/^\s+|\s+$/g, "");
+        var quoted = rawVal.charAt(0) === '"';
+        if (quoted && !_closedQuote(rawVal)) throw E(code, "an unterminated or trailing-garbage Digest quoted-string (RFC 7230 sec. 3.2.6)");
+        if (Object.prototype.hasOwnProperty.call(map, key)) throw E(code, "repeated Digest auth-param " + JSON.stringify(key));
+        var value = quoted ? _unq(rawVal) : rawVal;
+        if (_hasCtl(value)) throw E(code, "a Digest auth-param value contains a control character (RFC 7230 sec. 3.2.6)");
+        map[key] = { value, quoted };
+      }
+      return map;
+    }
+    function _validateDigest(paramText, E, code) {
+      var p = _parseParams(paramText, E, code);
+      if (!p.realm || !p.realm.quoted || p.realm.value === "") throw E(code, "a Digest challenge requires a non-empty quoted realm (RFC 7616 sec. 3.3)");
+      if (!p.nonce || !p.nonce.quoted || p.nonce.value === "") throw E(code, "a Digest challenge requires a non-empty quoted nonce (RFC 7616 sec. 3.3)");
+      if (p.algorithm && p.algorithm.quoted) throw E(code, "the Digest algorithm must be a token, not a quoted-string (RFC 7616 sec. 3.3)");
+      var qop = [];
+      if (p.qop) {
+        if (!p.qop.quoted) throw E(code, "the Digest qop must be a quoted list (RFC 7616 sec. 3.3)");
+        qop = p.qop.value.split(",").map(function(x) {
+          return x.replace(/^\s+|\s+$/g, "").toLowerCase();
+        }).filter(Boolean);
+        if (qop.length === 0) throw E(code, "a present Digest qop directive must list at least one value (RFC 7616 sec. 3.3)");
+      }
+      if (p.domain && !p.domain.quoted) throw E(code, "the Digest domain must be a quoted-string (RFC 7616 sec. 3.3)");
+      var domain = p.domain && p.domain.value.replace(/^\s+|\s+$/g, "") !== "" ? p.domain.value.replace(/^\s+|\s+$/g, "").split(/\s+/) : null;
+      if (p.charset && (p.charset.quoted || String(p.charset.value).toUpperCase() !== "UTF-8")) throw E(code, "the Digest charset must be the unquoted token UTF-8 (RFC 7616 sec. 3.3)");
+      if (p.stale) {
+        var sv = String(p.stale.value).toLowerCase();
+        if (p.stale.quoted || sv !== "true" && sv !== "false") throw E(code, "the Digest stale directive must be the unquoted token true or false (RFC 7616 sec. 3.3)");
+      }
+      if (p.userhash) {
+        var uhv = String(p.userhash.value).toLowerCase();
+        if (p.userhash.quoted || uhv !== "true" && uhv !== "false") throw E(code, "the Digest userhash directive must be the unquoted token true or false (RFC 7616 sec. 3.3)");
+      }
+      if (p.opaque && !p.opaque.quoted) throw E(code, "the Digest opaque directive must be a quoted-string (RFC 7616 sec. 3.3)");
+      return {
+        scheme: "Digest",
+        realm: p.realm.value,
+        nonce: p.nonce.value,
+        qop,
+        domain,
+        algorithm: p.algorithm ? p.algorithm.value.toUpperCase() : "MD5",
+        opaque: p.opaque ? p.opaque.value : null,
+        stale: !!(p.stale && String(p.stale.value).toLowerCase() === "true"),
+        userhash: !!(p.userhash && String(p.userhash.value).toLowerCase() === "true"),
+        charset: p.charset ? p.charset.value : null
+      };
+    }
+    function parseChallenge(www, E, code, policy) {
+      var pol = policy || {};
+      var codes = pol.codes || DEFAULT_CODES;
+      var preferStale = !!pol.preferStale;
+      var raw = String(www == null ? "" : www);
+      if (raw.length > constants.LIMITS.HTTP_AUTH_HEADER_MAX_BYTES) throw E(code, "the WWW-Authenticate header exceeds the " + constants.LIMITS.HTTP_AUTH_HEADER_MAX_BYTES + "-byte cap");
+      var challenges = _splitChallenges(raw);
+      var best = null, bestUsable = false, bestApplicable = false, bestStale = false, bestRank = -1, sawDigest = false;
+      for (var i = 0; i < challenges.length; i++) {
+        if (challenges[i].scheme.toLowerCase() !== "digest") continue;
+        sawDigest = true;
+        var parsed;
+        try {
+          parsed = _validateDigest(challenges[i].paramText, E, code);
+        } catch (_e) {
+          continue;
+        }
+        var alg = ALGS[parsed.algorithm];
+        var rank = alg ? alg.rank : 0;
+        var usable = _rejection(parsed, pol, codes) === null;
+        var applicable = pol.requestTarget === void 0 ? true : inProtectionSpace(parsed, pol.requestOrigin, pol.requestTarget);
+        var retryable = preferStale && !!parsed.stale && parsed.nonce !== pol.priorNonce && parsed.realm === pol.priorRealm;
+        if (best === null || usable && !bestUsable || usable === bestUsable && applicable && !bestApplicable || usable === bestUsable && applicable === bestApplicable && retryable && !bestStale || usable === bestUsable && applicable === bestApplicable && retryable === bestStale && rank > bestRank) {
+          best = parsed;
+          bestUsable = usable;
+          bestApplicable = applicable;
+          bestStale = retryable;
+          bestRank = rank;
+        }
+      }
+      if (best) return best;
+      if (sawDigest) throw E(code, "no valid Digest challenge: every Digest offer was malformed (missing realm / nonce or a bad directive, RFC 7616 sec. 3.3)");
+      return null;
+    }
+    function _octets(s, charset) {
+      var v = s == null ? "" : String(s);
+      return charset && String(charset).toUpperCase() === "UTF-8" ? Buffer.from(v, "utf8").toString("latin1") : v;
+    }
+    function _hasNonAscii(s) {
+      s = String(s == null ? "" : s);
+      for (var i = 0; i < s.length; i++) {
+        if (s.charCodeAt(i) > 127) return true;
+      }
+      return false;
+    }
+    function _pctEncodeUtf8(s) {
+      var bytes = Buffer.from(String(s == null ? "" : s), "utf8");
+      var out = "";
+      for (var i = 0; i < bytes.length; i++) {
+        var b = bytes[i];
+        if (b >= 48 && b <= 57 || b >= 65 && b <= 90 || b >= 97 && b <= 122 || b === 33 || b === 35 || b === 36 || b === 38 || b === 43 || b === 45 || b === 46 || b === 94 || b === 95 || b === 96 || b === 124 || b === 126) {
+          out += String.fromCharCode(b);
+        } else {
+          out += "%" + (b < 16 ? "0" : "") + b.toString(16).toUpperCase();
+        }
+      }
+      return out;
+    }
+    function _rejection(challenge, pol, codes) {
+      var alg = ALGS[challenge.algorithm];
+      if (!alg) return { code: codes.unsupportedAlgorithm, msg: "unsupported Digest algorithm " + challenge.algorithm + " (supported: SHA-512-256, SHA-256, MD5)" };
+      if (alg.hash === "md5" && !pol.allowMD5) return { code: codes.weakAlgorithm, msg: "MD5 Digest refused by default (RFC 7616 sec. 3.4 discourages it); set opts.auth.allowMD5 for legacy interop" };
+      if (challenge.qop.length === 0) {
+        if (!pol.allowLegacyQop) return { code: codes.noQop, msg: "a no-qop (RFC 2069) Digest challenge is refused by default; set opts.auth.allowLegacyQop for legacy interop" };
+      } else if (challenge.qop.indexOf("auth") === -1 && challenge.qop.indexOf("auth-int") === -1) {
+        return { code: codes.badChallenge, msg: "the Digest qop offered no member this client supports (auth / auth-int)" };
+      }
+      return null;
+    }
+    function answer(challenge, params, E) {
+      var pol = params.policy || {};
+      var codes = pol.codes || DEFAULT_CODES;
+      var rej = _rejection(challenge, pol, codes);
+      if (rej) throw E(rej.code, rej.msg);
+      var alg = ALGS[challenge.algorithm];
+      var useQop = challenge.qop.indexOf("auth") !== -1 ? "auth" : challenge.qop.indexOf("auth-int") !== -1 ? "auth-int" : null;
+      var cnonce = String((params.rng || function() {
+        return crypto.randomBytes(18).toString("base64");
+      })());
+      var realm = challenge.realm, nonce = challenge.nonce;
+      var isUtf8 = String(challenge.charset || "").toUpperCase() === "UTF-8";
+      var pUser = params.username == null ? "" : String(params.username);
+      var pPass = params.password == null ? "" : String(params.password);
+      if (isUtf8) {
+        pUser = pUser.normalize("NFC");
+        pPass = pPass.normalize("NFC");
+      }
+      var user = _octets(pUser, challenge.charset);
+      var pass = _octets(pPass, challenge.charset);
+      var HA1 = H(alg.hash, user + ":" + realm + ":" + pass);
+      if (alg.sess) HA1 = H(alg.hash, HA1 + ":" + nonce + ":" + cnonce);
+      var A2 = useQop === "auth-int" ? params.method + ":" + params.uri + ":" + H(alg.hash, params.body == null ? "" : params.body) : params.method + ":" + params.uri;
+      var HA2 = H(alg.hash, A2);
+      var ncNum = typeof params.nc === "number" && params.nc >= 1 ? Math.floor(params.nc) : 1;
+      var nc = ("0000000" + ncNum.toString(16)).slice(-8);
+      var response = useQop ? KD(alg.hash, HA1, nonce + ":" + nc + ":" + cnonce + ":" + useQop + ":" + HA2) : KD(alg.hash, HA1, nonce + ":" + HA2);
+      var parts;
+      if (!challenge.userhash && isUtf8 && _hasNonAscii(pUser)) {
+        parts = ["username*=UTF-8''" + _pctEncodeUtf8(pUser)];
+      } else {
+        var sentUser = challenge.userhash ? H(alg.hash, _octets(pUser, challenge.charset) + ":" + realm) : _octets(pUser, challenge.charset);
+        parts = ["username=" + _qstr(sentUser)];
+      }
+      parts.push("realm=" + _qstr(realm), "nonce=" + _qstr(nonce), "uri=" + _qstr(params.uri), "algorithm=" + challenge.algorithm);
+      if (useQop) {
+        parts.push("qop=" + useQop);
+        parts.push("nc=" + nc);
+      }
+      if (useQop || alg.sess) {
+        parts.push("cnonce=" + _qstr(cnonce));
+      }
+      parts.push("response=" + _qstr(response));
+      if (challenge.opaque != null) parts.push("opaque=" + _qstr(challenge.opaque));
+      if (challenge.userhash) parts.push("userhash=true");
+      return "Digest " + parts.join(", ");
+    }
+    function _domainEntry(d) {
+      d = String(d == null ? "" : d);
+      if (d.charAt(0) === "/") return { origin: null, full: d };
+      try {
+        var u = new URL(d);
+        return { origin: u.origin.toLowerCase(), full: (u.pathname || "/") + (u.search || "") };
+      } catch (_e) {
+        return null;
+      }
+    }
+    function inProtectionSpace(challenge, requestOrigin, requestPathAndSearch) {
+      var domain = challenge && challenge.domain;
+      if (!domain || !domain.length) return true;
+      var origin = String(requestOrigin == null ? "" : requestOrigin).toLowerCase();
+      var full = String(requestPathAndSearch == null ? "" : requestPathAndSearch);
+      for (var i = 0; i < domain.length; i++) {
+        var e = _domainEntry(domain[i]);
+        if (e === null) continue;
+        if (e.origin !== null && e.origin !== origin) continue;
+        if (full.indexOf(e.full) === 0) return true;
+      }
+      return false;
+    }
+    module2.exports = { parseChallenge, answer, inProtectionSpace };
+  }
+});
+
 // node_modules/@blamejs/pki/lib/est.js
 var require_est = __commonJS({
   "node_modules/@blamejs/pki/lib/est.js"(exports2, module2) {
@@ -25237,10 +25584,13 @@ var require_est = __commonJS({
     var cms = require_schema_cms();
     var x509 = require_schema_x509();
     var pkcs8 = require_schema_pkcs8();
+    var key = require_key();
     var csr = require_schema_csr();
+    var csrattrsFmt = require_schema_csrattrs();
     var frameworkError = require_framework_error();
     var guard = require_guard_all();
     var httpTransport = require_http_transport();
+    var httpDigest = require_http_digest();
     var retryAfter = require_http_retry_after();
     var EstError = frameworkError.EstError;
     function E(code, message, cause) {
@@ -25311,7 +25661,7 @@ var require_est = __commonJS({
         var rawHeaders = seg.slice(0, sep);
         var partBody = seg.slice(sep).replace(/^(\r?\n){2}/, "").replace(/\r?\n$/, "");
         var headers = {};
-        rawHeaders.split(/\r?\n/).forEach(function(line) {
+        rawHeaders.replace(/\r?\n(?=[ \t])/g, "").split(/\r?\n/).forEach(function(line) {
           var col = line.indexOf(":");
           if (col > 0) headers[line.slice(0, col).trim().toLowerCase()] = line.slice(col + 1).trim();
         });
@@ -25338,18 +25688,22 @@ var require_est = __commonJS({
       }
       return null;
     }
-    function _recipientKeyIds(recipientInfos) {
+    function _recipientKeyIds(recipientInfos, kind) {
       var ids = [];
       function push(v) {
         if (Buffer.isBuffer(v)) ids.push(v);
       }
       (recipientInfos || []).forEach(function(r) {
-        if (r.rid) push(r.rid.subjectKeyIdentifier);
-        if (r.kemri && r.kemri.rid) push(r.kemri.rid.subjectKeyIdentifier);
-        if (r.kekid) push(r.kekid.keyIdentifier);
-        (r.recipientEncryptedKeys || []).forEach(function(rek) {
-          if (rek.rid) push(rek.rid.subjectKeyIdentifier);
-        });
+        if (kind !== "symmetric") {
+          if (r.rid) push(r.rid.subjectKeyIdentifier);
+          if (r.kemri && r.kemri.rid) push(r.kemri.rid.subjectKeyIdentifier);
+          (r.recipientEncryptedKeys || []).forEach(function(rek) {
+            if (rek.rid) push(rek.rid.subjectKeyIdentifier);
+          });
+        }
+        if (kind !== "asymmetric") {
+          if (r.kekid) push(r.kekid.keyIdentifier);
+        }
       });
       return ids;
     }
@@ -25368,13 +25722,17 @@ var require_est = __commonJS({
       return out;
     }
     function _recipientMatches(recipientInfos, opts) {
-      if (Buffer.isBuffer(opts.expectedRecipientKeyId) && _recipientKeyIds(recipientInfos).some(function(id) {
+      if (Buffer.isBuffer(opts.expectedRecipientKeyId) && _recipientKeyIds(recipientInfos, opts.expectedRecipientKind).some(function(id) {
         return id.equals(opts.expectedRecipientKeyId);
       })) return true;
       var ias = opts.expectedRecipientIssuerSerial;
       if (ias && Buffer.isBuffer(ias.issuer) && ias.serialNumber != null) {
-        var want = typeof ias.serialNumber === "bigint" ? ias.serialNumber : BigInt(ias.serialNumber);
-        if (_recipientIssuerSerials(recipientInfos).some(function(r) {
+        var sn = ias.serialNumber, want;
+        if (typeof sn === "bigint" && sn >= 0n) want = sn;
+        else if (typeof sn === "number" && Number.isSafeInteger(sn) && sn >= 0) want = BigInt(sn);
+        else if (typeof sn === "string" && /^[0-9]+$/.test(sn)) want = BigInt(sn);
+        else throw E("est/bad-input", "expectedRecipientIssuerSerial.serialNumber must be a NON-NEGATIVE bigint, a safe non-negative integer, or a decimal digit string (a certificate serial is non-negative, RFC 5280 sec. 4.1.2.2)");
+        if (opts.expectedRecipientKind !== "symmetric" && _recipientIssuerSerials(recipientInfos).some(function(r) {
           return r.issuer.equals(ias.issuer) && r.serialNumber === want;
         })) return true;
       }
@@ -25428,6 +25786,7 @@ var require_est = __commonJS({
       }
       if (!keyPart || !certPart) throw E("est/bad-multipart", "a serverkeygen response needs one key part and one certificate part");
       if (opts.requestedEncryption && !encrypted) throw E("est/expected-encrypted-key", "encryption was requested but the private-key part is cleartext (RFC 7030 sec. 4.4.2)");
+      if (opts.requestedEncryption === false && encrypted) throw E("est/unexpected-encrypted-key", "the server returned an encrypted key but the CSR advertised no DecryptKeyIdentifier / AsymmetricDecryptKeyIdentifier to decrypt it (RFC 7030 sec. 4.4.2)");
       var out = { certificates: parseCertsOnly(transferDecode(certPart.body)).certificates };
       if (encrypted) {
         var parsedKey = cms.parse(transferDecode(keyPart.body));
@@ -25439,7 +25798,9 @@ var require_est = __commonJS({
         }
         out.encryptedKey = parsedKey;
       } else {
-        out.privateKey = pkcs8.parse(transferDecode(keyPart.body));
+        var keyDer = transferDecode(keyPart.body);
+        out.privateKey = pkcs8.parse(keyDer);
+        out.privateKeyDer = keyDer;
       }
       return out;
     }
@@ -25625,13 +25986,38 @@ var require_est = __commonJS({
       }
       return resolved;
     }
-    function _hasBasicChallenge(www) {
+    function _offersScheme(www, scheme) {
       var s = String(www || "").replace(/"(?:[^"\\]|\\.)*"/g, '""');
-      return /(?:^|,)\s*Basic(?=[\s,]|$)/i.test(s);
+      return new RegExp("(?:^|,)\\s*" + scheme + "(?=[\\s,]|$)", "i").test(s);
+    }
+    function _authScheme(opts) {
+      if (opts.auth && opts.auth.scheme != null) {
+        var sc = String(opts.auth.scheme).toLowerCase();
+        if (sc !== "basic" && sc !== "digest") throw E("est/bad-input", 'opts.auth.scheme must be "basic" or "digest"');
+        return sc;
+      }
+      if (opts.username !== void 0 || opts.password !== void 0) return "basic";
+      return null;
+    }
+    function _authUser(opts) {
+      return opts.auth && opts.auth.username !== void 0 ? opts.auth.username : opts.username;
+    }
+    function _authPass(opts) {
+      return opts.auth && opts.auth.password !== void 0 ? opts.auth.password : opts.password;
+    }
+    function _hasCreds(opts) {
+      return _authUser(opts) !== void 0 || _authPass(opts) !== void 0;
+    }
+    var DIGEST_CODES = { unsupportedAlgorithm: "est/digest-unsupported-algorithm", weakAlgorithm: "est/digest-weak-algorithm", noQop: "est/digest-no-qop", badChallenge: "est/digest-bad-challenge" };
+    function _digestPolicy(opts) {
+      return { allowMD5: !!(opts.auth && opts.auth.allowMD5), allowLegacyQop: !!(opts.auth && opts.auth.allowLegacyQop), codes: DIGEST_CODES };
     }
     function _drive(method, url, body, headers, opts, transport, budgets) {
       var redirects = 0;
       var authTried = false;
+      var staleRetries = 0;
+      var authSpaces = 0;
+      var lastDigestNonce = null;
       var initialOrigin = url.origin;
       function _tlsFor(u) {
         var t = budgets.tls;
@@ -25644,10 +26030,22 @@ var require_est = __commonJS({
         return t;
       }
       var authValue = null;
+      var digestChallenge = null;
+      var digestNcByNonce = /* @__PURE__ */ Object.create(null);
+      var digestSent = false;
       function _headersFor(u) {
-        if (!authValue || u.origin !== initialOrigin) return headers;
+        digestSent = false;
+        if (u.origin !== initialOrigin || !authValue && !digestChallenge) return headers;
         var hh = Object.assign({}, headers);
-        hh.authorization = authValue;
+        if (digestChallenge) {
+          if (!httpDigest.inProtectionSpace(digestChallenge, u.origin, u.pathname + u.search)) return headers;
+          var nkey = digestChallenge.nonce;
+          digestNcByNonce[nkey] = (digestNcByNonce[nkey] || 0) + 1;
+          hh.authorization = httpDigest.answer(digestChallenge, { method, uri: u.pathname + u.search, username: _authUser(opts), password: _authPass(opts), body, nc: digestNcByNonce[nkey], policy: _digestPolicy(opts) }, E);
+          digestSent = true;
+        } else {
+          hh.authorization = authValue;
+        }
         return hh;
       }
       function step() {
@@ -25675,12 +26073,39 @@ var require_est = __commonJS({
             return step();
           }
           if (status === 401) {
-            if (authTried) throw E("est/auth-required", "the server rejected the credentialed request (RFC 7030 sec. 3.2.3)");
             if (url.origin !== initialOrigin) throw E("est/auth-required", "refusing to send HTTP credentials to a redirected origin (RFC 7030 sec. 3.6)");
             var www = String(h["www-authenticate"] || "");
-            if (!_hasBasicChallenge(www)) throw E("est/auth-required", "the server requires an unsupported HTTP authentication scheme (only Basic is supported): " + www);
-            if (opts.username === void 0 && opts.password === void 0) throw E("est/auth-required", "the server requires HTTP authentication but no credentials were supplied (RFC 7030 sec. 3.2.3)");
-            authValue = "Basic " + Buffer.from((opts.username || "") + ":" + (opts.password || ""), "utf8").toString("base64");
+            if (www.length > constants.LIMITS.HTTP_AUTH_HEADER_MAX_BYTES) throw E("est/auth-required", "the WWW-Authenticate header exceeds the " + constants.LIMITS.HTTP_AUTH_HEADER_MAX_BYTES + "-byte cap (RFC 7030 sec. 3.2.3)");
+            var scheme = _authScheme(opts);
+            if (scheme === null) throw E("est/auth-required", "the server requires HTTP authentication but no credentials were supplied (RFC 7030 sec. 3.2.3)");
+            if (scheme === "digest") {
+              if (!_offersScheme(www, "Digest")) throw E("est/auth-required", 'opts.auth.scheme is "digest" but the server offered no Digest challenge: ' + www);
+              if (!_hasCreds(opts)) throw E("est/auth-required", "Digest authentication requires opts.auth.username / password (RFC 7030 sec. 3.2.3)");
+              var selPol = _digestPolicy(opts);
+              selPol.preferStale = digestSent;
+              selPol.priorNonce = lastDigestNonce;
+              selPol.priorRealm = digestChallenge && digestChallenge.realm;
+              selPol.requestOrigin = url.origin;
+              selPol.requestTarget = url.pathname + url.search;
+              var ch = httpDigest.parseChallenge(www, E, "est/digest-bad-challenge", selPol);
+              if (!ch) throw E("est/auth-required", "the server offered no usable Digest challenge: " + www);
+              if (digestSent && digestChallenge && ch.realm === digestChallenge.realm) {
+                if (!(ch.stale && ch.nonce !== lastDigestNonce && staleRetries < budgets.maxStaleRetries)) throw E("est/auth-required", "the server rejected the credentialed Digest request (RFC 7030 sec. 3.2.3)");
+                staleRetries += 1;
+              } else {
+                if (authTried && authSpaces >= budgets.maxRedirects) throw E("est/auth-required", "the server demanded Digest authentication for too many distinct protection spaces (RFC 7616 sec. 3.3)");
+                if (authTried) authSpaces += 1;
+                authTried = true;
+                staleRetries = 0;
+              }
+              lastDigestNonce = ch.nonce;
+              digestChallenge = ch;
+              return step();
+            }
+            if (authTried) throw E("est/auth-required", "the server rejected the credentialed request (RFC 7030 sec. 3.2.3)");
+            if (!_offersScheme(www, "Basic")) throw E("est/auth-required", "the server requires an unsupported HTTP authentication scheme (only Basic and Digest are supported): " + www);
+            if (!_hasCreds(opts)) throw E("est/auth-required", "the server requires HTTP authentication but no credentials were supplied (RFC 7030 sec. 3.2.3)");
+            authValue = "Basic " + Buffer.from((_authUser(opts) || "") + ":" + (_authPass(opts) || ""), "utf8").toString("base64");
             authTried = true;
             return step();
           }
@@ -25709,8 +26134,10 @@ var require_est = __commonJS({
         tls: _tlsForRequest(opts),
         timeout: guard.limits.cap(opts.timeout, "timeout", DEFAULT_TIMEOUT, { E, code: "est/bad-input", min: 1, max: MAX_TIMEOUT }),
         maxResponseBytes: guard.limits.cap(opts.maxResponseBytes, "maxResponseBytes", constants.LIMITS.HTTP_MAX_RESPONSE_BYTES, { E, code: "est/bad-input", min: 1, max: constants.LIMITS.HTTP_MAX_RESPONSE_BYTES }),
-        maxRedirects: guard.limits.cap(opts.maxRedirects, "maxRedirects", 5, { E, code: "est/bad-input", min: 0, max: 32 })
+        maxRedirects: guard.limits.cap(opts.maxRedirects, "maxRedirects", 5, { E, code: "est/bad-input", min: 0, max: 32 }),
+        maxStaleRetries: guard.limits.cap(opts.auth && opts.auth.maxStaleRetries, "maxStaleRetries", 1, { E, code: "est/bad-input", min: 0, max: 8 })
       };
+      _authScheme(opts);
       return _drive(method, url, body, Object.assign({}, headers), opts, transport, budgets);
     }
     function _certsResult(op, res, opts, csrSpki) {
@@ -25763,10 +26190,119 @@ var require_est = __commonJS({
         return _enroll("simplereenroll", baseUrl, csrInput, opts);
       });
     }
+    function _serverkeygenEncryptionFromCsr(csrDer) {
+      var attrs = csr.parse(csrDer).attributes || [];
+      var keyId = null, kind = null;
+      for (var i = 0; i < attrs.length; i++) {
+        if (attrs[i].type !== OID_DECRYPT_KEY_ID && attrs[i].type !== OID_ASYMM_DECRYPT_KEY_ID) continue;
+        var thisKind = attrs[i].type === OID_ASYMM_DECRYPT_KEY_ID ? "asymmetric" : "symmetric";
+        var vals = attrs[i].values || [];
+        if (vals.length !== 1) throw E("est/bad-input", "a serverkeygen key-identifier attribute must carry exactly one value (RFC 7030 sec. 4.4.1)");
+        var id;
+        try {
+          id = asn1.read.octetString(asn1.decode(vals[0]));
+        } catch (e) {
+          throw E("est/bad-input", "a serverkeygen key-identifier attribute value is not a valid OCTET STRING", e);
+        }
+        if (keyId !== null && !keyId.equals(id)) throw E("est/bad-input", "the CSR advertised two different serverkeygen key identifiers (RFC 7030 sec. 4.4.1)");
+        if (kind !== null && kind !== thisKind) throw E("est/bad-input", "the CSR advertised both a symmetric (DecryptKeyIdentifier) and an asymmetric (AsymmetricDecryptKeyIdentifier) serverkeygen key -- the recipient mechanism is ambiguous (RFC 7030 sec. 4.4.1)");
+        keyId = id;
+        kind = thisKind;
+      }
+      return { requestedEncryption: keyId !== null, expectedRecipientKeyId: keyId, expectedRecipientKind: kind };
+    }
+    function _assertConfidentialCipher(res) {
+      if (!res || !res.tls || !res.tls.cipher) return;
+      var c = res.tls.cipher;
+      var name = (String(c.name || "") + " " + String(c.standardName || "")).toUpperCase();
+      if (/NULL|ANON|EXPORT|\bEXP[-_0-9]|\bA(EC)?DH\b/.test(name)) throw E("est/weak-cipher", "the serverkeygen channel negotiated a NULL / anonymous / EXPORT cipher (" + (c.standardName || c.name) + "), which cannot protect the delivered private key (RFC 7030 sec. 4.4)");
+    }
+    function _ciHeader(headers, name) {
+      headers = headers || {};
+      if (headers[name] !== void 0) return headers[name];
+      var lname = name.toLowerCase(), keys = Object.keys(headers);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i].toLowerCase() === lname) return headers[keys[i]];
+      }
+      return null;
+    }
+    async function _serverkeygenResult(res, opts, derived) {
+      var verdict = classifyResponse(res.status, res.headers, res.body, { op: "serverkeygen", now: opts.now });
+      if (verdict.status === "retry") return { retry: true, retryAfterSeconds: verdict.retryAfterSeconds, retryAfterDate: verdict.retryAfterDate };
+      if (verdict.status !== "ok") throw E("est/http-error", "an EST serverkeygen response must be HTTP 200 or 202 (RFC 7030 sec. 4.4.2), got " + res.status);
+      var bodyLen = Buffer.isBuffer(res.body) ? res.body.length : Buffer.byteLength(String(res.body == null ? "" : res.body), "utf8");
+      if (bodyLen === 0) throw E("est/empty-body", "a 200 serverkeygen response carried an empty body (RFC 7030 sec. 4.4.2)");
+      _assertConfidentialCipher(res);
+      var out = parseServerKeygenResponse(res.body, _ciHeader(res.headers, "content-type"), {
+        requestedEncryption: derived.requestedEncryption,
+        expectedRecipientKeyId: derived.expectedRecipientKeyId,
+        expectedRecipientKind: derived.expectedRecipientKind,
+        expectedRecipientIssuerSerial: opts.expectedRecipientIssuerSerial
+      });
+      if (out.privateKeyDer) {
+        var spki;
+        try {
+          spki = await key.publicFromPrivate(out.privateKeyDer);
+        } catch (e) {
+          throw E("est/key-cert-mismatch", "the cleartext server-generated private key's public half could not be derived to bind it to a returned certificate (RFC 7030 sec. 4.4.2)", e);
+        }
+        var bound = findIssuedCert(out.certificates, spki);
+        if (!bound) throw E("est/key-cert-mismatch", "the cleartext server-generated private key matches no returned certificate's public key (RFC 7030 sec. 4.4.2)");
+        if (findIssuedCert(out.certificates.filter(function(c) {
+          return c !== bound;
+        }), spki)) throw E("est/ambiguous-issued-cert", "more than one returned certificate carries the server-generated key; the issued certificate is ambiguous (RFC 7030 sec. 4.4.2)");
+        delete out.privateKeyDer;
+      }
+      return out;
+    }
+    function serverkeygen(baseUrl, csrInput, opts) {
+      opts = opts || {};
+      return Promise.resolve().then(function() {
+        var csrDer = _csrDer(csrInput);
+        var derived = _serverkeygenEncryptionFromCsr(csrDer);
+        if (opts.requestedEncryption !== void 0 && !!opts.requestedEncryption !== derived.requestedEncryption) throw E("est/bad-input", "opts.requestedEncryption (" + !!opts.requestedEncryption + ") contradicts the CSR's advertised key-encryption attribute (" + derived.requestedEncryption + ") (RFC 7030 sec. 4.4.1)");
+        if (opts.expectedRecipientKeyId !== void 0) {
+          if (!Buffer.isBuffer(opts.expectedRecipientKeyId)) throw E("est/bad-input", "opts.expectedRecipientKeyId must be a Buffer");
+          if (derived.expectedRecipientKeyId && !opts.expectedRecipientKeyId.equals(derived.expectedRecipientKeyId)) throw E("est/bad-input", "opts.expectedRecipientKeyId contradicts the key identifier the CSR advertised (RFC 7030 sec. 4.4.1)");
+        }
+        if (opts.expectedRecipientIssuerSerial != null) {
+          var eis = opts.expectedRecipientIssuerSerial;
+          if (typeof eis !== "object" || Buffer.isBuffer(eis) || !Buffer.isBuffer(eis.issuer)) throw E("est/bad-input", "opts.expectedRecipientIssuerSerial must be { issuer: Buffer, serialNumber }");
+          var s = eis.serialNumber;
+          if (!(typeof s === "bigint" && s >= 0n || typeof s === "number" && Number.isSafeInteger(s) && s >= 0 || typeof s === "string" && /^[0-9]+$/.test(s))) throw E("est/bad-input", "opts.expectedRecipientIssuerSerial.serialNumber must be a NON-NEGATIVE bigint, a safe non-negative integer, or a decimal digit string (a certificate serial is non-negative, RFC 5280 sec. 4.1.2.2)");
+        }
+        if ((opts.expectedRecipientKeyId !== void 0 || opts.expectedRecipientIssuerSerial != null) && !derived.requestedEncryption) {
+          throw E("est/bad-input", "a recipient expectation (expectedRecipientKeyId / expectedRecipientIssuerSerial) implies an encrypted key, but the CSR advertised no DecryptKeyIdentifier / AsymmetricDecryptKeyIdentifier attribute (RFC 7030 sec. 4.4.1)");
+        }
+        return _client("serverkeygen", "POST", baseUrl, transferEncode(csrDer), { accept: "multipart/mixed", "content-type": "application/pkcs10" }, opts).then(function(res) {
+          return _serverkeygenResult(res, opts, derived);
+        });
+      });
+    }
+    function _csrattrsResult(res, opts) {
+      var verdict = classifyResponse(res.status, res.headers, res.body, { op: "csrattrs", now: opts.now });
+      if (verdict.status === "none-available") return { available: false, attrs: null };
+      if (verdict.status === "retry") throw E("est/http-error", "a /csrattrs response must be HTTP 200, 204, or 404, not 202 (RFC 7030 sec. 4.5.2)");
+      if (verdict.status !== "ok") throw E("est/http-error", "an EST csrattrs response must be HTTP 200 / 204 / 404 (RFC 7030 sec. 4.5.2), got " + res.status);
+      var bodyLen = Buffer.isBuffer(res.body) ? res.body.length : Buffer.byteLength(String(res.body == null ? "" : res.body), "utf8");
+      if (bodyLen === 0) throw E("est/empty-body", "a 200 csrattrs response carried an empty body (RFC 7030 sec. 4.5.2)");
+      var attrs = csrattrsFmt.parse(transferDecode(res.body));
+      return { available: true, attrs, plan: buildEnrollAttributes(attrs) };
+    }
+    function csrattrs(baseUrl, opts) {
+      opts = opts || {};
+      return Promise.resolve().then(function() {
+        return _client("csrattrs", "GET", baseUrl, null, { accept: "application/csrattrs" }, opts);
+      }).then(function(res) {
+        return _csrattrsResult(res, opts);
+      });
+    }
     module2.exports = {
       cacerts,
       simpleenroll,
       simplereenroll,
+      serverkeygen,
+      csrattrs,
       transferDecode,
       transferEncode,
       splitMultipartMixed,
@@ -26048,7 +26584,8 @@ var require_acme = __commonJS({
     var pkix = require_schema_pkix();
     var constants = require_constants();
     var rfc3339 = require_rfc3339();
-    var subtle = require_webcrypto().webcrypto.subtle;
+    var webcrypto = require_webcrypto().webcrypto;
+    var subtle = webcrypto.subtle;
     var frameworkError = require_framework_error();
     var httpTransport = require_http_transport();
     var retryAfter = require_http_retry_after();
@@ -26067,6 +26604,13 @@ var require_acme = __commonJS({
     function _isRfc3339(v) {
       return rfc3339.isValid(v);
     }
+    var _RANDOM_DENOM = Math.pow(2, 48);
+    function _defaultRandom() {
+      return Buffer.from(webcrypto.getRandomValues(new Uint8Array(6))).readUIntBE(0, 6) / _RANDOM_DENOM;
+    }
+    var RENEWAL_RETRY_MIN_SECONDS = 60;
+    var RENEWAL_RETRY_MAX_SECONDS = constants.TIME.days(1) / constants.TIME.seconds(1);
+    var RENEWAL_RETRY_DEFAULT_SECONDS = constants.TIME.hours(6) / constants.TIME.seconds(1);
     function _isUrl(v) {
       if (!_isString(v) || !/^https?:\/\/[^\s]+$/.test(v)) return false;
       var u;
@@ -26127,7 +26671,12 @@ var require_acme = __commonJS({
         { name: "expires", type: "rfc3339", requiredWhen: function(o) {
           return o.status === "valid";
         } },
-        { name: "challenges", type: "array", required: true, minItems: 1, elemType: "challenge" },
+        // challenges is required (the key is present) but MAY be empty for an already-"valid" authorization the CA
+        // granted out of band (RFC 8555 sec. 7.1.4 / 7.4.1 -- no challenge was validated); a pending/other authz still
+        // needs at least the one challenge the client fulfills.
+        { name: "challenges", type: "array", required: true, minItems: function(o) {
+          return o.status === "valid" ? 0 : 1;
+        }, elemType: "challenge" },
         { name: "wildcard", type: "boolean" }
       ],
       challenge: [
@@ -26147,7 +26696,7 @@ var require_acme = __commonJS({
         { name: "explanationURL", type: "url" }
       ]
     };
-    function _checkType(kind, field, value) {
+    function _checkType(kind, field, value, obj) {
       switch (field.type) {
         case "string":
           if (!_isString(value)) return "must be a string";
@@ -26173,7 +26722,8 @@ var require_acme = __commonJS({
           break;
         case "array":
           if (!Array.isArray(value)) return "must be an array";
-          if (field.minItems && value.length < field.minItems) return "must have at least " + field.minItems + " element(s)";
+          var minItems = typeof field.minItems === "function" ? field.minItems(obj) : field.minItems;
+          if (minItems && value.length < minItems) return "must have at least " + minItems + " element(s)";
           for (var i = 0; i < value.length; i++) {
             if (field.elemType === "url" && !_isUrl(value[i])) return "element " + i + " must be a URL string";
             if (field.elemType === "contact" && !_isUriString(value[i])) return "element " + i + " must be a URI string";
@@ -26205,20 +26755,22 @@ var require_acme = __commonJS({
         if (field.enum && field.enum.indexOf(obj[field.name]) === -1) {
           throw E("acme/bad-status", "the " + kind + " " + field.name + " " + JSON.stringify(obj[field.name]) + " is not a recognized value");
         }
-        var err = _checkType(kind, field, obj[field.name]);
+        var err = _checkType(kind, field, obj[field.name], obj);
         if (err) throw E("acme/bad-" + _codeSlug(kind), "the " + kind + " field " + JSON.stringify(field.name) + " " + err);
       }
       return obj;
     }
     function _validateIdentifier(id) {
-      if (!_isObject(id) || !_isString(id.type) || !_isString(id.value)) throw E("acme/bad-identifier", "an identifier must be { type, value } strings");
-      if (id.type === "dns") {
-        if (id.value.indexOf("*.") === 0) throw E("acme/bad-identifier", "a wildcard *. value is not permitted in an authorization identifier (RFC 8555 sec. 7.1.4)");
-        _assertDnsName(id.value);
-      } else if (id.type === "ip") {
-        _assertIpAddress(id.value);
+      if (!_isObject(id)) throw E("acme/bad-identifier", "an identifier must be { type, value } strings");
+      var type = id.type, value = id.value;
+      if (!_isString(type) || !_isString(value)) throw E("acme/bad-identifier", "an identifier must be { type, value } strings");
+      if (type === "dns") {
+        if (value.indexOf("*.") === 0) throw E("acme/bad-identifier", "a wildcard *. value is not permitted in an authorization identifier (RFC 8555 sec. 7.1.4)");
+        _assertDnsName(value);
+      } else if (type === "ip") {
+        _assertIpAddress(value);
       }
-      return id;
+      return { type, value };
     }
     function _assertDnsName(name) {
       if (!_isString(name)) throw E("acme/bad-identifier", "a dns identifier value must be a string");
@@ -26491,9 +27043,11 @@ var require_acme = __commonJS({
       return jose.sign({ protected: { alg, kid: o.kid, url: o.url }, payload: _payloadBuf(o.accountJwk), key, profile: "eab-inner" });
     }
     function _validateOrderIdentifier(id) {
-      if (!_isObject(id) || !_isString(id.type) || !_isString(id.value)) throw E("acme/bad-identifier", "an order identifier must be { type, value } strings");
-      if (id.type === "dns") {
-        var v = id.value;
+      if (!_isObject(id)) throw E("acme/bad-identifier", "an order identifier must be { type, value } strings");
+      var type = id.type, value = id.value;
+      if (!_isString(type) || !_isString(value)) throw E("acme/bad-identifier", "an order identifier must be { type, value } strings");
+      if (type === "dns") {
+        var v = value;
         if (v.indexOf("*.") === 0) {
           v = v.slice(2);
           if (v.indexOf("*") !== -1) throw E("acme/bad-identifier", "a wildcard order identifier permits exactly one leading *. label (RFC 8555 sec. 7.1.3)");
@@ -26501,16 +27055,15 @@ var require_acme = __commonJS({
           throw E("acme/bad-identifier", "a wildcard must be a single leading *. label (RFC 8555 sec. 7.1.3)");
         }
         _assertDnsName(v);
-      } else if (id.type === "ip") {
-        if (id.value.indexOf("*") !== -1) throw E("acme/bad-identifier", "an ip identifier has no wildcard form (RFC 8738)");
-        _assertIpAddress(id.value);
+      } else if (type === "ip") {
+        if (value.indexOf("*") !== -1) throw E("acme/bad-identifier", "an ip identifier has no wildcard form (RFC 8738)");
+        _assertIpAddress(value);
       }
-      return id;
+      return { type, value };
     }
     function newOrder(o) {
       if (!_isObject(o) || !Array.isArray(o.identifiers) || o.identifiers.length === 0) throw E("acme/bad-order", "newOrder requires a non-empty identifiers array (RFC 8555 sec. 7.4)");
-      o.identifiers.forEach(_validateOrderIdentifier);
-      var payload = { identifiers: o.identifiers };
+      var payload = { identifiers: o.identifiers.map(_validateOrderIdentifier) };
       if (o.notBefore !== void 0) {
         if (!_isRfc3339(o.notBefore)) throw E("acme/bad-order", "notBefore must be an RFC 3339 date-time");
         payload.notBefore = o.notBefore;
@@ -26524,6 +27077,10 @@ var require_acme = __commonJS({
         payload.replaces = o.replaces;
       }
       return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
+    }
+    function newAuthz(o) {
+      if (!_isObject(o) || !_isObject(o.identifier)) throw E("acme/bad-identifier", "newAuthz requires a single identifier object (RFC 8555 sec. 7.4.1)");
+      return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, { identifier: _validateIdentifier(o.identifier) });
     }
     async function _jwkToSpki(jwk) {
       var importAlg;
@@ -26708,10 +27265,21 @@ var require_acme = __commonJS({
         throw E("acme/bad-url", "the ACME URL did not parse: " + s, e);
       }
       if (url.protocol !== "https:") throw E("acme/insecure-url", "ACME requires https (RFC 8555 sec. 6.1), got " + url.protocol + " for " + s);
+      if (((/^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(s) || [])[1] || "").indexOf("@") !== -1) throw E("acme/bad-url", "an ACME URL must not contain userinfo: " + JSON.stringify(s));
       if (/[\s\\]/.test(s)) throw E("acme/bad-url", "an ACME URL must not contain whitespace or a backslash: " + JSON.stringify(s));
+      if (_uriStructurallyInvalid(s)) throw E("acme/bad-url", "an ACME URL authority is not canonical (the transport would repair it): " + JSON.stringify(s));
+      var _auth = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(s);
+      if (_auth) {
+        var _hp = _auth[1].slice(_auth[1].lastIndexOf("@") + 1);
+        var _rawHost = _hp.charAt(0) === "[" ? _hp.slice(0, _hp.indexOf("]") + 1) : _hp.split(":")[0];
+        if (_rawHost.toLowerCase() !== url.hostname) throw E("acme/bad-url", "an ACME URL host is not canonical (the transport would rewrite it): " + JSON.stringify(s));
+      }
       var rawPath = s.replace(/^[a-z]+:\/\/[^/?#]*/i, "").split(/[?#]/)[0];
       if (rawPath !== url.pathname) throw E("acme/bad-url", "an ACME URL path is not canonical (the transport would normalize it): " + JSON.stringify(s));
-      if (url.hash) throw E("acme/bad-url", "an ACME URL must not contain a fragment: " + JSON.stringify(s));
+      var qi = s.indexOf("?");
+      var rawQuery = qi === -1 ? "" : s.slice(qi).split("#")[0];
+      if (rawQuery !== url.search) throw E("acme/bad-url", "an ACME URL query is not canonical (the transport would normalize it): " + JSON.stringify(s));
+      if (s.indexOf("#") !== -1) throw E("acme/bad-url", "an ACME URL must not contain a fragment: " + JSON.stringify(s));
       return s;
     }
     function _resolveLocation(loc, base) {
@@ -26722,13 +27290,18 @@ var require_acme = __commonJS({
         isAbsolute = false;
       }
       if (isAbsolute) return _clientUrl(loc);
-      var abs;
+      var u;
       try {
-        abs = new URL(loc, base).href;
+        u = new URL(loc, base);
       } catch (e) {
         throw E("acme/bad-url", "the Location header did not resolve to a valid URL: " + JSON.stringify(loc), e);
       }
-      return _clientUrl(abs);
+      if (_queryRepaired(loc, u)) throw E("acme/bad-url", "a relative Link/Location query is not canonical (resolution re-encoded it): " + JSON.stringify(loc));
+      return _clientUrl(u.href);
+    }
+    function _queryRepaired(rawRef, resolvedUrl) {
+      var qi = rawRef.indexOf("?");
+      return qi !== -1 && rawRef.slice(qi).split("#")[0] !== resolvedUrl.search;
     }
     var _defaultSleep = require_sleep().sleep;
     function _clientTls(o) {
@@ -26754,6 +27327,252 @@ var require_acme = __commonJS({
       }
       if (text.slice(lastEnd).trim() !== "") throw E("acme/bad-certificate-chain", "the certificate chain contained trailing non-whitespace text outside a PEM block (RFC 8555 sec. 7.4.2)");
       if (!out.length) throw E("acme/bad-certificate-chain", "the certificate download carried no PEM certificate (RFC 8555 sec. 7.4.2)");
+      return out;
+    }
+    var LINK_HEADER_MAX_BYTES = constants.BYTES.kib(8);
+    var DEFAULT_MAX_ALTERNATES = 8;
+    var LINK_TOKEN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+    function _trimOWS(s) {
+      return s.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+    }
+    function _validRelType(t) {
+      if (/^[A-Za-z][A-Za-z0-9.-]*$/.test(t)) return true;
+      if (LINK_URI_BADCHAR.test(t)) return false;
+      return _validAbsoluteUri(t);
+    }
+    function _validAbsoluteUri(t) {
+      return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(t) && !LINK_URI_BADPCT.test(t) && !_uriStructurallyInvalid(t);
+    }
+    function _multiFragment(uri) {
+      return uri.split("#").length > 2;
+    }
+    function _authorityMultiAt(uri) {
+      var m = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?#]*)/.exec(uri);
+      return !!m && m[1].split("@").length > 2;
+    }
+    function _hasEmptyAuthority(uri) {
+      var m = /^([A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?#]*)/.exec(uri);
+      if (!m) return false;
+      var scheme = m[1] ? m[1].slice(0, -1).toLowerCase() : "";
+      if (scheme !== "" && scheme !== "http" && scheme !== "https" && scheme !== "ws" && scheme !== "wss" && scheme !== "ftp") return false;
+      var host = m[2].slice(m[2].lastIndexOf("@") + 1);
+      if (host.charAt(0) !== "[") {
+        var ci = host.indexOf(":");
+        if (ci !== -1) host = host.slice(0, ci);
+      }
+      return host === "";
+    }
+    function _bracketsOnlyInAuthority(uri) {
+      if (uri.indexOf("[") === -1 && uri.indexOf("]") === -1) return true;
+      var m = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/(?:[^/?#@[\]]*@)?\[[^[\]]*\]/.exec(uri);
+      if (!m) return false;
+      var rest = uri.slice(m[0].length);
+      if (rest.indexOf("[") !== -1 || rest.indexOf("]") !== -1) return false;
+      var afterHost = rest.split(/[/?#]/)[0];
+      return afterHost === "" || /^:[0-9]*$/.test(afterHost);
+    }
+    function _relFirstSegHasColon(uri) {
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(uri) || uri.indexOf("//") === 0) return false;
+      return uri.split(/[/?#]/)[0].indexOf(":") !== -1;
+    }
+    function _badPort(uri) {
+      var m = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/(?:[^/?#@]*@)?(?:\[[^\]]*\]|[^/?#:]*)(:[^/?#]*)?/.exec(uri);
+      return !!(m && m[1] && !/^:[0-9]*$/.test(m[1]));
+    }
+    function _badIpLiteral(uri) {
+      var m = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/(?:[^/?#@]*@)?\[([^\]]*)\]/.exec(uri);
+      if (!m) return false;
+      if (/^[vV][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+$/.test(m[1])) return false;
+      return !URL.canParse("http://[" + m[1] + "]/");
+    }
+    function _uriStructurallyInvalid(uri) {
+      return !_bracketsOnlyInAuthority(uri) || _hasEmptyAuthority(uri) || _authorityMultiAt(uri) || _multiFragment(uri) || _relFirstSegHasColon(uri) || _badPort(uri) || _badIpLiteral(uri);
+    }
+    function _dedupKey(href) {
+      return href.replace(/%[0-9A-Fa-f]{2}/g, function(m) {
+        var c = String.fromCharCode(parseInt(m.slice(1), 16));
+        return /[A-Za-z0-9._~-]/.test(c) ? c : "%" + m.slice(1).toUpperCase();
+      });
+    }
+    var LINK_QUOTED_INTERIOR = /^(?:[^"\\]|\\.)*$/;
+    var LINK_URI_BADCHAR = /[^A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]/;
+    var LINK_URI_BADPCT = /%(?![0-9A-Fa-f]{2})/;
+    function _hasEncodedDotSegment(uri) {
+      var segs = uri.split(/[?#]/)[0].split("/");
+      for (var _si = 0; _si < segs.length; _si++) {
+        if (!/%2e/i.test(segs[_si])) continue;
+        var dec = segs[_si].replace(/%2e/ig, ".");
+        if (dec === "." || dec === "..") return true;
+      }
+      return false;
+    }
+    function _linkUriInvalid(uri) {
+      return LINK_URI_BADCHAR.test(uri) || LINK_URI_BADPCT.test(uri) || _hasEncodedDotSegment(uri) || _uriStructurallyInvalid(uri);
+    }
+    function _hasCtlOctet(s) {
+      for (var _ci = 0; _ci < s.length; _ci++) {
+        var _cc = s.charCodeAt(_ci);
+        if (_cc === 127 || _cc < 32 && _cc !== 9) return true;
+      }
+      return false;
+    }
+    function _splitLinkValues(s) {
+      var out = [], start = 0, inAngle = false, inQuote = false;
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        if (inQuote) {
+          if (ch === "\\") {
+            i++;
+            continue;
+          }
+          if (ch === '"') inQuote = false;
+          continue;
+        }
+        if (ch === '"') {
+          inQuote = true;
+          continue;
+        }
+        if (ch === "<") inAngle = true;
+        else if (ch === ">") inAngle = false;
+        else if (ch === "," && !inAngle) {
+          out.push(s.slice(start, i));
+          start = i + 1;
+        }
+      }
+      if (inQuote || inAngle) throw E("acme/bad-link", "the Link header has an unterminated quote or angle bracket (RFC 8288)");
+      out.push(s.slice(start));
+      return out;
+    }
+    function _splitLinkParams(rest) {
+      var parts = [], start = 0, inQuote = false;
+      for (var i = 0; i < rest.length; i++) {
+        var ch = rest.charAt(i);
+        if (inQuote) {
+          if (ch === "\\") {
+            i++;
+            continue;
+          }
+          if (ch === '"') inQuote = false;
+          continue;
+        }
+        if (ch === '"') inQuote = true;
+        else if (ch === ";") {
+          parts.push(rest.slice(start, i));
+          start = i + 1;
+        }
+      }
+      parts.push(rest.slice(start));
+      var out = [];
+      for (var j = 0; j < parts.length; j++) {
+        var p = _trimOWS(parts[j]);
+        if (p === "") {
+          if (j === 0) continue;
+          throw E("acme/bad-link", "an empty Link parameter (a ';' with no parameter) is malformed (RFC 8288): " + JSON.stringify(rest));
+        }
+        var eq = p.indexOf("=");
+        var name = (eq === -1 ? p : _trimOWS(p.slice(0, eq))).toLowerCase();
+        if (!LINK_TOKEN.test(name)) throw E("acme/bad-link", "a Link parameter name must be a token (RFC 8288 / RFC 7230): " + JSON.stringify(p));
+        if (eq === -1) {
+          out.push({ name, value: "", hasValue: false });
+          continue;
+        }
+        var v = _trimOWS(p.slice(eq + 1));
+        if (v.length >= 2 && v.charAt(0) === '"' && v.charAt(v.length - 1) === '"') {
+          var inner = v.slice(1, -1);
+          if (!LINK_QUOTED_INTERIOR.test(inner)) throw E("acme/bad-link", "a quoted Link parameter value is malformed (an unescaped quote or dangling backslash, RFC 7230): " + JSON.stringify(p));
+          v = inner.replace(/\\(.)/g, "$1");
+        } else if (!LINK_TOKEN.test(v)) {
+          throw E("acme/bad-link", "an unquoted Link parameter value must be a non-empty token (RFC 8288 / RFC 7230): " + JSON.stringify(p));
+        }
+        out.push({ name, value: v, hasValue: true });
+      }
+      return out;
+    }
+    function _relHasAlternate(rel) {
+      var toks = String(rel).split(" ");
+      for (var i = 0; i < toks.length; i++) {
+        if (toks[i].toLowerCase() === "alternate") return true;
+      }
+      return false;
+    }
+    function _parseLinkValue(raw) {
+      var s = _trimOWS(raw);
+      if (s === "") return null;
+      var gt = s.indexOf(">");
+      if (s.charAt(0) !== "<" || gt === -1) throw E("acme/bad-link", "a Link value must be <URI-Reference> with parameters (RFC 8288): " + JSON.stringify(raw));
+      var rest = s.slice(gt + 1).replace(/^[ \t]+/, "");
+      if (rest !== "" && rest.charAt(0) !== ";") throw E("acme/bad-link", "a Link value's parameters must be introduced by ';' (RFC 8288): " + JSON.stringify(raw));
+      var uri = s.slice(1, gt);
+      if (_linkUriInvalid(uri)) throw E("acme/bad-link", "a Link URI-Reference contains a character, percent-escape, or encoded dot-segment not permitted by RFC 3986: " + JSON.stringify(raw));
+      var params = _splitLinkParams(rest), rel = "", relSeen = false, anchor = null, anchorSeen = false;
+      for (var i = 0; i < params.length; i++) {
+        if (params[i].name === "rel" && !relSeen) {
+          rel = params[i].value;
+          relSeen = true;
+        } else if (params[i].name === "anchor") {
+          if (anchorSeen) throw E("acme/bad-link", "a Link value must not carry more than one anchor parameter (RFC 8288 sec. 3.2, ambiguous context): " + JSON.stringify(raw));
+          anchorSeen = true;
+          if (!params[i].hasValue) throw E("acme/bad-link", "a Link anchor parameter requires a URI value (RFC 8288 sec. 3.2): " + JSON.stringify(raw));
+          anchor = params[i].value;
+        }
+      }
+      return { uri, rel, anchor, relSeen };
+    }
+    function _parseLinkAlternates(headers, base) {
+      var raw = null;
+      for (var k in headers) {
+        if (Object.prototype.hasOwnProperty.call(headers, k) && k.toLowerCase() === "link") {
+          raw = headers[k];
+          break;
+        }
+      }
+      if (raw == null) return [];
+      var baseUrl = new URL(base), baseOrigin = baseUrl.origin, baseHref = baseUrl.href;
+      var fields = Array.isArray(raw) ? raw : [raw], out = [], seen = /* @__PURE__ */ Object.create(null), totalBytes = 0;
+      seen[_dedupKey(baseHref)] = true;
+      for (var fi = 0; fi < fields.length; fi++) {
+        var field = String(fields[fi]);
+        totalBytes += field.length + 1;
+        if (totalBytes > LINK_HEADER_MAX_BYTES) throw E("acme/bad-link", "the Link header(s) exceed the " + LINK_HEADER_MAX_BYTES + "-byte aggregate cap (RFC 8288, CWE-770)");
+        if (_hasCtlOctet(field)) throw E("acme/bad-link", "a Link header must not contain control octets (RFC 9110 field-value)");
+        var values = _splitLinkValues(field);
+        for (var vi = 0; vi < values.length; vi++) {
+          var lv = _parseLinkValue(values[vi]);
+          if (lv === null) continue;
+          if (lv.relSeen && lv.rel === "") throw E("acme/bad-link", "a Link rel parameter must name at least one relation-type (RFC 8288 sec. 3.3)");
+          if (lv.rel !== "" && (lv.rel.charAt(0) === " " || lv.rel.charAt(lv.rel.length - 1) === " ")) throw E("acme/bad-link", "a Link rel value has a leading or trailing space (RFC 8288 sec. 3.3): " + JSON.stringify(lv.rel));
+          var relToks = lv.rel === "" ? [] : lv.rel.split(" ");
+          for (var ri = 0; ri < relToks.length; ri++) {
+            if (relToks[ri] !== "" && !_validRelType(relToks[ri])) throw E("acme/bad-link", "a Link rel value contains a token that is not a valid relation-type (RFC 8288 sec. 3.3): " + JSON.stringify(lv.rel));
+          }
+          if (!_relHasAlternate(lv.rel)) continue;
+          if (lv.anchor != null) {
+            if (_linkUriInvalid(lv.anchor)) continue;
+            var au;
+            try {
+              au = new URL(lv.anchor, base);
+            } catch (_ae) {
+              continue;
+            }
+            if (_queryRepaired(lv.anchor, au)) continue;
+            if (au.href !== baseHref) continue;
+          }
+          var resolved;
+          try {
+            resolved = _resolveLocation(lv.uri, base);
+          } catch (e) {
+            if (e && e.code === "acme/insecure-url") throw E("acme/bad-link", 'a rel="alternate" Link target is not an https URL: ' + JSON.stringify(lv.uri), e);
+            continue;
+          }
+          var parsed = new URL(resolved);
+          if (parsed.origin !== baseOrigin) throw E("acme/bad-link", `a rel="alternate" Link target is not on the certificate download's origin (SSRF guard): ` + JSON.stringify(lv.uri));
+          var key = _dedupKey(parsed.href);
+          if (!seen[key]) {
+            seen[key] = true;
+            out.push(resolved);
+          }
+        }
+      }
       return out;
     }
     function client(directoryUrl, opts) {
@@ -26960,6 +27779,21 @@ var require_acme = __commonJS({
           });
         });
       }
+      function _newAuthz(identifier) {
+        return Promise.resolve().then(function() {
+          var canon = _validateIdentifier(identifier);
+          return _resource("newAuthz").then(function(url) {
+            return _post(url, newAuthz, { identifier: canon }, "kid", void 0, [200, 201]).then(function(res) {
+              var loc = res.headers["location"];
+              if (!_isString(loc)) throw E("acme/no-authorization-url", "newAuthz did not return an authorization URL in a Location header (RFC 8555 sec. 7.4.1)");
+              var authz = validate("authorization", _json(res));
+              if (!authz.identifier || authz.identifier.type !== canon.type || authz.identifier.value !== canon.value || authz.wildcard === true) throw E("acme/identifier-mismatch", "the returned authorization does not match the requested identifier (RFC 8555 sec. 7.4.1)");
+              if (authz.status !== "pending" && authz.status !== "valid") throw E("acme/unexpected-authorization-status", "newAuthz returned an authorization that is neither pending nor already valid (status " + JSON.stringify(authz.status) + "); RFC 8555 sec. 7.4.1");
+              return { authorization: authz, url: _resolveLocation(loc, url) };
+            });
+          });
+        });
+      }
       function _getOrder(url) {
         return _postAsGet(_clientUrl(url)).then(function(res) {
           return validate("order", _json(res));
@@ -27028,13 +27862,53 @@ var require_acme = __commonJS({
       function _pollAuthorization(url, budget) {
         return _poll("authorization", url, budget);
       }
-      function _downloadCertificate(url) {
-        return _post(_clientUrl(url), postAsGet, null, "kid", "application/pem-certificate-chain").then(function(res) {
-          if (res.status !== 200) throw _serverProblem(res);
-          var ctToken = String(res.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
-          if (ctToken !== "application/pem-certificate-chain") throw E("acme/bad-certificate-chain", "the certificate download returned an unexpected media type " + JSON.stringify(ctToken) + " (expected application/pem-certificate-chain, RFC 8555 sec. 7.4.2)");
-          var chain = _splitPemChain(_bodyText(res));
-          return { certificate: chain[0], chain: chain.slice(1), certificates: chain, alternates: [] };
+      function _readCertChain(res) {
+        var ctToken = String(res.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+        if (ctToken !== "application/pem-certificate-chain") throw E("acme/bad-certificate-chain", "the certificate download returned an unexpected media type " + JSON.stringify(ctToken) + " (expected application/pem-certificate-chain, RFC 8555 sec. 7.4.2)");
+        var chain = _splitPemChain(_bodyText(res));
+        return { certificate: chain[0], chain: chain.slice(1), certificates: chain };
+      }
+      function _fetchCertChain(url) {
+        return _post(url, postAsGet, null, "kid", "application/pem-certificate-chain").then(_readCertChain);
+      }
+      function _downloadCertificate(url, opts2) {
+        opts2 = opts2 || {};
+        return Promise.resolve().then(function() {
+          var select = opts2.selectChain;
+          if (select !== void 0 && typeof select !== "function") throw E("acme/bad-input", "downloadCertificate opts.selectChain must be a function");
+          var maxAlt = guard.limits.cap(opts2.maxAlternates, "maxAlternates", DEFAULT_MAX_ALTERNATES, { E, code: "acme/bad-input", min: 0, max: 64 });
+          var dlUrl = _clientUrl(url);
+          return _post(dlUrl, postAsGet, null, "kid", "application/pem-certificate-chain").then(function(res) {
+            var primary = _readCertChain(res);
+            var alternates = [], linkError = null;
+            try {
+              alternates = _parseLinkAlternates(res.headers, dlUrl);
+            } catch (e) {
+              linkError = e;
+            }
+            function result(cand) {
+              return { certificate: cand.certificate, chain: cand.chain, certificates: cand.certificates, alternates };
+            }
+            if (!select) return result(primary);
+            return Promise.resolve(select(primary)).then(function(primaryMatch) {
+              if (primaryMatch) return result(primary);
+              if (linkError) throw linkError;
+              var leaf = primary.certificate, toFetch = alternates.slice(0, maxAlt), overBudget = alternates.length > maxAlt, idx = 0;
+              function next() {
+                if (idx >= toFetch.length) {
+                  if (overBudget) throw E("acme/too-many-alternates", "no acceptable chain within the maxAlternates=" + maxAlt + " fetch budget (RFC 8555 sec. 7.4.2, CWE-770)");
+                  throw E("acme/no-matching-chain", "no downloaded chain satisfied selectChain (RFC 8555 sec. 7.4.2)");
+                }
+                return _fetchCertChain(toFetch[idx++]).then(function(cand) {
+                  if (!cand.certificate.equals(leaf)) throw E("acme/bad-alternate", "an alternate chain did not start with the same end-entity certificate (RFC 8555 sec. 7.4.2)");
+                  return Promise.resolve(select(cand)).then(function(m) {
+                    return m ? result(cand) : next();
+                  });
+                });
+              }
+              return next();
+            });
+          });
         });
       }
       function _revokeCert(o) {
@@ -27088,10 +27962,19 @@ var require_acme = __commonJS({
           });
         });
       }
-      function _renewalInfo(certDer) {
+      function _renewalInfo(certDer, clockFn, retryAfterCapSeconds) {
         if (!Buffer.isBuffer(certDer)) throw E("acme/bad-input", "renewalInfo requires a DER certificate Buffer");
+        var _rawClk = typeof clockFn === "function" ? clockFn : clock;
+        function clk() {
+          var t = _rawClk();
+          if (typeof t !== "number" || !isFinite(t)) throw E("acme/bad-input", "the renewalInfo clock returned a non-finite value");
+          return t;
+        }
+        var notAfterMs = x509.parse(certDer).validity.notAfter.getTime();
+        if (clk() > notAfterMs) throw E("acme/certificate-expired", "the certificate is already past its notAfter; a client MUST NOT check RenewalInfo after it has expired (RFC 9773 sec. 4.3)");
         var certId = ariCertId(certDer);
         return _resource("renewalInfo").then(function(base) {
+          if (clk() > notAfterMs) throw E("acme/certificate-expired", "the certificate expired before the RenewalInfo request could be issued; a client MUST NOT check RenewalInfo after expiry (RFC 9773 sec. 4.3)");
           var u = new URL(base);
           u.pathname = u.pathname.replace(/\/+$/, "") + "/" + certId;
           var url = _clientUrl(u.href);
@@ -27100,8 +27983,65 @@ var require_acme = __commonJS({
             var obj = validateRenewalInfo(_json(res));
             var ra = res.headers["retry-after"];
             var retryAfterSeconds = null;
-            if (typeof ra === "string" && ra.trim() !== "") retryAfterSeconds = retryAfter.parse(ra, { now: clock(), E, code: "acme/bad-retry-after" }).retryAfterSeconds;
+            if (typeof ra === "string" && ra.trim() !== "") {
+              var raOpts = { now: clk(), E, code: "acme/bad-retry-after" };
+              if (typeof retryAfterCapSeconds === "number") {
+                raOpts.cap = retryAfterCapSeconds;
+                raOpts.lenient = true;
+              }
+              retryAfterSeconds = retryAfter.parse(ra, raOpts).retryAfterSeconds;
+            }
             return { renewalInfo: obj, retryAfterSeconds };
+          });
+        });
+      }
+      function _renewalWindow(certDer, o) {
+        o = o || {};
+        return Promise.resolve().then(function() {
+          if (!Buffer.isBuffer(certDer)) throw E("acme/bad-input", "renewalWindow requires a DER certificate Buffer");
+          if (o.random !== void 0 && typeof o.random !== "function") throw E("acme/bad-input", "renewalWindow opts.random must be a function returning a number in [0, 1]");
+          if (o.clock !== void 0 && typeof o.clock !== "function") throw E("acme/bad-input", "renewalWindow opts.clock must be a function returning epoch milliseconds");
+          if (o.replaced !== void 0 && typeof o.replaced !== "boolean") throw E("acme/bad-input", "renewalWindow opts.replaced must be a boolean");
+          if (o.previous !== void 0 && !_isObject(o.previous)) throw E("acme/bad-input", "renewalWindow opts.previous must be a prior renewalWindow result object");
+          var _clk = typeof o.clock === "function" ? o.clock : clock;
+          function clk() {
+            var t = _clk();
+            if (typeof t !== "number" || !isFinite(t)) throw E("acme/bad-input", "the renewalWindow clock returned a non-finite value");
+            return t;
+          }
+          var notAfter = x509.parse(certDer).validity.notAfter;
+          var now = clk();
+          if (now > notAfter.getTime()) throw E("acme/certificate-expired", "the certificate is already past its notAfter; there is nothing to renew (RFC 9773 sec. 4.3)");
+          if (o.replaced === true) throw E("acme/certificate-replaced", "the caller asserts this certificate has already been replaced (RFC 9773 sec. 4.3)");
+          return _renewalInfo(certDer, clk, RENEWAL_RETRY_MAX_SECONDS).then(function(ri) {
+            var w = ri.renewalInfo.suggestedWindow;
+            var startMs = Date.parse(w.start), endMs = Date.parse(w.end);
+            var notAfterMs = notAfter.getTime();
+            var effEnd = Math.min(endMs, notAfterMs), effStart = Math.min(startMs, effEnd);
+            var pw = o.previous && _isObject(o.previous.suggestedWindow) ? o.previous.suggestedWindow : null;
+            var selectedMs;
+            if (pw && pw.start === w.start && pw.end === w.end && _isString(o.previous.selectedTime)) {
+              var prevMs = Date.parse(o.previous.selectedTime);
+              if (!isFinite(prevMs)) throw E("acme/bad-input", "renewalWindow opts.previous.selectedTime must be an RFC 3339 date-time");
+              selectedMs = Math.max(effStart, Math.min(effEnd, prevMs));
+            } else {
+              var draw = o.random ? o.random() : _defaultRandom();
+              if (typeof draw !== "number" || !(draw >= 0 && draw <= 1)) throw E("acme/bad-input", "renewalWindow opts.random must return a number in [0, 1]");
+              selectedMs = Math.round(effStart + draw * (effEnd - effStart));
+            }
+            var retryAfterSeconds = ri.retryAfterSeconds == null ? RENEWAL_RETRY_DEFAULT_SECONDS : Math.max(RENEWAL_RETRY_MIN_SECONDS, Math.min(RENEWAL_RETRY_MAX_SECONDS, ri.retryAfterSeconds));
+            return {
+              suggestedWindow: w,
+              selectedTime: new Date(selectedMs).toISOString(),
+              // Decide renew-now against a FRESH clock read: the RenewalInfo GET may itself span the selected
+              // instant, so the pre-fetch `now` (used above only for the expiry gate) could be stale here. Also
+              // renew now when the SELECTED instant lands at or past notAfter -- whether the whole window opened
+              // after expiry or a straddling window's draw hit the clamp endpoint, there is no margin left, so
+              // waiting for the (clamped) time would leave the cert to expire unrenewed.
+              renewNow: selectedMs <= clk() || selectedMs >= notAfterMs,
+              retryAfterSeconds,
+              explanationURL: _isString(ri.renewalInfo.explanationURL) ? ri.renewalInfo.explanationURL : null
+            };
           });
         });
       }
@@ -27109,6 +28049,7 @@ var require_acme = __commonJS({
         directory: _directory,
         newAccount: _newAccount,
         newOrder: _newOrder,
+        newAuthz: _newAuthz,
         getOrder: _getOrder,
         getAuthorization: _getAuthorization,
         getChallenge: _getChallenge,
@@ -27121,7 +28062,8 @@ var require_acme = __commonJS({
         deactivateAccount: _deactivateAccount,
         deactivateAuthorization: _deactivateAuthorization,
         keyChange: _keyChange,
-        renewalInfo: _renewalInfo
+        renewalInfo: _renewalInfo,
+        renewalWindow: _renewalWindow
       };
     }
     module2.exports = {
@@ -27141,6 +28083,7 @@ var require_acme = __commonJS({
       newAccount,
       externalAccountBinding,
       newOrder,
+      newAuthz,
       finalize,
       challengeResponse,
       deactivate,
