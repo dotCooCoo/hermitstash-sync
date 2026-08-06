@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.11",
+      "version": "0.18.12",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.11",
-      "bundledAt": "2026-08-05T00:00:00Z",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.11:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.11",
+      "tag": "v0.18.12",
+      "bundledAt": "2026-08-06T00:00:00Z",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.12:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.12",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -165,18 +165,18 @@
             "bundledAt": "2026-07-25T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.3.29",
+            "version": "0.3.32",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.3.29:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.3.32:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:8eb19192bcc9e9660b5fe72376d27de33a1c2c3b44ba18b1b3aeb9f0d95ed2bf"
+              "server": "sha256:275a0ef678a74e9ce035658ae95b18c05dcf69200bf934f609f149d1c8e739e3"
             },
-            "bundledAt": "2026-08-03T00:00:00Z"
+            "bundledAt": "2026-08-05T00:00:00Z"
           }
         }
       }
