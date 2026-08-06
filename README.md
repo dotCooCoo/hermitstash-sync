@@ -195,6 +195,7 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
   "ignore": ["*.log", "build/**"],
   "include": [],
   "pinnedServerSpki": [],
+  "tunnelMode": false,
   "logLevel": "info",
   "autoUpdate": true,
   "autoUpdateChannel": "stable",
@@ -228,6 +229,7 @@ Every numeric / enum / array field is also exposed as an env var so container de
 | `HERMITSTASH_AUTO_UPDATE_CHANNEL` | `autoUpdateChannel` | `stable` or `beta` |
 | `HERMITSTASH_LOG_LEVEL` | `logLevel` | `debug`/`info`/`warn`/`error` |
 | `HERMITSTASH_PINNED_SERVER_SPKI` | `pinnedServerSpki` | Comma-separated `sha256/<base64>` pins |
+| `HERMITSTASH_TUNNEL_MODE` | `tunnelMode` | `true`/`false` — reach the server inside a Tailscale/WireGuard tunnel (skips the TLS hostname/SAN check; requires a pinned server SPKI) |
 | `HERMITSTASH_INCLUDE` | `include` | Comma-separated patterns |
 | `HERMITSTASH_IGNORE` | `ignore` | Comma-separated patterns |
 
@@ -273,6 +275,21 @@ openssl x509 -in server.crt -pubkey -noout \
 ```
 
 Empty array (default) = no pinning, the default trust chain wins. Get the pin wrong and the daemon refuses every connection — keep at least one current + one backup pin during rotations.
+
+### Tunnel mode (Tailscale / WireGuard)
+
+When you reach the HermitStash server *inside* a Tailscale (or other WireGuard) tunnel — on its MagicDNS name or tailnet IP — the server's external TLS leaf will not carry that tunnel hostname, so the normal hostname/SAN check fails. Tunnel mode skips **only** that hostname match while keeping every other check: the pinned server SPKI, the mTLS chain, and the post-quantum group floor all stay enforced. Inside the tunnel, WireGuard's transport plus the SPKI pin plus mTLS already bind the server's identity — the SAN match is the one redundant layer.
+
+Set it up at enrollment:
+
+```bash
+hermitstash-sync init --tunnel
+# headless: HERMITSTASH_TUNNEL_MODE=1 hermitstash-sync init --non-interactive
+```
+
+`--tunnel` captures the server's leaf SPKI over the first-contact enrollment connection (trust-on-first-use) and writes it to `pinnedServerSpki`, then turns `tunnelMode` on. From then on the daemon verifies that pin on every connection in place of the hostname.
+
+Tunnel mode is **explicit opt-in only** — never inferred from a `.ts.net` URL — and it is **fail-closed**: it requires a pinned SPKI. Turning `tunnelMode` on with an empty `pinnedServerSpki` refuses to start (relaxing the hostname check with no pin would accept any chain-valid cert). Point the client at the server's real `https://` port on the tailnet, where TLS is terminated at HermitStash — not a `tailscale serve`-terminated port, which terminates TLS itself and is a separate exposure path from sync.
 
 ### Bandwidth limit
 
