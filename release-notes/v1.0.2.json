@@ -1,0 +1,17 @@
+{
+  "version": "1.0.2",
+  "date": "2026-08-05",
+  "headline": "Refresh the vendored blamejs framework",
+  "summary": "A maintenance release that brings the vendored blamejs framework to its current version; there is no change to how the client syncs.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Refreshed the vendored blamejs framework to 0.18.11",
+          "body": "Brings the vendored framework current, consolidating its accumulated wire-layer and crypto hardening. The primitives the client relies on — the WebSocket transport, JSON parsing, URL and path safety, and the certificate and crypto bootstrap — are unchanged, so the sync behavior is identical."
+        }
+      ]
+    }
+  ]
+}
