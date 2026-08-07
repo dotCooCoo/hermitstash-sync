@@ -863,10 +863,17 @@ function newTestWsClient(url, apiKey) {
   var certPath = process.env.HERMITSTASH_TEST_CLIENT_CERT;
   var keyPath = process.env.HERMITSTASH_TEST_CLIENT_KEY;
   var caPath = process.env.HERMITSTASH_TEST_CA_CERT;
+  // No `tls: { rejectUnauthorized: false }` here: the client ignores
+  // config-supplied TLS options (see _configTlsOverrides in lib/ws-client.js), so
+  // it would be inert and would only read as still-supported. The harness reaches
+  // the test server with verification ON — the test CA below is bundled into the
+  // trust anchors additively. If a future harness change breaks the handshake,
+  // fix the certificate or the CA path; do NOT reach for
+  // HERMITSTASH_ALLOW_INSECURE_TLS, which restores the full passthrough for every
+  // dial in the process.
   var config = {
     server: url,
     reconnect: false,
-    tls: { rejectUnauthorized: false },
   };
   if (certPath && keyPath && caPath) {
     config.mtls = { cert: certPath, key: keyPath, ca: caPath };

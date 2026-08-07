@@ -67,20 +67,32 @@ describe('tunnel mode — a captured pin must be acknowledged before it is trust
     return Promise.resolve().then(fn).finally(restore);
   }
 
-  it('headless setup REFUSES an unacknowledged captured pin', async () => {
+  it('headless setup REFUSES to capture a pin — it has no way to confirm one', async () => {
     await withEnv({ [PIN_ENV]: undefined, [ACK_ENV]: undefined }, async () => {
       await assert.rejects(
         cli.resolveTunnelPins(ctx.url, { interactive: false }),
-        /confirm|acknowledg|HERMITSTASH_TUNNEL_PIN_ACK|out-of-band/i,
-        'a captured pin with no confirmation must not be silently trusted');
+        /HERMITSTASH_PINNED_SERVER_SPKI|out-of-band|cannot confirm/i,
+        'unattended setup must not trust-on-first-use; it must demand the pin out-of-band');
     });
   });
 
-  it('headless setup accepts the captured pin with the explicit acknowledgement', async () => {
+  it('no "proceed anyway" flag can substitute for the pin in a headless setup', async () => {
+    // A flag would only assert "pin whatever answers" — it names no value, so it
+    // cannot distinguish the real server from an interceptor. Setting the old
+    // acknowledgement variable (or anything like it) must NOT unlock capture.
     await withEnv({ [PIN_ENV]: undefined, [ACK_ENV]: '1' }, async () => {
+      await assert.rejects(
+        cli.resolveTunnelPins(ctx.url, { interactive: false }),
+        /HERMITSTASH_PINNED_SERVER_SPKI|out-of-band|cannot confirm/i,
+        'a value-less acknowledgement flag must not unlock unattended trust-on-first-use');
+    });
+  });
+
+  it('headless setup succeeds when the pin is supplied out-of-band', async () => {
+    const realPin = await HttpClient.probeServerLeafSpki(ctx.url);
+    await withEnv({ [PIN_ENV]: realPin, [ACK_ENV]: undefined }, async () => {
       const pins = await cli.resolveTunnelPins(ctx.url, { interactive: false });
-      assert.equal(pins.length, 1, 'one captured pin');
-      assert.match(pins[0], /^sha256\/[A-Za-z0-9+/]{43}=$/, 'and it is a well-formed pin');
+      assert.deepEqual(pins, [realPin], 'the supplied pin is used verbatim');
     });
   });
 

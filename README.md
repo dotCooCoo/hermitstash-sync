@@ -286,18 +286,22 @@ Set it up at enrollment. The safest form supplies the pin out-of-band — read i
 HERMITSTASH_PINNED_SERVER_SPKI='sha256/AAAA...=' hermitstash-sync init --tunnel
 ```
 
-With no pin supplied, `--tunnel` falls back to pinning the leaf it observes at setup and asks you to confirm it first:
+With no pin supplied, interactive setup falls back to pinning the leaf it observes and asks you to confirm it first:
 
 ```bash
 hermitstash-sync init --tunnel
 #   Server SPKI pin: sha256/AAAA...=
 #   Does this pin match the server's certificate? Confirm out-of-band before accepting. (y/N):
-
-# headless — supply the pin, or acknowledge the observed one explicitly:
-HERMITSTASH_TUNNEL_MODE=1 HERMITSTASH_TUNNEL_PIN_ACK=1 hermitstash-sync init --non-interactive
 ```
 
-Confirm that pin against the server before accepting it. Because tunnel mode does not check the hostname, the pin is what binds the server's identity: anyone able to intercept the connection at setup can answer with a certificate they own, and pinning it would make that interception persist on every later connection instead of failing visibly. A pin supplied out-of-band avoids that window entirely, which is why it is preferred and why an observed pin is never accepted silently.
+Confirm that pin against the server before accepting it. Because tunnel mode does not check the hostname, the pin is what binds the server's identity: anyone able to intercept the connection at setup can answer with a certificate they own, and pinning it would make that interception persist on every later connection instead of failing visibly.
+
+A headless setup (`--non-interactive`) therefore **requires** the supplied pin — it has nobody to compare the observed one against, and a "proceed anyway" flag would only mean *pin whatever answers*, which names no value and so cannot tell your server from an interceptor:
+
+```bash
+HERMITSTASH_TUNNEL_MODE=1 HERMITSTASH_PINNED_SERVER_SPKI='sha256/AAAA...=' \
+  hermitstash-sync init --non-interactive
+```
 
 Tunnel mode is **explicit opt-in only** — never inferred from a `.ts.net` URL — and it is **fail-closed**: it requires a pinned SPKI. Turning `tunnelMode` on with an empty `pinnedServerSpki` refuses to start (relaxing the hostname check with no pin would accept any chain-valid cert). Point the client at the server's real `https://` port on the tailnet, where TLS is terminated at HermitStash — not a `tailscale serve`-terminated port, which terminates TLS itself and is a separate exposure path from sync.
 
@@ -425,7 +429,7 @@ The `status` command shows which state the daemon is in:
 - **PQC TLS** on every connection — hybrid group list `SecP384r1MLKEM1024:X25519MLKEM768:SecP256r1MLKEM768:X25519` (NIST Level 5 preferred, Level 3 and Level 1 hybrids next, then an `X25519` classical last-resort that matches the server's group preference). Both `ecdhCurve` and `groups` are set so Node negotiates the hybrid group even on older OpenSSL builds.
 - **Post-quantum floor enforced at negotiation time** — after each handshake to a HermitStash server (the mTLS sync transport and the WebSocket control channel), the client reads the *negotiated* key-exchange group and refuses the connection if it is classical rather than a post-quantum hybrid, naming the group and host in the error. This closes a downgrade/MITM path where a hostile or out-of-date server selects `X25519` even though the hybrids are offered first. The negotiated group is logged either way. Set `HERMITSTASH_ALLOW_CLASSICAL_TLS=1` to relax the hard-fail to a warning for an endpoint you must reach over classical TLS deliberately. The auto-update GitHub-release downloader is observe-only — it warns on a classical negotiation but never fails, since the release CDN offers no post-quantum group.
 - **TLS 1.3 minimum** — connections below TLS 1.3 are rejected
-- **Server verification cannot be turned off from `config.json`** — the config file may carry TLS options for the WebSocket transport, but the two that decide whether the server is checked at all (`rejectUnauthorized`, `checkServerIdentity`) are dropped and logged rather than applied, so an edited config cannot disable chain validation or displace the SPKI-pin check. Set `HERMITSTASH_ALLOW_INSECURE_TLS=1` to permit them deliberately (a self-signed test harness); it is off by default.
+- **No undeclared TLS overrides from `config.json`** — TLS options in the config file are ignored outright for the WebSocket transport (logged, not applied), rather than filtered key by key. Filtering would not be enough: those options are applied last, so besides the obvious `rejectUnauthorized`, a `ca` entry would *replace* the trust anchors with an attacker's root, `servername` would choose the name the identity check validates against, and `minVersion`/`ciphers` would drop the connection to TLS 1.2 — each yielding a chain-valid intercept without touching verification directly. Set `HERMITSTASH_ALLOW_INSECURE_TLS=1` to apply them deliberately (a self-signed test server); it is off by default. Note that `config.json` remains a trust boundary by design — it names the server URL, the certificate authority to trust (`mtls.ca`), and any pinned server key — so write access to it, like write access to the certificate directory, is equivalent to controlling the client. It is created `0700`; keep it that way.
 - **mTLS** client certificates for server authentication (optional, certs cached in memory). Certificates auto-renew on startup when within 60 days of expiry — no admin intervention required. A server-initiated CA rotation to a new signature algorithm is capability-gated: before swapping its identity the client runs an in-process loopback handshake to confirm its own TLS runtime can present and verify the new algorithm. A build too old to handshake it keeps the current certificate, logs which algorithm it cannot yet use, and stays connected on the existing CA — upgrade the client to apply the rotation. The candidate cert/key/CA is validated (key match + issuer chain with a `cA:TRUE` check) and staged atomically, so a rejected or interrupted rotation never replaces a working identity.
 - **Per-session PQC envelope** on encryption-grade JSON POSTs (`/drop/init`, `/drop/finalize/:bundleId`, `/sync/rename`) — ML-KEM-1024 + ECDH P-384 + SHAKE256 + XChaCha20-Poly1305, server keypair fetched once from `/.well-known/blamejs-pubkey` and cached. Strict-monotonic counter on the wire blocks replay. Other Bearer-authed sync calls send plain JSON over the PQC TLS + mTLS layer — transport encryption is the floor; no Bearer-authed sync call ever sends plaintext on the wire.
 - **SHA3-512** checksums verified before file rename — mismatched downloads never appear in sync folder

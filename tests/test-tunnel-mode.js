@@ -200,29 +200,47 @@ describe('tunnel mode — config.tls cannot disable TLS verification (ws transpo
     return seen;
   }
 
-  it('strips rejectUnauthorized:false coming from config.tls', () => {
+  it('ignores rejectUnauthorized:false coming from config.tls', () => {
     const opts = capturedTlsOpts({ tls: { rejectUnauthorized: false } }, undefined);
     assert.ok(opts, 'expected to capture the dial TLS options');
     assert.notEqual(opts.rejectUnauthorized, false,
       'config.tls must NOT be able to disable chain validation on the WebSocket transport');
   });
 
-  it('strips a checkServerIdentity override so it cannot displace the SPKI pin', () => {
+  it('ignores a checkServerIdentity override so it cannot displace the SPKI pin', () => {
     const opts = capturedTlsOpts(
       { tls: { checkServerIdentity: () => undefined }, pinnedServerSpki: [realPin] }, undefined);
     assert.ok(opts, 'expected to capture the dial TLS options');
-    assert.notEqual(typeof opts.checkServerIdentity, 'undefined',
-      'the pin verifier must still be installed');
-    // The installed verifier must be OURS (it rejects a wrong pin), not the stub.
+    assert.equal(typeof opts.checkServerIdentity, 'function', 'the pin verifier must still be installed');
+    // The surviving verifier must be OURS — it rejects a cert whose pin doesn't
+    // match — not the config-supplied stub that would accept anything.
     const err = opts.checkServerIdentity('stub.invalid', peerCert);
     assert.ok(err instanceof Error,
       'the surviving checkServerIdentity must be the pin verifier, not the config-supplied stub');
   });
 
-  it('keeps non-security keys from config.tls (only verification keys are dropped)', () => {
-    const opts = capturedTlsOpts({ tls: { rejectUnauthorized: false, servername: 'kept.example' } }, undefined);
-    assert.equal(opts.servername, 'kept.example', 'benign TLS options still pass through');
-    assert.notEqual(opts.rejectUnauthorized, false, 'the verification key is still dropped');
+  // A denylist of "obviously dangerous" keys is not enough: this object is
+  // spread LAST, so ANY surviving key overrides what the client just set. These
+  // three are the ones that defeat server identity without ever touching
+  // rejectUnauthorized/checkServerIdentity, so they are pinned as regressions.
+  it('ignores config.tls "ca" — it would REPLACE the trust anchors with an attacker root', () => {
+    const attackerRoot = '-----BEGIN CERTIFICATE-----\nattacker\n-----END CERTIFICATE-----';
+    const opts = capturedTlsOpts({ tls: { ca: attackerRoot }, mtls: null }, undefined);
+    assert.notEqual(opts.ca, attackerRoot,
+      'config.tls.ca must not replace the trust store — a chain-valid intercept would follow');
+  });
+
+  it('ignores config.tls "servername" — it would retarget the hostname/SAN check', () => {
+    const opts = capturedTlsOpts({ tls: { servername: 'attacker.tld' } }, undefined);
+    assert.notEqual(opts.servername, 'attacker.tld',
+      'config.tls.servername must not choose the name the identity check validates against');
+  });
+
+  it('ignores config.tls TLS-floor overrides — they would allow a TLS 1.2 downgrade', () => {
+    const opts = capturedTlsOpts({ tls: { maxVersion: 'TLSv1.2', minVersion: 'TLSv1.2', ciphers: 'DEFAULT:@SECLEVEL=0' } }, undefined);
+    assert.notEqual(opts.maxVersion, 'TLSv1.2', 'config.tls must not cap the TLS version');
+    assert.equal(opts.minVersion, 'TLSv1.3', 'the TLS 1.3 floor stands');
+    assert.notEqual(opts.ciphers, 'DEFAULT:@SECLEVEL=0', 'config.tls must not weaken the cipher policy');
   });
 
   it('honors the explicit HERMITSTASH_ALLOW_INSECURE_TLS escape hatch (test harnesses)', () => {
