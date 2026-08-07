@@ -44,15 +44,37 @@ jobs:
         # resolving them ad-hoc at run time.
         run: npm ci
 
-      # ── Vendor freshness ───────────────────────────────────────
-      # Fails CI when the pinned blamejs in vendor/MANIFEST.json doesn't
-      # match the latest upstream release. Loud signal so a stale vendored
-      # package doesn't silently miss security fixes from blamejs.
-      - name: Check vendored blamejs is current
+      # ── Vendor freshness (advisory — never fails CI) ────────────
+      # Surfaces a pinned blamejs in vendor/MANIFEST.json that is behind the
+      # latest upstream release, as a warning on the run.
+      #
+      # NON-blocking on purpose. blamejs publishes roughly daily, so a hard
+      # failure here turns every push red the moment upstream ships — including
+      # pushes whose own content is fine, and including a release cut minutes
+      # earlier against what was then the newest version. Worse, failing this
+      # step SKIPPED the steps below it, so a stale pin masked the real linters
+      # rather than adding to them. Currency is enforced where it belongs: at
+      # release time, by `scripts/release.js prepare`, which reports the same
+      # check against the tree actually being shipped.
+      - name: Check vendored blamejs is current (advisory)
         id: vendor_freshness
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/check-blamejs-version.js
+        run: |
+          set +e
+          OUTPUT=$(node scripts/check-blamejs-version.js 2>&1)
+          CODE=$?
+          set -e
+          # The script annotates with ::error:: because it is also invoked as a
+          # hard gate elsewhere. Strip that prefix so a stale pin does not paint
+          # an error annotation on a run this step deliberately lets pass — the
+          # ::warning:: below is the signal.
+          printf '%s\n' "$OUTPUT" | sed 's/^::error:://'
+          if [ $CODE -ne 0 ]; then
+            echo "::warning::Vendored blamejs is behind the latest upstream release — refresh it with the recipe in scripts/vendor-update.sh before the next release."
+          fi
+          exit 0
 
       # ── ESLint ─────────────────────────────────────────────────
       - name: Run ESLint
