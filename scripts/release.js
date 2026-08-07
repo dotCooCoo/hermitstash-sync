@@ -316,13 +316,35 @@ function cmdPrepare(opts) {
   _ok('codebase-patterns clean');
 
   _section('vendor currency');
-  // Advisory: a transient network/API error must not block the cut. A real
-  // "vendored blamejs is stale" failure is surfaced as a warning to act on.
+  // HARD GATE on a genuinely stale vendor, and this is the right place for it:
+  // `prepare` runs before the release commit exists and long before any tag, so
+  // failing here costs nothing but a re-run. (ci.yml deliberately keeps its copy
+  // advisory — there it would only fire on the push that already carries an
+  // immutable tag, punishing a cut it cannot prevent, and it used to skip the
+  // real linters when it did.)
+  //
+  // Severity is GRADED off the script's own exit codes, which is what let this
+  // be advisory before: 1 = actually behind upstream (a release blocker),
+  // 2 = could not reach the API at all (a network blip must not block a cut).
   var freshness = _run('node', ['scripts/check-blamejs-version.js'], { allowFail: true });
-  if (freshness.status !== 0) {
-    console.warn('warning: check-blamejs-version reported non-zero (stale vendor or network blip) — review before tagging');
-  } else {
+  if (freshness.status === 0) {
     _ok('vendored blamejs current');
+  } else if (freshness.status === 2) {
+    console.warn('warning: could not reach the GitHub API to check vendored blamejs currency — ' +
+      'unverified, not known-stale. Re-run `prepare` when connectivity returns if you want the proof.');
+  } else if (opts && opts.vendorStaleReason) {
+    // Audited override for the real race: blamejs ships often, so upstream can
+    // publish mid-cut and strand an otherwise-finished release. Overriding is
+    // allowed but never silent — the reason is echoed here and belongs in the
+    // release discussion.
+    console.warn('warning: vendored blamejs is STALE and the gate was overridden.');
+    console.warn('         reason: ' + opts.vendorStaleReason);
+  } else {
+    throw new Error(
+      'vendored blamejs is behind the latest upstream release (see the report above). Refresh it before ' +
+      'cutting — a release should not ship a vendored framework that is knowingly behind. If upstream ' +
+      'published mid-cut and you are deliberately shipping the older pin, re-run with ' +
+      '--vendor-stale-reason="why" to record that decision.');
   }
 
   console.log('\nESLint, ShellCheck, and Hadolint run in CI (ci.yml), not locally.');
@@ -583,6 +605,7 @@ function cmdHelp() {
   console.log('');
   console.log('Usage:');
   console.log('  node scripts/release.js prepare [--minor]  # bump VERSION (both files) + regen CHANGELOG + gates');
+  console.log('        --vendor-stale-reason="why"          # ship despite a stale vendored blamejs (recorded, not silent)');
   console.log('  node scripts/release.js regen              # re-regen CHANGELOG after release-notes edits');
   console.log('  node scripts/release.js test               # full suite (node tests/run-all.js)');
   console.log('  node scripts/release.js commit             # signed release commit on main');
@@ -601,6 +624,19 @@ function cmdHelp() {
 var sub = process.argv[2] || 'help';
 var args = process.argv.slice(3);
 var opts = { minor: args.indexOf('--minor') !== -1 };
+// --vendor-stale-reason="…" — audited override for the vendor-currency gate in
+// `prepare`. Requires a non-empty reason: an override that records nothing is
+// indistinguishable from not having the gate.
+var _reasonArg = args.filter(function (a) { return a.indexOf('--vendor-stale-reason') === 0; })[0];
+if (_reasonArg) {
+  var _eq = _reasonArg.indexOf('=');
+  opts.vendorStaleReason = _eq === -1 ? '' : _reasonArg.slice(_eq + 1).trim();
+  if (!opts.vendorStaleReason) {
+    console.error('release: --vendor-stale-reason needs a value, e.g. ' +
+      '--vendor-stale-reason="upstream published 0.18.15 mid-cut; shipping .14, refresh next patch"');
+    process.exit(1);
+  }
+}
 
 try {
   switch (sub) {
