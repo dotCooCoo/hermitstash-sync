@@ -26,6 +26,7 @@ const nodeCrypto = require('node:crypto');
 
 const HttpClient = require('../lib/http-client');
 const config = require('../lib/config');
+const cli = require('../lib/cli');
 
 // A real certificate (any of the bundled roots) gives us valid DER to derive a
 // genuine SPKI pin from; we present it as a peer cert to the verifier.
@@ -126,6 +127,108 @@ describe('tunnel mode — probeServerLeafSpki (SPKI capture)', () => {
       HttpClient.probeServerLeafSpki('http://hs.tailnet-abc.ts.net'),
       /https:\/\/|without TLS|plaintext|serve-terminated/i,
       'capturing an SPKI pin over http:// must be refused');
+  });
+
+});
+
+describe('tunnel mode — prefers an out-of-band pin over trust-on-first-use', () => {
+
+  // An operator-supplied pin arrived over a channel the network attacker does
+  // not control, so it must be used VERBATIM and must suppress the probe
+  // entirely — probing would re-open the window the supplied pin exists to
+  // close. The server URL below is unroutable: if the probe ran at all, the
+  // call would reject instead of resolving.
+  const ENV = 'HERMITSTASH_PINNED_SERVER_SPKI';
+  const saved = process.env[ENV];                                               // allow:raw-process-env — test fixture toggling the documented operator env var
+  const restore = () => {
+    if (saved === undefined) delete process.env[ENV];                           // allow:raw-process-env — test fixture cleanup
+    else process.env[ENV] = saved;                                              // allow:raw-process-env — test fixture cleanup
+  };
+
+  it('uses the supplied pin(s) and never probes the network', async () => {
+    process.env[ENV] = realPin;                                                 // allow:raw-process-env — test fixture
+    try {
+      const pins = await cli.resolveTunnelPins('https://unroutable.invalid:9', { interactive: false });
+      assert.deepEqual(pins, [realPin], 'the out-of-band pin must be used verbatim');
+    } finally { restore(); }
+  });
+
+  it('accepts multiple comma-separated supplied pins (rotation)', async () => {
+    process.env[ENV] = `${realPin}, ${wrongPin}`;                               // allow:raw-process-env — test fixture
+    try {
+      const pins = await cli.resolveTunnelPins('https://unroutable.invalid:9', { interactive: false });
+      assert.deepEqual(pins, [realPin, wrongPin], 'both pins carry through, trimmed');
+    } finally { restore(); }
+  });
+
+});
+
+describe('tunnel mode — config.tls cannot disable TLS verification (ws transport)', () => {
+
+  // `config.tls` is an undeclared passthrough: absent from config DEFAULTS and
+  // unvalidated, so config.load()'s {...DEFAULTS, ...parsed} hands it straight
+  // to the dial. Spread last it would disable chain validation AND — because
+  // Node only calls checkServerIdentity when the chain verified — silently void
+  // the SPKI pin, turning config-file write access into full interception of the
+  // control channel. Capture the real dial options to prove it cannot.
+  const WsClient = require('../lib/ws-client');
+  const b = require('../vendor/blamejs');
+
+  function capturedTlsOpts(cfg, env) {
+    const realConnect = b.wsClient.connect;
+    const savedEnv = process.env.HERMITSTASH_ALLOW_INSECURE_TLS;                // allow:raw-process-env — test fixture
+    if (env === undefined) delete process.env.HERMITSTASH_ALLOW_INSECURE_TLS;   // allow:raw-process-env — test fixture
+    else process.env.HERMITSTASH_ALLOW_INSECURE_TLS = env;                      // allow:raw-process-env — test fixture
+    let seen = null;
+    b.wsClient.connect = (_url, opts) => {
+      seen = opts && opts.tlsOpts;
+      const { EventEmitter } = require('node:events');
+      const stub = new EventEmitter();
+      stub.readyState = 'connecting';
+      stub.send = () => {}; stub.close = () => {}; stub.cancelReconnect = () => {};
+      return stub;
+    };
+    try {
+      const ws = new WsClient(Object.assign({ server: 'https://stub.invalid:443', reconnect: false }, cfg), 'hs_stub_key');
+      ws.connect('stub-bundle', 0);
+      try { ws.close(); } catch { /* teardown */ }
+    } finally {
+      b.wsClient.connect = realConnect;
+      if (savedEnv === undefined) delete process.env.HERMITSTASH_ALLOW_INSECURE_TLS;  // allow:raw-process-env — test fixture cleanup
+      else process.env.HERMITSTASH_ALLOW_INSECURE_TLS = savedEnv;                     // allow:raw-process-env — test fixture cleanup
+    }
+    return seen;
+  }
+
+  it('strips rejectUnauthorized:false coming from config.tls', () => {
+    const opts = capturedTlsOpts({ tls: { rejectUnauthorized: false } }, undefined);
+    assert.ok(opts, 'expected to capture the dial TLS options');
+    assert.notEqual(opts.rejectUnauthorized, false,
+      'config.tls must NOT be able to disable chain validation on the WebSocket transport');
+  });
+
+  it('strips a checkServerIdentity override so it cannot displace the SPKI pin', () => {
+    const opts = capturedTlsOpts(
+      { tls: { checkServerIdentity: () => undefined }, pinnedServerSpki: [realPin] }, undefined);
+    assert.ok(opts, 'expected to capture the dial TLS options');
+    assert.notEqual(typeof opts.checkServerIdentity, 'undefined',
+      'the pin verifier must still be installed');
+    // The installed verifier must be OURS (it rejects a wrong pin), not the stub.
+    const err = opts.checkServerIdentity('stub.invalid', peerCert);
+    assert.ok(err instanceof Error,
+      'the surviving checkServerIdentity must be the pin verifier, not the config-supplied stub');
+  });
+
+  it('keeps non-security keys from config.tls (only verification keys are dropped)', () => {
+    const opts = capturedTlsOpts({ tls: { rejectUnauthorized: false, servername: 'kept.example' } }, undefined);
+    assert.equal(opts.servername, 'kept.example', 'benign TLS options still pass through');
+    assert.notEqual(opts.rejectUnauthorized, false, 'the verification key is still dropped');
+  });
+
+  it('honors the explicit HERMITSTASH_ALLOW_INSECURE_TLS escape hatch (test harnesses)', () => {
+    const opts = capturedTlsOpts({ tls: { rejectUnauthorized: false } }, '1');
+    assert.equal(opts.rejectUnauthorized, false,
+      'with the documented escape hatch set, the override is honored deliberately');
   });
 
 });
