@@ -1,0 +1,26 @@
+{
+  "version": "1.0.6",
+  "date": "2026-08-08",
+  "headline": "Refuse a connection that cannot be shown to be post-quantum",
+  "summary": "The post-quantum floor accepted a connection whose key exchange the runtime did not report, on the assumption that silence meant a post-quantum group. Node 24.19.0 reports those groups, so silence no longer means that and the connection is refused instead.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "An unreported key exchange is no longer treated as post-quantum",
+          "body": "The client checks the negotiated key exchange after each handshake and refuses a classical one. Until now, a connection that reported no key exchange at all was allowed through, because older runtimes reported nothing for a post-quantum hybrid and the two cases were indistinguishable. From Node 24.19.0 a hybrid identifies itself, so an empty report means only what it says: the key exchange was not ephemeral — neither post-quantum nor forward-secret. That connection is now refused under enforcement, with an error naming the reason. Set HERMITSTASH_ALLOW_CLASSICAL_TLS=1 to permit it deliberately, as with a classical group. The auto-update downloader remains observe-only and still warns rather than failing."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Raised the Node.js floor to 24.19.0",
+          "body": "24.19.0 is the current long-term-support release, and its reporting of the negotiated key exchange is what the change above relies on. The boot check, the container image, and the continuous-integration matrix move together. Pre-built binaries embed their own runtime and are unaffected by the version installed on the machine."
+        }
+      ]
+    }
+  ]
+}
