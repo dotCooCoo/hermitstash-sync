@@ -104,6 +104,94 @@ VER="${2:-latest}"
 
 echo "=== Vendoring $PKG@$VER ==="
 
+# ---- blamejs: a source tree, not an esbuild bundle ----
+#
+# The framework is vendored as its published source tree rather than bundled,
+# because the boot-time integrity gate hashes individual consumed files. It is
+# published as @blamejs/core — the bare name `blamejs` on npm belongs to an
+# UNRELATED package and must never be installed.
+#
+# Refreshing this used to be a manual sequence of clone, copy and hand-repair
+# steps, which is how line endings and stray paths kept getting into the tree.
+# The published tarball avoids all of it: tar writes the bytes as published, so
+# nothing rewrites line endings on the way in, and the archive contains only
+# what actually runs.
+if [ "$PKG" = "blamejs" ]; then
+  NPM_NAME="@blamejs/core"
+  if [ "$VER" = "latest" ]; then
+    INSTALLED_VER=$(npm view "$NPM_NAME" version 2>/dev/null)
+    [ -n "$INSTALLED_VER" ] || { echo "ERROR: could not resolve the latest $NPM_NAME version."; exit 1; }
+  else
+    INSTALLED_VER="${VER#v}"
+  fi
+  TAG="v$INSTALLED_VER"
+  echo "Resolved $NPM_NAME@$INSTALLED_VER (tag $TAG)"
+
+  # Read the published digest BEFORE downloading, so the comparison is against
+  # what the registry advertises rather than against the file just received.
+  INTEGRITY=$(npm view "$NPM_NAME@$INSTALLED_VER" dist.integrity 2>/dev/null)
+  [ -n "$INTEGRITY" ] || { echo "ERROR: no published integrity for $NPM_NAME@$INSTALLED_VER; refusing to vendor unverifiable bytes."; exit 1; }
+
+  TMPPACK=".vendor-blamejs.tmp"
+  _cleanup_pack() { node -e "try{require('fs').rmSync('$TMPPACK',{recursive:true,force:true,maxRetries:10,retryDelay:200})}catch(_e){}" 2>/dev/null || true; }
+  trap _cleanup_pack EXIT
+  _cleanup_pack
+  mkdir -p "$TMPPACK"
+  npm pack "$NPM_NAME@$INSTALLED_VER" --pack-destination "$TMPPACK" --silent >/dev/null 2>&1
+  TARBALL=$(node -e "
+    var fs=require('fs'),p=require('path'),d=process.argv[1];
+    var f=fs.readdirSync(d).filter(function(n){return /\.tgz\$/.test(n);});
+    if(f.length!==1){process.stderr.write('expected one tarball, found '+f.length+'\n');process.exit(1);}
+    process.stdout.write(p.join(d,f[0]));
+  " "$TMPPACK")
+  [ -n "$TARBALL" ] && [ -f "$TARBALL" ] || { echo "ERROR: npm pack produced no tarball."; exit 1; }
+
+  INTEGRITY="$INTEGRITY" TARBALL="$TARBALL" node -e '
+    var fs=require("fs"), crypto=require("crypto");
+    var want=process.env.INTEGRITY.trim();
+    var m=/^sha(256|384|512)-(.+)$/.exec(want);
+    if(!m){console.error("unrecognized integrity format: "+want);process.exit(1);}
+    var got="sha"+m[1]+"-"+crypto.createHash("sha"+m[1]).update(fs.readFileSync(process.env.TARBALL)).digest("base64");
+    if(got!==want){console.error("INTEGRITY MISMATCH\n  published: "+want+"\n  received:  "+got);process.exit(1);}
+    console.log("Integrity verified: "+want.slice(0,24)+"…");
+  '
+
+  DEST="vendor/blamejs"
+  # Empty the directory's CONTENTS rather than removing it: on this platform a
+  # file-syncing agent can hold the directory handle open, so the final rmdir
+  # fails even after every child is gone and leaves the tree half-removed.
+  node -e "var fs=require('fs'),p=require('path');fs.mkdirSync('$DEST',{recursive:true});for(var e of fs.readdirSync('$DEST')){fs.rmSync(p.join('$DEST',e),{recursive:true,force:true,maxRetries:60,retryDelay:300});}"
+  tar -xzf "$TARBALL" -C "$DEST" --strip-components=1
+  _cleanup_pack
+
+  [ -f "$DEST/package.json" ] || { echo "ERROR: extract failed — $DEST/package.json missing."; exit 1; }
+  node -e "var b=require('./$DEST');console.log('blamejs surface OK:',Object.keys(b).length,'primitives');"
+
+  # Recompute the consumed-file hashes the boot gate checks. Without this the
+  # tree and the manifest disagree and the client refuses to start.
+  node scripts/vendor-hash.js
+
+  INTEGRITY="$INTEGRITY" TAG="$TAG" INSTALLED_VER="$INSTALLED_VER" DATE="$DATE" MANIFEST="$MANIFEST" node -e '
+    var fs=require("fs");
+    var m=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"));
+    var e=m.packages.blamejs=m.packages.blamejs||{};
+    e.version=process.env.INSTALLED_VER;
+    e.tag=process.env.TAG;
+    e.bundledAt=process.env.DATE;
+    // The registry-published digest of the exact tarball this tree came from,
+    // so the vendored bytes stay traceable to a published artifact rather than
+    // to a version number someone typed.
+    e.integrity=process.env.INTEGRITY.trim();
+    fs.writeFileSync(process.env.MANIFEST, JSON.stringify(m,null,2)+"\n");
+    console.log("Updated MANIFEST.json: blamejs → "+process.env.INSTALLED_VER);
+  '
+
+  echo ""
+  echo "=== Done: blamejs v$INSTALLED_VER vendored ($(find "$DEST" -type f | wc -l) files) ==="
+  echo "Next: node tests/test-vendor-integrity.js && node bin/hermitstash-sync.js version"
+  exit 0
+fi
+
 # Install temporarily
 npm install "${PKG}@${VER}" --no-save --ignore-scripts 2>/dev/null
 INSTALLED_VER=$(node -e "console.log(require('./node_modules/${PKG}/package.json').version)")
