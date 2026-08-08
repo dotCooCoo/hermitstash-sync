@@ -347,6 +347,26 @@ function cmdPrepare(opts) {
       '--vendor-stale-reason="why" to record that decision.');
   }
 
+  _section('base image currency');
+  // Digest drift only WARNS. Both bases here are rebuilt continuously upstream,
+  // so failing on drift would block nearly every cut, and the pressure that
+  // creates is to bump the pin blindly to quiet the gate — worse than the
+  // staleness it was meant to surface. Drift is also just a proxy; the harm is
+  // shipping a fixable CRITICAL/HIGH, and Trivy already hard-gates that.
+  //
+  // A non-zero exit means something else: the pinned digest no longer resolves,
+  // a base carries no digest at all, or a Dockerfile could not be parsed. Those
+  // are a broken build or a broken check, and both block.
+  var baseCurrency = _run('node', ['scripts/check-base-currency.js'], { allowFail: true });
+  if (baseCurrency.status === 0) {
+    _ok('base image pins checked');
+  } else {
+    throw new Error(
+      'base-image currency check failed (see the report above). Either a pinned digest no longer ' +
+      'resolves, a base image is not digest-pinned, or a Dockerfile could not be parsed — each is a ' +
+      'release blocker. Digest drift alone does NOT reach here; it warns above.');
+  }
+
   console.log('\nESLint, ShellCheck, and Hadolint run in CI (ci.yml), not locally.');
   console.log('next: node scripts/release.js test');
 }
