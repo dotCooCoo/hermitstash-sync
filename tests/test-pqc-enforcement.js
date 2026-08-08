@@ -48,8 +48,13 @@ function fakeSocket(keyInfo) {
 }
 
 const CLASSICAL = { name: 'X25519', type: 'ECDH' };
-const HYBRID_EMPTY = {};                            // ML-KEM hybrid (Node reports no name)
-const HYBRID_NAMED = { name: 'X25519MLKEM768' };    // some Node builds DO surface a hybrid name
+// Node 24.19+ reports an ML-KEM hybrid POSITIVELY as { type: 'TLSGroup', name }.
+const HYBRID_TLSGROUP = { name: 'X25519MLKEM768', type: 'TLSGroup' };
+const HYBRID_NAMED = { name: 'X25519MLKEM768' };    // name-only, still recognised
+// An empty key-info no longer means "hybrid". Per the tls docs it means the key
+// exchange was NOT EPHEMERAL — neither post-quantum nor forward-secret — so the
+// floor refuses it under enforcement instead of reading it as a hybrid.
+const NO_EPHEMERAL = {};
 
 // Run the enforce:true assertion against a classical socket in a CHILD
 // process so the module-level HERMITSTASH_ALLOW_CLASSICAL_TLS read happens
@@ -94,10 +99,21 @@ describe('PQC floor — enforced sync transport (enforce:true, escape hatch OFF)
     assert.match(msg, /HERMITSTASH_ALLOW_CLASSICAL_TLS=1/, 'error points at the documented override');
   });
 
-  it('passes a hybrid negotiation reported with an empty key-info name', () => {
-    const sock = fakeSocket(HYBRID_EMPTY);
+  it('passes a hybrid reported as type TLSGroup (Node 24.19+ shape)', () => {
+    const sock = fakeSocket(HYBRID_TLSGROUP);
     HttpClient.assertNegotiatedGroupPqc(sock, 'sync.example.test', { enforce: true });
-    assert.equal(sock.destroyed, false, 'an ML-KEM hybrid (empty name) must not fail');
+    assert.equal(sock.destroyed, false, 'a positively-identified hybrid must not fail');
+  });
+
+  it('REFUSES a non-ephemeral key exchange (empty key-info) under enforcement', () => {
+    // Previously read as "hybrid, therefore fine" — a fail-open that a
+    // non-post-quantum, non-forward-secret negotiation slipped through.
+    const sock = fakeSocket(NO_EPHEMERAL);
+    const blocked = HttpClient.assertNegotiatedGroupPqc(sock, 'sync.example.test', { enforce: true });
+    assert.equal(blocked, true, 'an unreported key exchange must be refused, not assumed post-quantum');
+    assert.equal(sock.destroyed, true, 'the socket must be torn down');
+    assert.match(String(sock.destroyErr && sock.destroyErr.message), /non-ephemeral|post-quantum/i,
+      'the error must name why it was refused');
   });
 
   it('passes a hybrid negotiation reported with an MLKEM name', () => {
@@ -122,7 +138,7 @@ describe('PQC floor — observe-only updater path (enforce:false)', () => {
   });
 
   it('passes a hybrid negotiation without failing', () => {
-    const sock = fakeSocket(HYBRID_EMPTY);
+    const sock = fakeSocket(HYBRID_TLSGROUP);
     HttpClient.assertNegotiatedGroupPqc(sock, 'objects.githubusercontent.com', { enforce: false });
     assert.equal(sock.destroyed, false);
   });

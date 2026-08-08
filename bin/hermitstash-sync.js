@@ -4,15 +4,15 @@
 // codebase-patterns:allow-file process-exit — boot-time gates terminate via process.exit() to surface fail-fast diagnostics before any side effects.
 // codebase-patterns:allow-file inline-require — each IIFE gate cold-loads the blamejs vendor lazily; hoisting would run unrelated boot code before the Node-floor check.
 
-// Node version gate. Floor is 24.18.0 — npm engines is advisory only, so
+// Node version gate. Floor is 24.19.0 — npm engines is advisory only, so
 // check at runtime to fail fast with an actionable error instead of leaking
-// a cryptic stack from a 24.18+ API call deep in vendored blamejs (or one of
-// the security backports between 24.4 and 24.18.0 we now rely on). SEA users
+// a cryptic stack from a 24.19+ API call deep in vendored blamejs (or one of
+// the security backports between 24.4 and 24.19.0 we now rely on). SEA users
 // carry the embedded Node with them so this only fires for from-source
 // installs on a stale runtime.
 (function _enforceNodeFloor() {
-  var FLOOR = { major: 24, minor: 18, patch: 0 }; // allow:raw-byte-literal — semver triple (Node 24.18.0), not byte sizes
-  // process.versions.node is the bare triple ("24.18.0") with NO leading 'v'
+  var FLOOR = { major: 24, minor: 19, patch: 0 }; // allow:raw-byte-literal — semver triple (Node 24.19.0), not byte sizes
+  // process.versions.node is the bare triple ("24.19.0") with NO leading 'v'
   // (only process.version carries the 'v'). The prefix is optional so the
   // parse matches either shape, and the unanchored tail ignores any
   // prerelease/nightly suffix (e.g. "25.0.0-nightly...").
@@ -29,7 +29,7 @@
     if (minor === FLOOR.minor && patch >= FLOOR.patch) return;
   }
   process.stderr.write(
-    'hermitstash-sync requires Node.js 24.18.0 or newer (current: ' +
+    'hermitstash-sync requires Node.js 24.19.0 or newer (current: ' +
     process.version + ').\n' +
     'Upgrade Node, then re-run. The SEA binary releases ship with their own\n' +
     'embedded Node and are not affected by your system Node version.\n'

@@ -58,7 +58,7 @@ function sourcesOfTruth(repoRoot) {
   const nodeRange = (pkg.engines && typeof pkg.engines.node === 'string') ? pkg.engines.node : '';
   const nodeFloor = nodeRange.replace(/^[\s>=~^]+/, '').trim();
   if (!/^\d+\.\d+\.\d+$/.test(nodeFloor)) {
-    throw new Error(`package.json engines.node ("${nodeRange}") is not a plain floor like ">=24.18.0"`);
+    throw new Error(`package.json engines.node ("${nodeRange}") is not a plain floor like ">=24.19.0"`);
   }
 
   return { blamejsVersion, blamejsMinor, nodeFloor };

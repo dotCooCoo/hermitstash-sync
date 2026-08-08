@@ -34,14 +34,14 @@ const BIN_SRC = nodeFs.readFileSync(BIN_PATH, 'utf8');
 const CLI_SRC = nodeFs.readFileSync(CLI_PATH, 'utf8');
 
 // ---------------------------------------------------------------------------
-// cli#19 — the Node.js runtime floor gate must actually enforce 24.18.0.
+// cli#19 — the Node.js runtime floor gate must actually enforce 24.19.0.
 //
 // The prior regex was anchored to a literal 'v' (`/^v(\d+)...`) but parsed
-// process.versions.node, which is the BARE triple ("24.18.0", no 'v'). The
+// process.versions.node, which is the BARE triple ("24.19.0", no 'v'). The
 // match always returned null, the `if (!m) return;` branch let every version
 // through, and the floor was never enforced on any Node version.
 // ---------------------------------------------------------------------------
-describe('cli#19 — Node-floor boot gate enforces 24.18.0', () => {
+describe('cli#19 — Node-floor boot gate enforces 24.19.0', () => {
   // Spawn the REAL bin with process.versions.node forced to `nodeVer`. The
   // Node-floor IIFE is the first thing bin/hermitstash-sync.js runs, so a
   // below-floor value exits 78 before any other boot work; an at/above-floor
@@ -56,28 +56,31 @@ describe('cli#19 — Node-floor boot gate enforces 24.18.0', () => {
   }
 
   it('exits 78 (EX_CONFIG) when the runtime is below the floor', () => {
-    for (const ver of ['24.17.9', '24.4.0', '23.99.99', '10.0.0']) {
+    // 24.18.0 / 24.18.9 sit just under the current floor — they are listed
+    // explicitly so a floor bump that forgets this test fails loudly here
+    // rather than silently continuing to admit the previous minor.
+    for (const ver of ['24.18.9', '24.18.0', '24.17.9', '24.4.0', '23.99.99', '10.0.0']) {
       const r = driveBinWithNodeVersion(ver);
       assert.equal(r.status, 78,
-        `Node ${ver} is below the 24.18.0 floor and must be refused with exit 78 (got ${r.status})`);
-      assert.match(r.stderr || '', /requires Node\.js 24\.18\.0 or newer/,
+        `Node ${ver} is below the 24.19.0 floor and must be refused with exit 78 (got ${r.status})`);
+      assert.match(r.stderr || '', /requires Node\.js 24\.19\.0 or newer/,
         `Node ${ver} must surface the actionable floor error`);
     }
   });
 
   it('does NOT exit 78 at or above the floor', () => {
-    for (const ver of ['24.18.0', '24.19.0', '25.0.0', '30.1.2']) {
+    for (const ver of ['24.19.0', '24.20.1', '25.0.0', '30.1.2']) {
       const r = driveBinWithNodeVersion(ver);
       assert.notEqual(r.status, 78,
-        `Node ${ver} is at/above the 24.18.0 floor and must be allowed (got exit ${r.status}, stderr: ${r.stderr})`);
+        `Node ${ver} is at/above the 24.19.0 floor and must be allowed (got exit ${r.status}, stderr: ${r.stderr})`);
       assert.equal(r.status, 0,
         `Node ${ver} should boot through to the version command and exit 0 (got ${r.status})`);
     }
   });
 
   it('parses the at-floor prerelease/nightly triple and allows it', () => {
-    // Unanchored tail ignores the "-nightly..." suffix; 24.18.0 == floor passes.
-    const r = driveBinWithNodeVersion('24.18.0-nightly20250101abcdef');
+    // Unanchored tail ignores the "-nightly..." suffix; 24.19.0 == floor passes.
+    const r = driveBinWithNodeVersion('24.19.0-nightly20250101abcdef');
     assert.equal(r.status, 0,
       `an at-floor prerelease build must be allowed (got ${r.status}, stderr: ${r.stderr})`);
   });
