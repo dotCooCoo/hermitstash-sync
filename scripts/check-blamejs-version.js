@@ -26,13 +26,25 @@
 
 const nodeFs = require('node:fs');
 const nodePath = require('node:path');
+const nodeChildProcess = require('node:child_process');
 const b = require('../vendor/blamejs');
 
 const MANIFEST_PATH = nodePath.join(__dirname, '..', 'vendor', 'MANIFEST.json');
-const API_URL = 'https://api.github.com/repos/blamejs/blamejs/releases/latest';
-// The releases/latest payload is a few KiB; cap the response well above
-// that so a compromised / MITM'd transport can't stream an unbounded
-// body into memory.
+// Currency is measured against the npm registry because that is where the
+// vendored tree comes from. Asking GitHub instead compares against a different
+// publication event: a tagged release with no corresponding publish would read
+// as staleness that no refresh could clear, and a publish without a tag would
+// hide staleness that one could. The check has to ask the same source
+// scripts/vendor-update.sh fetches from.
+//
+// It also removes a dependency on the GitHub API, whose rate limiting has made
+// this check fail for reasons that had nothing to do with currency.
+//
+// The package is @blamejs/core. The bare name `blamejs` on npm belongs to an
+// unrelated package and must never be consulted here.
+//
+// A version string is a few bytes; the cap is far above that so a misbehaving
+// or intercepted command cannot stream an unbounded body into memory.
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
 
 function readVendoredTag() {
@@ -45,35 +57,38 @@ function readVendoredTag() {
 }
 
 async function fetchLatestTag() {
-  const headers = {
-    'User-Agent': 'hermitstash-sync-vendor-check',
-    'Accept':     'application/vnd.github+json',
-  };
-  // GitHub Actions provides GITHUB_TOKEN as the standard auth handle;
-  // unauthenticated requests are rate-limited to 60/hour shared across
-  // the runner's IP. Use the token when present so the check survives
-  // a noisy CI day.
-  if (process.env.GITHUB_TOKEN) {
-    headers['Authorization'] = 'Bearer ' + process.env.GITHUB_TOKEN;
+  // Asked through npm's own client rather than this project's HTTP client.
+  // That client requires a post-quantum key exchange, and the registry does not
+  // offer one — the handshake ends in a TLS alert before any request is sent.
+  // Loosening it for this one call is not on the table: the floor exists so
+  // that no caller can quietly opt out of it.
+  //
+  // Transport is not what protects the vendored code in any case. The package
+  // is fetched over the same connection during a refresh, and what makes those
+  // bytes trustworthy is the published SHA-512 they are checked against before
+  // anything is unpacked. This call reads a version number and compares it to
+  // one already on disk; a tampered answer can cause a spurious "stale" or
+  // "current" report and nothing else.
+  //
+  // The command is a fixed literal with nothing interpolated into it.
+  let stdout;
+  try {
+    stdout = nodeChildProcess.execSync('npm view @blamejs/core version', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 30000,
+      maxBuffer: MAX_RESPONSE_BYTES,
+    });
+  } catch (e) {
+    throw new Error('could not reach the npm registry: ' + (e.message || 'npm view failed'));
   }
-
-  const res = await b.httpClient.request({
-    method:           'GET',
-    url:              API_URL,
-    headers:          headers,
-    timeoutMs:        15000,
-    maxResponseBytes: MAX_RESPONSE_BYTES,
-  });
-  if (res.statusCode !== 200) {
-    throw new Error('GitHub API returned HTTP ' + res.statusCode);
+  const version = String(stdout).trim();
+  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error('registry returned an unrecognized version: ' + version.slice(0, 40));
   }
-  let parsed;
-  try { parsed = b.safeJson.parse(res.body, { maxBytes: MAX_RESPONSE_BYTES }); }
-  catch (e) { throw new Error('GitHub API response not JSON: ' + e.message); }
-  if (typeof parsed.tag_name !== 'string' || parsed.tag_name.length === 0) {
-    throw new Error('GitHub API response missing tag_name');
-  }
-  return parsed.tag_name;
+  // The manifest records a tag ("v0.18.16") while the registry reports a bare
+  // version, so normalize here rather than at every comparison site.
+  return 'v' + version;
 }
 
 (async function main() {
@@ -99,12 +114,11 @@ async function fetchLatestTag() {
   console.error('::error::Vendored blamejs ' + vendored + ' does not match upstream latest ' + latest + '.');
   console.error('');
   console.error('Update with:');
-  console.error('  rm -rf vendor/blamejs');
-  console.error('  git clone --depth 1 --branch ' + latest + ' https://github.com/blamejs/blamejs vendor/blamejs');
-  console.error('  rm -rf vendor/blamejs/.git');
+  console.error('  bash scripts/vendor-update.sh blamejs ' + latest.replace(/^v/, ''));
   console.error('');
-  console.error('Then edit vendor/MANIFEST.json:');
-  console.error('  "version": "' + latest.replace(/^v/, '') + '",');
-  console.error('  "tag":     "' + latest + '"');
+  console.error('That verifies the published package against its SHA-512 before unpacking,');
+  console.error('recomputes the consumed-file hashes the startup check reads, and records the');
+  console.error('version, tag and digest in vendor/MANIFEST.json. Editing the manifest by hand');
+  console.error('leaves those hashes describing the previous tree.');
   process.exit(1);
 })();
