@@ -11069,13 +11069,32 @@ var KNOWN_ANTIPATTERNS = [
     // self-execution. Structural test-harness-contract drift a behavioral test
     // can't assert (the race only surfaces under require, intermittently on a
     // slow runner) — the detector is the guard.
+    // A WHATWG URL `hostname` setter SILENTLY IGNORES a value it cannot parse
+    // as a host, so `u.hostname = bucket + "." + u.hostname` against an
+    // IP-literal endpoint left the URL unchanged and dropped the bucket out of
+    // the request entirely — the key was addressed at the server root and the
+    // signature covered that wrong canonical request, with no error raised.
+    // Four call sites shared the shape. They now route through
+    // sigv4.applyVirtualHostedBucket, which verifies the assignment landed.
+    id: "url-hostname-assignment-unverified",
+    primitive: "compose sigv4.applyVirtualHostedBucket (or verify the value took) — a bare `url.hostname = ...` is a SILENT no-op when the composed host will not parse",
+    regex: /^\s*[A-Za-z_$][\w$]*\.hostname\s*=(?!=)/m,
+    skipCommentLines: true,
+    allowlist: [
+      // Home of the verified helper: the one assignment that checks its own
+      // result and throws when the setter ignored it.
+      "lib/object-store/sigv4.js",
+    ],
+    reason: "The WHATWG URL hostname setter does not throw on a value it cannot parse as a host — it ignores the assignment and leaves the previous host in place. Composing a virtual-hosted bucket prefix onto an IP-literal endpoint ('mybucket.127.0.0.1' fails the IPv4 last-label parse) therefore dropped the bucket silently: the request addressed the server root and the SigV4 signature was computed over that wrong canonical request, so the caller got a valid-looking presigned URL pointing at the wrong place. Route host composition through sigv4.applyVirtualHostedBucket, which re-reads the setter and throws INVALID_ENDPOINT naming path-style as the remedy. Fires on any `<ident>.hostname =` assignment at the start of a line; `===` comparisons, `hostname:` object-literal keys, and the helper's own verified assignment stay silent.",
+  },
+  {
     id: "test-unguarded-module-level-run",
-    primitive: "a test file's run()/self-execution must sit under `if (require.main === module)` (export run for the smoke worker to await) — a bare module-level run() at column 0 re-runs at require-time and races / exits the worker",
+    primitive: "a test file's self-execution must sit under `if (require.main === module)` (export run for the smoke worker to await) — a bare module-level call at column 0 runs the body at require-time, detached from the worker",
     scanScope: "test",
-    regex: /^run\s*\(/m,
+    regex: /^(?!if\b|for\b|while\b|switch\b|catch\b|else\b|do\b|try\b|function\b|return\b|new\b|typeof\b|void\b|delete\b|await\b|module\b|exports\b|require\b|process\b|console\b|describe\b|it\b|test\b|expect\b)[A-Za-z_$][\w$]*\s*\(/m,
     skipCommentLines: true,
     allowlist: [],
-    reason: "The smoke worker requires each test module and awaits its exported run(); a column-0 `run()` / `run().then(...process.exit...)` fires a second unawaited run() at require-time that races the worker's result print (and process.exit() exits before the result line, read as 'no result line' / 'fork failed' on a slow runner). Export `run` and wrap the invocation in `if (require.main === module)`. Fires on any `run(` at the start of a line; `function run()`, `module.exports = { run }`, and an indented `run()` inside the require-main guard stay silent.",
+    reason: "The smoke worker requires each test module and awaits ONLY its exported run() / groups. A column-0 self-invocation therefore runs the body detached at require-time: the worker reports the file before the body's assertions execute, so they never count and a FAILING one is never seen — a false pass. (A file that self-invokes under a different entry name and exports nothing reports zero checks to the worker while printing its own OK line, which reads as a passing test.) It also races the worker's result print, and a process.exit() in the invocation exits before the result line — read as 'no result line' / 'fork failed' on a slow runner. Export the entry function as `run` and wrap the invocation in `if (require.main === module)`. The callee name is NOT part of the contract, so this matches a column-0 call of ANY identifier (run, main, start, ...); `function run()`, `module.exports = { run }`, control-flow keywords, `require(`/`module.`/`console.`/`process.`, and an indented invocation inside the require-main guard all stay silent.",
   },
   {
     id: "test-detached-async-iife",
