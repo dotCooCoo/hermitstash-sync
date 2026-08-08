@@ -66,7 +66,15 @@ jobs:
         # end to end downstream.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '>=24.19.0'
+          # EXACT pin, never a range. This Node builds the SEA binary, and which
+          # shared libraries that binary dynamically links is a property of the
+          # Node build — the runtime image's `apk add` list in Dockerfile has to
+          # match it. A range lets the runner resolve to whatever Node is newest,
+          # which silently moved the build from 24 to 26 between two releases and
+          # shipped an image that could not start (missing libatomic.so.1). Keep
+          # this equal to package.json engines.node, and keep it on an Active LTS
+          # line — 25 and 26 are Current, not LTS.
+          node-version: '24.19.0'
 
       - name: Get version
         id: version
@@ -212,7 +220,7 @@ jobs:
         # zizmor: ignore[cache-poisoning] no cache input set, so setup-node caches nothing.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '>=24.19.0'
+          node-version: '24.19.0'
 
       - name: Get version
         id: version

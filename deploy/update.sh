@@ -90,7 +90,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 if ! command -v node >/dev/null 2>&1; then
-  err "node is required for ECDSA signature verification. Install Node.js 20+."
+  err "node is required for ECDSA signature verification. Install Node.js 24+."
   exit 20
 fi
 

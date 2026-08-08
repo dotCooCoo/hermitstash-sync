@@ -130,8 +130,21 @@ LABEL org.opencontainers.image.title="hermitstash-sync" \
 #                             have it pulled in by apt's base set. Without
 #                             it `hermitstash-sync` fails at load time with
 #                             "cannot open shared object file".
+#   libatomic              — same story on a different Node major: a binary
+#                             built on Node 26 links libatomic.so.1, where a
+#                             Node 24 build does not. A missing libatomic
+#                             fails identically at load time, so the container
+#                             never reaches the entrypoint. The Node that
+#                             builds the binary is pinned exactly in
+#                             .github/workflows/release.yml, so this should not
+#                             move on its own; libatomic stays installed as
+#                             insurance because the cost is a few KB and the
+#                             failure mode is a container that cannot start.
+#                             Re-check this list on any Node bump — the SEA's
+#                             shared-library set is a property of the Node
+#                             build, not of this project's code.
 # hadolint ignore=DL3018
-RUN apk add --no-cache ca-certificates-bundle tini bash shadow libstdc++ \
+RUN apk add --no-cache ca-certificates-bundle tini bash shadow libstdc++ libatomic \
     && groupadd --system --gid 1000 hermit \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /config --shell /sbin/nologin hermit \
     && mkdir -p /data /config \

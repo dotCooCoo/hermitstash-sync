@@ -859,6 +859,7 @@ function countBundleFiles(dbPath, bundleId) {
  * Does NOT call connect() — the caller should attach 'message'/'open' listeners
  * first, then call wsClient.connect(bundleId, since).
  */
+var _wsClientSeq = 0;
 function newTestWsClient(url, apiKey) {
   var certPath = process.env.HERMITSTASH_TEST_CLIENT_CERT;
   var keyPath = process.env.HERMITSTASH_TEST_CLIENT_KEY;
@@ -871,9 +872,17 @@ function newTestWsClient(url, apiKey) {
   // fix the certificate or the CA path; do NOT reach for
   // HERMITSTASH_ALLOW_INSECURE_TLS, which restores the full passthrough for every
   // dial in the process.
+  // Each test client gets its own instance id. Tests that open two clients on
+  // one bundle are modelling two SEPARATE subscribers (two devices), not one
+  // client reconnecting — and the server drops an earlier connection carrying
+  // the same id. Sharing the installation-wide id here would make the second
+  // client silently displace the first, which is precisely the behaviour the
+  // multi-subscriber tests exist to forbid.
+  _wsClientSeq += 1;
   var config = {
     server: url,
     reconnect: false,
+    instanceId: 'test-' + process.pid + '-' + _wsClientSeq,
   };
   if (certPath && keyPath && caPath) {
     config.mtls = { cert: certPath, key: keyPath, ca: caPath };

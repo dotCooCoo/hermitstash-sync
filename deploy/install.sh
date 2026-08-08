@@ -163,7 +163,7 @@ elif [ "${HERMITSTASH_ALLOW_UNVERIFIED:-0}" = "1" ]; then
   warn "default install — install Node.js and re-run for the full signature gate."
 else
   err "node is required to verify the release signature before installing."
-  err "Install Node.js 20+ and re-run (apt install nodejs / dnf install nodejs / brew install node),"
+  err "Install Node.js 24+ and re-run (apt install nodejs / dnf install nodejs / brew install node),"
   err "or use the signed container image (ghcr.io/dotcoocoo/hermitstash-sync)."
   err "To install without the signature gate (checksum-only, weaker — same-channel checksum is"
   err "not an integrity substitute), re-run with HERMITSTASH_ALLOW_UNVERIFIED=1."
