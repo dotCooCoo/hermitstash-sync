@@ -1,0 +1,26 @@
+{
+  "version": "1.0.9",
+  "date": "2026-08-08",
+  "headline": "Vendor the framework from a verified published package",
+  "summary": "The vendored framework was assembled by hand from a clone, which checks nothing about what it fetched. It now comes from the published package and its bytes are verified against the registry's advertised digest before anything is unpacked.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "The vendored framework is verified against a published digest",
+          "body": "It was previously copied out of a shallow clone of a release tag, which trusts whatever that tag resolves to at the moment of the fetch and leaves no way to tell afterwards whether the tree matches anything upstream published. The bytes are now checked against the registry's advertised SHA-512 before being unpacked, the refresh stops rather than vendoring on a mismatch, and that digest is recorded alongside the version so the tree stays traceable to a specific published artifact. The per-file hashes the client verifies at startup are recomputed in the same run, so the tree and the manifest cannot be left disagreeing."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "The binary no longer carries the framework's test and example trees",
+          "body": "The published package contains only what actually runs, so the framework's test, example, documentation, benchmark and fuzzing trees are no longer vendored. Roughly a thousand files leave the tree. Nothing the client calls is affected — the framework surface is unchanged."
+        }
+      ]
+    }
+  ]
+}
