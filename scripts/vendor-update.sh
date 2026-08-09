@@ -178,6 +178,19 @@ if [ "$PKG" = "blamejs" ]; then
     e.version=process.env.INSTALLED_VER;
     e.tag=process.env.TAG;
     e.bundledAt=process.env.DATE;
+    // The CPE and purl carry the version too, and only these two were being
+    // rewritten — so every refresh left the identifiers naming an older
+    // release. Inventory and vulnerability tooling reads those, not the
+    // version field, and would attribute the refreshed bytes to whatever
+    // release the identifiers were last correct for. Rewrite the version
+    // component in place rather than rebuilding the string, so the rest of the
+    // identifier (and anything an operator has customised) survives.
+    if (typeof e.cpe === "string") {
+      e.cpe = e.cpe.replace(/^(cpe:2\.3:a:[^:]+:[^:]+:)[^:]+/, "$1" + process.env.INSTALLED_VER);
+    }
+    if (typeof e.purl === "string") {
+      e.purl = e.purl.replace(/@.*$/, "@" + process.env.TAG);
+    }
     // The registry-published digest of the exact tarball this tree came from,
     // so the vendored bytes stay traceable to a published artifact rather than
     // to a version number someone typed.

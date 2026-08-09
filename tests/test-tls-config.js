@@ -66,8 +66,22 @@ describe('Server TLS Constants (hermitstash)', function () {
     assert.strictEqual(serverConstants.PQC_GROUPS.SecP384r1MLKEM1024, 0x11ED);
   });
 
-  it('PQC_GROUPS has exactly 2 entries', function () {
-    assert.strictEqual(Object.keys(serverConstants.PQC_GROUPS).length, 2);
+  it('PQC_GROUPS covers every hybrid the preference list advertises', function () {
+    // Asserting a count let a real bug hide: SecP256r1MLKEM768 was advertised
+    // in the preference list but missing from this accept-set, so the server
+    // offered the group, accepted it at the TLS layer, then answered a client
+    // offering only it with a fatal handshake_failure — indistinguishable, from
+    // that client's side, from being refused for offering nothing post-quantum.
+    // The relationship between the two tables is what matters, so check that
+    // instead of a number that has to be edited every time a group is added.
+    const advertised = serverConstants.TLS_GROUP_PREFERENCE.filter((g) => /MLKEM/i.test(g));
+    assert.ok(advertised.length > 0, 'preference list advertises no hybrid');
+    for (const group of advertised) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(serverConstants.PQC_GROUPS, group),
+        `${group} is advertised but missing from PQC_GROUPS — it would be refused at the gate`
+      );
+    }
   });
 });
 
@@ -131,17 +145,36 @@ describe('OpenSSL TLS Context Validation', function () {
 });
 
 describe('Enrollment TLS agent (first contact)', function () {
-  it('advertises the PQC group preference on both ecdhCurve and groups', function () {
+  it('advertises the PQC group preference on ecdhCurve, and only there', function () {
     const agent = buildEnrollmentAgent();
     try {
       // A bare https.Agent would negotiate Node's default non-PQC curves and
-      // be rejected by a server that enforces the PQC gate. Both options must
-      // be set — OpenSSL honours ecdhCurve vs groups differently across Node
-      // versions.
+      // be rejected by a server that enforces the PQC gate.
       assert.strictEqual(agent.options.ecdhCurve, syncConstants.TLS_GROUPS);
-      assert.strictEqual(agent.options.groups, syncConstants.TLS_GROUPS);
+      // `groups` is not a node:tls option — the premise that OpenSSL honours it
+      // on some Node versions is checked directly below, and a second copy of
+      // the preference under a name nothing reads invites narrowing it there
+      // and believing the wire changed.
+      assert.strictEqual(agent.options.groups, undefined);
     } finally {
       try { agent.destroy(); } catch (_e) { /* best-effort */ }
+    }
+  });
+
+  it('node:tls honours ecdhCurve and ignores groups (the premise)', function () {
+    // A value no implementation could accept throws on an option that is read
+    // and is swallowed by one that is not, so this re-establishes the premise
+    // against the running Node rather than trusting it — and fails loudly if a
+    // future Node starts implementing one of the ignored names.
+    assert.throws(
+      () => tls.createSecureContext({ minVersion: 'TLSv1.3', ecdhCurve: 'not-a-real-group' }),
+      'ecdhCurve must be validated by node:tls'
+    );
+    for (const ignored of ['groups', 'curves', 'namedCurves']) {
+      assert.doesNotThrow(
+        () => tls.createSecureContext({ minVersion: 'TLSv1.3', [ignored]: 'not-a-real-group' }),
+        `${ignored} is now honoured by node:tls — the group preference must be set through it too`
+      );
     }
   });
 

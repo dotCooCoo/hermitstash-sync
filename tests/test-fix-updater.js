@@ -69,13 +69,17 @@ describe('updater#18 — beta-channel asset/signature regex accepts a prerelease
     assert.equal(assetRe.test(build), true);
   });
 
-  it('guards the old bug: a digit-only version pattern (no prerelease tail) is rejected', () => {
-    // Behavioral guard so a revert to the digit-only `\d+\.\d+\.\d+-<plat>` form
-    // (which drops the prerelease/build tail) fails here. The prerelease slot is a
-    // BARE bounded char class, not a `(?:…)?` group — b.selfUpdate runs the pattern
-    // through b.guardRegex.sanitize, which refuses a quantified group.
-    assert.match(assetRe.source, /\[-0-9A-Za-z\.\+\]\{0,\d+\}/, 'asset pattern carries a bounded prerelease char class');
-    assert.match(sigRe.source, /\[-0-9A-Za-z\.\+\]\{0,\d+\}/, 'sig pattern carries a bounded prerelease char class');
+  it('guards the old bug: the pattern carries an optional prerelease/build slot', () => {
+    // A revert to the digit-only `\d+\.\d+\.\d+-<plat>` form still matches a
+    // stable asset and stops matching a tailed one, so assert on that difference
+    // rather than on how the tail slot is spelled. Pinning the spelling made this
+    // guard fail on a rewrite that kept every property it exists to protect.
+    const stable = `hermitstash-sync-v1.2.3-${PLAT}-${ARCH}${EXT}`;
+    const tailed = `hermitstash-sync-v1.2.3-beta.1-${PLAT}-${ARCH}${EXT}`;
+    assert.equal(assetRe.test(stable), true, 'stable asset must match');
+    assert.equal(assetRe.test(tailed), true, 'prerelease asset must match — the tail slot is gone');
+    assert.equal(sigRe.test(`${stable}.sig`), true, 'stable signature must match');
+    assert.equal(sigRe.test(`${tailed}.sig`), true, 'prerelease signature must match — the tail slot is gone');
   });
 
   it('both patterns pass b.guardRegex.sanitize (b.selfUpdate refuses an unsafe assetPattern)', () => {

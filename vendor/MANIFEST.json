@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.16",
+      "version": "0.18.18",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.16",
-      "bundledAt": "2026-08-08",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.16:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.16",
+      "tag": "v0.18.18",
+      "bundledAt": "2026-08-09",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.18:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.18",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -42,10 +42,10 @@
         "index": "sha256:6ae0a3c0ada980aa5edf4eb07743279cfe2925462c786e1fd84747be7cb88527",
         "safe-json": "sha256:3ebfbf8e5d9e4a19063eeed7518ca19f2e4f898792bea9602c4bf138e506df6f",
         "safe-url": "sha256:d6024d0e64936b25833cc1a0a3113d8d5c9f3048ba7452ebcbbebb581c41cd4d",
-        "pqc-agent": "sha256:2b050109a917b6938f4c5fcf0237c7120604387cdf72ba9f9adbcb6f99f13db5",
+        "pqc-agent": "sha256:251a6fd06497ed25d815c5c247349cbf0b7960002e3fa97727b09471b85fd315",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
-        "http-client": "sha256:9e14d3d5bbd5fffe49dc7285f532eafb7a079986904f385310a0a086536160d0",
-        "ws-client": "sha256:9c6969e68f025a3f4ee440ca7d53e0f44477e16709d2f549aa4a4b50d79cce67",
+        "http-client": "sha256:ca10259b4fad6d851f48ef337e7273b5903138e4a13f72348b9332b574decd87",
+        "ws-client": "sha256:c2f2d94d90f1e22e4c9019433998fc58f4b4530a70cde8682b714218c37b7a2c",
         "log-stream": "sha256:2f9d5173b0f03071718103387570754b343d399a13ed9f6959221ccc550eb989",
         "log-stream-local": "sha256:c589a6d39de96877f4fa81fc2f5650679e2768ee0e0c607883aceaab4abce940",
         "atomic-file": "sha256:06e412123a3b76d6a874d87ebee320f07497fb4f9a38c4cea9b4329d9ea9c2d4",
@@ -55,26 +55,26 @@
         "process-spawn": "sha256:0d0f2943ff174da48bb555cf189d9aae0120ecee43cf536072544706039acc6b",
         "config-drift": "sha256:eb337e008f638b44721a80553527b95dd5f7e6d2e80feaac8e5fd8d422e82c50",
         "middleware-api-encrypt": "sha256:3c6f390e35c39c4bd3c5d551e089e738920989019314bcead7b654adab747862",
-        "noble-post-quantum": "sha256:f9c94094b3c10fe73dac5343289da582454ea6053494fab2bf66099d9103d6c3",
-        "noble-ciphers": "sha256:2b30a26f728c5349f4c4b47834f862a4f77393b1224fc12b22abe3ce2cfab78f"
+        "noble-post-quantum": "sha256:fab7ebe5737793862c473444f4ee5912f79dd1edec86683acbb4eecbca0f5892",
+        "noble-ciphers": "sha256:f3325f480cb8eb814fcb0baaa19336cbbf2b993f48624c6aa9600ffd69d0be5e"
       },
       "transitive": {
         "_note": "Mechanically projected from vendor/blamejs/lib/vendor/MANIFEST.json by scripts/project-transitive-manifest.js. Run by scripts/vendor-hash.js on every blamejs refresh and gated by its --check (scripts/release.js prepare + CI). Do not hand-edit — re-run the projector. Filtered to bundles whose files.server ships under vendor/blamejs/, carrying only the fields the release SBOM consumes.",
         "source": "vendor/blamejs/lib/vendor/MANIFEST.json",
         "packages": {
           "@noble/ciphers": {
-            "version": "2.2.0",
+            "version": "2.3.0",
             "license": "MIT",
             "author": "Paul Miller",
             "source": "https://github.com/paulmillr/noble-ciphers",
-            "cpe": "cpe:2.3:a:paulmillr:noble-ciphers:2.2.0:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:paulmillr:noble-ciphers:2.3.0:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/noble-ciphers.cjs"
             },
             "hashes": {
-              "server": "sha256:2b30a26f728c5349f4c4b47834f862a4f77393b1224fc12b22abe3ce2cfab78f"
+              "server": "sha256:f3325f480cb8eb814fcb0baaa19336cbbf2b993f48624c6aa9600ffd69d0be5e"
             },
-            "bundledAt": "2026-07-13T00:00:00Z"
+            "bundledAt": "2026-08-08T00:00:00Z"
           },
           "@noble/curves": {
             "version": "2.3.0",
@@ -88,21 +88,41 @@
             "hashes": {
               "server": "sha256:b5fe88d1ea780d0581dee6145d666f89d46fc9531b5db35db2e5b16627840890"
             },
-            "bundledAt": "2026-08-06T00:00:00Z"
+            "bundledAt": "2026-08-06T00:00:00Z",
+            "components": {
+              "@noble/hashes": {
+                "url": "https://github.com/paulmillr/noble-hashes",
+                "version": "2.3.0"
+              }
+            }
           },
           "@noble/post-quantum": {
-            "version": "0.6.1",
+            "version": "0.7.0",
             "license": "MIT",
             "author": "Paul Miller",
             "source": "https://github.com/paulmillr/noble-post-quantum",
-            "cpe": "cpe:2.3:a:paulmillr:noble-post-quantum:0.6.1:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:paulmillr:noble-post-quantum:0.7.0:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/noble-post-quantum.cjs"
             },
             "hashes": {
-              "server": "sha256:f9c94094b3c10fe73dac5343289da582454ea6053494fab2bf66099d9103d6c3"
+              "server": "sha256:fab7ebe5737793862c473444f4ee5912f79dd1edec86683acbb4eecbca0f5892"
             },
-            "bundledAt": "2026-07-13T00:00:00Z"
+            "bundledAt": "2026-08-08T00:00:00Z",
+            "components": {
+              "@noble/hashes": {
+                "url": "https://github.com/paulmillr/noble-hashes",
+                "version": "2.3.0"
+              },
+              "@noble/curves": {
+                "url": "https://github.com/paulmillr/noble-curves",
+                "version": "2.3.0"
+              },
+              "@noble/ciphers": {
+                "url": "https://github.com/paulmillr/noble-ciphers",
+                "version": "2.3.0"
+              }
+            }
           },
           "@simplewebauthn/server": {
             "version": "13.3.2",
@@ -165,22 +185,22 @@
             "bundledAt": "2026-07-25T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.4.1",
+            "version": "0.4.11",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.4.1:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.4.11:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:32241b4cb9744ddb43a3ae66d796331d2a77e02037ed1828f39e8c358bfef66e"
+              "server": "sha256:cf2ea38c07f16967881d336a1de6419d27eb2c7af17449ab7ae43235db616945"
             },
-            "bundledAt": "2026-08-07T00:00:00Z"
+            "bundledAt": "2026-08-09T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-w9RiZWTIiulfqW6wQgJBZjWaW8d3eF/4vwg8afXkFmsQRhmIzfJVxuM6X/zkOeIiugo1sbkECcU6q+CBrJQH+g=="
+      "integrity": "sha512-th2kkb7sLjEaubE0wTG8mlj46zeOzezx1WSDK4GaSdQYIiq3gxYmffP2Ztc0+COPf7VMtCmMDUaLpp6a7PZfbg=="
     }
   }
 }
