@@ -50,7 +50,7 @@ ARG NODE_VERSION=24.19.0-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba32
 # refresh surfaces as a failed build rather than a silently-vulnerable
 # image. RUNTIME_BASE stays a build-arg so a refresh is visible in the diff
 # and an operator can override it for a local rebuild against a newer base.
-ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:c0534ee75e0a6bc74bdfef07155049ec435b9e03a706d3545be3130d1a7cd00f  # wolfi-base 2026-08-08
+ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:1454fe554abc89f10a43cabc290d8d61941d7e81c9778b408894aaba27d398a1  # wolfi-base 2026-08-09
 
 # ---------- Stage 1: download + verify the signed binary ----------
 FROM node:${NODE_VERSION} AS verify
