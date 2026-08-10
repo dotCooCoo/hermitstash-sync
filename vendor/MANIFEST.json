@@ -2,18 +2,19 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.18",
+      "version": "0.18.19",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.18",
-      "bundledAt": "2026-08-09",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.18:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.18",
+      "tag": "v0.18.19",
+      "bundledAt": "2026-08-10",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.19:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.19",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
+        "vendor/blamejs/lib/regex-linear.js — b.regexLinear.compile (backtracking-free matching in the release checks, so a pattern's cost is bounded by the subject rather than screened)",
         "vendor/blamejs/lib/vendor/noble-ciphers.cjs#xchacha20poly1305 — symmetric AEAD for the HermitStash ECIES session key",
         "vendor/blamejs/lib/vendor/noble-post-quantum.cjs#ml_kem1024 — KEM leg of the HermitStash hybrid ECIES bootstrap"
       ],
@@ -35,26 +36,28 @@
         "process-spawn": "vendor/blamejs/lib/process-spawn.js",
         "config-drift": "vendor/blamejs/lib/config-drift.js",
         "middleware-api-encrypt": "vendor/blamejs/lib/middleware/api-encrypt.js",
+        "regex-linear": "vendor/blamejs/lib/regex-linear.js",
         "noble-post-quantum": "vendor/blamejs/lib/vendor/noble-post-quantum.cjs",
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:6ae0a3c0ada980aa5edf4eb07743279cfe2925462c786e1fd84747be7cb88527",
+        "index": "sha256:2d2c81c19e4177450b701dba05f582a8b6ef9581d202f01ec04d912556266a2f",
         "safe-json": "sha256:3ebfbf8e5d9e4a19063eeed7518ca19f2e4f898792bea9602c4bf138e506df6f",
         "safe-url": "sha256:d6024d0e64936b25833cc1a0a3113d8d5c9f3048ba7452ebcbbebb581c41cd4d",
         "pqc-agent": "sha256:251a6fd06497ed25d815c5c247349cbf0b7960002e3fa97727b09471b85fd315",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
-        "http-client": "sha256:ca10259b4fad6d851f48ef337e7273b5903138e4a13f72348b9332b574decd87",
-        "ws-client": "sha256:c2f2d94d90f1e22e4c9019433998fc58f4b4530a70cde8682b714218c37b7a2c",
+        "http-client": "sha256:41e57992bf026bee2b88612ff57fc4b17650a89fe6991ada311120510a826b86",
+        "ws-client": "sha256:348d01cd552fed583f05944d1853f71b0119105cb067c2e607b19ec9e6f47aee",
         "log-stream": "sha256:2f9d5173b0f03071718103387570754b343d399a13ed9f6959221ccc550eb989",
         "log-stream-local": "sha256:c589a6d39de96877f4fa81fc2f5650679e2768ee0e0c607883aceaab4abce940",
         "atomic-file": "sha256:06e412123a3b76d6a874d87ebee320f07497fb4f9a38c4cea9b4329d9ea9c2d4",
-        "app-shutdown": "sha256:f43d402302fea92b48840b8bd477a05d6b26520f3d8e92b494eed28afcf08094",
+        "app-shutdown": "sha256:3e8a1f7fb91380d1d02357bd774dde12c912fdd56c4123520b52efefafa894d9",
         "retry": "sha256:3c474b166b896745aa85252037de0c4ef1113cebd9cac56fa1b247ebeabd8303",
         "framework-error": "sha256:a62f496ac8ff910008b08f90889c107cbf2094bb2e3e81213b6ad4b30b61989b",
         "process-spawn": "sha256:0d0f2943ff174da48bb555cf189d9aae0120ecee43cf536072544706039acc6b",
         "config-drift": "sha256:eb337e008f638b44721a80553527b95dd5f7e6d2e80feaac8e5fd8d422e82c50",
-        "middleware-api-encrypt": "sha256:3c6f390e35c39c4bd3c5d551e089e738920989019314bcead7b654adab747862",
+        "middleware-api-encrypt": "sha256:83669e3560e4d00f8ebe3f2eab83da0f5b9acaad2a0abf38b12e29064d7407cf",
+        "regex-linear": "sha256:f9a8c5f4bb5a392ce6a867159869bf7dfae5c10cf839ae3b569cac063275a24d",
         "noble-post-quantum": "sha256:fab7ebe5737793862c473444f4ee5912f79dd1edec86683acbb4eecbca0f5892",
         "noble-ciphers": "sha256:f3325f480cb8eb814fcb0baaa19336cbbf2b993f48624c6aa9600ffd69d0be5e"
       },
@@ -185,22 +188,22 @@
             "bundledAt": "2026-07-25T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.4.11",
+            "version": "0.4.13",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.4.11:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.4.13:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:cf2ea38c07f16967881d336a1de6419d27eb2c7af17449ab7ae43235db616945"
+              "server": "sha256:067ac05899ef04f7851a8d010dc4289e7a01706d5fd2cdc1ce59860631bba284"
             },
-            "bundledAt": "2026-08-09T00:00:00Z"
+            "bundledAt": "2026-08-10T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-th2kkb7sLjEaubE0wTG8mlj46zeOzezx1WSDK4GaSdQYIiq3gxYmffP2Ztc0+COPf7VMtCmMDUaLpp6a7PZfbg=="
+      "integrity": "sha512-HgDQ1PQMhGhtAnxEiX2wOmhaZ9LNalRxZMNfDFXE2yrf7YKiKEDhlNsxuslDXr5L9Nk/uNvyaTCYzzjhLcWjFg=="
     }
   }
 }

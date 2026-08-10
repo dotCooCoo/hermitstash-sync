@@ -59,6 +59,11 @@ const CONSUMED = {
   'process-spawn':          'vendor/blamejs/lib/process-spawn.js',
   'config-drift':           'vendor/blamejs/lib/config-drift.js',
   'middleware-api-encrypt': 'vendor/blamejs/lib/middleware/api-encrypt.js',
+  // The release checks decide whether a base-image pin is current and whether
+  // the vendored framework is the version it claims, and they reach those
+  // verdicts by matching with this. Bytes that decide what a release is allowed
+  // to ship belong under the same integrity check as the rest of the surface.
+  'regex-linear':           'vendor/blamejs/lib/regex-linear.js',
   'noble-post-quantum':     'vendor/blamejs/lib/vendor/noble-post-quantum.cjs',
   'noble-ciphers':          'vendor/blamejs/lib/vendor/noble-ciphers.cjs',
 };

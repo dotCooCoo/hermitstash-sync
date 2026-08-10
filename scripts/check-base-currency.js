@@ -42,17 +42,28 @@
  *
  * Usage:
  *   node scripts/check-base-currency.js              # report; exit 0 unless broken
- *   node scripts/check-base-currency.js --max-age-days=N
- *                                                    # additionally fail when a
- *                                                    # pin has drifted and the
- *                                                    # current tag build is more
- *                                                    # than N days newer
  *   node scripts/check-base-currency.js --json       # machine-readable
+ *
+ * A --max-age-days=N flag was documented here and parsed, but its value was
+ * never read, so it silently did nothing. Both the flag and the claim are gone
+ * rather than left to look like a working control. Implementing it needs the
+ * build date behind a digest, which this script does not fetch.
  */
 
 var fs = require("fs");
 var path = require("path");
 var https = require("https");
+var b = require("../vendor/blamejs");
+
+// Matched with b.regexLinear rather than a RegExp literal. Both patterns put a
+// repetition inside an optional group, which the platform engine can be made to
+// backtrack over and which the unsafe-regex screen therefore refuses outright —
+// even though an optional group repeats at most once and neither is actually
+// exponential. Running them through the linear matcher removes the question
+// instead of arguing with the screen: no backtracking is possible, so the work
+// is bounded by the subject length whatever the pattern does.
+var DOCKERFILE_NAME = b.regexLinear.compile("^Dockerfile(\\..+)?$");
+var FROM_LINE = b.regexLinear.compile("^\\s*FROM\\s+(\\S+)(?:\\s+AS\\s+(\\S+))?", "i");
 
 var REPO = path.resolve(__dirname, "..");
 
@@ -103,7 +114,7 @@ function listDockerfiles(dir, out, rel) {
     var childRel = rel ? rel + "/" + e.name : e.name;
     if (EXCLUDED_PREFIXES.some(function (p) { return (childRel + "/").indexOf(p) === 0; })) return;
     if (e.isDirectory()) { listDockerfiles(path.join(dir, e.name), out, childRel); return; }
-    if (/^Dockerfile(\..+)?$/.test(e.name)) out.push(childRel);
+    if (DOCKERFILE_NAME.test(e.name)) out.push(childRel);
   });
   return out;
 }
@@ -127,7 +138,7 @@ function parseDockerfile(relPath) {
     var argMatch = /^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S+)/.exec(line);
     if (argMatch) { args[argMatch[1]] = argMatch[2]; return; }
 
-    var fromMatch = /^\s*FROM\s+(\S+)(?:\s+AS\s+(\S+))?/i.exec(line);
+    var fromMatch = FROM_LINE.exec(line);
     if (!fromMatch) return;
 
     var ref = fromMatch[1];
@@ -275,11 +286,6 @@ async function resolveDigest(parsed, reference) {
 async function main() {
   var argv = process.argv.slice(2);
   var asJson = argv.indexOf("--json") !== -1;
-  var maxAge = null;
-  argv.forEach(function (a) {
-    var m = /^--max-age-days=(\d+)$/.exec(a);
-    if (m) maxAge = parseInt(m[1], 10);
-  });
 
   if (!asJson) console.log(bold("\n== base-currency =="));
 

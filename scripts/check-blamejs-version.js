@@ -29,6 +29,13 @@ const nodePath = require('node:path');
 const nodeChildProcess = require('node:child_process');
 const b = require('../vendor/blamejs');
 
+// Matched with b.regexLinear rather than a RegExp literal. The optional
+// prerelease tail puts a repetition inside an optional group, which the
+// unsafe-regex screen refuses even though an optional group repeats at most
+// once. The linear matcher cannot backtrack at all, so the subject — a version
+// string from the registry — bounds the work whatever the pattern looks like.
+const SEMVER = b.regexLinear.compile('^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$');
+
 const MANIFEST_PATH = nodePath.join(__dirname, '..', 'vendor', 'MANIFEST.json');
 // Currency is measured against the npm registry because that is where the
 // vendored tree comes from. Asking GitHub instead compares against a different
@@ -83,7 +90,7 @@ async function fetchLatestTag() {
     throw new Error('could not reach the npm registry: ' + (e.message || 'npm view failed'));
   }
   const version = String(stdout).trim();
-  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
+  if (!SEMVER.test(version)) {
     throw new Error('registry returned an unrecognized version: ' + version.slice(0, 40));
   }
   // The manifest records a tag ("v0.18.16") while the registry reports a bare
