@@ -1,0 +1,17 @@
+{
+  "version": "1.0.12",
+  "date": "2026-08-10",
+  "headline": "Refresh the vendored framework",
+  "summary": "The framework moves to 0.18.20. Nothing this client does changes; the release is here because the framework is where its wire, crypto and update primitives come from, and staying on the current one is how a fix reaches this client without a separate decision each time.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "The vendored framework moves to 0.18.20",
+          "body": "The changes in it concern serving HTTP responses and building SQL identifiers — this client does neither, so no behaviour here is affected. The release also adds browser builds of the vendored crypto, which a client with no browser surface does not ship; the transitive inventory correctly continues to list only what actually ships in the binary."
+        }
+      ]
+    }
+  ]
+}

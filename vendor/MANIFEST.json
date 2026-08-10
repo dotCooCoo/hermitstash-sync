@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.19",
+      "version": "0.18.20",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.19",
+      "tag": "v0.18.20",
       "bundledAt": "2026-08-10",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.19:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.19",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.20:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.20",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -72,12 +72,14 @@
             "source": "https://github.com/paulmillr/noble-ciphers",
             "cpe": "cpe:2.3:a:paulmillr:noble-ciphers:2.3.0:*:*:*:*:node.js:*:*",
             "files": {
-              "server": "lib/vendor/noble-ciphers.cjs"
+              "server": "lib/vendor/noble-ciphers.cjs",
+              "browser": "lib/vendor/browser/noble-ciphers.mjs"
             },
             "hashes": {
-              "server": "sha256:f3325f480cb8eb814fcb0baaa19336cbbf2b993f48624c6aa9600ffd69d0be5e"
+              "server": "sha256:f3325f480cb8eb814fcb0baaa19336cbbf2b993f48624c6aa9600ffd69d0be5e",
+              "browser": "sha256:0ffd91540bcb586a29b56e52ee1c29df69097b50776beb4036a07558f7a4e12e"
             },
-            "bundledAt": "2026-08-08T00:00:00Z"
+            "bundledAt": "2026-08-10T00:00:00Z"
           },
           "@noble/curves": {
             "version": "2.3.0",
@@ -106,12 +108,14 @@
             "source": "https://github.com/paulmillr/noble-post-quantum",
             "cpe": "cpe:2.3:a:paulmillr:noble-post-quantum:0.7.0:*:*:*:*:node.js:*:*",
             "files": {
-              "server": "lib/vendor/noble-post-quantum.cjs"
+              "server": "lib/vendor/noble-post-quantum.cjs",
+              "browser": "lib/vendor/browser/noble-post-quantum.mjs"
             },
             "hashes": {
-              "server": "sha256:fab7ebe5737793862c473444f4ee5912f79dd1edec86683acbb4eecbca0f5892"
+              "server": "sha256:fab7ebe5737793862c473444f4ee5912f79dd1edec86683acbb4eecbca0f5892",
+              "browser": "sha256:cae1d5bbdc7184b202b6ca68df6e1db7b0d0f668c77809ded189ca7f271accc9"
             },
-            "bundledAt": "2026-08-08T00:00:00Z",
+            "bundledAt": "2026-08-10T00:00:00Z",
             "components": {
               "@noble/hashes": {
                 "url": "https://github.com/paulmillr/noble-hashes",
@@ -203,7 +207,7 @@
           }
         }
       },
-      "integrity": "sha512-HgDQ1PQMhGhtAnxEiX2wOmhaZ9LNalRxZMNfDFXE2yrf7YKiKEDhlNsxuslDXr5L9Nk/uNvyaTCYzzjhLcWjFg=="
+      "integrity": "sha512-e0ZJan+h4Qtqmp0VcN6rWpEeemKuL4tiAphvfDnXZgrziMT/SHJfAFLUu/cYLdAh/M6vrsU6twCLTF1G82Bapg=="
     }
   }
 }
