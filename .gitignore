@@ -35,3 +35,7 @@ tests/certs/
 
 # Scratch — local-only stress/simulation scripts, throwaway analysis.
 .scratch/
+
+# Coverage output: raw V8 JSON (one file per process) and the rendered report.
+# Regenerate with `node scripts/coverage.js`.
+.coverage/
