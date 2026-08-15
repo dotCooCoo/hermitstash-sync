@@ -209,7 +209,7 @@ Config file: `~/.hermitstash-sync/config.json` (or `$HERMITSTASH_SYNC_CONFIG_DIR
 `server` must be an `https://` URL. A plaintext `http://` server is refused at
 config-load for any non-loopback host — it would ship the API key and every
 file over an unencrypted, non-post-quantum connection. A loopback target
-(`http://127.0.0.1`, `::1`, `localhost` — e.g. a TLS-terminating sidecar on the
+(`http://127.0.0.1`, `::1`, `localhost` — a TLS-terminating sidecar, for example, on the
 same host) stays allowed; to reach a trusted non-loopback proxy over plaintext
 deliberately, set `HERMITSTASH_ALLOW_PLAINTEXT=1`.
 
@@ -536,7 +536,7 @@ Outside systemd (Docker, Windows, dev runs) the notify calls no-op cleanly — `
 
 ## File structure
 
-```
+```text
 bin/hermitstash-sync.js       CLI entry point
 lib/cli.js                    Command parser and dispatcher
 lib/config.js                 Config file management
@@ -573,7 +573,7 @@ The sync client ships as a standalone binary — no Node.js installation require
 
 ### Release workflow
 
-```
+```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 

@@ -21,7 +21,7 @@ node tests/run-all.js
 
 ### Server source location
 
-The test runner spawns `node server.js` from the server repo. By default it looks for a sibling checkout at `../hermitstash/` (i.e. `dotCooCoo/hermitstash` cloned next to this repo). Override the path with:
+The test runner spawns `node server.js` from the server repo. By default it looks for a sibling checkout at `../hermitstash/` (that is, `dotCooCoo/hermitstash` cloned next to this repo). Override the path with:
 
 ```sh
 HERMITSTASH_SERVER_DIR=/path/to/server node tests/run-all.js
