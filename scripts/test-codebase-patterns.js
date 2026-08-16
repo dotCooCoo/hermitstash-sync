@@ -1614,8 +1614,55 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     });
 
     // And nothing may go back to consuming .stdout straight off the call.
-    assert.ok(!/_capture\((?:[^)]|\)(?!\s*\.stdout))*\)\s*\.stdout\s*\n?\s*\.split/.test(src),
-      'a gate must store the capture and consult .status before splitting .stdout');
+    //
+    // The call's own parentheses are matched rather than approximated. Spanning
+    // them with one expression needs an alternation under a star — the
+    // nested-quantifier shape that backtracks catastrophically, which this repo's
+    // lint refuses and which would be a poor thing to introduce in a check about
+    // reading lookups safely. Bounding by the first semicolon instead is wrong
+    // for a different reason: an argument may contain one, as `--format=%s;%b`
+    // does, and the scan would stop before the chained access it is looking for.
+    //
+    // String contents are blanked first, keeping length, so a paren or semicolon
+    // inside a git argument cannot unbalance the match.
+    //
+    // Limit, accepted knowingly: comments and regex literals are not masked, so
+    // an unbalanced paren inside one — within the argument list of a call that is
+    // also consuming .stdout directly — would be miscounted. This is the blanket
+    // over both gates, each of which is asserted by name above, so the cost of a
+    // JavaScript tokenizer here buys very little.
+    var masked = src.split('');
+    for (var mi = 0; mi < src.length; mi += 1) {
+      var mc = src.charAt(mi);
+      if (mc !== '"' && mc !== "'" && mc !== '`') continue;
+      var quote = mc;
+      mi += 1;
+      while (mi < src.length && src.charAt(mi) !== quote) {
+        if (src.charAt(mi) === '\\') { masked[mi] = ' '; mi += 1; }
+        if (mi < src.length && src.charAt(mi) !== '\n') masked[mi] = ' ';
+        mi += 1;
+      }
+    }
+    var code = masked.join('');
+
+    var from = -1;
+    var direct = [];
+    while ((from = code.indexOf('_capture(', from + 1)) !== -1) {
+      var open = code.indexOf('(', from);
+      var depth = 0;
+      var close = -1;
+      for (var ci = open; ci < code.length; ci += 1) {
+        if (code.charAt(ci) === '(') depth += 1;
+        else if (code.charAt(ci) === ')') { depth -= 1; if (depth === 0) { close = ci; break; } }
+      }
+      if (close === -1) continue;
+      if (/^\s*\.stdout\s*\.split/.test(code.slice(close + 1, close + 40))) {
+        direct.push(code.slice(0, from).split('\n').length);
+      }
+    }
+    assert.deepEqual(direct, [],
+      'a gate must store the capture and consult .status before splitting .stdout; '
+      + 'found at line(s) ' + direct.join(', '));
   });
 
 });
