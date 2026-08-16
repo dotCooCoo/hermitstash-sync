@@ -23,14 +23,21 @@
  *   treats the cell as text), `prefix-quote` (legacy `'` prefix),
  *   `wrap-with-quotes-and-prefix` (email-attachment posture),
  *   `reject` (throw), `allowlist` (only documented safe functions
- *   like SUM / AVERAGE pass through unprefixed).
+ *   like SUM / AVERAGE pass through unprefixed; anything the matcher
+ *   cannot identify as an allowlisted call is prefixed).
+ *
+ *   The four prefixing modes force quoted output. OWASP places the
+ *   prefix inside the quoted field, and a bare leading TAB is a
+ *   delimiter under tab-separated import, so an unquoted prefix can
+ *   put the trigger character back at the front of the cell.
  *
  *   Unicode bidi/zero-width strip: CVE-2021-42574 Trojan Source bidi
  *   overrides (U+202A-202E, U+2066-2069) are rejected or stripped
  *   per profile; zero-width characters (ZWSP / ZWNJ / ZWJ / WJ / SHY)
- *   always strip. Leading bidi/zero-width prefixes are stripped before
- *   the formula scan so a cell beginning with U+200B`=SUM(...)` cannot
- *   slip past the start-anchor check.
+ *   and Unicode Tags block characters (U+E0000-E007F, the ASCII
+ *   smuggling channel) always strip. Leading bidi/zero-width prefixes
+ *   are stripped before the formula scan so a cell beginning with
+ *   U+200B`=SUM(...)` cannot slip past the cell-start check.
  *
  *   CSV-bomb caps: per-cell (`maxCellBytes`, default 64 KiB), total
  *   (`maxTotalBytes`, default 1 GiB), row count (`maxRows`, default
@@ -107,46 +114,181 @@ function _stringFromCps(cps) {
   return cps.map(_fromCp).join("");
 }
 
-// ---- Compiled detectors ----
-// Shared regexes pulled from lib/codepoint-class; CSV-specific ones
-// (homoglyph + leading-BOM) compiled here.
+// ---- Character-class tables ----
+// The threat classes are the shared tables from lib/codepoint-class, scanned
+// with its codepoint walkers. CSV adds two of its own: the homoglyph set and
+// the BOM.
 
-var BIDI_RE       = codepointClass.BIDI_RE;
-var BIDI_RE_G     = codepointClass.BIDI_RE_G;
-var C0_CTRL_RE    = codepointClass.C0_CTRL_RE;
-var C0_CTRL_RE_G  = codepointClass.C0_CTRL_RE_G;
-var ZW_RE_G       = codepointClass.ZW_RE_G;
-var NULL_RE_G     = codepointClass.NULL_RE_G;
-var HOMOGLYPH_RE  = new RegExp("[" + _charClass(HOMOGLYPH_RANGES) + "]");      // allow:dynamic-regex — codepoints from HOMOGLYPH_RANGES literal table
-var HOMOGLYPH_G   = new RegExp("[" + _charClass(HOMOGLYPH_RANGES) + "]", "g"); // allow:dynamic-regex — codepoints from HOMOGLYPH_RANGES literal table
-var BOM_RE_LEAD   = new RegExp("^" + _hex4(0xFEFF));                           // allow:dynamic-regex — single literal codepoint U+FEFF
-var BOM_RE_G      = new RegExp(_hex4(0xFEFF), "g");                            // allow:dynamic-regex — single literal codepoint U+FEFF
+var BIDI_RANGES       = codepointClass.BIDI_RANGES;
+var C0_CTRL_RANGES    = codepointClass.C0_CTRL_RANGES;
+var ZERO_WIDTH_RANGES = codepointClass.ZERO_WIDTH_RANGES;
+var TAG_RANGES        = codepointClass.TAG_RANGES;
+var NULL_RANGES       = codepointClass.NULL_RANGES;
+var BOM_CODE          = 0xFEFF;
+var BOM_RANGES        = [BOM_CODE];
 
-// Formula-trigger character class assembled from FORMULA_PREFIX_CPS:
-//   [=+\-@\t\r\u3D...] — used inside the "<line-start or delimiter>"
-//   formula-prefix scan and the dangerous-function scan.
-var FORMULA_TRIGGER_CLASS = (function () {
-  var parts = FORMULA_PREFIX_CPS.map(function (cp) {
-    if (cp === 0x2D) return "\\-";    // hyphen literal inside char class
-    if (cp === 0x5C) return "\\\\";   // backslash safety
-    return _hex4(cp);
+
+// Cell-start scanning is a character walk, not a pattern match. Both scans ask
+// the same question — "does a cell begin with a formula trigger?" — and the
+// answer depends on three positional facts a single expression states only
+// obliquely: where a cell begins, whether it is quoted, and where the trigger
+// run ends. Written out, each is a line you can read and test; folded into an
+// expression they interact, and the interactions are where the holes were.
+// See _cellStarts for the boundary rule.
+
+// Characters that separate cells within a row. TAB and PIPE are here as well
+// as in the trigger table: a document may use either as its delimiter, so a
+// cell can both follow one and begin with one.
+//
+// The scan treats all of them as boundaries whatever the configured delimiter,
+// because a document is only as safe as the way a RECIPIENT opens it — a
+// spreadsheet asked to import the same bytes as semicolon-separated splits on
+// semicolons regardless of what the producer intended. The operator's own
+// delimiter is added on top, since it may be a character outside this set and
+// a boundary the scan does not recognize is a cell it never scans.
+var CELL_DELIMITERS = [",", ";", "\t", "|"];
+
+function _cellDelimiters(delimiter) {
+  if (typeof delimiter !== "string" || delimiter.length === 0) return CELL_DELIMITERS;
+  if (CELL_DELIMITERS.indexOf(delimiter) !== -1) return CELL_DELIMITERS;
+  return CELL_DELIMITERS.concat([delimiter]);
+}
+
+var CR_CODE = 0x0D;
+var LF_CODE = 0x0A;
+
+function _isLineTerminator(ch) { return ch === "\r" || ch === "\n"; }
+
+// Visit each index at which a cell begins: the start of the input, the
+// position after a delimiter, and the position after a complete run of line
+// terminators. `visit(index)` returning a truthy value stops the walk.
+//
+// It is a walk rather than a list because the caller's input is untrusted and
+// the number of cell boundaries is proportional to it — a document of nothing
+// but delimiters has one per byte, so collecting them first turns 20 MiB of
+// input into hundreds of MiB of index array. Visiting each in turn allocates
+// nothing beyond the finding that is actually returned.
+//
+// The walk is quote-aware because it has to be. A delimiter inside a quoted
+// field is field content, and the mitigation this guard applies puts a TAB —
+// which is itself one of the delimiters a document may use — at the front of a
+// quoted cell. A scanner that split on every delimiter it saw would read the
+// character after that TAB as opening a new cell and report the framework's
+// own escaped output as an injected formula.
+//
+// A line-terminator run is consumed whole for the same class of reason: CR and
+// LF are themselves formula triggers, so stopping between the CR and the LF of
+// a CRLF would report the LF as a formula-leading cell on every line ending in
+// an ordinary document.
+//
+// `quote` is the operator's configured quote character, not a literal `"`.
+// Under a different one a double quote is ordinary content, and reading it as
+// opening a field sends the walk looking for a close that never arrives — past
+// every remaining cell boundary to the end of input, so nothing after it is
+// scanned at all and a formula there is missed rather than mis-located.
+function _eachCellStart(text, quote, delims, visit) {
+  if (visit(0)) return;
+  var i = 0;
+  while (i < text.length) {
+    if (text.charAt(i) === quote) {
+      i += 1;
+      while (i < text.length) {
+        if (text.charAt(i) !== quote) { i += 1; continue; }
+        // A doubled quote is an escaped quote, not the end of the field.
+        if (text.charAt(i + 1) === quote) { i += 2; continue; }
+        i += 1;
+        break;
+      }
+    }
+    while (i < text.length &&
+           delims.indexOf(text.charAt(i)) === -1 &&
+           !_isLineTerminator(text.charAt(i))) {
+      i += 1;
+    }
+    if (i >= text.length) return;
+    if (_isLineTerminator(text.charAt(i))) {
+      while (i < text.length && _isLineTerminator(text.charAt(i))) i += 1;
+    } else {
+      i += 1;
+    }
+    if (visit(i)) return;
+  }
+}
+
+// The first cell that begins with a formula trigger, or null.
+//
+// A quoted cell whose first character is TAB is skipped ONLY under the policy
+// that produces that shape. OWASP's Excel-resistant form is a TAB inside the
+// quoted field, so under `prefix-tab` a scanner that flagged it would report
+// every correctly-escaped document as hostile. Under any other policy no TAB
+// prefix is ever emitted, TAB is simply one of FORMULA_PREFIXES, and the same
+// cell is an ordinary triggering cell — `escapeCell` refuses it under `reject`,
+// and the scan has to agree with the serializer rather than exempt a shape this
+// configuration never writes.
+//
+// A BARE leading TAB is a finding under every policy: unquoted it is a
+// delimiter under tab-separated import and is dropped by consumers that trim
+// leading whitespace on unquoted fields, either of which puts the next
+// character first again.
+function _findFormulaCell(text, quote, delims, formulaPolicy) {
+  if (typeof text !== "string") return null;
+  var tabIsMitigation = formulaPolicy === "prefix-tab";
+  var hit = null;
+  _eachCellStart(text, quote, delims, function (at) {
+    var quoted = text.charAt(at) === quote;
+    var triggerAt = quoted ? at + 1 : at;
+    var ch = text.charAt(triggerAt);
+    if (ch === "") return false;
+    if (FORMULA_PREFIXES.indexOf(ch) === -1) return false;
+    // Unquoted, a line terminator at a cell start is the row separator, so
+    // the cell is empty rather than one opening with a CR. A blank row, a
+    // leading blank row and a trailing newline are all ordinary documents.
+    // Inside quotes the same character is genuine content and stands.
+    if (!quoted && _isLineTerminator(ch)) return false;
+    if (quoted && ch === "\t" && tabIsMitigation) return false;
+    hit = { index: triggerAt, char: ch };
+    return true;
   });
-  return "[" + parts.join("") + "]";
-})();
+  return hit;
+}
 
-// allow:dynamic-regex — class composed from FORMULA_PREFIX_CPS literal table
-var FORMULA_SCAN_RE = new RegExp(
-  "(^|[,;\\t|])\"?(" + FORMULA_TRIGGER_CLASS + ")"
-);
-// allow:dynamic-regex — class composed from FORMULA_PREFIX_CPS literal table
-var DANGER_SCAN_RE = new RegExp(
-  "(^|[,;\\t|])\"?" + FORMULA_TRIGGER_CLASS + "([A-Z][A-Z0-9_.]*)\\b",
-  "g"
-);
-// allow:dynamic-regex — class composed from FORMULA_PREFIX_CPS literal table
-var ALLOWLIST_FIRST_WORD_RE = new RegExp(
-  "^" + FORMULA_TRIGGER_CLASS + "([A-Z]+)\\b"
-);
+// Visit every cell that begins with a trigger followed by a word, as
+// `visit(index, name)`. The caller matches `name` against its function table
+// and keeps only what it recognizes, so nothing accumulates for the ordinary
+// cells in between. Names are passed as written and compared
+// case-insensitively by the caller: spreadsheet function names are
+// case-insensitive, so a case-sensitive table lookup reads as a filter to
+// spell around.
+function _eachTriggeredWord(text, quote, delims, visit) {
+  if (typeof text !== "string") return;
+  _eachCellStart(text, quote, delims, function (start) {
+    var at = text.charAt(start) === quote ? start + 1 : start;
+    if (FORMULA_PREFIXES.indexOf(text.charAt(at)) === -1) return false;
+    if (!_isNameStart(text.charAt(at + 1))) return false;
+    var w = at + 1;
+    while (w < text.length && _isWordChar(text.charAt(w))) w += 1;
+    return visit(at, text.slice(at + 1, w));
+  });
+}
+
+function _isNameStart(ch) {
+  return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
+}
+
+function _isWordChar(ch) {
+  return _isNameStart(ch) || (ch >= "0" && ch <= "9") || ch === "_" || ch === ".";
+}
+
+// The leading function name of a single cell value, or null when the value
+// does not begin with a trigger followed by a word.
+function _leadingFunctionName(str) {
+  if (typeof str !== "string" || str.length === 0) return null;
+  if (FORMULA_PREFIXES.indexOf(str.charAt(0)) === -1) return null;
+  if (!_isNameStart(str.charAt(1))) return null;
+  var w = 1;
+  while (w < str.length && _isWordChar(str.charAt(w))) w += 1;
+  return str.slice(1, w);
+}
 
 var NULL_BYTE = codepointClass.NULL_BYTE;
 var BOM_CHAR  = codepointClass.BOM_CHAR;
@@ -240,11 +382,81 @@ var COMPLIANCE_POSTURES = gateContract.compliancePostures(PROFILES, { base: 256,
 
 // ---- Internal helpers ----
 
-function _firstMatch(text, re) {
+// How many of each line ending the document uses. One walk, so a CRLF is
+// counted once as a CRLF rather than twice as a CR and an LF, and a terminator
+// at either end of the document counts like any other: the patterns this
+// replaced needed a character on both sides of the terminator, so a document
+// that opened with a bare LF or closed with a bare CR was read as having no
+// line endings of that kind at all — which decided both the reported dialect
+// and whether mixed endings were flagged.
+function _lineEndingCounts(text) {
+  var counts = { crlf: 0, lf: 0, cr: 0 };
+  for (var i = 0; i < text.length; i += 1) {
+    var cc = text.charCodeAt(i);
+    if (cc === CR_CODE) {
+      if (text.charCodeAt(i + 1) === LF_CODE) { counts.crlf += 1; i += 1; }
+      else counts.cr += 1;
+    } else if (cc === LF_CODE) {
+      counts.lf += 1;
+    }
+  }
+  return counts;
+}
+
+// Everything before the first line terminator, whichever of the three it is.
+function _firstLine(text) {
+  for (var i = 0; i < text.length; i += 1) {
+    var cc = text.charCodeAt(i);
+    if (cc === CR_CODE || cc === LF_CODE) return text.slice(0, i);
+  }
+  return text;
+}
+
+// The invisible characters a spreadsheet drops silently between the start of a
+// cell and its first visible character: U+200B-200F (ZWSP / ZWNJ / ZWJ / LRM /
+// RLM), U+202A-202E (LRE / RLE / PDF / LRO / RLO), U+2066-2069 (LRI / RLI /
+// FSI / PDI) and U+FEFF (BOM). One of these in front of `=` puts a codepoint
+// between the cell start and the trigger, so a cell-start check reads the
+// invisible character instead and the formula reaches the evaluator. Excel,
+// Sheets and every browser render the cell as though the prefix were not
+// there, so nobody reviewing the file sees it.
+var INVISIBLE_PREFIX_RANGES = [[0x200B, 0x200F], [0x202A, 0x202E],
+                               [0x2066, 0x2069], 0xFEFF];
+
+// `text` with a leading run of `ranges` members removed. Only the run at the
+// very front — an invisible character further in is the scanner's business,
+// not this one's.
+function _stripLeading(text, ranges) {
+  var i = 0;
+  while (i < text.length) {
+    var cp = text.codePointAt(i);
+    if (!codepointClass.inRanges(cp, ranges)) break;
+    i += cp > 0xFFFF ? 2 : 1;
+  }
+  return i === 0 ? text : text.slice(i);
+}
+
+var _isAsciiLetter = codepointClass.isAsciiLetter;
+
+function _startsWithAsciiLetter(text) {
+  return text.length > 0 && _isAsciiLetter(text.charCodeAt(0));
+}
+
+// A homoglyph only spoofs where there is something to spoof, so the scan runs
+// only on text that also carries ASCII letters.
+function _hasAsciiLetter(text) {
+  for (var i = 0; i < text.length; i++) {
+    if (_isAsciiLetter(text.charCodeAt(i))) return true;
+  }
+  return false;
+}
+
+function _firstMatch(text, ranges) {
   if (typeof text !== "string") return null;
-  var m = text.match(re);
-  if (!m) return null;
-  return { index: m.index, char: m[0] };
+  var i = codepointClass.firstInRanges(text, ranges);
+  if (i === -1) return null;
+  var cp = text.codePointAt(i);
+  return { index: i, char: String.fromCodePoint(cp), codePoint: cp };
 }
 
 function _detectIssues(text, opts) {
@@ -259,25 +471,18 @@ function _detectIssues(text, opts) {
     });
   }
 
-  // Bidi / null / control / zero-width via the shared codepoint class. CSV
-  // exposes its own policy vocabulary (bidiCharPolicy / controlCharPolicy /
-  // nullByteHandling), normalized here to the shared detector's names so the
-  // per-class match-and-push blocks live in exactly one place; zero-width is
-  // always scanned (warn) since CSV ships no zeroWidthPolicy.
-  issues.push.apply(issues, codepointClass.detectCharThreats(text, {
-    bidiPolicy:      opts.bidiCharPolicy,
-    controlPolicy:   opts.controlCharPolicy,
-    nullBytePolicy:  opts.nullByteHandling,
-    zeroWidthPolicy: opts.zeroWidthPolicy || "audit",
-  }, "csv", "warn"));
+  // Bidi / null / control / zero-width via the shared codepoint class, under
+  // the vocabulary translation in _charPolicies.
+  issues.push.apply(issues,
+    codepointClass.detectCharThreats(text, _charPolicies(opts), "csv", "warn"));
 
-  if (opts.homoglyphPolicy !== "allow" && /[A-Za-z]/.test(text)) {
-    var homoMatch = _firstMatch(text, HOMOGLYPH_RE);
+  if (opts.homoglyphPolicy !== "allow" && _hasAsciiLetter(text)) {
+    var homoMatch = _firstMatch(text, HOMOGLYPH_RANGES);
     if (homoMatch) {
       issues.push({
         kind: "homoglyph", severity: "warn", ruleId: "csv.homoglyph",
         location: homoMatch.index,
-        snippet: "homoglyph U+" + homoMatch.char.charCodeAt(0).toString(HEX_RADIX) +
+        snippet: "homoglyph U+" + homoMatch.codePoint.toString(HEX_RADIX) +
                  " mixed with ASCII at byte " + homoMatch.index,
       });
     }
@@ -285,27 +490,19 @@ function _detectIssues(text, opts) {
 
 
   if (opts.formulaInjectionPolicy !== "audit-only" && opts.formulaInjectionPolicy !== "allow") {
-    // Strip ZWSP / RTLO / LRM / RLM / BOM at cell-start before the
-    // formula scan. Without this, a cell beginning with U+200B (zero-
-    // width space), U+202E (RTLO), U+200E/F (LTR/RTL marks), or U+FEFF
-    // (BOM) followed by `=` slips past the start-anchor check (the `^`
-    // sits before the codepoint, not after) and the formula reaches
-    // the spreadsheet evaluator. Browsers + Excel + Sheets all strip
-    // these silently — operator users see "=SUM(...)" rendered, the
-    // file shipped a hidden bidi prefix that bypassed the scanner.
-    // U+200B-200F (ZWSP / ZWNJ / ZWJ / LRM / RLM) +
-    // U+202A-202E (LRE / RLE / PDF / LRO / RLO) +
-    // U+2066-2069 (LRI / RLI / FSI / PDI) +
-    // U+FEFF (BOM)                                                     // allow:dynamic-regex — explicit codepoints, no operator input
-    var stripped = text.replace(new RegExp("^[\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]+"), "");
-    var formulaMatch = _firstMatch(stripped, FORMULA_SCAN_RE);
+    // Remove the invisible prefix before the formula scan runs, so a hidden
+    // character in front of the trigger cannot hide the trigger from it.
+    var stripped = _stripLeading(text, INVISIBLE_PREFIX_RANGES);
+    var formulaMatch = _findFormulaCell(stripped, opts.quote || "\"",
+                                        _cellDelimiters(opts.delimiter),
+                                        opts.formulaInjectionPolicy);
     if (formulaMatch) {
       issues.push({
         kind: "formula-prefix-cell", severity: "critical",
         ruleId: "csv.formula-injection",
         location: formulaMatch.index,
         snippet: "cell beginning with formula trigger " +
-                 JSON.stringify(formulaMatch.char.slice(-1)) +
+                 JSON.stringify(formulaMatch.char) +
                  " at byte " + formulaMatch.index +
                  (stripped.length !== text.length ? " (after stripping leading bidi/zero-width prefix)" : ""),
       });
@@ -313,26 +510,27 @@ function _detectIssues(text, opts) {
   }
 
   if (Array.isArray(opts.dangerousFunctions) && opts.dangerousFunctions.length > 0) {
-    var dangerIter = text.matchAll(DANGER_SCAN_RE);
-    var dangerMatch;
-    for (dangerMatch of dangerIter) {
-      var fn = dangerMatch[2].toUpperCase();
+    _eachTriggeredWord(text, opts.quote || "\"", _cellDelimiters(opts.delimiter),
+                       function (at, name) {
+      var fn = name.toUpperCase();
       if (opts.dangerousFunctions.indexOf(fn) !== -1) {
         issues.push({
           kind: "dangerous-function", severity: "critical",
           ruleId: "csv.dangerous-function",
-          location: dangerMatch.index,
+          location: at,
           snippet: "spreadsheet function " + JSON.stringify(fn) +
                    " is on the dangerous-function denylist (exfiltration / RCE vector)",
         });
       }
-    }
+      return false;
+    });
   }
 
   if (opts.dialectPolicy === "strict") {
-    var hasCrlf = text.indexOf("\r\n") !== -1;
-    var hasLfOnly = /[^\r]\n/.test(text);
-    var hasCrOnly = /\r[^\n]/.test(text);
+    var endings = _lineEndingCounts(text);
+    var hasCrlf = endings.crlf > 0;
+    var hasLfOnly = endings.lf > 0;
+    var hasCrOnly = endings.cr > 0;
     if ((hasCrlf && hasLfOnly) || (hasCrlf && hasCrOnly) || (hasLfOnly && hasCrOnly)) {
       issues.push({
         kind: "dialect-mixed-line-endings", severity: "high",
@@ -344,16 +542,51 @@ function _detectIssues(text, opts) {
   return issues;
 }
 
+// CSV exposes its own character-policy vocabulary (bidiCharPolicy /
+// controlCharPolicy / nullByteHandling); the shared codepoint class speaks
+// bidiPolicy / controlPolicy / nullBytePolicy. Translating in one place keeps
+// the detect and sanitize paths reading the same policy for the same class —
+// a second, drifting copy is how one path ends up enforcing what the other
+// ignores. Zero-width carries no CSV opt, so it is scanned at warn severity
+// and stripped unconditionally below.
+function _charPolicies(opts) {
+  return {
+    bidiPolicy:      opts.bidiCharPolicy,
+    controlPolicy:   opts.controlCharPolicy,
+    nullBytePolicy:  opts.nullByteHandling,
+    zeroWidthPolicy: opts.zeroWidthPolicy || "audit",
+  };
+}
+
 function _stripIssues(text, opts) {
   if (typeof text !== "string") return text;
+  // Refuse the classes set to "reject" before stripping the ones set to
+  // "strip". This scrubber never refuses on a detected issue, and the strip
+  // branches below only fire on "strip", so without the assert a "reject"
+  // class would be neither refused nor removed and the threat would be
+  // returned verbatim.
+  codepointClass.assertNoCharThreats(text, _charPolicies(opts), _err, "csv");
   var out = text;
-  if (opts.bomPrefix !== true) out = out.replace(BOM_RE_LEAD, "");
-  out = out.replace(BOM_RE_G, "");
-  if (opts.bidiCharPolicy === "strip") out = out.replace(BIDI_RE_G, "");
-  if (opts.controlCharPolicy === "strip") out = out.replace(C0_CTRL_RE_G, "");
-  if (opts.nullByteHandling === "strip") out = out.replace(NULL_RE_G, "");
-  if (opts.homoglyphPolicy === "strip") out = out.replace(HOMOGLYPH_G, "");
-  out = out.replace(ZW_RE_G, "");
+  // `bomPrefix` is the operator saying the file opens with a BOM — the byte
+  // that makes Excel read it as UTF-8 — and validate honors that by flagging a
+  // leading BOM only when the opt is false. So the byte is restored at the END
+  // of the scrub, after the strip passes that would otherwise take it: the BOM
+  // is a member of both the BOM table and the shared zero-width one, and the
+  // zero-width strip runs unconditionally. Only the leading BOM comes back; a
+  // BOM further in is the mid-stream artifact validate flags either way.
+  var keepLeadingBom = opts.bomPrefix === true && out.charCodeAt(0) === BOM_CODE;
+  out = codepointClass.stripRanges(out, BOM_RANGES);
+  if (opts.bidiCharPolicy === "strip") out = codepointClass.stripRanges(out, BIDI_RANGES);
+  if (opts.controlCharPolicy === "strip") out = codepointClass.stripRanges(out, C0_CTRL_RANGES);
+  if (opts.nullByteHandling === "strip") out = codepointClass.stripRanges(out, NULL_RANGES);
+  if (opts.homoglyphPolicy === "strip") out = codepointClass.stripRanges(out, HOMOGLYPH_RANGES);
+  // Zero-width and Unicode Tags characters carry no CSV opt and are removed
+  // unconditionally: both are invisible in every spreadsheet and every text
+  // editor an operator would review the file in, so there is no rendering a
+  // reader could compare against to notice them. Tags in particular are the
+  // ASCII-smuggling channel — a cell reads as one value and carries another.
+  out = codepointClass.stripRanges(out, ZERO_WIDTH_RANGES);
+  out = codepointClass.stripRanges(out, TAG_RANGES);
   if (opts.trailingWhitespacePolicy === "trim") {
     out = out.split("\n").map(function (line) {
       // Linear per-line trailing-whitespace trim — .replace(/[ \t]+$/) is
@@ -361,7 +594,7 @@ function _stripIssues(text, opts) {
       return safeBuffer.stripTrailingHspace(line);
     }).join("\n");
   }
-  return out;
+  return keepLeadingBom ? BOM_CHAR + out : out;
 }
 
 // _resolveOpts removed — the generated guard exposes the bound resolver as
@@ -389,6 +622,18 @@ function _stripIssues(text, opts) {
  * directly for operators that emit CSV through their own writer
  * (streaming exports, third-party libraries) and only need the
  * per-cell defense.
+ *
+ * A writer of your own must emit the returned value as a QUOTED field
+ * under any of the prefixing policies. OWASP places the prefix inside
+ * the quoted field: emitted bare, a leading TAB is a delimiter under
+ * tab-separated import and is dropped by consumers that trim leading
+ * whitespace from unquoted fields, either of which puts the trigger
+ * character back at the front of the cell. `b.guardCsv.serialize`
+ * quotes for you; a writer you supply does not.
+ *
+ * Escaping is a fixed point — passing a value that escapeCell already
+ * returned gives that value back unchanged, so a pipeline that escapes
+ * twice does not stack prefixes.
  *
  * @opts
  *   formulaInjectionPolicy: "prefix-tab"|"prefix-quote"|"wrap-with-quotes-and-prefix"|"reject"|"allowlist",
@@ -418,8 +663,26 @@ function _stripIssues(text, opts) {
  *   huge;                                              // → "9007199254740993"
  */
 function escapeCell(value, opts) {
+  return _escapeCell(value, opts).value;
+}
+
+// The escape, plus whether this cell is subject to the formula mitigation and
+// so must be emitted quoted. serialize needs the second fact, and it is about
+// which branch the cell took — not about what the result starts with.
+//
+// Both readings of "what the result starts with" are wrong in one direction.
+// Under the apostrophe policies a benign value already beginning with `'` is
+// never a triggering cell at all, so treating its leading character as a
+// mitigation would quote a whole document over a value the guard never
+// touched. And under prefix-tab a cell already beginning with TAB IS a
+// triggering cell — TAB is one of the triggers — left unchanged only because
+// the prefix would be redundant; bare it is still the unquoted form the
+// mitigation exists to avoid, so it needs the quoting even though no character
+// was added.
+function _escapeCell(value, opts) {
   opts = Object.assign({}, DEFAULTS, opts || {});
   var str = value == null ? "" : String(value);
+  var mitigated = false;
 
   var cellBytes = Buffer.byteLength(str, "utf8");
   if (cellBytes > opts.maxCellBytes) {
@@ -430,16 +693,18 @@ function escapeCell(value, opts) {
   if (opts.nullByteHandling === "reject" && str.indexOf(NULL_BYTE) !== -1) {
     throw _err("csv.null-byte", "cell contains null byte");
   }
-  if (opts.controlCharPolicy === "reject" && C0_CTRL_RE.test(str)) {       // allow:regex-no-length-cap — str length capped by maxCellBytes above
+  if (opts.controlCharPolicy === "reject" &&
+      codepointClass.firstInRanges(str, C0_CTRL_RANGES) !== -1) {
     throw _err("csv.control", "cell contains C0 control character");
   }
-  if (opts.bidiCharPolicy === "reject" && BIDI_RE.test(str)) {             // allow:regex-no-length-cap — str length capped by maxCellBytes above
+  if (opts.bidiCharPolicy === "reject" &&
+      codepointClass.firstInRanges(str, BIDI_RANGES) !== -1) {
     throw _err("csv.bidi", "cell contains Unicode bidi override (CVE-2021-42574)");
   }
 
-  if (opts.nullByteHandling === "strip") str = str.replace(NULL_RE_G, "");
-  if (opts.controlCharPolicy === "strip") str = str.replace(C0_CTRL_RE_G, "");
-  if (opts.bidiCharPolicy === "strip") str = str.replace(BIDI_RE_G, "");
+  if (opts.nullByteHandling === "strip") str = codepointClass.stripRanges(str, NULL_RANGES);
+  if (opts.controlCharPolicy === "strip") str = codepointClass.stripRanges(str, C0_CTRL_RANGES);
+  if (opts.bidiCharPolicy === "strip") str = codepointClass.stripRanges(str, BIDI_RANGES);
 
   if (opts.trailingWhitespacePolicy === "trim") {
     // Linear strip — .replace(/[ \t]+$/) is O(n^2) on adversarial untrusted CSV.
@@ -474,20 +739,33 @@ function escapeCell(value, opts) {
       throw _err("csv.formula-injection",
         "cell starts with formula prefix " + JSON.stringify(str.charAt(0)));
     } else if (policy === "prefix-tab") {
-      str = "\t" + str;
+      // TAB is itself one of FORMULA_PREFIXES, so an already-prefixed cell
+      // still enters this branch. Re-prefixing would stack a second TAB on
+      // every pass and the mitigation would stop being a fixed point —
+      // escaping an escaped cell must return it unchanged.
+      if (str.charAt(0) !== "\t") str = "\t" + str;
+      mitigated = true;
     } else if (policy === "prefix-quote") {
-      str = "'" + str;
+      str = "'" + str; mitigated = true;
     } else if (policy === "wrap-with-quotes-and-prefix") {
-      str = "'" + str;
+      str = "'" + str; mitigated = true;
     } else if (policy === "allowlist") {
-      var firstWord = str.match(ALLOWLIST_FIRST_WORD_RE);
-      if (firstWord && opts.formulasAllowlist.indexOf(firstWord[1]) === -1) {
-        str = "'" + str;
-      }
+      // Only a cell positively identified as an allowlisted call passes
+      // through unprefixed. A leading word the matcher does not recognize —
+      // `=cmd|x`, `=2+3`, a trigger with nothing word-like after it — is the
+      // unknown case, and the unknown case gets the prefix. Reading a
+      // non-match as "safe" would let every payload that is not shaped like a
+      // function call through untouched. The allowlist is compared
+      // case-insensitively because spreadsheet function names are.
+      var firstWord = _leadingFunctionName(str);
+      var allowed = firstWord !== null && opts.formulasAllowlist.some(function (fn) {
+        return String(fn).toUpperCase() === firstWord.toUpperCase();
+      });
+      if (!allowed) { str = "'" + str; mitigated = true; }
     }
   }
 
-  return str;
+  return { value: str, mitigated: mitigated };
 }
 
 // ---- Schema-bound serializer ----
@@ -641,8 +919,9 @@ function schema(spec) {
  *     { name: "bob",   note: "ok" },
  *   ], { profile: "strict" });
  *
- *   // Formula trigger disarmed with a leading TAB per OWASP guidance:
- *   out.indexOf("\t=WEBSERVICE") !== -1;               // → true
+ *   // Formula trigger disarmed with a leading TAB inside the quoted
+ *   // field, which is the form OWASP specifies:
+ *   out.indexOf("\"\t=WEBSERVICE") !== -1;             // → true
  *   out.indexOf("\r\n") !== -1;                        // → true
  */
 function serialize(rows, opts) {
@@ -662,13 +941,25 @@ function serialize(rows, opts) {
 
   var redactor = (opts.piiPolicy === "redact" && opts.redact) ? opts.redact : null;
 
+  // Quoting is part of the formula mitigation, so it is applied when — and
+  // only when — the mitigation fired. Quoting unconditionally would grow an
+  // ordinary export by about a third for cells that carry no trigger at all,
+  // which for a large table can be the difference between fitting under
+  // maxTotalBytes and being refused.
+  var mitigationApplied = false;
+  function _escaped(value) {
+    var r = _escapeCell(value, opts);
+    if (r.mitigated) mitigationApplied = true;
+    return r.value;
+  }
+
   var escapedRows = [];
   for (var ri = 0; ri < rows.length; ri += 1) {
     var row = rows[ri];
     var escapedRow;
     if (Array.isArray(row)) {
       escapedRow = row.map(function (v) {
-        var ev = escapeCell(v, opts);
+        var ev = _escaped(v);
         if (Buffer.byteLength(ev, "utf8") > opts.maxCellBytes) {
           throw _err("csv.cell-too-large",
             "cell at row " + ri + " exceeds maxCellBytes " + opts.maxCellBytes);
@@ -684,7 +975,7 @@ function serialize(rows, opts) {
           "row " + ri + " has " + keys.length + " columns; max " + opts.maxColumns);
       }
       for (var ki = 0; ki < keys.length; ki += 1) {
-        var ev2 = escapeCell(row[keys[ki]], opts);
+        var ev2 = _escaped(row[keys[ki]]);
         if (Buffer.byteLength(ev2, "utf8") > opts.maxCellBytes) {
           throw _err("csv.cell-too-large",
             "cell at row " + ri + " column " + JSON.stringify(keys[ki]) +
@@ -699,11 +990,19 @@ function serialize(rows, opts) {
     escapedRows.push(escapedRow);
   }
 
+  // A prefix mitigation only holds INSIDE a quoted field: the default quote
+  // rule fires on the delimiter / quote char / CR / LF, so a TAB- or
+  // apostrophe-prefixed cell would otherwise be emitted bare. A bare leading
+  // TAB is a delimiter under tab-separated import and is trimmed by consumers
+  // that strip leading whitespace from unquoted fields — either way the
+  // trigger char ends up first again and the mitigation is undone. Quoting is
+  // therefore part of the mitigation, not a formatting preference, and an
+  // operator cannot switch it off while a prefixing policy is active.
   var out = csv.stringify(escapedRows, {
     delimiter:    opts.delimiter,
     quote:        opts.quote || "\"",
     eol:          opts.lineEnding,
-    alwaysQuote:  opts.alwaysQuote || false,
+    alwaysQuote:  mitigationApplied || opts.alwaysQuote || false,
     columns:      opts.headers || null,
     header:       opts.headers !== false,
   });
@@ -771,8 +1070,12 @@ function serialize(rows, opts) {
  * BOM (when `bomPrefix: false`), bidi override chars (when
  * `bidiCharPolicy: "strip"`), C0 control chars (when
  * `controlCharPolicy: "strip"`), null bytes (when
- * `nullByteHandling: "strip"`), zero-width chars (always), and
- * trailing whitespace per `trailingWhitespacePolicy`. Refuses
+ * `nullByteHandling: "strip"`), zero-width and Unicode Tags chars
+ * (always), and trailing whitespace per `trailingWhitespacePolicy`.
+ *
+ * Throws when a character class is set to `"reject"` and the input
+ * carries it — `"reject"` refuses, `"strip"` repairs, and sanitize
+ * never returns a class the operator asked it to refuse. Refuses
  * pathological expansion: when the sanitized output exceeds
  * `sanitizeAmplificationCap` (default 1.5x) the function throws
  * `GuardCsvError("csv.sanitize-amplified")` — sanitize is a
@@ -841,13 +1144,12 @@ function detect(input) {
       lineEnding: null, dialect: "unknown", confidence: 0,
     };
   }
-  var crlf = (text.match(/\r\n/g) || []).length;
-  var lfOnly = (text.match(/[^\r]\n/g) || []).length;
-  var crOnly = (text.match(/\r[^\n]/g) || []).length;
+  var endings = _lineEndingCounts(text);
+  var crlf = endings.crlf, lfOnly = endings.lf, crOnly = endings.cr;
   var lineEnding = crlf >= lfOnly && crlf >= crOnly
     ? "\r\n"
     : (lfOnly >= crOnly ? "\n" : "\r");
-  var firstLine = text.split(/\r\n|\r|\n/)[0] || "";
+  var firstLine = _firstLine(text);
   var counts = { ",": 0, ";": 0, "\t": 0, "|": 0 };
   for (var i = 0; i < firstLine.length; i += 1) {
     var c = firstLine.charAt(i);
@@ -859,7 +1161,7 @@ function detect(input) {
   });
   return {
     delimiter:  delim,
-    hasHeader:  /^[A-Za-z]/.test(firstLine),
+    hasHeader:  _startsWithAsciiLetter(firstLine),
     encoding:   text.charCodeAt(0) === 0xFEFF ? "utf-8-sig" : "utf-8",
     lineEnding: lineEnding,
     dialect:    (crlf > 0 && (lfOnly > 0 || crOnly > 0)) ? "mixed" : "consistent",
@@ -938,7 +1240,10 @@ function _gateDispositionFor(issue, opts) {
     case "formula-prefix-cell":        return gateContract.policyDisposition(opts.formulaInjectionPolicy);
     case "homoglyph":                  return gateContract.policyDisposition(opts.homoglyphPolicy);
     case "bom-mid-stream":             return "sanitize";
+    // Both are stripped unconditionally by this guard's sanitizer (it exposes
+    // no policy for either), so the gate repairs rather than refuses.
     case "zero-width":                 return "sanitize";
+    case "unicode-tags":               return "sanitize";
     case "dangerous-function":         return "refuse";
     case "dialect-mixed-line-endings": return "refuse";
     default:                           return null;
@@ -983,8 +1288,82 @@ function _gateProduceSanitized(text, opts) {
     return i.kind === "formula-prefix-cell" || i.kind === "dangerous-function";
   });
   if (hasFormula) {
-    var rows = csv.parse(clean, { header: false });
+    // Read it back under the dialect it was written in. `csv.parse` defaults
+    // to a comma, so a semicolon- or tab-delimited document parsed without
+    // these lands as one cell per row, and the re-serialized output the gate
+    // serves has a different shape from the document it was handed.
+    var rows = csv.parse(clean, {
+      header:    false,
+      delimiter: opts.delimiter,
+      quote:     opts.quote || "\"",
+    });
     clean = serialize(rows, Object.assign({}, opts, { headers: false }));
+  }
+
+  // The sanitizer has to reach a FIXED POINT: whatever it hands back must not
+  // still trip the scan that asked for it. Re-serializing mitigates the cells
+  // the CONFIGURED dialect produces, and the scan deliberately looks wider —
+  // it treats every common delimiter as a boundary because a recipient may
+  // open the file under a different dialect. A formula behind one of those
+  // other delimiters therefore survives the round trip: `safe;=2+3` in a comma
+  // document reparses as one cell, gains no prefix, and would be served with
+  // the payload intact under a "sanitize" verdict.
+  //
+  // It cannot be mitigated either. Prefixing at the interior boundary leaves
+  // the alternate reader a bare TAB-led cell, which is the unquoted form this
+  // guard refuses on its own terms, and quoting for a dialect we are not
+  // writing would rewrite the document's shape. So the honest answer is to
+  // refuse what the round trip could not disarm.
+  // Walk EVERY formula-leading cell, not the one the scan reports. `detect`
+  // returns the first hit only, so a check that inspects that finding alone
+  // clears the whole document on the strength of its safest cell — under the
+  // allowlist policy an `=SUM(A1)` in the first cell would shield an `=cmd|x`
+  // in the next.
+  //
+  // The allowlist policy leaves a named-safe call unprefixed on purpose, so a
+  // cell that is a positively allowlisted call is the configured outcome
+  // rather than a failure to disarm. Every other surviving trigger is one the
+  // round trip could not neutralize.
+  // `allow` and `audit-only` permit formulas by configuration — `detect`
+  // suppresses the finding for them — so there is nothing here to fail to
+  // disarm. Without this the document is refused whenever some UNRELATED
+  // repairable issue (a zero-width character, a stray BOM) is what sent it
+  // through the sanitizer at all. The dangerous-function denylist below is a
+  // separate axis and still applies.
+  var residual = null;
+  var formulasPermitted = opts.formulaInjectionPolicy === "allow" ||
+                          opts.formulaInjectionPolicy === "audit-only";
+  if (!formulasPermitted) _eachCellStart(clean, opts.quote || "\"",
+    _cellDelimiters(opts.delimiter),
+    function (at) {
+      var quoted = clean.charAt(at) === (opts.quote || "\"");
+      var triggerAt = quoted ? at + 1 : at;
+      var ch = clean.charAt(triggerAt);
+      if (ch === "" || FORMULA_PREFIXES.indexOf(ch) === -1) return false;
+      if (!quoted && _isLineTerminator(ch)) return false;
+      if (quoted && ch === "\t" && opts.formulaInjectionPolicy === "prefix-tab") return false;
+      if (opts.formulaInjectionPolicy === "allowlist") {
+        var name = _leadingFunctionName(clean.slice(triggerAt));
+        if (name !== null && opts.formulasAllowlist.some(function (fn) {
+          return String(fn).toUpperCase() === name.toUpperCase();
+        })) return false;
+      }
+      residual = { index: triggerAt, char: ch };
+      return true;
+    });
+  if (residual === null) {
+    var dangerous = _detectIssues(clean, opts).filter(function (i) {
+      return i.kind === "dangerous-function";
+    });
+    if (dangerous.length > 0) residual = { snippet: dangerous[0].snippet };
+  }
+  if (residual !== null) {
+    throw _err("csv.formula-injection",
+      "sanitize cannot disarm " +
+      JSON.stringify(residual.snippet ||
+        ("cell beginning with " + JSON.stringify(residual.char) +
+         " at offset " + residual.index)) +
+      " without rewriting the document for a dialect it is not emitting");
   }
   return Buffer.from(clean, "utf8");
 }

@@ -1,4 +1,4 @@
-// @blamejs/pki v0.5.3 — vendored (Apache-2.0). Zero-dep pure CJS.
+// @blamejs/pki v0.5.7 — vendored (Apache-2.0). Zero-dep pure CJS.
 // https://github.com/blamejs/pki  Exports: x509, crl, pkcs12, key, webcrypto, schema, csr, cms, ...
 // Backs lib/mtls-engine-default.js (PQC-capable CA + PKCS#12 engine).
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -141,7 +141,7 @@ var require_package = __commonJS({
   "node_modules/@blamejs/pki/package.json"(exports2, module2) {
     module2.exports = {
       name: "@blamejs/pki",
-      version: "0.5.3",
+      version: "0.5.7",
       description: "Pure-JavaScript PKI toolkit that owns its stack \u2014 X.509, ASN.1/DER, CMS, PQC-first.",
       license: "Apache-2.0",
       author: "blamejs contributors",
@@ -154,6 +154,10 @@ var require_package = __commonJS({
         url: "https://github.com/blamejs/pki/issues"
       },
       main: "index.js",
+      exports: {
+        ".": "./index.js",
+        "./package.json": "./package.json"
+      },
       bin: {
         pki: "bin/pki.js"
       },
@@ -691,1952 +695,18 @@ var require_constants = __commonJS({
   }
 });
 
-// node_modules/@blamejs/pki/lib/guard-bytes.js
-var require_guard_bytes = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-bytes.js"(exports2, module2) {
+// node_modules/@blamejs/pki/lib/guard-async.js
+var require_guard_async = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-async.js"(exports2, module2) {
     "use strict";
-    function view(input, ErrorClass, code, label) {
-      if (Buffer.isBuffer(input) || input instanceof Uint8Array) {
-        try {
-          return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-        } catch (e) {
-          throw new ErrorClass(code, label + ": input is not a usable byte view (detached backing buffer?)", e);
-        }
-      }
-      throw new ErrorClass(code, label + ": expected a Buffer / Uint8Array");
-    }
-    function source(input, ErrorClass, code, label) {
-      var isAb = input instanceof ArrayBuffer;
-      if (isAb || ArrayBuffer.isView(input)) {
-        try {
-          return isAb ? Buffer.from(input) : Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-        } catch (e) {
-          throw new ErrorClass(code, label + ": input is not a usable byte source (detached backing buffer?)", e);
-        }
-      }
-      throw new ErrorClass(code, label + ": expected a BufferSource (ArrayBuffer / TypedArray / Buffer)");
-    }
-    function snapshot(input, ErrorClass, code, label) {
-      return Buffer.from(view(input, ErrorClass, code, label));
-    }
-    function snapshotSource(input, ErrorClass, code, label) {
-      return Buffer.from(source(input, ErrorClass, code, label));
-    }
-    module2.exports = { view, source, snapshot, snapshotSource };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-text.js
-var require_guard_text = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-text.js"(exports2, module2) {
-    "use strict";
-    var bytes = require_guard_bytes();
-    var LATIN1 = "latin1";
-    function decode(input, maxBytes, ErrorClass, spec) {
-      if (!Number.isInteger(maxBytes) || maxBytes < 0) {
-        throw new TypeError("guard.text.decode: maxBytes must be a non-negative integer");
-      }
-      var charset = spec.charset || LATIN1;
-      if (Buffer.isBuffer(input)) {
-        input = bytes.view(input, ErrorClass, spec.badInput, spec.label);
-        if (input.length > maxBytes) throw new ErrorClass(spec.tooLarge, spec.label + " exceeds the size cap");
-        if (spec.fatal) {
-          try {
-            return new TextDecoder(charset, { fatal: true }).decode(input);
-          } catch (e) {
-            throw new ErrorClass(spec.badDecode, spec.label + " is not valid " + charset, e);
-          }
-        }
-        return input.toString(charset);
-      }
-      if (typeof input === "string") {
-        var byteLen = charset === LATIN1 ? input.length : Buffer.byteLength(input, "utf8");
-        if (byteLen > maxBytes) throw new ErrorClass(spec.tooLarge, spec.label + " exceeds the size cap");
-        return input;
-      }
-      throw new ErrorClass(spec.badInput, spec.label + " expects a string or Buffer");
-    }
-    module2.exports = { decode };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-limits.js
-var require_guard_limits = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-limits.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    function cap(value, key, dflt, opts) {
-      if (value === void 0) return dflt;
-      opts = opts || {};
-      var min = opts.min === void 0 ? 0 : opts.min;
-      if (!Number.isInteger(min) || opts.max !== void 0 && !Number.isInteger(opts.max)) {
-        throw new TypeError("guard.limits.cap: the min/max bounds for " + key + " must be integers");
-      }
-      if (!Number.isInteger(value) || value < min || opts.max !== void 0 && value > opts.max) {
-        var want = "an integer >= " + min + (opts.max !== void 0 ? " and <= " + opts.max : "");
-        if (min === 0 && opts.max === void 0) want = "a non-negative integer";
-        if (opts.E) throw opts.E(opts.code, (opts.label || key) + " must be " + want);
-        throw new TypeError("decode: " + key + " must be " + want);
-      }
-      return value;
-    }
-    function depthCap(value, key, dflt) {
-      var n = cap(value, key, dflt);
-      if (n > constants.LIMITS.MAX_DECODE_DEPTH_CEILING) {
-        throw new TypeError("decode: " + key + " " + n + " exceeds the stack-safe ceiling " + constants.LIMITS.MAX_DECODE_DEPTH_CEILING);
-      }
-      return n;
-    }
-    function counter(max, E, code, label) {
-      if (!Number.isInteger(max) || max < 0) {
-        throw new TypeError("guard.limits.counter: max must be a non-negative integer");
-      }
-      var n = 0;
-      return {
-        tick: function() {
-          n += 1;
-          if (n > max) throw E(code, (label || "decoded item") + " count exceeds the cap " + max);
-        }
-      };
-    }
-    function byteCap(buf, max, E, code, label) {
-      if (!Number.isInteger(max) || max < 0) {
-        throw new TypeError("guard.limits.byteCap: max must be a non-negative integer");
-      }
-      if (buf.length > max) {
-        throw E(code, (label || "input") + " is " + buf.length + " bytes, over the " + max + "-byte cap");
-      }
-      return buf;
-    }
-    module2.exports = { cap, depthCap, counter, byteCap };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-crypto.js
-var require_guard_crypto = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-crypto.js"(exports2, module2) {
-    "use strict";
-    var nodeCrypto = require("node:crypto");
-    function constantTimeEqual(a, b) {
-      return a.length === b.length && nodeCrypto.timingSafeEqual(a, b);
-    }
-    function isOctetAligned(bitString) {
-      return !!bitString && bitString.unusedBits === 0;
-    }
-    function assertOctetAligned(bitString, E, code, label) {
-      if (!isOctetAligned(bitString)) {
-        throw E(code, (label || "signature") + " BIT STRING must be octet-aligned (0 unused bits)");
-      }
-      return bitString;
-    }
-    module2.exports = { constantTimeEqual, isOctetAligned, assertOctetAligned };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-range.js
-var require_guard_range = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-range.js"(exports2, module2) {
-    "use strict";
-    var UINT31_MAX = 2147483647n;
-    var SAFE_MAX = 9007199254740991n;
-    var SAFE_MIN = -9007199254740991n;
-    var UINT64_MAX = 18446744073709551615n;
-    function int(value, min, max, E, code, label) {
-      if (typeof min !== "bigint" || typeof max !== "bigint") {
-        throw new TypeError("guard.range.int: the min/max bounds must be BigInt");
-      }
-      if (max > SAFE_MAX) {
-        throw new TypeError("guard.range.int: max " + max + " exceeds the safe-integer ceiling; use a BigInt-preserving guard");
-      }
-      if (min < SAFE_MIN) {
-        throw new TypeError("guard.range.int: min " + min + " is below the safe-integer floor; use a BigInt-preserving guard");
-      }
-      if (typeof value !== "bigint" || value < min || value > max) {
-        throw E(code, label + " must be an integer within " + min + ".." + max);
-      }
-      return Number(value);
-    }
-    function uint31(value, E, code, label) {
-      return int(value, 0n, UINT31_MAX, E, code, label);
-    }
-    function positiveInt31(value, E, code, label) {
-      return int(value, 1n, UINT31_MAX, E, code, label);
-    }
-    function uint64(value, E, code, label) {
-      var v;
-      if (typeof value === "bigint") {
-        v = value;
-      } else if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
-        v = BigInt(value);
-      } else {
-        throw E(code, label + " must be a non-negative safe-integer Number or a BigInt (a uint64)");
-      }
-      if (v < 0n || v > UINT64_MAX) {
-        throw E(code, label + " must be a uint64 in [0, 2^64)");
-      }
-      return v;
-    }
-    function authoredInteger(value, E, code, label) {
-      if (typeof value === "bigint") return value;
-      if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
-      throw E(code, label + " must be an integer (a safe-integer number, or a bigint for a large value)");
-    }
-    module2.exports = {
-      int,
-      uint31,
-      positiveInt31,
-      uint64,
-      authoredInteger
-    };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-time.js
-var require_guard_time = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-time.js"(exports2, module2) {
-    "use strict";
-    function assertValid(value, E, code, label) {
-      if (!(value instanceof Date) || isNaN(value.getTime())) {
-        throw E(code, (label || "value") + " must be a valid Date");
-      }
-      return value;
-    }
-    function within(instant, lower, upper, E, code, label, opts) {
-      assertValid(instant, E, code, label);
-      assertValid(lower, E, code, (label || "window") + " lower bound");
-      assertValid(upper, E, code, (label || "window") + " upper bound");
-      var t = instant.getTime();
-      var lo = lower.getTime();
-      var hi = upper.getTime();
-      return t >= lo && (opts && opts.upperInclusive ? t <= hi : t < hi);
-    }
-    module2.exports = {
-      assertValid,
-      within
-    };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-name.js
-var require_guard_name = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-name.js"(exports2, module2) {
-    "use strict";
-    function assertNoControlBytes(str, E, code, label) {
-      for (var i = 0; i < str.length; i++) {
-        var c = str.charCodeAt(i);
-        if (c === 0 || c < 32 && c !== 9) {
-          throw E(code, label + " contains an embedded control byte (CVE-2009-2408)");
-        }
-      }
-      return str;
-    }
-    function assertPrintableIa5(buf, E, code, label) {
-      for (var i = 0; i < buf.length; i++) {
-        if (buf[i] < 32 || buf[i] > 126) {
-          throw E(code, label + " must be a printable IA5String (no control bytes)");
-        }
-      }
-      return buf;
-    }
-    function _canonAttrValue(v, E, code, label) {
-      if (typeof v !== "string") return v;
-      assertNoControlBytes(v, E, code, label);
-      return v.trim().replace(/\s+/g, " ").toLowerCase();
-    }
-    function _assertSequence(a, b, E, code, label, what) {
-      if (!Array.isArray(a) || !Array.isArray(b)) {
-        throw E(code, "cannot compare " + label + ": " + what + " comparison requires the RDN sequence on both sides (pass name.rdns, not the parsed Name)");
-      }
-    }
-    function rdnEqual(a, b, E, code, label) {
-      _assertSequence(a, b, E, code, label, "an RDN");
-      if (a.length !== b.length) return false;
-      var used = [];
-      for (var i = 0; i < a.length; i++) {
-        var found = false;
-        for (var j = 0; j < b.length; j++) {
-          if (used[j]) continue;
-          if (a[i].type === b[j].type && _canonAttrValue(a[i].value, E, code, label) === _canonAttrValue(b[j].value, E, code, label)) {
-            used[j] = true;
-            found = true;
-            break;
-          }
-        }
-        if (!found) return false;
-      }
-      return true;
-    }
-    function dnEqual(rdnsA, rdnsB, E, code, label) {
-      _assertSequence(rdnsA, rdnsB, E, code, label, "a distinguished-name");
-      if (rdnsA.length !== rdnsB.length) return false;
-      for (var i = 0; i < rdnsA.length; i++) {
-        if (!rdnEqual(rdnsA[i], rdnsB[i], E, code, label)) return false;
-      }
-      return true;
-    }
-    function escapeControlBytes(str) {
-      var s = String(str), out = "";
-      for (var i = 0; i < s.length; i++) {
-        var c = s.charCodeAt(i);
-        out += c < 32 || c === 127 ? "\\x" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase() : s.charAt(i);
-      }
-      return out;
-    }
-    function escapeDnValue(v) {
-      var s = String(v).replace(/([,+"\\<>;])/g, "\\$1"), out = "";
-      for (var i = 0; i < s.length; i++) {
-        var c = s.charCodeAt(i);
-        out += c < 32 || c === 127 ? "\\" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase() : s.charAt(i);
-      }
-      if (out.length && out.charAt(out.length - 1) === " ") out = out.slice(0, -1) + "\\ ";
-      if (out.charAt(0) === "#" || out.charAt(0) === " ") out = "\\" + out;
-      return out;
-    }
-    module2.exports = {
-      assertNoControlBytes,
-      assertPrintableIa5,
-      dnEqual,
-      rdnEqual,
-      escapeControlBytes,
-      escapeDnValue
-    };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-encoding.js
-var require_guard_encoding = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-encoding.js"(exports2, module2) {
-    "use strict";
-    var B64URL_ALPHABET = /^[A-Za-z0-9_-]*$/;
-    var B64_ALPHABET = /^[A-Za-z0-9+/]*={0,2}$/;
-    var HEX_ALPHABET = /^[0-9A-Fa-f]*$/;
-    function _capBefore(nChars, perByteChars, maxBytes, E, code, label) {
-      if (maxBytes == null) return;
-      if (!Number.isInteger(maxBytes) || maxBytes < 0) {
-        throw new TypeError("guard.encoding: maxBytes must be a non-negative integer or null");
-      }
-      if (Math.floor(nChars / perByteChars) > maxBytes) {
-        throw E(code, label + " exceeds the maximum decoded size of " + maxBytes + " bytes");
-      }
-    }
-    function base64url(text, maxBytes, E, code, label) {
-      if (typeof text !== "string") throw E(code, label + " must be a string");
-      if (!B64URL_ALPHABET.test(text)) throw E(code, label + " is not base64url (padding or a non-alphabet character)");
-      if (text.length % 4 === 1) throw E(code, label + " has an impossible base64url length");
-      _capBefore(text.length * 3, 4, maxBytes, E, code, label);
-      var buf = Buffer.from(text, "base64url");
-      if (buf.toString("base64url") !== text) throw E(code, label + " is not canonical base64url");
-      return buf;
-    }
-    function base64(text, maxBytes, E, code, label) {
-      if (typeof text !== "string") throw E(code, label + " must be a string");
-      if (!B64_ALPHABET.test(text)) throw E(code, label + " is not base64 (a non-alphabet character)");
-      if (text.length % 4 !== 0) throw E(code, label + " must be whole 4-character base64 groups (RFC 4648 sec. 3.5)");
-      _capBefore(text.length * 3, 4, maxBytes, E, code, label);
-      var buf = Buffer.from(text, "base64");
-      if (buf.toString("base64") !== text) throw E(code, label + " is not canonical base64 (RFC 4648 sec. 3.5)");
-      return buf;
-    }
-    function hex(text, maxBytes, E, code, label) {
-      if (typeof text !== "string") throw E(code, label + " must be a string");
-      if (!HEX_ALPHABET.test(text)) throw E(code, label + " is not hexadecimal");
-      if (text.length % 2 !== 0) throw E(code, label + " must have an even number of hex digits");
-      _capBefore(text.length, 2, maxBytes, E, code, label);
-      var buf = Buffer.from(text, "hex");
-      if (buf.toString("hex") !== text.toLowerCase()) throw E(code, label + " is not canonical hexadecimal");
-      return buf;
-    }
-    module2.exports = { base64url, base64, hex };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-json.js
-var require_guard_json = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-json.js"(exports2, module2) {
-    "use strict";
-    var text = require_guard_text();
-    var limits = require_guard_limits();
-    function parse(input, ErrorClass, spec) {
-      function E(code, message, cause) {
-        return new ErrorClass(code, message, cause);
-      }
-      if (spec.maxBytes === void 0 || spec.maxDepth === void 0) {
-        throw new TypeError("guard.json.parse: spec.maxBytes and spec.maxDepth are required");
-      }
-      var maxBytes = limits.cap(spec.maxBytes, "guard.json.parse spec.maxBytes", void 0);
-      var maxDepth = limits.depthCap(spec.maxDepth, "guard.json.parse spec.maxDepth", void 0);
-      var str = text.decode(input, maxBytes, ErrorClass, {
-        charset: "utf-8",
-        fatal: true,
-        tooLarge: spec.tooLarge,
-        badDecode: spec.badJson,
-        badInput: spec.badInput,
-        label: spec.label
-      });
-      var i = 0, n = str.length;
-      function ws() {
-        while (i < n) {
-          var c = str.charCodeAt(i);
-          if (c === 32 || c === 9 || c === 10 || c === 13) i++;
-          else break;
-        }
-      }
-      function fail(msg) {
-        throw E(spec.badJson, "invalid JSON at offset " + i + ": " + msg);
-      }
-      function value(depth) {
-        if (depth > maxDepth) throw E(spec.tooDeep, "JSON nesting exceeds the depth cap");
-        ws();
-        if (i >= n) fail("unexpected end of input");
-        var c = str[i];
-        if (c === "{") return object(depth);
-        if (c === "[") return array(depth);
-        if (c === '"') return string();
-        if (c === "-" || c >= "0" && c <= "9") return number();
-        if (str.substr(i, 4) === "true") {
-          i += 4;
-          return true;
-        }
-        if (str.substr(i, 5) === "false") {
-          i += 5;
-          return false;
-        }
-        if (str.substr(i, 4) === "null") {
-          i += 4;
-          return null;
-        }
-        fail("unexpected token");
-        return void 0;
-      }
-      function object(depth) {
-        i++;
-        var out = {};
-        ws();
-        if (str[i] === "}") {
-          i++;
-          return out;
-        }
-        for (; ; ) {
-          ws();
-          if (str[i] !== '"') fail("expected a string key");
-          var key = string();
-          if (Object.prototype.hasOwnProperty.call(out, key)) throw E(spec.duplicateMember, "duplicate JSON member " + JSON.stringify(key));
-          ws();
-          if (str[i] !== ":") fail("expected ':'");
-          i++;
-          Object.defineProperty(out, key, { value: value(depth + 1), writable: true, enumerable: true, configurable: true });
-          ws();
-          if (str[i] === ",") {
-            i++;
-            continue;
-          }
-          if (str[i] === "}") {
-            i++;
-            return out;
-          }
-          fail("expected ',' or '}'");
-        }
-      }
-      function array(depth) {
-        i++;
-        var out = [];
-        ws();
-        if (str[i] === "]") {
-          i++;
-          return out;
-        }
-        for (; ; ) {
-          out.push(value(depth + 1));
-          ws();
-          if (str[i] === ",") {
-            i++;
-            continue;
-          }
-          if (str[i] === "]") {
-            i++;
-            return out;
-          }
-          fail("expected ',' or ']'");
-        }
-      }
-      function string() {
-        i++;
-        var s = "";
-        for (; ; ) {
-          if (i >= n) fail("unterminated string");
-          var c = str[i++];
-          if (c === '"') return s;
-          if (c === "\\") {
-            if (i >= n) fail("unterminated escape");
-            var e = str[i++];
-            if (e === '"') s += '"';
-            else if (e === "\\") s += "\\";
-            else if (e === "/") s += "/";
-            else if (e === "b") s += "\b";
-            else if (e === "f") s += "\f";
-            else if (e === "n") s += "\n";
-            else if (e === "r") s += "\r";
-            else if (e === "t") s += "	";
-            else if (e === "u") {
-              var hex = str.substr(i, 4);
-              if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("bad \\u escape");
-              s += String.fromCharCode(parseInt(hex, 16));
-              i += 4;
-            } else fail("bad escape");
-          } else if (c.charCodeAt(0) < 32) {
-            fail("control character in string");
-          } else s += c;
-        }
-      }
-      function number() {
-        var start = i;
-        if (str[i] === "-") i++;
-        while (i < n && str[i] >= "0" && str[i] <= "9") i++;
-        if (str[i] === ".") {
-          i++;
-          while (i < n && str[i] >= "0" && str[i] <= "9") i++;
-        }
-        if (str[i] === "e" || str[i] === "E") {
-          i++;
-          if (str[i] === "+" || str[i] === "-") i++;
-          while (i < n && str[i] >= "0" && str[i] <= "9") i++;
-        }
-        var tok = str.slice(start, i);
-        if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(tok)) fail("malformed number");
-        var v = Number(tok);
-        if (!isFinite(v)) fail("bad number");
-        return v;
-      }
-      var result = value(0);
-      ws();
-      if (i !== n) fail("trailing content after JSON value");
-      return result;
-    }
-    module2.exports = { parse };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-identifier.js
-var require_guard_identifier = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-identifier.js"(exports2, module2) {
-    "use strict";
-    function assertCanonicalOid(str, E, code, label, boundsCode) {
-      var who = label || "OID";
-      if (typeof str !== "string" || !/^(0|[1-9]\d*)(\.(0|[1-9]\d*))+$/.test(str)) {
-        throw E(code, who + " must be a canonical dotted-decimal OID string of two or more arcs with no leading-zero component");
-      }
-      if (boundsCode === null) return str;
-      var bcode = boundsCode === void 0 ? code : boundsCode;
-      var parts = str.split(".");
-      var root = BigInt(parts[0]);
-      var second = BigInt(parts[1]);
-      if (root > 2n) throw E(bcode, who + " root arc must be 0, 1, or 2 (X.660)");
-      if (root < 2n && second > 39n) throw E(bcode, who + " second arc must be 0..39 under roots 0 and 1 (X.660)");
-      return str;
-    }
-    function assertKnownKeys(obj, known, E, code, message) {
-      var describe = typeof message === "function" ? message : function(k) {
-        return message + JSON.stringify(k);
-      };
-      Object.keys(obj).forEach(function(k) {
-        if (!Object.prototype.hasOwnProperty.call(known, k)) throw E(code, describe(k));
-      });
-    }
-    module2.exports = { assertCanonicalOid, assertKnownKeys };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-header.js
-var require_guard_header = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-header.js"(exports2, module2) {
-    "use strict";
-    var C = require_constants();
-    function assertField(name, value, E, code) {
-      if (typeof name !== "string" || name.length === 0) throw new E(code, "a header field name must be a non-empty string");
-      for (var i = 0; i < name.length; i++) {
-        var nc = name.charCodeAt(i);
-        if (nc < 33 || nc > 126 || nc === 58) throw new E(code, "a header field name must be RFC 5322 ftext (printable ASCII, no space / ':' / control): " + JSON.stringify(name));
-      }
-      var v = typeof value === "string" ? value : String(value);
-      for (var j = 0; j < v.length; j++) {
-        var vc = v.charCodeAt(j);
-        if (vc === 0 || vc === 13 || vc === 10) throw new E(code, "a header field value must not contain CR / LF / NUL (header injection) in " + JSON.stringify(name));
-      }
-      if (Buffer.byteLength(name, "utf8") + 2 + Buffer.byteLength(v, "utf8") > C.LIMITS.HEADER_LINE_MAX_OCTETS) {
-        throw new E(code, "a header field line exceeds RFC 5322's " + C.LIMITS.HEADER_LINE_MAX_OCTETS + "-octet limit: " + JSON.stringify(name));
-      }
-      return v;
-    }
-    module2.exports = { assertField };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-compress.js
-var require_guard_compress = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-compress.js"(exports2, module2) {
-    "use strict";
-    var zlib = require("zlib");
-    var DECOMPRESS = {
-      zlib: zlib.inflateSync,
-      // RFC 1950
-      brotli: zlib.brotliDecompressSync,
-      // RFC 7932
-      zstd: zlib.zstdDecompressSync
-      // RFC 8478
-    };
-    var _PROBE_COMPRESS = {
-      zlib: zlib.deflateSync,
-      brotli: zlib.brotliCompressSync,
-      zstd: zlib.zstdCompressSync
-    };
-    function _reportsTruncation(name) {
-      var compress = _PROBE_COMPRESS[name];
-      var decompress = DECOMPRESS[name];
-      if (typeof compress !== "function" || typeof decompress !== "function") return false;
-      var sample = Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz0123456789");
-      var frame, whole;
+    function deferred(body) {
       try {
-        frame = compress(sample);
-      } catch (_e) {
-        return false;
-      }
-      if (!Buffer.isBuffer(frame) || frame.length < 4) return false;
-      try {
-        whole = decompress(frame, { maxOutputLength: 4096 });
-      } catch (_e2) {
-        return false;
-      }
-      if (!Buffer.isBuffer(whole) || !whole.equals(sample)) return false;
-      var cutAccepted = false;
-      try {
-        decompress(frame.subarray(0, frame.length - 2), { maxOutputLength: 4096 });
-        cutAccepted = true;
-      } catch (_e3) {
-      }
-      return !cutAccepted;
-    }
-    var SAFE = {};
-    Object.keys(DECOMPRESS).forEach(function(n) {
-      if (_reportsTruncation(n)) SAFE[n] = true;
-    });
-    function bounded(algorithm, stream, cap, E, codes, label) {
-      var decompress = DECOMPRESS[algorithm];
-      if (!Object.prototype.hasOwnProperty.call(SAFE, algorithm) || !decompress) {
-        throw new TypeError("guard.compress.bounded: unknown or unsafe algorithm " + JSON.stringify(algorithm));
-      }
-      if (!Buffer.isBuffer(stream)) {
-        throw new TypeError("guard.compress.bounded: stream must be a Buffer (route the input through guard.bytes.view first)");
-      }
-      if (!Number.isInteger(cap) || cap < 1) {
-        throw new TypeError("guard.compress.bounded: cap must be a positive integer");
-      }
-      var what = label || "the compressed input";
-      var res;
-      try {
-        res = decompress(stream, { maxOutputLength: cap, info: true });
+        return Promise.resolve(body());
       } catch (e) {
-        if (e && e.code === "ERR_BUFFER_TOO_LARGE") {
-          throw E(codes.tooLarge, what + " decompresses to more than the " + cap + "-byte cap (a decompression-bomb defense)", e);
-        }
-        throw E(codes.failed, what + " could not be decompressed", e);
+        return Promise.reject(e);
       }
-      var consumed = res.engine.bytesWritten;
-      if (consumed !== stream.length) {
-        throw E(codes.failed, what + " carries " + (stream.length - consumed) + " trailing byte(s) after the end of the compressed stream");
-      }
-      return res.buffer;
-    }
-    function algorithms() {
-      return Object.keys(SAFE);
-    }
-    module2.exports = { bounded, algorithms };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-secret.js
-var require_guard_secret = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-secret.js"(exports2, module2) {
-    "use strict";
-    var bytes = require_guard_bytes();
-    function zeroize(value, ErrorClass, code, label) {
-      if (value === null || value === void 0) return value;
-      var view = bytes.view(value, ErrorClass, code, label);
-      view.fill(0);
-      return value;
-    }
-    function zeroizeAll(list, ErrorClass, code, label) {
-      if (!list) return list;
-      for (var i = 0; i < list.length; i++) zeroize(list[i], ErrorClass, code, label);
-      return list;
-    }
-    module2.exports = { zeroize, zeroizeAll };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/guard-all.js
-var require_guard_all = __commonJS({
-  "node_modules/@blamejs/pki/lib/guard-all.js"(exports2, module2) {
-    "use strict";
-    var bytes = require_guard_bytes();
-    var text = require_guard_text();
-    var limits = require_guard_limits();
-    var crypto = require_guard_crypto();
-    var range = require_guard_range();
-    var time = require_guard_time();
-    var name = require_guard_name();
-    var encoding = require_guard_encoding();
-    var json = require_guard_json();
-    var identifier = require_guard_identifier();
-    var header = require_guard_header();
-    var compress = require_guard_compress();
-    var secret = require_guard_secret();
-    module2.exports = {
-      bytes,
-      text,
-      limits,
-      crypto,
-      range,
-      time,
-      name,
-      encoding,
-      json,
-      identifier,
-      header,
-      compress,
-      secret
-    };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/asn1-der.js
-var require_asn1_der = __commonJS({
-  "node_modules/@blamejs/pki/lib/asn1-der.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    var frameworkError = require_framework_error();
-    var guard = require_guard_all();
-    var Asn1Error = frameworkError.Asn1Error;
-    var OidError = frameworkError.OidError;
-    function _asn1Error(c, m) {
-      return new Asn1Error(c, m);
-    }
-    function _oidErr(c, m) {
-      return new OidError(c, m);
-    }
-    var UNIVERSAL_TYPES = {
-      BOOLEAN: { tag: 1, form: "primitive" },
-      INTEGER: { tag: 2, form: "primitive" },
-      BIT_STRING: { tag: 3, form: "primitive" },
-      OCTET_STRING: { tag: 4, form: "primitive" },
-      NULL: { tag: 5, form: "primitive" },
-      OBJECT_IDENTIFIER: { tag: 6, form: "primitive" },
-      EXTERNAL: { tag: 8, form: "constructed" },
-      ENUMERATED: { tag: 10, form: "primitive" },
-      EMBEDDED_PDV: { tag: 11, form: "constructed" },
-      UTF8_STRING: { tag: 12, form: "primitive" },
-      SEQUENCE: { tag: 16, form: "constructed" },
-      SET: { tag: 17, form: "constructed" },
-      NUMERIC_STRING: { tag: 18, form: "primitive" },
-      PRINTABLE_STRING: { tag: 19, form: "primitive" },
-      TELETEX_STRING: { tag: 20, form: "primitive" },
-      IA5_STRING: { tag: 22, form: "primitive" },
-      UTC_TIME: { tag: 23, form: "primitive" },
-      GENERALIZED_TIME: { tag: 24, form: "primitive" },
-      VISIBLE_STRING: { tag: 26, form: "primitive" },
-      UNIVERSAL_STRING: { tag: 28, form: "primitive" },
-      CHARACTER_STRING: { tag: 29, form: "constructed" },
-      BMP_STRING: { tag: 30, form: "primitive" }
-    };
-    var TAGS = {};
-    Object.keys(UNIVERSAL_TYPES).forEach(function(k) {
-      TAGS[k] = UNIVERSAL_TYPES[k].tag;
-    });
-    var CLASS_UNIVERSAL = 0;
-    var CLASS_APPLICATION = 64;
-    var CLASS_CONTEXT = 128;
-    var CLASS_PRIVATE = 192;
-    var CONSTRUCTED_BIT = 32;
-    var CONSTRUCTED_ONLY_UNIVERSAL_TAGS = /* @__PURE__ */ Object.create(null);
-    Object.keys(UNIVERSAL_TYPES).forEach(function(k) {
-      var d = UNIVERSAL_TYPES[k];
-      if (d.form === "constructed") CONSTRUCTED_ONLY_UNIVERSAL_TAGS[d.tag] = true;
-    });
-    function _className(bits) {
-      switch (bits) {
-        case CLASS_UNIVERSAL:
-          return "universal";
-        case CLASS_APPLICATION:
-          return "application";
-        case CLASS_CONTEXT:
-          return "context";
-        case CLASS_PRIVATE:
-          return "private";
-        // Coverage residual -- tagClassBits is (first & 0xc0), always one of the 4 enumerated class values; the default arm is unreachable defensive code.
-        default:
-          return "universal";
-      }
-    }
-    function _asBuffer(input, who) {
-      return guard.bytes.view(input, Asn1Error, "asn1/not-buffer", who);
-    }
-    function decode(input, opts) {
-      opts = opts || {};
-      var buf = _asBuffer(input, "decode");
-      var maxBytes = guard.limits.cap(opts.maxBytes, "maxBytes", constants.LIMITS.DER_MAX_BYTES);
-      var maxDepth = guard.limits.depthCap(opts.maxDepth, "maxDepth", constants.LIMITS.DER_MAX_DEPTH);
-      var maxItems = guard.limits.cap(opts.maxItems, "maxItems", constants.LIMITS.DER_MAX_ITEMS);
-      if (buf.length > maxBytes) {
-        throw new Asn1Error("asn1/too-large", "input " + buf.length + " bytes exceeds cap " + maxBytes);
-      }
-      var ctr = guard.limits.counter(maxItems, _asn1Error, "asn1/too-many-items", "decoded DER node");
-      var r = _decodeTLV(buf, 0, buf.length, 0, maxDepth, opts.ber === true, void 0, ctr);
-      if (!opts.allowTrailing && r.end !== buf.length) {
-        throw new Asn1Error("asn1/trailing-bytes", buf.length - r.end + " trailing byte(s) after the top-level value");
-      }
-      return r.node;
-    }
-    function _decodeTLV(buf, start, limit, depth, maxDepth, ber, strDepth, ctr) {
-      if (depth > maxDepth) {
-        throw new Asn1Error("asn1/too-deep", "nesting exceeds depth cap " + maxDepth);
-      }
-      if (ctr) ctr.tick();
-      var p = start;
-      if (p >= limit) throw new Asn1Error("asn1/truncated", "expected an identifier octet");
-      var first = buf[p];
-      p += 1;
-      var tagClassBits = first & 192;
-      var constructed = (first & CONSTRUCTED_BIT) !== 0;
-      var tagNumber = first & 31;
-      if (tagNumber === 31) {
-        tagNumber = 0;
-        var seen = 0;
-        for (; ; ) {
-          if (p >= limit) throw new Asn1Error("asn1/truncated", "truncated high-tag-number");
-          var tb = buf[p];
-          p += 1;
-          if (seen === 0 && tb === 128) {
-            throw new Asn1Error("asn1/non-minimal-tag", "leading 0x80 in high-tag-number form");
-          }
-          tagNumber = tagNumber * 128 + (tb & 127);
-          seen += 1;
-          if (seen > 4) throw new Asn1Error("asn1/tag-too-large", "high-tag-number too large");
-          if ((tb & 128) === 0) break;
-        }
-        if (tagNumber < 31) {
-          throw new Asn1Error("asn1/non-minimal-tag", "high-tag-number form used for a low tag");
-        }
-      }
-      if (tagClassBits === CLASS_UNIVERSAL && CONSTRUCTED_ONLY_UNIVERSAL_TAGS[tagNumber] && !constructed) {
-        throw new Asn1Error("asn1/bad-tlv", "a universal constructed-only type (SEQUENCE/SET/EXTERNAL/EMBEDDED PDV/CHARACTER STRING) must be constructed");
-      }
-      if (tagClassBits === CLASS_UNIVERSAL && constructed && !CONSTRUCTED_ONLY_UNIVERSAL_TAGS[tagNumber]) {
-        if (!(ber && tagNumber === TAGS.OCTET_STRING)) {
-          throw new Asn1Error("asn1/constructed-primitive-type", "a universal primitive-only type must be encoded primitive in DER");
-        }
-        strDepth = (strDepth || 0) + 1;
-        if (strDepth > constants.LIMITS.BER_MAX_STRING_NESTING) {
-          throw new Asn1Error("asn1/bad-constructed-string", "constructed OCTET STRING nesting exceeds the cap " + constants.LIMITS.BER_MAX_STRING_NESTING);
-        }
-      }
-      if (p >= limit) throw new Asn1Error("asn1/truncated", "expected a length octet");
-      var lenByte = buf[p];
-      p += 1;
-      var length;
-      if (lenByte < 128) {
-        length = lenByte;
-      } else if (lenByte === 128) {
-        if (!ber || !constructed) {
-          throw new Asn1Error("asn1/indefinite-length", "indefinite length is not valid DER");
-        }
-        length = -1;
-      } else {
-        var numLenBytes = lenByte & 127;
-        if (numLenBytes > 6) throw new Asn1Error("asn1/length-too-large", "length uses more than 6 octets");
-        if (p + numLenBytes > limit) throw new Asn1Error("asn1/truncated", "truncated long-form length");
-        if (buf[p] === 0) throw new Asn1Error("asn1/non-minimal-length", "leading zero in long-form length");
-        length = 0;
-        for (var i = 0; i < numLenBytes; i++) length = length * 256 + buf[p + i];
-        p += numLenBytes;
-        if (length < 128) throw new Asn1Error("asn1/non-minimal-length", "long form used for a length < 128");
-      }
-      var contentStart = p;
-      var indefinite = length === -1;
-      var contentEnd = indefinite ? -1 : contentStart + length;
-      if (!indefinite && contentEnd > limit) throw new Asn1Error("asn1/truncated", "content length overruns the buffer");
-      var children = null;
-      var content = null;
-      var child;
-      var end;
-      if (constructed) {
-        children = [];
-        var cp = contentStart;
-        if (indefinite) {
-          for (; ; ) {
-            if (cp + 2 > limit) throw new Asn1Error("asn1/truncated", "indefinite-length value is missing its end-of-contents octets");
-            if (buf[cp] === 0 && buf[cp + 1] === 0) break;
-            child = _decodeTLV(buf, cp, limit, depth + 1, maxDepth, ber, strDepth, ctr);
-            children.push(child.node);
-            cp = child.end;
-          }
-          contentEnd = cp;
-          end = cp + 2;
-        } else {
-          while (cp < contentEnd) {
-            child = _decodeTLV(buf, cp, contentEnd, depth + 1, maxDepth, ber, strDepth, ctr);
-            children.push(child.node);
-            cp = child.end;
-          }
-          end = contentEnd;
-        }
-      } else {
-        content = buf.subarray(contentStart, contentEnd);
-        end = contentEnd;
-      }
-      var node = {
-        tagClass: _className(tagClassBits),
-        constructed,
-        tagNumber,
-        length: contentEnd - contentStart,
-        header: { start, end: contentStart },
-        contentStart,
-        contentEnd,
-        content,
-        children,
-        bytes: buf.subarray(start, end)
-      };
-      if (ber && constructed && tagClassBits === CLASS_UNIVERSAL && tagNumber === TAGS.OCTET_STRING) {
-        var segments = [];
-        for (var s = 0; s < children.length; s++) {
-          if (children[s].tagClass !== "universal" || children[s].tagNumber !== TAGS.OCTET_STRING) {
-            throw new Asn1Error("asn1/bad-constructed-string", "a constructed OCTET STRING segment must itself be an OCTET STRING");
-          }
-          segments.push(children[s].content);
-        }
-        node.content = Buffer.concat(segments);
-        node.constructed = false;
-        node.children = null;
-      }
-      if (ber && constructed && tagClassBits === CLASS_CONTEXT && node.children) {
-        node.ber = true;
-      }
-      return { node, end };
-    }
-    function _expectUniversal(node, tag, who) {
-      if (node.tagClass !== "universal" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", who + ": expected universal tag " + tag + ", got " + node.tagClass + "/" + node.tagNumber);
-      }
-    }
-    function _expectPrimitive(node, who) {
-      if (node.constructed) throw new Asn1Error("asn1/expected-primitive", who + ": expected a primitive encoding");
-    }
-    function readBoolean(node) {
-      _expectUniversal(node, TAGS.BOOLEAN, "readBoolean");
-      _expectPrimitive(node, "readBoolean");
-      if (node.content.length !== 1) throw new Asn1Error("asn1/bad-boolean", "BOOLEAN content must be 1 octet");
-      var v = node.content[0];
-      if (v === 0) return false;
-      if (v === 255) return true;
-      throw new Asn1Error("asn1/bad-boolean", "DER BOOLEAN must be 0x00 or 0xFF, got 0x" + v.toString(16));
-    }
-    function _readIntegerLikeContent(node, typeName, who) {
-      _expectPrimitive(node, who);
-      var c = node.content;
-      if (c.length === 0) throw new Asn1Error("asn1/bad-integer", typeName + " must have at least 1 content octet");
-      if (c.length > constants.LIMITS.DER_MAX_INTEGER_BYTES + 1) {
-        throw new Asn1Error(
-          "asn1/integer-too-large",
-          typeName + " content " + c.length + " bytes exceeds cap " + (constants.LIMITS.DER_MAX_INTEGER_BYTES + 1)
-        );
-      }
-      if (c.length > 1) {
-        if (c[0] === 0 && (c[1] & 128) === 0) throw new Asn1Error("asn1/non-minimal-integer", "non-minimal positive " + typeName);
-        if (c[0] === 255 && (c[1] & 128) !== 0) throw new Asn1Error("asn1/non-minimal-integer", "non-minimal negative " + typeName);
-      }
-      var neg = (c[0] & 128) !== 0;
-      var mag = c.length ? BigInt("0x" + Buffer.from(c).toString("hex")) : 0n;
-      return neg ? mag - (1n << BigInt(c.length * 8)) : mag;
-    }
-    function readInteger(node) {
-      _expectUniversal(node, TAGS.INTEGER, "readInteger");
-      return _readIntegerLikeContent(node, "INTEGER", "readInteger");
-    }
-    function readEnumerated(node) {
-      _expectUniversal(node, TAGS.ENUMERATED, "readEnumerated");
-      return _readIntegerLikeContent(node, "ENUMERATED", "readEnumerated");
-    }
-    function readIntegerImplicit(node, tag) {
-      if (node.tagClass !== "context" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", "readIntegerImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
-      }
-      return _readIntegerLikeContent(node, "INTEGER", "readIntegerImplicit");
-    }
-    function _readBitStringContent(node, who) {
-      _expectPrimitive(node, who);
-      var c = node.content;
-      if (c.length === 0) throw new Asn1Error("asn1/bad-bit-string", "BIT STRING must have >= 1 content octet");
-      var unusedBits = c[0];
-      if (unusedBits > 7) throw new Asn1Error("asn1/bad-bit-string", "unused-bit count " + unusedBits + " > 7");
-      if (unusedBits > 0 && c.length === 1) throw new Asn1Error("asn1/bad-bit-string", "unused bits declared over an empty body");
-      if (unusedBits > 0 && c.length > 1) {
-        var mask = (1 << unusedBits) - 1;
-        if ((c[c.length - 1] & mask) !== 0) throw new Asn1Error("asn1/bad-bit-string", "DER requires unused bits to be zero");
-      }
-      return { unusedBits, bytes: c.subarray(1) };
-    }
-    function readBitString(node) {
-      _expectUniversal(node, TAGS.BIT_STRING, "readBitString");
-      return _readBitStringContent(node, "readBitString");
-    }
-    function readBitStringImplicit(node, tag) {
-      if (node.tagClass !== "context" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", "readBitStringImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
-      }
-      return _readBitStringContent(node, "readBitStringImplicit");
-    }
-    function readOctetString(node) {
-      _expectUniversal(node, TAGS.OCTET_STRING, "readOctetString");
-      _expectPrimitive(node, "readOctetString");
-      return node.content;
-    }
-    function readOctetStringImplicit(node, tag) {
-      if (node.tagClass !== "context" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", "readOctetStringImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
-      }
-      if (node.constructed && node.ber === true) {
-        var segments = [];
-        for (var s = 0; s < node.children.length; s++) {
-          var seg = node.children[s];
-          if (seg.tagClass !== "universal" || seg.tagNumber !== TAGS.OCTET_STRING || seg.constructed || !seg.content) {
-            throw new Asn1Error("asn1/bad-constructed-string", "a constructed OCTET STRING segment must itself be an OCTET STRING");
-          }
-          segments.push(seg.content);
-        }
-        return Buffer.concat(segments);
-      }
-      _expectPrimitive(node, "readOctetStringImplicit");
-      return node.content;
-    }
-    function readNull(node) {
-      _expectUniversal(node, TAGS.NULL, "readNull");
-      _expectPrimitive(node, "readNull");
-      if (node.content.length !== 0) throw new Asn1Error("asn1/bad-null", "NULL must have empty content");
-      return null;
-    }
-    function readBooleanImplicit(node, tag) {
-      if (node.tagClass !== "context" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", "readBooleanImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
-      }
-      _expectPrimitive(node, "readBooleanImplicit");
-      if (node.content.length !== 1) throw new Asn1Error("asn1/bad-boolean", "BOOLEAN content must be 1 octet");
-      var v = node.content[0];
-      if (v === 0) return false;
-      if (v === 255) return true;
-      throw new Asn1Error("asn1/bad-boolean", "DER BOOLEAN must be 0x00 or 0xFF, got 0x" + v.toString(16));
-    }
-    function readNullImplicit(node, tag) {
-      if (node.tagClass !== "context" || node.tagNumber !== tag) {
-        throw new Asn1Error("asn1/unexpected-tag", "readNullImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
-      }
-      _expectPrimitive(node, "readNullImplicit");
-      if (node.content.length !== 0) throw new Asn1Error("asn1/bad-null", "IMPLICIT NULL must have empty content");
-      return null;
-    }
-    function readOid(node) {
-      _expectUniversal(node, TAGS.OBJECT_IDENTIFIER, "readOid");
-      _expectPrimitive(node, "readOid");
-      return decodeOidContent(node.content);
-    }
-    function decodeOidContent(buf) {
-      if (buf.length === 0) throw new OidError("oid/empty", "OBJECT IDENTIFIER content is empty");
-      var arcs = [];
-      var arcStart = 0;
-      for (var i = 0; i < buf.length; i++) {
-        var b = buf[i];
-        if (i === arcStart && b === 128) throw new OidError("oid/non-minimal", "non-minimal sub-identifier (leading 0x80)");
-        if (i - arcStart >= constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES) {
-          throw new OidError(
-            "oid/subidentifier-too-large",
-            "OID sub-identifier exceeds " + constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES + " octets"
-          );
-        }
-        if ((b & 128) === 0) {
-          var value = 0n;
-          for (var k = arcStart; k <= i; k++) value = value * 128n + BigInt(buf[k] & 127);
-          arcs.push(value);
-          arcStart = i + 1;
-        }
-      }
-      if (arcStart !== buf.length) throw new OidError("oid/truncated", "OBJECT IDENTIFIER ends mid sub-identifier");
-      var first = arcs[0];
-      var a1, a2;
-      if (first < 40n) {
-        a1 = 0n;
-        a2 = first;
-      } else if (first < 80n) {
-        a1 = 1n;
-        a2 = first - 40n;
-      } else {
-        a1 = 2n;
-        a2 = first - 80n;
-      }
-      var out = [a1.toString(), a2.toString()];
-      for (var j = 1; j < arcs.length; j++) out.push(arcs[j].toString());
-      return out.join(".");
-    }
-    function _decodeText(buf, encoding) {
-      return buf.toString(encoding);
-    }
-    function _decodeIa5(buf) {
-      for (var i = 0; i < buf.length; i++) {
-        if (buf[i] > 127) throw new Asn1Error("asn1/bad-ia5-string", "IA5String requires 7-bit ASCII");
-      }
-      return buf.toString("latin1");
-    }
-    function _decodeVisible(buf) {
-      for (var i = 0; i < buf.length; i++) {
-        if (buf[i] < 32 || buf[i] > 126) throw new Asn1Error("asn1/bad-visible-string", "VisibleString must be 0x20..0x7E");
-      }
-      return buf.toString("latin1");
-    }
-    function _decodePrintable(buf) {
-      var s = buf.toString("latin1");
-      if (!PRINTABLE_RE.test(s)) throw new Asn1Error("asn1/bad-printable-string", "PrintableString has characters outside the restricted set");
-      return s;
-    }
-    function readNumericString(node) {
-      _expectUniversal(node, TAGS.NUMERIC_STRING, "readNumericString");
-      _expectPrimitive(node, "readNumericString");
-      var s = node.content.toString("latin1");
-      if (!NUMERIC_RE.test(s)) throw new Asn1Error("asn1/bad-numeric-string", "NumericString has characters outside the digits-and-space set");
-      return s;
-    }
-    function _decodeUtf8Strict(buf) {
-      try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(buf);
-      } catch (_e) {
-        throw new Asn1Error("asn1/bad-utf8-string", "invalid UTF-8 in UTF8String");
-      }
-    }
-    function readString(node) {
-      if (node.tagClass !== "universal") throw new Asn1Error("asn1/expected-string", "readString: not a universal string type");
-      _expectPrimitive(node, "readString");
-      switch (node.tagNumber) {
-        case TAGS.UTF8_STRING:
-          return _decodeUtf8Strict(node.content);
-        case TAGS.PRINTABLE_STRING:
-          return _decodePrintable(node.content);
-        case TAGS.IA5_STRING:
-          return _decodeIa5(node.content);
-        case TAGS.TELETEX_STRING:
-          return _decodeText(node.content, "latin1");
-        case TAGS.VISIBLE_STRING:
-          return _decodeVisible(node.content);
-        case TAGS.BMP_STRING:
-          return _decodeUtf16be(node.content);
-        case TAGS.UNIVERSAL_STRING:
-          return _decodeUtf32be(node.content);
-        default:
-          throw new Asn1Error("asn1/expected-string", "readString: tag " + node.tagNumber + " is not a known string type");
-      }
-    }
-    function _decodeUtf16be(buf) {
-      if (buf.length % 2 !== 0) throw new Asn1Error("asn1/bad-bmp-string", "BMPString length must be even");
-      for (var i = 0; i < buf.length; i += 2) {
-        var u = buf[i] << 8 | buf[i + 1];
-        if (u >= 55296 && u <= 57343) throw new Asn1Error("asn1/bad-bmp-string", "code point out of range");
-      }
-      var swapped = Buffer.from(buf);
-      swapped.swap16();
-      return swapped.toString("utf16le");
-    }
-    function _decodeUtf32be(buf) {
-      if (buf.length % 4 !== 0) throw new Asn1Error("asn1/bad-universal-string", "UniversalString length must be a multiple of 4");
-      var out = "";
-      for (var i = 0; i < buf.length; i += 4) {
-        var cp = buf[i] * 16777216 + (buf[i + 1] << 16) + (buf[i + 2] << 8) + buf[i + 3];
-        if (cp > 1114111 || cp >= 55296 && cp <= 57343) {
-          throw new Asn1Error("asn1/bad-universal-string", "code point out of range");
-        }
-        out += String.fromCodePoint(cp);
-      }
-      return out;
-    }
-    var UTC_RE = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/;
-    var GEN_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/;
-    var GEN_FRAC_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d+)Z$/;
-    function readTime(node, opts) {
-      if (node.tagClass !== "universal") throw new Asn1Error("asn1/expected-time", "readTime: not a universal time type");
-      _expectPrimitive(node, "readTime");
-      var s = node.content.toString("latin1");
-      var m, year;
-      if (node.tagNumber === TAGS.UTC_TIME) {
-        m = UTC_RE.exec(s);
-        if (!m) throw new Asn1Error("asn1/bad-utctime", "UTCTime must be YYMMDDHHMMSSZ, got " + JSON.stringify(s));
-        year = parseInt(m[1], 10);
-        year += year < 50 ? 2e3 : 1900;
-      } else if (node.tagNumber === TAGS.GENERALIZED_TIME) {
-        m = GEN_RE.exec(s);
-        if (!m) {
-          if (!(opts && opts.allowFractional)) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime must be YYYYMMDDHHMMSSZ, got " + JSON.stringify(s));
-          m = GEN_FRAC_RE.exec(s);
-          if (!m) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime must be YYYYMMDDHHMMSS[.fraction]Z, got " + JSON.stringify(s));
-          if (m[7].charAt(m[7].length - 1) === "0") throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime fraction must not have trailing zeros, got " + JSON.stringify(s));
-        }
-        year = parseInt(m[1], 10);
-      } else {
-        throw new Asn1Error("asn1/expected-time", "readTime: tag " + node.tagNumber + " is not a time type");
-      }
-      var month = parseInt(m[2], 10);
-      var day = parseInt(m[3], 10);
-      var hour = parseInt(m[4], 10);
-      var min = parseInt(m[5], 10);
-      var sec = parseInt(m[6], 10);
-      var ms = node.tagNumber === TAGS.GENERALIZED_TIME && m[7] ? parseInt((m[7] + "000").slice(0, 3), 10) : 0;
-      var d = /* @__PURE__ */ new Date(0);
-      d.setUTCFullYear(year, month - 1, day);
-      d.setUTCHours(hour, min, sec, ms);
-      if (isNaN(d.getTime())) throw new Asn1Error("asn1/bad-time", "unparseable time " + JSON.stringify(s));
-      if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day || d.getUTCHours() !== hour || d.getUTCMinutes() !== min || d.getUTCSeconds() !== sec) {
-        throw new Asn1Error("asn1/bad-time", "time component out of range " + JSON.stringify(s));
-      }
-      return d;
-    }
-    function encodeLength(n) {
-      if (typeof n !== "number" || !isFinite(n) || n < 0 || Math.floor(n) !== n) {
-        throw new Asn1Error("asn1/bad-length", "length must be a non-negative integer");
-      }
-      if (n < 128) return Buffer.from([n]);
-      var bytes = [];
-      var v = n;
-      while (v > 0) {
-        bytes.unshift(v & 255);
-        v = Math.floor(v / 256);
-      }
-      if (bytes.length > 126) throw new Asn1Error("asn1/length-too-large", "length needs more than 126 octets");
-      return Buffer.concat([Buffer.from([128 | bytes.length]), Buffer.from(bytes)]);
-    }
-    function sequenceTlv(node) {
-      var content = node.content != null ? node.content : Buffer.concat((node.children || []).map(function(c) {
-        return c.bytes;
-      }));
-      return Buffer.concat([Buffer.from([TAGS.SEQUENCE | CONSTRUCTED_BIT]), encodeLength(content.length), content]);
-    }
-    function encodeIdentifier(classBits, constructed, tagNumber) {
-      if (typeof tagNumber !== "number" || !isFinite(tagNumber) || tagNumber < 0 || Math.floor(tagNumber) !== tagNumber) {
-        throw new Asn1Error("asn1/bad-tag", "tag number must be a non-negative integer");
-      }
-      var lead = classBits | (constructed ? CONSTRUCTED_BIT : 0);
-      if (tagNumber < 31) return Buffer.from([lead | tagNumber]);
-      var body = [];
-      var v = tagNumber;
-      do {
-        body.unshift(v & 127);
-        v = Math.floor(v / 128);
-      } while (v > 0);
-      if (body.length > 4) throw new Asn1Error("asn1/tag-too-large", "high-tag-number too large");
-      for (var i = 0; i < body.length - 1; i++) body[i] |= 128;
-      return Buffer.concat([Buffer.from([lead | 31]), Buffer.from(body)]);
-    }
-    function encodeTLV(classBits, constructed, tagNumber, content) {
-      var body = Buffer.isBuffer(content) ? guard.bytes.view(content, Asn1Error, "asn1/not-buffer", "encodeTLV content") : Buffer.from(content || []);
-      var id = encodeIdentifier(classBits, constructed, tagNumber);
-      return Buffer.concat([id, encodeLength(body.length), body]);
-    }
-    function _universal(tagNumber, constructed, content) {
-      return encodeTLV(CLASS_UNIVERSAL, constructed, tagNumber, content);
-    }
-    function intToDer(v) {
-      if (typeof v === "number") {
-        if (!Number.isSafeInteger(v)) throw new Asn1Error("asn1/bad-integer", "unsafe integer; pass a BigInt");
-        v = BigInt(v);
-      }
-      if (typeof v !== "bigint") throw new Asn1Error("asn1/bad-integer", "integer must be number or BigInt");
-      if (v === 0n) return Buffer.from([0]);
-      var bytes = [];
-      if (v > 0n) {
-        var t = v;
-        while (t > 0n) {
-          bytes.unshift(Number(t & 0xffn));
-          t >>= 8n;
-        }
-        if (bytes[0] & 128) bytes.unshift(0);
-      } else {
-        var len = 1;
-        while (v < -(1n << BigInt(8 * len - 1))) len += 1;
-        var tc = (1n << BigInt(8 * len)) + v;
-        for (var i = len - 1; i >= 0; i--) {
-          bytes[i] = Number(tc & 0xffn);
-          tc >>= 8n;
-        }
-      }
-      return Buffer.from(bytes);
-    }
-    function encodeOidContent(dotted) {
-      guard.identifier.assertCanonicalOid(dotted, _oidErr, "oid/bad-input", "OID", "oid/bad-arc");
-      var arcs = dotted.split(".").map(function(p) {
-        return BigInt(p);
-      });
-      var a1 = arcs[0], a2 = arcs[1];
-      var subids = [a1 * 40n + a2].concat(arcs.slice(2));
-      var out = [];
-      for (var s = 0; s < subids.length; s++) {
-        var body = [];
-        var v = subids[s];
-        do {
-          body.unshift(Number(v & 0x7fn));
-          v >>= 7n;
-        } while (v > 0n);
-        if (body.length > constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES) {
-          throw new OidError(
-            "oid/subidentifier-too-large",
-            "OID sub-identifier exceeds " + constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES + " octets"
-          );
-        }
-        for (var k = 0; k < body.length - 1; k++) body[k] |= 128;
-        for (var j = 0; j < body.length; j++) out.push(body[j]);
-      }
-      return Buffer.from(out);
-    }
-    var PRINTABLE_RE = /^[A-Za-z0-9 '()+,\-./:=?]*$/;
-    var NUMERIC_RE = /^[0-9 ]*$/;
-    function _fmtTwo(n) {
-      return (n < 10 ? "0" : "") + n;
-    }
-    function _generalizedTimeString(date) {
-      var y = date.getUTCFullYear();
-      if (y < 0 || y > 9999) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime year " + y + " outside 0000..9999");
-      var yyyy = ("000" + y).slice(-4);
-      return yyyy + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
-    }
-    function _utcTimeString(date) {
-      var y = date.getUTCFullYear();
-      if (y < 1950 || y > 2049) throw new Asn1Error("asn1/bad-utctime", "UTCTime year " + y + " outside 1950..2049; use GeneralizedTime");
-      var yy = y % 100;
-      return _fmtTwo(yy) + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
-    }
-    var build = {
-      boolean: function(v) {
-        return _universal(TAGS.BOOLEAN, false, Buffer.from([v ? 255 : 0]));
-      },
-      integer: function(v) {
-        return _universal(TAGS.INTEGER, false, _intContent(v, "build.integer"));
-      },
-      enumerated: function(v) {
-        return _universal(TAGS.ENUMERATED, false, _intContent(v, "build.enumerated"));
-      },
-      nullValue: function() {
-        return _universal(TAGS.NULL, false, Buffer.alloc(0));
-      },
-      oid: function(dotted) {
-        return _universal(TAGS.OBJECT_IDENTIFIER, false, encodeOidContent(dotted));
-      },
-      octetString: function(buf) {
-        return _universal(TAGS.OCTET_STRING, false, _asBuffer(buf, "build.octetString"));
-      },
-      bitString: function(buf, unusedBits) {
-        var u = guard.limits.cap(unusedBits == null ? 0 : unusedBits, "unusedBits", 0, { E: _asn1Error, code: "asn1/bad-bit-string", min: 0, max: 7 });
-        var body = _asBuffer(buf, "build.bitString");
-        if (u > 0 && body.length === 0) throw new Asn1Error("asn1/bad-bit-string", "empty BIT STRING must declare zero unused bits");
-        if (u > 0 && body.length > 0) {
-          var mask = (1 << u) - 1;
-          if ((body[body.length - 1] & mask) !== 0) throw new Asn1Error("asn1/bad-bit-string", "unused bits must be zero");
-        }
-        return _universal(TAGS.BIT_STRING, false, Buffer.concat([Buffer.from([u]), body]));
-      },
-      // A minimal DER NamedBitList BIT STRING (X.690 sec. 11.2.2): the asserted `positions` (0-based bit
-      // indices, 0 = the MSB of the first octet) with every trailing zero bit removed and the unused-bit
-      // count set below the last set bit. The single home the keyUsage / PKIFailureInfo / any named-bit
-      // encoder composes, so the minimal-encoding rule lives once (the CHECK side is
-      // schema.assertMinimalNamedBits). No bits asserted -> the empty BIT STRING.
-      namedBitString: function(positions) {
-        if (!Array.isArray(positions)) throw new Asn1Error("asn1/bad-bit-string", "namedBitString requires an array of bit positions");
-        var hi = -1, i, p;
-        for (i = 0; i < positions.length; i++) {
-          p = positions[i];
-          if (typeof p !== "number" || !isFinite(p) || p < 0 || (p | 0) !== p) throw new Asn1Error("asn1/bad-bit-string", "a named-bit position must be a non-negative integer");
-          if (p > hi) hi = p;
-        }
-        if (hi < 0) return build.bitString(Buffer.alloc(0), 0);
-        var buf = Buffer.alloc((hi >> 3) + 1);
-        for (i = 0; i < positions.length; i++) {
-          p = positions[i];
-          buf[p >> 3] |= 128 >> (p & 7);
-        }
-        return build.bitString(buf, 7 - (hi & 7));
-      },
-      utf8: function(s) {
-        return _universal(TAGS.UTF8_STRING, false, Buffer.from(String(s), "utf8"));
-      },
-      ia5: function(s) {
-        s = String(s);
-        for (var i = 0; i < s.length; i++) {
-          if (s.charCodeAt(i) > 127) throw new Asn1Error("asn1/bad-ia5-string", "IA5String requires 7-bit ASCII");
-        }
-        return _universal(TAGS.IA5_STRING, false, Buffer.from(s, "latin1"));
-      },
-      printable: function(s) {
-        s = String(s);
-        if (!PRINTABLE_RE.test(s)) throw new Asn1Error("asn1/bad-printable-string", "value has characters outside the PrintableString set");
-        return _universal(TAGS.PRINTABLE_STRING, false, Buffer.from(s, "latin1"));
-      },
-      bmpString: function(s) {
-        s = String(s);
-        var out = Buffer.alloc(s.length * 2);
-        for (var i = 0; i < s.length; i++) {
-          var u = s.charCodeAt(i);
-          if (u >= 55296 && u <= 57343) throw new Asn1Error("asn1/bad-bmp-string", "BMPString cannot encode a surrogate code point (non-BMP characters are unsupported)");
-          out[i * 2] = u >> 8 & 255;
-          out[i * 2 + 1] = u & 255;
-        }
-        return _universal(TAGS.BMP_STRING, false, out);
-      },
-      utcTime: function(date) {
-        return _universal(TAGS.UTC_TIME, false, Buffer.from(_utcTimeString(date), "latin1"));
-      },
-      generalizedTime: function(date) {
-        return _universal(TAGS.GENERALIZED_TIME, false, Buffer.from(_generalizedTimeString(date), "latin1"));
-      },
-      sequence: function(children) {
-        return _universal(TAGS.SEQUENCE, true, Buffer.concat(_asBufferArray(children, "build.sequence")));
-      },
-      set: function(children) {
-        var arr = _asBufferArray(children, "build.set").slice();
-        arr.sort(Buffer.compare);
-        return _universal(TAGS.SET, true, Buffer.concat(arr));
-      },
-      setOf: function(children) {
-        var arr = _asBufferArray(children, "build.setOf").slice();
-        arr.sort(Buffer.compare);
-        return _universal(TAGS.SET, true, Buffer.concat(arr));
-      },
-      // Context-tagged constructions for [n] EXPLICIT / IMPLICIT tagging.
-      explicit: function(tagNumber, inner) {
-        return encodeTLV(CLASS_CONTEXT, true, tagNumber, _asBuffer(inner, "build.explicit"));
-      },
-      contextPrimitive: function(tagNumber, content) {
-        return encodeTLV(CLASS_CONTEXT, false, tagNumber, _asBuffer(content, "build.contextPrimitive"));
-      },
-      contextConstructed: function(tagNumber, content) {
-        return encodeTLV(CLASS_CONTEXT, true, tagNumber, _asBuffer(content, "build.contextConstructed"));
-      },
-      // IMPLICIT [tag] retag of an already-encoded UNIVERSAL TLV: replace the source's tag with a context-class
-      // [tag] identifier, PRESERVING the source's primitive/constructed bit and content octets (X.680 sec. 30.6).
-      // A single home for the tag replacement so no format module re-inlines the P/C-bit handling (a decode of
-      // the source validates it is exactly one well-formed TLV; its content is the trailing `length` octets).
-      implicit: function(tagNumber, tlv) {
-        var buf = _asBuffer(tlv, "build.implicit");
-        var node = decode(buf);
-        return encodeTLV(CLASS_CONTEXT, node.constructed, tagNumber, buf.slice(buf.length - node.length));
-      },
-      raw: function(buf) {
-        return _asBuffer(buf, "build.raw");
-      }
-    };
-    function _intContent(v, who) {
-      if (Buffer.isBuffer(v)) {
-        if (v.length === 0) throw new Asn1Error("asn1/bad-integer", who + ": INTEGER content is empty");
-        if (v.length > 1) {
-          if (v[0] === 0 && (v[1] & 128) === 0) throw new Asn1Error("asn1/non-minimal-integer", who + ": non-minimal positive INTEGER");
-          if (v[0] === 255 && (v[1] & 128) !== 0) throw new Asn1Error("asn1/non-minimal-integer", who + ": non-minimal negative INTEGER");
-        }
-      }
-      var content = Buffer.isBuffer(v) ? v : intToDer(v);
-      if (content.length > constants.LIMITS.DER_MAX_INTEGER_BYTES + 1) {
-        throw new Asn1Error("asn1/integer-too-large", who + ": INTEGER content " + content.length + " bytes exceeds cap " + (constants.LIMITS.DER_MAX_INTEGER_BYTES + 1));
-      }
-      return content;
-    }
-    function _asBufferArray(arr, who) {
-      if (!Array.isArray(arr)) throw new Asn1Error("asn1/bad-children", who + ": expected an array of TLV buffers");
-      return arr.map(function(b) {
-        return _asBuffer(b, who);
-      });
-    }
-    module2.exports = {
-      TAGS,
-      decode,
-      // `encode` is the documented public name for the low-level TLV encoder;
-      // `encodeTLV` remains as the descriptive alias.
-      encode: encodeTLV,
-      encodeTLV,
-      encodeLength,
-      sequenceTlv,
-      encodeIdentifier,
-      decodeOidContent,
-      encodeOidContent,
-      build,
-      read: {
-        boolean: readBoolean,
-        integer: readInteger,
-        integerImplicit: readIntegerImplicit,
-        enumerated: readEnumerated,
-        bitString: readBitString,
-        bitStringImplicit: readBitStringImplicit,
-        octetString: readOctetString,
-        octetStringImplicit: readOctetStringImplicit,
-        nullValue: readNull,
-        nullImplicit: readNullImplicit,
-        booleanImplicit: readBooleanImplicit,
-        oid: readOid,
-        string: readString,
-        numericString: readNumericString,
-        time: readTime
-      }
-    };
-  }
-});
-
-// node_modules/@blamejs/pki/lib/cbor-det.js
-var require_cbor_det = __commonJS({
-  "node_modules/@blamejs/pki/lib/cbor-det.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    var frameworkError = require_framework_error();
-    var asn1 = require_asn1_der();
-    var guard = require_guard_all();
-    var CborError = frameworkError.CborError;
-    var _fbuf = new ArrayBuffer(8);
-    var _fdv = new DataView(_fbuf);
-    var _utf8 = new TextDecoder("utf-8", { fatal: true });
-    var _MAX_EPOCH_SECONDS = 8640000000000n;
-    function _asBuffer(input, who) {
-      return guard.bytes.view(input, CborError, "cbor/not-buffer", who);
-    }
-    function _profile(name) {
-      var p = name === void 0 ? "deterministic" : name;
-      if (p === "deterministic") return { mapKeyCompare: Buffer.compare };
-      throw new TypeError("decode: unknown profile " + JSON.stringify(p) + ' (only "deterministic" is supported)');
-    }
-    function _assertUtf8(buf) {
-      try {
-        _utf8.decode(buf);
-      } catch (_e) {
-        throw new CborError("cbor/bad-utf8", "text string is not well-formed UTF-8");
-      }
-    }
-    function _readFloatBits(argument, ai) {
-      if (ai === 25) {
-        _fdv.setUint16(0, Number(argument));
-        return _fdv.getFloat16(0);
-      }
-      if (ai === 26) {
-        _fdv.setUint32(0, Number(argument));
-        return _fdv.getFloat32(0);
-      }
-      _fdv.setBigUint64(0, argument);
-      return _fdv.getFloat64(0);
-    }
-    function _halfRoundtrips(d) {
-      _fdv.setFloat16(0, d);
-      return Object.is(_fdv.getFloat16(0), d);
-    }
-    function _singleRoundtrips(d) {
-      return Object.is(Math.fround(d), d);
-    }
-    function _decodeItem(buf, start, limit, depth, maxD, rules, state) {
-      if (depth > maxD) throw new CborError("cbor/too-deep", "nesting exceeds depth cap " + maxD);
-      state.n += 1;
-      if (state.n > state.max) throw new CborError("cbor/too-many-items", "decoded item count exceeds cap " + state.max);
-      var p = start;
-      if (p >= limit) throw new CborError("cbor/truncated", "expected an initial byte");
-      var ib = buf[p];
-      p += 1;
-      var mt = ib >> 5;
-      var ai = ib & 31;
-      if (ib === 255) throw new CborError("cbor/unexpected-break", "stray break byte (0xff) at an item head");
-      if (ai === 28 || ai === 29 || ai === 30) throw new CborError("cbor/reserved-ai", "reserved additional-info " + ai);
-      if (ai === 31) {
-        if (mt === 2 || mt === 3 || mt === 4 || mt === 5) {
-          throw new CborError("cbor/indefinite-length", "indefinite-length items are not valid deterministic CBOR");
-        }
-        throw new CborError("cbor/reserved-ai", "additional-info 31 is undefined for major type " + mt);
-      }
-      var argument;
-      var contentStart;
-      if (ai <= 23) {
-        argument = BigInt(ai);
-        contentStart = p;
-      } else {
-        var nBytes = ai === 24 ? 1 : ai === 25 ? 2 : ai === 26 ? 4 : 8;
-        if (p + nBytes > limit) throw new CborError("cbor/truncated", "truncated " + nBytes + "-byte argument");
-        if (nBytes === 1) argument = BigInt(buf[p]);
-        else if (nBytes === 2) argument = BigInt(buf.readUInt16BE(p));
-        else if (nBytes === 4) argument = BigInt(buf.readUInt32BE(p));
-        else argument = buf.readBigUInt64BE(p);
-        p += nBytes;
-        if (mt !== 7) {
-          var minForWidth = nBytes === 1 ? 24n : nBytes === 2 ? 256n : nBytes === 4 ? 65536n : 4294967296n;
-          if (argument < minForWidth) {
-            throw new CborError("cbor/non-minimal-argument", "argument " + argument + " is not in the shortest head form");
-          }
-        }
-        contentStart = p;
-      }
-      var content = null;
-      var children = null;
-      var end;
-      if (mt === 0 || mt === 1) {
-        end = contentStart;
-      } else if (mt === 2 || mt === 3) {
-        var len = Number(argument);
-        if (contentStart + len > limit) throw new CborError("cbor/truncated", "string content overruns the buffer");
-        content = buf.subarray(contentStart, contentStart + len);
-        if (mt === 3) _assertUtf8(content);
-        end = contentStart + len;
-      } else if (mt === 4) {
-        children = [];
-        var cp = contentStart;
-        for (var i = 0n; i < argument; i++) {
-          var el = _decodeItem(buf, cp, limit, depth + 1, maxD, rules, state);
-          children.push(el.node);
-          cp = el.end;
-        }
-        end = cp;
-      } else if (mt === 5) {
-        children = [];
-        var mp = contentStart;
-        for (var j = 0n; j < argument; j++) {
-          var k = _decodeItem(buf, mp, limit, depth + 1, maxD, rules, state);
-          mp = k.end;
-          var v = _decodeItem(buf, mp, limit, depth + 1, maxD, rules, state);
-          mp = v.end;
-          if (children.length > 0) {
-            var cmp = rules.mapKeyCompare(children[children.length - 1][0].bytes, k.node.bytes);
-            if (cmp > 0) throw new CborError("cbor/unsorted-map-keys", "map keys are not in bytewise-ascending order");
-            if (cmp === 0) throw new CborError("cbor/duplicate-map-key", "duplicate map key");
-          }
-          children.push([k.node, v.node]);
-        }
-        end = mp;
-      } else if (mt === 6) {
-        var inner = _decodeItem(buf, contentStart, limit, depth + 1, maxD, rules, state);
-        children = [inner.node];
-        end = inner.end;
-      } else {
-        if (ai <= 23) {
-          end = contentStart;
-        } else if (ai === 24) {
-          if (argument < 32n) {
-            throw new CborError("cbor/reserved-simple", "simple value " + argument + " must use the single-byte immediate form");
-          }
-          end = contentStart;
-        } else {
-          var d = _readFloatBits(argument, ai);
-          if (Number.isNaN(d)) {
-            if (!(ai === 25 && argument === 0x7e00n)) {
-              throw new CborError("cbor/non-canonical-nan", "a NaN must be the canonical half float 0xf97e00");
-            }
-          } else if (ai === 26) {
-            if (_halfRoundtrips(d)) throw new CborError("cbor/non-minimal-float", "a half-representable value must use the half form");
-          } else if (ai === 27) {
-            if (_halfRoundtrips(d) || _singleRoundtrips(d)) {
-              throw new CborError("cbor/non-minimal-float", "a value representable in a narrower float must use it");
-            }
-          }
-          end = contentStart;
-        }
-      }
-      var node = {
-        majorType: mt,
-        ai,
-        argument,
-        content,
-        children,
-        header: { start, end: contentStart },
-        contentStart,
-        contentEnd: end,
-        length: end - contentStart,
-        bytes: buf.subarray(start, end)
-      };
-      return { node, end };
-    }
-    function decode(input, opts) {
-      opts = opts || {};
-      var buf = _asBuffer(input, "decode");
-      var maxBytes = guard.limits.cap(opts.maxBytes, "maxBytes", constants.LIMITS.CBOR_MAX_BYTES);
-      var maxDepth = guard.limits.depthCap(opts.maxDepth, "maxDepth", constants.LIMITS.CBOR_MAX_DEPTH);
-      var maxItems = guard.limits.cap(opts.maxItems, "maxItems", constants.LIMITS.CBOR_MAX_ITEMS);
-      var rules = _profile(opts.profile);
-      if (buf.length > maxBytes) throw new CborError("cbor/too-large", "input " + buf.length + " bytes exceeds cap " + maxBytes);
-      var r = _decodeItem(buf, 0, buf.length, 0, maxDepth, rules, { n: 0, max: maxItems });
-      if (!opts.allowTrailing && r.end !== buf.length) {
-        throw new CborError("cbor/trailing-bytes", buf.length - r.end + " trailing byte(s) after the top-level item");
-      }
-      return r.node;
     }
-    function _expectMajor(node, mt, who) {
-      if (!node || node.majorType !== mt) {
-        throw new CborError("cbor/unexpected-major", who + ": expected major type " + mt);
-      }
-    }
-    function _tagInner(node, tagNum, who) {
-      if (!node || node.majorType !== 6 || node.argument !== BigInt(tagNum)) {
-        throw new CborError("cbor/unexpected-tag", who + ": expected tag " + tagNum);
-      }
-      return node.children[0];
-    }
-    function readUint(node) {
-      _expectMajor(node, 0, "read.uint");
-      return node.argument;
-    }
-    function readNint(node) {
-      _expectMajor(node, 1, "read.nint");
-      return -1n - node.argument;
-    }
-    function readInt(node) {
-      if (node && node.majorType === 0) return node.argument;
-      if (node && node.majorType === 1) return -1n - node.argument;
-      throw new CborError("cbor/unexpected-major", "read.int: expected major type 0 or 1");
-    }
-    function readByteString(node) {
-      _expectMajor(node, 2, "read.byteString");
-      return node.content;
-    }
-    function readTextString(node) {
-      _expectMajor(node, 3, "read.textString");
-      return node.content.toString("utf8");
-    }
-    function readArray(node) {
-      _expectMajor(node, 4, "read.array");
-      return node.children;
-    }
-    function readMap(node) {
-      _expectMajor(node, 5, "read.map");
-      return node.children;
-    }
-    function readMapGet(node, key) {
-      _expectMajor(node, 5, "read.mapGet");
-      var wantText = typeof key === "string";
-      if (!wantText) {
-        if (typeof key === "number") {
-          if (!Number.isSafeInteger(key)) throw new TypeError("read.mapGet: a numeric key must be a safe integer");
-          key = BigInt(key);
-        } else if (typeof key !== "bigint") {
-          throw new TypeError("read.mapGet: key must be a text string or an integer");
-        }
-      }
-      for (var i = 0; i < node.children.length; i++) {
-        var k = node.children[i][0];
-        if (wantText) {
-          if (k.majorType === 3 && readTextString(k) === key) return node.children[i][1];
-        } else if ((k.majorType === 0 || k.majorType === 1) && readInt(k) === key) {
-          return node.children[i][1];
-        }
-      }
-      return null;
-    }
-    function readBoolean(node) {
-      _expectMajor(node, 7, "read.boolean");
-      if (node.ai === 20) return false;
-      if (node.ai === 21) return true;
-      throw new CborError("cbor/bad-simple", "read.boolean: simple value " + node.ai + " is not a boolean");
-    }
-    function readNull(node) {
-      _expectMajor(node, 7, "read.nullValue");
-      if (node.ai !== 22) throw new CborError("cbor/bad-simple", "read.nullValue: simple value " + node.ai + " is not null");
-      return null;
-    }
-    function readUndefined(node) {
-      _expectMajor(node, 7, "read.undefinedValue");
-      if (node.ai !== 23) throw new CborError("cbor/bad-simple", "read.undefinedValue: simple value " + node.ai + " is not undefined");
-      return void 0;
-    }
-    function readFloat(node) {
-      _expectMajor(node, 7, "read.float");
-      if (node.ai !== 25 && node.ai !== 26 && node.ai !== 27) {
-        throw new CborError("cbor/bad-simple", "read.float: node is a simple value, not a float");
-      }
-      return _readFloatBits(node.argument, node.ai);
-    }
-    function readBiguint(node) {
-      var inner = _tagInner(node, 2, "read.biguint");
-      if (inner.majorType !== 2) throw new CborError("cbor/bad-tag-content", "read.biguint: tag 2 must wrap a byte string");
-      var c = inner.content;
-      if (c.length > constants.LIMITS.CBOR_MAX_BIGUINT_BYTES) {
-        throw new CborError("cbor/biguint-too-large", "bignum " + c.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BIGUINT_BYTES);
-      }
-      if (c.length > 0 && c[0] === 0) throw new CborError("cbor/non-minimal-biguint", "bignum has a leading zero byte");
-      if (c.length <= 8) throw new CborError("cbor/non-minimal-biguint", "a value that fits a basic integer must not use a bignum");
-      return BigInt("0x" + c.toString("hex"));
-    }
-    function readTime(node) {
-      var inner = _tagInner(node, 1, "read.time");
-      if (inner.majorType !== 0 && inner.majorType !== 1) {
-        throw new CborError("cbor/bad-tag-content", "read.time: tag 1 must wrap an integer");
-      }
-      var secs = inner.majorType === 0 ? inner.argument : -1n - inner.argument;
-      if (secs < -_MAX_EPOCH_SECONDS || secs > _MAX_EPOCH_SECONDS) {
-        throw new CborError("cbor/bad-time", "epoch time out of range");
-      }
-      var ns = Number(secs);
-      var d = new Date(ns < 0 ? -constants.TIME.seconds(-ns) : constants.TIME.seconds(ns));
-      if (isNaN(d.getTime())) throw new CborError("cbor/bad-time", "epoch time out of range");
-      return d;
-    }
-    function readOid(node) {
-      var inner = _tagInner(node, 111, "read.oid");
-      if (inner.majorType !== 2) throw new CborError("cbor/bad-tag-content", "read.oid: tag 111 must wrap a byte string");
-      return asn1.decodeOidContent(inner.content);
-    }
-    function _cbItem(x, who) {
-      if (!Buffer.isBuffer(x)) throw new CborError("cbor/not-buffer", who + ": expected a pre-encoded CBOR item Buffer");
-      return x;
-    }
-    function _assertDecodes(out, who) {
-      try {
-        decode(out);
-      } catch (e) {
-        throw new CborError("cbor/bad-item", who + ": produced bytes the strict decoder rejects (" + (e && e.code) + ")", e);
-      }
-      return out;
-    }
-    function _capString(out, who) {
-      if (out.length > constants.LIMITS.CBOR_MAX_BYTES) throw new CborError("cbor/too-large", who + ": encoded " + out.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BYTES);
-      return out;
-    }
-    function _assertWellFormedText(str, who) {
-      for (var i = 0; i < str.length; i++) {
-        var c = str.charCodeAt(i);
-        if (c >= 55296 && c <= 56319) {
-          var n = str.charCodeAt(i + 1);
-          if (!(n >= 56320 && n <= 57343)) throw new CborError("cbor/bad-utf8", who + ": the string has an unpaired high surrogate");
-          i++;
-        } else if (c >= 56320 && c <= 57343) throw new CborError("cbor/bad-utf8", who + ": the string has an unpaired low surrogate");
-      }
-    }
-    function _head(mt, argument, who) {
-      var a = typeof argument === "bigint" ? argument : BigInt(argument);
-      if (a < 0n) throw new CborError("cbor/bad-argument", who + ": a CBOR head argument must be non-negative");
-      if (a > 0xffffffffffffffffn) throw new CborError("cbor/bad-argument", who + ": a CBOR head argument exceeds 64 bits");
-      var mtb = mt << 5, b;
-      if (a <= 23n) return Buffer.from([mtb | Number(a)]);
-      if (a < 256n) return Buffer.from([mtb | 24, Number(a)]);
-      if (a < 65536n) {
-        b = Buffer.alloc(3);
-        b[0] = mtb | 25;
-        b.writeUInt16BE(Number(a), 1);
-        return b;
-      }
-      if (a < 4294967296n) {
-        b = Buffer.alloc(5);
-        b[0] = mtb | 26;
-        b.writeUInt32BE(Number(a), 1);
-        return b;
-      }
-      b = Buffer.alloc(9);
-      b[0] = mtb | 27;
-      b.writeBigUInt64BE(a, 1);
-      return b;
-    }
-    var build = {
-      uint: function(n) {
-        var a = typeof n === "bigint" ? n : BigInt(n);
-        if (a < 0n) throw new CborError("cbor/bad-argument", "build.uint: value must be non-negative");
-        return _head(0, a, "build.uint");
-      },
-      nint: function(n) {
-        var a = typeof n === "bigint" ? n : BigInt(n);
-        if (a >= 0n) throw new CborError("cbor/bad-argument", "build.nint: value must be negative");
-        return _head(1, -1n - a, "build.nint");
-      },
-      int: function(n) {
-        var a = typeof n === "bigint" ? n : BigInt(n);
-        return a >= 0n ? _head(0, a, "build.int") : _head(1, -1n - a, "build.int");
-      },
-      byteString: function(buf) {
-        var b = _asBuffer(buf, "build.byteString");
-        return _capString(Buffer.concat([_head(2, b.length, "build.byteString"), b]), "build.byteString");
-      },
-      textString: function(s) {
-        var str = String(s);
-        _assertWellFormedText(str, "build.textString");
-        var b = Buffer.from(str, "utf8");
-        return _capString(Buffer.concat([_head(3, b.length, "build.textString"), b]), "build.textString");
-      },
-      array: function(items) {
-        if (!Array.isArray(items)) throw new CborError("cbor/bad-argument", "build.array: expected an array of pre-encoded items");
-        var parts = items.map(function(x, i) {
-          return _cbItem(x, "build.array[" + i + "]");
-        });
-        return _assertDecodes(Buffer.concat([_head(4, items.length, "build.array")].concat(parts)), "build.array");
-      },
-      map: function(pairs) {
-        if (!Array.isArray(pairs)) throw new CborError("cbor/bad-argument", "build.map: expected an array of [key, value] pairs");
-        var enc = pairs.map(function(p, i2) {
-          if (!Array.isArray(p) || p.length !== 2) throw new CborError("cbor/bad-argument", "build.map[" + i2 + "]: each entry is a [key, value] pair");
-          return [_cbItem(p[0], "build.map key"), _cbItem(p[1], "build.map value")];
-        });
-        enc.sort(function(a, b) {
-          return Buffer.compare(a[0], b[0]);
-        });
-        for (var i = 1; i < enc.length; i++) {
-          if (Buffer.compare(enc[i - 1][0], enc[i][0]) === 0) throw new CborError("cbor/duplicate-map-key", "build.map: duplicate map key");
-        }
-        var flat = [_head(5, pairs.length, "build.map")];
-        enc.forEach(function(p) {
-          flat.push(p[0], p[1]);
-        });
-        return _assertDecodes(Buffer.concat(flat), "build.map");
-      },
-      tag: function(tagNum, inner) {
-        return _assertDecodes(Buffer.concat([_head(6, tagNum, "build.tag"), _cbItem(inner, "build.tag content")]), "build.tag");
-      },
-      boolean: function(v) {
-        return Buffer.from([v ? 245 : 244]);
-      },
-      nullValue: function() {
-        return Buffer.from([246]);
-      },
-      raw: function(buf) {
-        return _assertDecodes(_asBuffer(buf, "build.raw"), "build.raw");
-      },
-      // Tagged leaves -- the inverse of read.biguint / read.time / read.oid.
-      biguint: function(n) {
-        var a = typeof n === "bigint" ? n : BigInt(n);
-        if (a < 0n) throw new CborError("cbor/bad-argument", "build.biguint: value must be non-negative");
-        var hex = a.toString(16);
-        if (hex.length % 2) hex = "0" + hex;
-        var mag = a === 0n ? Buffer.alloc(0) : Buffer.from(hex, "hex");
-        if (mag.length <= 8) throw new CborError("cbor/bad-argument", "build.biguint: a value that fits 8 bytes must use build.uint (RFC 8949 preferred serialization)");
-        if (mag.length > constants.LIMITS.CBOR_MAX_BIGUINT_BYTES) throw new CborError("cbor/biguint-too-large", "build.biguint: " + mag.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BIGUINT_BYTES);
-        return build.tag(2, build.byteString(mag));
-      },
-      time: function(v) {
-        var ms;
-        if (v instanceof Date) {
-          ms = v.getTime();
-          if (Number.isNaN(ms)) throw new CborError("cbor/bad-time", "build.time: an Invalid Date has no epoch value");
-          if (ms % 1e3 !== 0) throw new CborError("cbor/bad-time", "build.time: a Date with sub-second precision cannot be a second-granularity CBOR epoch; round to whole seconds");
-        }
-        var secs = v instanceof Date ? BigInt(Math.floor(ms / 1e3)) : typeof v === "bigint" ? v : BigInt(v);
-        if (secs < -_MAX_EPOCH_SECONDS || secs > _MAX_EPOCH_SECONDS) throw new CborError("cbor/bad-time", "build.time: epoch seconds " + secs + " are outside the representable Date range");
-        return build.tag(1, build.int(secs));
-      },
-      oid: function(dotted) {
-        return build.tag(111, build.byteString(asn1.encodeOidContent(dotted)));
-      }
-    };
-    module2.exports = {
-      decode,
-      build,
-      read: {
-        uint: readUint,
-        nint: readNint,
-        int: readInt,
-        byteString: readByteString,
-        textString: readTextString,
-        array: readArray,
-        map: readMap,
-        mapGet: readMapGet,
-        boolean: readBoolean,
-        nullValue: readNull,
-        undefinedValue: readUndefined,
-        float: readFloat,
-        biguint: readBiguint,
-        time: readTime,
-        oid: readOid
-      }
-    };
+    module2.exports = { deferred };
   }
 });
 
@@ -4491,6 +2561,2426 @@ var require_webcrypto = __commonJS({
   }
 });
 
+// node_modules/@blamejs/pki/lib/guard-parsed.js
+var require_guard_parsed = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-parsed.js"(exports2, module2) {
+    "use strict";
+    var bytes = require_guard_bytes();
+    function _isBytes(x) {
+      return Buffer.isBuffer(x) || ArrayBuffer.isView(x) || x instanceof ArrayBuffer;
+    }
+    function _isAttributeTypeAndValue(a) {
+      return !!a && typeof a.type === "string" && _isOptName(a.name) && typeof a.value === "string";
+    }
+    function _isRdnSequence(rdns) {
+      if (!Array.isArray(rdns)) return false;
+      for (var i = 0; i < rdns.length; i++) {
+        if (!Array.isArray(rdns[i]) || rdns[i].length === 0) return false;
+        if (!rdns[i].every(_isAttributeTypeAndValue)) return false;
+      }
+      return true;
+    }
+    function _isName(n) {
+      return !!n && _isRdnSequence(n.rdns) && Buffer.isBuffer(n.bytes) && typeof n.dn === "string";
+    }
+    function _isOptName(v) {
+      return typeof v === "string" || v === null;
+    }
+    function _isAlgorithmIdentifier(a) {
+      return !!a && typeof a.oid === "string" && _isOptName(a.name) && (Buffer.isBuffer(a.parameters) || a.parameters === null);
+    }
+    function _isBitString(b) {
+      return !!b && Buffer.isBuffer(b.bytes) && typeof b.unusedBits === "number";
+    }
+    function _isExtensionEntry(e) {
+      return !!e && typeof e.oid === "string" && _isOptName(e.name) && typeof e.critical === "boolean" && Buffer.isBuffer(e.value);
+    }
+    function _isCrlExtensionEntry(e) {
+      return !!e && typeof e.oid === "string" && _isOptName(e.name) && typeof e.critical === "boolean" && e.value !== void 0;
+    }
+    function isCert(o) {
+      return !!o && typeof o === "object" && Buffer.isBuffer(o.tbsBytes) && typeof o.version === "number" && typeof o.serialNumber === "bigint" && typeof o.serialNumberHex === "string" && _isAlgorithmIdentifier(o.signatureAlgorithm) && _isAlgorithmIdentifier(o.tbsSignatureAlgorithm) && _isBitString(o.signatureValue) && !!o.validity && o.validity.notBefore instanceof Date && o.validity.notAfter instanceof Date && _isName(o.issuer) && _isName(o.subject) && !!o.subjectPublicKeyInfo && Buffer.isBuffer(o.subjectPublicKeyInfo.bytes) && _isAlgorithmIdentifier(o.subjectPublicKeyInfo.algorithm) && _isBitString(o.subjectPublicKeyInfo.publicKey) && Array.isArray(o.extensions) && o.extensions.every(_isExtensionEntry);
+    }
+    function isCrl(o) {
+      return !!o && typeof o === "object" && Buffer.isBuffer(o.tbsBytes) && typeof o.version === "number" && _isAlgorithmIdentifier(o.signatureAlgorithm) && _isBitString(o.signatureValue) && _isName(o.issuer) && o.thisUpdate instanceof Date && (o.nextUpdate === null || o.nextUpdate instanceof Date) && Array.isArray(o.crlExtensions) && o.crlExtensions.every(_isCrlExtensionEntry) && Array.isArray(o.revokedCertificates) && o.revokedCertificates.every(function(e) {
+        return !!e && typeof e.serialNumber === "bigint" && typeof e.serialNumberHex === "string" && e.revocationDate instanceof Date && Array.isArray(e.crlEntryExtensions) && e.crlEntryExtensions.every(_isCrlExtensionEntry);
+      });
+    }
+    function _safe(shape) {
+      return function(o) {
+        try {
+          return shape(o) === true;
+        } catch (_e) {
+          return false;
+        }
+      };
+    }
+    var certShape = _safe(isCert);
+    var crlShape = _safe(isCrl);
+    var _SHAPES = { certificate: certShape, crl: crlShape };
+    function accept(input, kind, parse, E, code, label) {
+      var who = label || "the argument";
+      var shape = _SHAPES[kind];
+      if (!shape) throw new TypeError("guard.parsed.accept: unknown kind " + kind);
+      if (_isBytes(input) || typeof input === "string") return parse(input);
+      var claimsParsed = false;
+      if (input && typeof input === "object") {
+        try {
+          claimsParsed = input.tbsBytes !== void 0;
+        } catch (_e) {
+          claimsParsed = true;
+        }
+      }
+      if (claimsParsed) {
+        if (!shape(input)) {
+          throw E(code, who + " claims to be a parsed " + kind + " (it carries tbsBytes) but is not a complete one -- pass the bytes, or the unmodified output of the matching pki.schema parser, since a partial object would be read as though the parser had produced it");
+        }
+        return input;
+      }
+      throw E(code, who + " must be a " + kind + " DER Buffer, a PEM string, or a parsed " + kind);
+    }
+    var PROVENANCE = /* @__PURE__ */ new WeakMap();
+    function recordingParser(kind, parse, ErrorClass, code, label) {
+      return function(input) {
+        var isText = typeof input === "string";
+        var snap = isText ? input : bytes.snapshotSource(input, ErrorClass, code, label);
+        var out = parse(snap);
+        if (out && typeof out === "object") {
+          PROVENANCE.set(out, {
+            kind,
+            source: isText ? snap : Buffer.from(snap),
+            shape: _shapeOf(out)
+          });
+        }
+        return out;
+      };
+    }
+    function recordingWalker(kind, walkNode, decodeBytes) {
+      return function(node) {
+        var out = walkNode(node);
+        if (out && typeof out === "object" && node && _isBytes(node.bytes)) {
+          PROVENANCE.set(out, {
+            kind,
+            source: Buffer.from(node.bytes),
+            shape: _shapeOf(out),
+            derive: function(src) {
+              return walkNode(decodeBytes(src));
+            }
+          });
+        }
+        return out;
+      };
+    }
+    function _recordOf(obj, kind) {
+      if (!obj || typeof obj !== "object") return void 0;
+      var rec = PROVENANCE.get(obj);
+      return rec && rec.kind === kind ? rec : void 0;
+    }
+    function isRecorded(obj) {
+      return !!obj && typeof obj === "object" && PROVENANCE.has(obj);
+    }
+    function isRecordedAsProduced(obj) {
+      if (!isRecorded(obj)) return false;
+      var shape = PROVENANCE.get(obj).shape;
+      var keys = _allNames(obj);
+      for (var i = 0; i < keys.length; i++) {
+        if (!shape[keys[i]]) return false;
+      }
+      return true;
+    }
+    function _shapeOf(obj) {
+      var shape = /* @__PURE__ */ Object.create(null);
+      var keys = _allNames(obj);
+      for (var i = 0; i < keys.length; i++) shape[keys[i]] = true;
+      return shape;
+    }
+    function _allNames(obj) {
+      var names = [];
+      var seen = /* @__PURE__ */ Object.create(null);
+      for (var o = obj; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+        var own = Object.getOwnPropertyNames(o);
+        for (var i = 0; i < own.length; i++) {
+          if (seen[own[i]]) continue;
+          seen[own[i]] = true;
+          names.push(own[i]);
+        }
+      }
+      return names;
+    }
+    function fromTrustedSource(input, kind, claimFields, parse, E, code, why) {
+      if (input && typeof input === "object" && !_isBytes(input)) {
+        var rec = _recordOf(input, kind);
+        if (rec !== void 0) return (rec.derive || parse)(rec.source);
+        for (var i = 0; i < claimFields.length; i++) {
+          var claims;
+          try {
+            claims = input[claimFields[i]] !== void 0;
+          } catch (_e) {
+            claims = true;
+          }
+          if (claims) throw E(code, why);
+        }
+      }
+      return parse(input);
+    }
+    var _CLAIMS = {
+      certificate: ["tbsBytes", "subjectPublicKeyInfo", "serialNumberHex"],
+      crl: ["tbsBytes", "revokedCertificates", "crlExtensions"],
+      cms: ["signerInfos", "encapContentInfo"]
+    };
+    var _WHY = {
+      certificate: "the signed byte range, the signature and the fields that range encodes are separate properties of a parsed object, so a REBUILT certificate (Object.assign, spread, a JSON round-trip) could have them describe different certificates -- keep a real CA certificate's signed bytes and signature and replace only its public key and every field is still well-formed",
+      crl: "the signed byte range, the revocation list and the scope extensions are separate properties of a parsed object, so a REBUILT CRL could have them describe different CRLs -- empty the revocation list and a correctly signed CRL reports a revoked certificate as good",
+      cms: "the signed attribute bytes, the signature, the encapsulated content and the certificates that verify it are separate properties of a parsed object, so a REBUILT SignedData could have them describe different messages -- keep a genuine signer's signature and signed attributes and put other content beside them, and every part of the check passes for content that signer never signed"
+    };
+    function acceptDerived(input, kind, parse, E, code, label) {
+      var claims = _CLAIMS[kind];
+      if (!claims) throw new TypeError("guard.parsed.acceptDerived: unknown kind " + kind);
+      var who = label || "the argument";
+      if (input !== null && input !== void 0 && typeof input === "object" && !_isBytes(input)) {
+        var claimsSomething = false;
+        for (var i = 0; i < claims.length && !claimsSomething; i++) {
+          try {
+            claimsSomething = input[claims[i]] !== void 0;
+          } catch (_e) {
+            claimsSomething = true;
+          }
+        }
+        if (!claimsSomething) {
+          throw E(code, who + " must be a " + kind + " DER Buffer, a PEM string, or a parsed " + kind);
+        }
+      }
+      var ns = { certificate: "x509", crl: "crl", cms: "cms" }[kind];
+      return fromTrustedSource(
+        input,
+        kind,
+        claims,
+        parse,
+        E,
+        code,
+        who + " must be its DER bytes, a PEM string, or an unmodified pki.schema." + ns + ".parse result: " + _WHY[kind]
+      );
+    }
+    module2.exports = {
+      accept,
+      acceptDerived,
+      fromTrustedSource,
+      recordingParser,
+      recordingWalker,
+      isCert: certShape,
+      isCrl: crlShape,
+      isRecorded,
+      isRecordedAsProduced
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-secret.js
+var require_guard_secret = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-secret.js"(exports2, module2) {
+    "use strict";
+    var bytes = require_guard_bytes();
+    function zeroize(value, ErrorClass, code, label) {
+      if (value === null || value === void 0) return value;
+      var view = bytes.view(value, ErrorClass, code, label);
+      view.fill(0);
+      return value;
+    }
+    function zeroizeAll(list, ErrorClass, code, label) {
+      if (!list) return list;
+      for (var i = 0; i < list.length; i++) zeroize(list[i], ErrorClass, code, label);
+      return list;
+    }
+    module2.exports = { zeroize, zeroizeAll };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-bytes.js
+var require_guard_bytes = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-bytes.js"(exports2, module2) {
+    "use strict";
+    var async = require_guard_async();
+    function _raise(E, code, message, cause) {
+      return E.prototype instanceof Error ? new E(code, message, cause) : E(code, message, cause);
+    }
+    function view(input, ErrorClass, code, label) {
+      if (Buffer.isBuffer(input) || input instanceof Uint8Array) {
+        try {
+          return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+        } catch (e) {
+          throw _raise(ErrorClass, code, label + ": input is not a usable byte view (detached backing buffer?)", e);
+        }
+      }
+      throw _raise(ErrorClass, code, label + ": expected a Buffer / Uint8Array");
+    }
+    function source(input, ErrorClass, code, label) {
+      var isAb = input instanceof ArrayBuffer;
+      if (isAb || ArrayBuffer.isView(input)) {
+        try {
+          return isAb ? Buffer.from(input) : Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+        } catch (e) {
+          throw _raise(ErrorClass, code, label + ": input is not a usable byte source (detached backing buffer?)", e);
+        }
+      }
+      throw _raise(ErrorClass, code, label + ": expected a BufferSource (ArrayBuffer / TypedArray / Buffer)");
+    }
+    function snapshot(input, ErrorClass, code, label) {
+      return Buffer.from(view(input, ErrorClass, code, label));
+    }
+    function snapshotSource(input, ErrorClass, code, label) {
+      return Buffer.from(source(input, ErrorClass, code, label));
+    }
+    function snapshotDeep(value, ErrorClass, code, label, opts) {
+      var o = opts || {};
+      var cap = o.maxDepth == null ? 64 : o.maxDepth;
+      return _deep(value, ErrorClass, code, label, cap, 0, o.collect || null);
+    }
+    var _CRYPTO_KEY_SURFACE = { type: 1, extractable: 1, algorithm: 1, usages: 1 };
+    var _ERROR_SURFACE = { message: 1, stack: 1, name: 1, cause: 1 };
+    var _REGEXP_SURFACE = {
+      lastIndex: 1,
+      source: 1,
+      flags: 1,
+      global: 1,
+      ignoreCase: 1,
+      multiline: 1,
+      sticky: 1,
+      unicode: 1,
+      unicodeSets: 1,
+      hasIndices: 1,
+      dotAll: 1
+    };
+    var _THENABLE_SURFACE = { then: 1, catch: 1, finally: 1 };
+    function _opaqueSurface(v, ErrorClass, code, label) {
+      var proto = Object.getPrototypeOf(v);
+      if (proto === Object.prototype || proto === null) return null;
+      if (v instanceof WeakMap || v instanceof WeakSet) return {};
+      if (v instanceof Error) return _ERROR_SURFACE;
+      if (v instanceof RegExp) return _REGEXP_SURFACE;
+      if (require_webcrypto().isCryptoKeyLike(v)) return _CRYPTO_KEY_SURFACE;
+      var then;
+      try {
+        then = v.then;
+      } catch (e) {
+        throw _raise(ErrorClass, code, label + ': reading "then" threw', e);
+      }
+      if (typeof then === "function") return _THENABLE_SURFACE;
+      return null;
+    }
+    function _opaqueIsSafeToPass(v, surface) {
+      var keys = _reachableKeys(v);
+      for (var i = 0; i < keys.length; i++) {
+        if (surface[keys[i]]) continue;
+        if (!_wasEnumerable(v, keys[i])) continue;
+        return false;
+      }
+      return true;
+    }
+    function _reachableKeys(v) {
+      var names = [];
+      var seen = /* @__PURE__ */ Object.create(null);
+      for (var o = v; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+        var own = Object.getOwnPropertyNames(o);
+        for (var i = 0; i < own.length; i++) {
+          if (own[i] === "constructor" || seen[own[i]]) continue;
+          seen[own[i]] = true;
+          names.push(own[i]);
+        }
+      }
+      return names;
+    }
+    function _copyBytesSameKind(v, ErrorClass, code, label, collect) {
+      var src = source(v, ErrorClass, code, label);
+      var owned = new ArrayBuffer(src.length);
+      new Uint8Array(owned).set(src);
+      if (collect) collect.push(Buffer.from(owned, 0, src.length));
+      if (Buffer.isBuffer(v)) return Buffer.from(owned, 0, src.length);
+      if (v instanceof ArrayBuffer) return owned;
+      if (v instanceof DataView) return new DataView(owned);
+      return new v.constructor(owned, 0, src.length / v.BYTES_PER_ELEMENT);
+    }
+    function _deep(v, ErrorClass, code, label, cap, depth, collect) {
+      if (depth > cap) throw _raise(ErrorClass, code, label + " is nested too deeply to copy");
+      if (v == null || typeof v !== "object") return v;
+      if (Buffer.isBuffer(v) || ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
+        var bytesCopy = _copyBytesSameKind(v, ErrorClass, code, label, collect);
+        _copyNamed(v, bytesCopy, ErrorClass, code, label, cap, depth, collect);
+        return bytesCopy;
+      }
+      if (require_guard_parsed().isRecordedAsProduced(v)) return v;
+      if (v instanceof Date) return new Date(v.getTime());
+      if (Array.isArray(v)) {
+        var arr = [];
+        for (var i = 0; i < v.length; i++) arr.push(_deep(v[i], ErrorClass, code, label, cap, depth + 1, collect));
+        _copyNamed(v, arr, ErrorClass, code, label, cap, depth, collect);
+        return arr;
+      }
+      var surface = _opaqueSurface(v, ErrorClass, code, label);
+      if (surface) {
+        if (_opaqueIsSafeToPass(v, surface)) return v;
+        throw _raise(ErrorClass, code, label + ": a " + (v.constructor && v.constructor.name || "value") + " carrying its own fields cannot be used here -- its state cannot be copied, so those fields would stay changeable after they were checked; pass the fields as a plain object");
+      }
+      if (v instanceof Map) return _copyEntries(v, /* @__PURE__ */ new Map(), ErrorClass, code, label, cap, depth, collect);
+      if (v instanceof Set) return _copyEntries(v, /* @__PURE__ */ new Set(), ErrorClass, code, label, cap, depth, collect);
+      var out = Object.create(Object.getPrototypeOf(v));
+      _copyNamed(v, out, ErrorClass, code, label, cap, depth, collect);
+      return out;
+    }
+    function _namesToCopy(src, dst) {
+      var indexed = Array.isArray(dst) || ArrayBuffer.isView(dst);
+      var kind = indexed || dst instanceof Map || dst instanceof Set || dst instanceof ArrayBuffer;
+      if (!kind) return _reachableKeys(src);
+      var own = Object.getOwnPropertyNames(src);
+      var out = [];
+      for (var i = 0; i < own.length; i++) {
+        if (own[i] === "length" || indexed && String(Number(own[i])) === own[i]) continue;
+        out.push(own[i]);
+      }
+      return out;
+    }
+    function _copyEntries(src, dst, ErrorClass, code, label, cap, depth, collect) {
+      src.forEach(function(value, key) {
+        var copiedValue = _deep(value, ErrorClass, code, label, cap, depth + 1, collect);
+        if (dst instanceof Set) dst.add(copiedValue);
+        else dst.set(_deep(key, ErrorClass, code, label, cap, depth + 1, collect), copiedValue);
+      });
+      _copyNamed(src, dst, ErrorClass, code, label, cap, depth, collect);
+      return dst;
+    }
+    function _copyNamed(src, dst, ErrorClass, code, label, cap, depth, collect) {
+      var keys = _namesToCopy(src, dst);
+      for (var k = 0; k < keys.length; k++) {
+        var value;
+        try {
+          value = src[keys[k]];
+        } catch (e) {
+          throw _raise(ErrorClass, code, label + ": reading " + JSON.stringify(keys[k]) + " threw", e);
+        }
+        Object.defineProperty(dst, keys[k], {
+          value: typeof value === "function" ? value : _deep(value, ErrorClass, code, label, cap, depth + 1, collect),
+          writable: true,
+          enumerable: _wasEnumerable(src, keys[k]),
+          configurable: true
+        });
+      }
+    }
+    function _wasEnumerable(v, name) {
+      for (var o = v; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+        var d = Object.getOwnPropertyDescriptor(o, name);
+        if (d) return !!d.enumerable;
+      }
+      return false;
+    }
+    function fixArguments(ErrorClass, code, args) {
+      var copies = [];
+      var values = [];
+      function release() {
+        require_guard_secret().zeroizeAll(
+          copies,
+          ErrorClass,
+          code,
+          // allow:inline-require -- circular load: guard-secret requires this module
+          "a copy of a caller-supplied argument"
+        );
+      }
+      try {
+        for (var i = 0; i < args.length; i++) {
+          values.push(snapshotDeep(args[i][0], ErrorClass, code, args[i][1], { collect: copies }));
+        }
+      } catch (e) {
+        release();
+        throw e;
+      }
+      return { values, release };
+    }
+    function fixedCall(ErrorClass, code, args, body) {
+      var handle = null;
+      return async.deferred(function() {
+        handle = fixArguments(ErrorClass, code, args);
+        return body.apply(null, handle.values);
+      }).finally(function() {
+        if (handle) handle.release();
+      });
+    }
+    module2.exports = {
+      view,
+      source,
+      snapshot,
+      snapshotSource,
+      snapshotDeep,
+      fixArguments,
+      fixedCall
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-text.js
+var require_guard_text = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-text.js"(exports2, module2) {
+    "use strict";
+    var bytes = require_guard_bytes();
+    var LATIN1 = "latin1";
+    function decode(input, maxBytes, ErrorClass, spec) {
+      if (!Number.isInteger(maxBytes) || maxBytes < 0) {
+        throw new TypeError("guard.text.decode: maxBytes must be a non-negative integer");
+      }
+      var charset = spec.charset || LATIN1;
+      if (Buffer.isBuffer(input)) {
+        input = bytes.view(input, ErrorClass, spec.badInput, spec.label);
+        if (input.length > maxBytes) throw new ErrorClass(spec.tooLarge, spec.label + " exceeds the size cap");
+        if (spec.fatal) {
+          try {
+            return new TextDecoder(charset, { fatal: true }).decode(input);
+          } catch (e) {
+            throw new ErrorClass(spec.badDecode, spec.label + " is not valid " + charset, e);
+          }
+        }
+        return input.toString(charset);
+      }
+      if (typeof input === "string") {
+        var byteLen = charset === LATIN1 ? input.length : Buffer.byteLength(input, "utf8");
+        if (byteLen > maxBytes) throw new ErrorClass(spec.tooLarge, spec.label + " exceeds the size cap");
+        return input;
+      }
+      throw new ErrorClass(spec.badInput, spec.label + " expects a string or Buffer");
+    }
+    module2.exports = { decode };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-limits.js
+var require_guard_limits = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-limits.js"(exports2, module2) {
+    "use strict";
+    var constants = require_constants();
+    function cap(value, key, dflt, opts) {
+      if (value === void 0) return dflt;
+      opts = opts || {};
+      var min = opts.min === void 0 ? 0 : opts.min;
+      if (!Number.isInteger(min) || opts.max !== void 0 && !Number.isInteger(opts.max)) {
+        throw new TypeError("guard.limits.cap: the min/max bounds for " + key + " must be integers");
+      }
+      if (!Number.isInteger(value) || value < min || opts.max !== void 0 && value > opts.max) {
+        var want = "an integer >= " + min + (opts.max !== void 0 ? " and <= " + opts.max : "");
+        if (min === 0 && opts.max === void 0) want = "a non-negative integer";
+        if (opts.E) throw opts.E(opts.code, (opts.label || key) + " must be " + want);
+        throw new TypeError("decode: " + key + " must be " + want);
+      }
+      return value;
+    }
+    function depthCap(value, key, dflt) {
+      var n = cap(value, key, dflt);
+      if (n > constants.LIMITS.MAX_DECODE_DEPTH_CEILING) {
+        throw new TypeError("decode: " + key + " " + n + " exceeds the stack-safe ceiling " + constants.LIMITS.MAX_DECODE_DEPTH_CEILING);
+      }
+      return n;
+    }
+    function counter(max, E, code, label) {
+      if (!Number.isInteger(max) || max < 0) {
+        throw new TypeError("guard.limits.counter: max must be a non-negative integer");
+      }
+      var n = 0;
+      return {
+        tick: function() {
+          n += 1;
+          if (n > max) throw E(code, (label || "decoded item") + " count exceeds the cap " + max);
+        }
+      };
+    }
+    function byteCap(buf, max, E, code, label) {
+      if (!Number.isInteger(max) || max < 0) {
+        throw new TypeError("guard.limits.byteCap: max must be a non-negative integer");
+      }
+      if (buf.length > max) {
+        throw E(code, (label || "input") + " is " + buf.length + " bytes, over the " + max + "-byte cap");
+      }
+      return buf;
+    }
+    module2.exports = { cap, depthCap, counter, byteCap };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-crypto.js
+var require_guard_crypto = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-crypto.js"(exports2, module2) {
+    "use strict";
+    var nodeCrypto = require("node:crypto");
+    function constantTimeEqual(a, b) {
+      return a.length === b.length && nodeCrypto.timingSafeEqual(a, b);
+    }
+    function isOctetAligned(bitString) {
+      return !!bitString && bitString.unusedBits === 0;
+    }
+    function assertOctetAligned(bitString, E, code, label) {
+      if (!isOctetAligned(bitString)) {
+        throw E(code, (label || "signature") + " BIT STRING must be octet-aligned (0 unused bits)");
+      }
+      return bitString;
+    }
+    module2.exports = { constantTimeEqual, isOctetAligned, assertOctetAligned };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-range.js
+var require_guard_range = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-range.js"(exports2, module2) {
+    "use strict";
+    var UINT31_MAX = 2147483647n;
+    var SAFE_MAX = 9007199254740991n;
+    var SAFE_MIN = -9007199254740991n;
+    var UINT64_MAX = 18446744073709551615n;
+    function int(value, min, max, E, code, label) {
+      if (typeof min !== "bigint" || typeof max !== "bigint") {
+        throw new TypeError("guard.range.int: the min/max bounds must be BigInt");
+      }
+      if (max > SAFE_MAX) {
+        throw new TypeError("guard.range.int: max " + max + " exceeds the safe-integer ceiling; use a BigInt-preserving guard");
+      }
+      if (min < SAFE_MIN) {
+        throw new TypeError("guard.range.int: min " + min + " is below the safe-integer floor; use a BigInt-preserving guard");
+      }
+      if (typeof value !== "bigint" || value < min || value > max) {
+        throw E(code, label + " must be an integer within " + min + ".." + max);
+      }
+      return Number(value);
+    }
+    function uint31(value, E, code, label) {
+      return int(value, 0n, UINT31_MAX, E, code, label);
+    }
+    function positiveInt31(value, E, code, label) {
+      return int(value, 1n, UINT31_MAX, E, code, label);
+    }
+    function uint64(value, E, code, label) {
+      var v;
+      if (typeof value === "bigint") {
+        v = value;
+      } else if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+        v = BigInt(value);
+      } else {
+        throw E(code, label + " must be a non-negative safe-integer Number or a BigInt (a uint64)");
+      }
+      if (v < 0n || v > UINT64_MAX) {
+        throw E(code, label + " must be a uint64 in [0, 2^64)");
+      }
+      return v;
+    }
+    function authoredInteger(value, E, code, label) {
+      if (typeof value === "bigint") return value;
+      if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
+      throw E(code, label + " must be an integer (a safe-integer number, or a bigint for a large value)");
+    }
+    module2.exports = {
+      int,
+      uint31,
+      positiveInt31,
+      uint64,
+      authoredInteger
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-time.js
+var require_guard_time = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-time.js"(exports2, module2) {
+    "use strict";
+    function assertValid(value, E, code, label) {
+      if (!(value instanceof Date) || isNaN(value.getTime())) {
+        throw E(code, (label || "value") + " must be a valid Date");
+      }
+      return value;
+    }
+    function within(instant, lower, upper, E, code, label, opts) {
+      assertValid(instant, E, code, label);
+      assertValid(lower, E, code, (label || "window") + " lower bound");
+      assertValid(upper, E, code, (label || "window") + " upper bound");
+      var t = instant.getTime();
+      var lo = lower.getTime();
+      var hi = upper.getTime();
+      return t >= lo && (opts && opts.upperInclusive ? t <= hi : t < hi);
+    }
+    module2.exports = {
+      assertValid,
+      within
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-name.js
+var require_guard_name = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-name.js"(exports2, module2) {
+    "use strict";
+    function assertNoControlBytes(str, E, code, label) {
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        if (c === 0 || c < 32 && c !== 9) {
+          throw E(code, label + " contains an embedded control byte (CVE-2009-2408)");
+        }
+      }
+      return str;
+    }
+    function assertPrintableIa5(buf, E, code, label) {
+      for (var i = 0; i < buf.length; i++) {
+        if (buf[i] < 32 || buf[i] > 126) {
+          throw E(code, label + " must be a printable IA5String (no control bytes)");
+        }
+      }
+      return buf;
+    }
+    function _isSpace(c) {
+      return c === 32 || c === 9 || c === 10 || c === 13;
+    }
+    function _canonAttrValue(v, E, code, label) {
+      if (typeof v !== "string") return v;
+      assertNoControlBytes(v, E, code, label);
+      var out = "", lastWasSpace = true;
+      for (var i = 0; i < v.length; i++) {
+        if (_isSpace(v.charCodeAt(i))) {
+          lastWasSpace = true;
+          continue;
+        }
+        if (lastWasSpace && out.length) out += " ";
+        lastWasSpace = false;
+        out += v.charAt(i);
+      }
+      return out.toLowerCase();
+    }
+    function _assertSequence(a, b, E, code, label, what) {
+      if (!Array.isArray(a) || !Array.isArray(b)) {
+        throw E(code, "cannot compare " + label + ": " + what + " comparison requires the RDN sequence on both sides (pass name.rdns, not the parsed Name)");
+      }
+    }
+    function rdnEqual(a, b, E, code, label) {
+      _assertSequence(a, b, E, code, label, "an RDN");
+      if (a.length !== b.length) return false;
+      var used = [];
+      for (var i = 0; i < a.length; i++) {
+        var found = false;
+        for (var j = 0; j < b.length; j++) {
+          if (used[j]) continue;
+          if (a[i].type === b[j].type && _canonAttrValue(a[i].value, E, code, label) === _canonAttrValue(b[j].value, E, code, label)) {
+            used[j] = true;
+            found = true;
+            break;
+          }
+        }
+        if (!found) return false;
+      }
+      return true;
+    }
+    function dnEqual(rdnsA, rdnsB, E, code, label) {
+      _assertSequence(rdnsA, rdnsB, E, code, label, "a distinguished-name");
+      if (rdnsA.length !== rdnsB.length) return false;
+      for (var i = 0; i < rdnsA.length; i++) {
+        if (!rdnEqual(rdnsA[i], rdnsB[i], E, code, label)) return false;
+      }
+      return true;
+    }
+    function escapeControlBytes(str) {
+      var s = String(str), out = "";
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        out += c < 32 || c === 127 ? "\\x" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase() : s.charAt(i);
+      }
+      return out;
+    }
+    var DN_SPECIAL = { 44: 1, 43: 1, 34: 1, 92: 1, 60: 1, 62: 1, 59: 1 };
+    function escapeDnValue(v) {
+      var s = String(v), out = "";
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c < 32 || c === 127) out += "\\" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase();
+        else if (DN_SPECIAL[c] === 1) out += "\\" + s.charAt(i);
+        else out += s.charAt(i);
+      }
+      if (out.length && out.charAt(out.length - 1) === " ") out = out.slice(0, -1) + "\\ ";
+      if (out.charAt(0) === "#" || out.charAt(0) === " ") out = "\\" + out;
+      return out;
+    }
+    module2.exports = {
+      assertNoControlBytes,
+      assertPrintableIa5,
+      dnEqual,
+      rdnEqual,
+      escapeControlBytes,
+      escapeDnValue
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-encoding.js
+var require_guard_encoding = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-encoding.js"(exports2, module2) {
+    "use strict";
+    function _alphabet(chars) {
+      var t = new Uint8Array(128);
+      for (var i = 0; i < chars.length; i++) t[chars.charCodeAt(i)] = 1;
+      return t;
+    }
+    var UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    var LOWER = "abcdefghijklmnopqrstuvwxyz";
+    var DIGITS = "0123456789";
+    var B64URL_ALPHABET = _alphabet(UPPER + LOWER + DIGITS + "-_");
+    var B64_ALPHABET = _alphabet(UPPER + LOWER + DIGITS + "+/");
+    var HEX_ALPHABET = _alphabet(DIGITS + "abcdefABCDEF");
+    function _inAlphabet(text, table) {
+      for (var i = 0; i < text.length; i++) {
+        var c = text.charCodeAt(i);
+        if (c > 127 || table[c] !== 1) return false;
+      }
+      return true;
+    }
+    function _capBefore(nChars, perByteChars, maxBytes, E, code, label) {
+      if (maxBytes == null) return;
+      if (!Number.isInteger(maxBytes) || maxBytes < 0) {
+        throw new TypeError("guard.encoding: maxBytes must be a non-negative integer or null");
+      }
+      if (Math.floor(nChars / perByteChars) > maxBytes) {
+        throw E(code, label + " exceeds the maximum decoded size of " + maxBytes + " bytes");
+      }
+    }
+    function base64url(text, maxBytes, E, code, label) {
+      if (typeof text !== "string") throw E(code, label + " must be a string");
+      if (!_inAlphabet(text, B64URL_ALPHABET)) throw E(code, label + " is not base64url (padding or a non-alphabet character)");
+      if (text.length % 4 === 1) throw E(code, label + " has an impossible base64url length");
+      _capBefore(text.length * 3, 4, maxBytes, E, code, label);
+      var buf = Buffer.from(text, "base64url");
+      if (buf.toString("base64url") !== text) throw E(code, label + " is not canonical base64url");
+      return buf;
+    }
+    function base64(text, maxBytes, E, code, label) {
+      if (typeof text !== "string") throw E(code, label + " must be a string");
+      var pad = 0;
+      while (pad < 2 && text.length > pad && text.charCodeAt(text.length - 1 - pad) === 61) pad++;
+      if (!_inAlphabet(text.slice(0, text.length - pad), B64_ALPHABET)) throw E(code, label + " is not base64 (a non-alphabet character)");
+      if (text.length % 4 !== 0) throw E(code, label + " must be whole 4-character base64 groups (RFC 4648 sec. 3.5)");
+      _capBefore(text.length * 3, 4, maxBytes, E, code, label);
+      var buf = Buffer.from(text, "base64");
+      if (buf.toString("base64") !== text) throw E(code, label + " is not canonical base64 (RFC 4648 sec. 3.5)");
+      return buf;
+    }
+    function hex(text, maxBytes, E, code, label) {
+      if (typeof text !== "string") throw E(code, label + " must be a string");
+      if (!_inAlphabet(text, HEX_ALPHABET)) throw E(code, label + " is not hexadecimal");
+      if (text.length % 2 !== 0) throw E(code, label + " must have an even number of hex digits");
+      _capBefore(text.length, 2, maxBytes, E, code, label);
+      var buf = Buffer.from(text, "hex");
+      if (buf.toString("hex") !== text.toLowerCase()) throw E(code, label + " is not canonical hexadecimal");
+      return buf;
+    }
+    module2.exports = { base64url, base64, hex };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-json.js
+var require_guard_json = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-json.js"(exports2, module2) {
+    "use strict";
+    var text = require_guard_text();
+    var limits = require_guard_limits();
+    function _hexVal(c) {
+      if (c >= 48 && c <= 57) return c - 48;
+      if (c >= 97 && c <= 102) return c - 97 + 10;
+      if (c >= 65 && c <= 70) return c - 65 + 10;
+      return -1;
+    }
+    function parse(input, ErrorClass, spec) {
+      function E(code, message, cause) {
+        return new ErrorClass(code, message, cause);
+      }
+      if (spec.maxBytes === void 0 || spec.maxDepth === void 0) {
+        throw new TypeError("guard.json.parse: spec.maxBytes and spec.maxDepth are required");
+      }
+      var maxBytes = limits.cap(spec.maxBytes, "guard.json.parse spec.maxBytes", void 0);
+      var maxDepth = limits.depthCap(spec.maxDepth, "guard.json.parse spec.maxDepth", void 0);
+      var str = text.decode(input, maxBytes, ErrorClass, {
+        charset: "utf-8",
+        fatal: true,
+        tooLarge: spec.tooLarge,
+        badDecode: spec.badJson,
+        badInput: spec.badInput,
+        label: spec.label
+      });
+      var i = 0, n = str.length;
+      function ws() {
+        while (i < n) {
+          var c = str.charCodeAt(i);
+          if (c === 32 || c === 9 || c === 10 || c === 13) i++;
+          else break;
+        }
+      }
+      function fail(msg) {
+        throw E(spec.badJson, "invalid JSON at offset " + i + ": " + msg);
+      }
+      function value(depth) {
+        if (depth > maxDepth) throw E(spec.tooDeep, "JSON nesting exceeds the depth cap");
+        ws();
+        if (i >= n) fail("unexpected end of input");
+        var c = str[i];
+        if (c === "{") return object(depth);
+        if (c === "[") return array(depth);
+        if (c === '"') return string();
+        if (c === "-" || c >= "0" && c <= "9") return number();
+        if (str.substr(i, 4) === "true") {
+          i += 4;
+          return true;
+        }
+        if (str.substr(i, 5) === "false") {
+          i += 5;
+          return false;
+        }
+        if (str.substr(i, 4) === "null") {
+          i += 4;
+          return null;
+        }
+        fail("unexpected token");
+        return void 0;
+      }
+      function object(depth) {
+        i++;
+        var out = {};
+        ws();
+        if (str[i] === "}") {
+          i++;
+          return out;
+        }
+        for (; ; ) {
+          ws();
+          if (str[i] !== '"') fail("expected a string key");
+          var key = string();
+          if (Object.prototype.hasOwnProperty.call(out, key)) throw E(spec.duplicateMember, "duplicate JSON member " + JSON.stringify(key));
+          ws();
+          if (str[i] !== ":") fail("expected ':'");
+          i++;
+          Object.defineProperty(out, key, { value: value(depth + 1), writable: true, enumerable: true, configurable: true });
+          ws();
+          if (str[i] === ",") {
+            i++;
+            continue;
+          }
+          if (str[i] === "}") {
+            i++;
+            return out;
+          }
+          fail("expected ',' or '}'");
+        }
+      }
+      function array(depth) {
+        i++;
+        var out = [];
+        ws();
+        if (str[i] === "]") {
+          i++;
+          return out;
+        }
+        for (; ; ) {
+          out.push(value(depth + 1));
+          ws();
+          if (str[i] === ",") {
+            i++;
+            continue;
+          }
+          if (str[i] === "]") {
+            i++;
+            return out;
+          }
+          fail("expected ',' or ']'");
+        }
+      }
+      function string() {
+        i++;
+        var s = "";
+        for (; ; ) {
+          if (i >= n) fail("unterminated string");
+          var c = str[i++];
+          if (c === '"') return s;
+          if (c === "\\") {
+            if (i >= n) fail("unterminated escape");
+            var e = str[i++];
+            if (e === '"') s += '"';
+            else if (e === "\\") s += "\\";
+            else if (e === "/") s += "/";
+            else if (e === "b") s += "\b";
+            else if (e === "f") s += "\f";
+            else if (e === "n") s += "\n";
+            else if (e === "r") s += "\r";
+            else if (e === "t") s += "	";
+            else if (e === "u") {
+              var cp = 0;
+              if (i + 4 > n) fail("bad \\u escape");
+              for (var h = 0; h < 4; h++) {
+                var d = _hexVal(str.charCodeAt(i + h));
+                if (d < 0) fail("bad \\u escape");
+                cp = cp << 4 | d;
+              }
+              s += String.fromCharCode(cp);
+              i += 4;
+            } else fail("bad escape");
+          } else if (c.charCodeAt(0) < 32) {
+            fail("control character in string");
+          } else s += c;
+        }
+      }
+      function number() {
+        var start = i;
+        if (str[i] === "-") i++;
+        var intStart = i;
+        while (i < n && str[i] >= "0" && str[i] <= "9") i++;
+        var intLen = i - intStart;
+        if (intLen === 0) fail("malformed number");
+        if (intLen > 1 && str[intStart] === "0") fail("malformed number");
+        if (str[i] === ".") {
+          i++;
+          var fracStart = i;
+          while (i < n && str[i] >= "0" && str[i] <= "9") i++;
+          if (i === fracStart) fail("malformed number");
+        }
+        if (str[i] === "e" || str[i] === "E") {
+          i++;
+          if (str[i] === "+" || str[i] === "-") i++;
+          var expStart = i;
+          while (i < n && str[i] >= "0" && str[i] <= "9") i++;
+          if (i === expStart) fail("malformed number");
+        }
+        var v = Number(str.slice(start, i));
+        if (!isFinite(v)) fail("bad number");
+        return v;
+      }
+      var result = value(0);
+      ws();
+      if (i !== n) fail("trailing content after JSON value");
+      return result;
+    }
+    module2.exports = { parse };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-identifier.js
+var require_guard_identifier = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-identifier.js"(exports2, module2) {
+    "use strict";
+    function _isDottedDecimal(str) {
+      if (str.length === 0) return false;
+      var arcs = 0, digits = 0, leadingZero = false;
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        if (c === 46) {
+          if (digits === 0 || leadingZero) return false;
+          arcs++;
+          digits = 0;
+          leadingZero = false;
+          continue;
+        }
+        if (c < 48 || c > 57) return false;
+        if (digits === 1 && str.charCodeAt(i - 1) === 48) leadingZero = true;
+        digits++;
+      }
+      if (digits === 0 || leadingZero) return false;
+      return arcs >= 1;
+    }
+    function assertCanonicalOid(str, E, code, label, boundsCode) {
+      var who = label || "OID";
+      if (typeof str !== "string" || !_isDottedDecimal(str)) {
+        throw E(code, who + " must be a canonical dotted-decimal OID string of two or more arcs with no leading-zero component");
+      }
+      if (boundsCode === null) return str;
+      var bcode = boundsCode === void 0 ? code : boundsCode;
+      var parts = str.split(".");
+      var root = BigInt(parts[0]);
+      var second = BigInt(parts[1]);
+      if (root > 2n) throw E(bcode, who + " root arc must be 0, 1, or 2 (X.660)");
+      if (root < 2n && second > 39n) throw E(bcode, who + " second arc must be 0..39 under roots 0 and 1 (X.660)");
+      return str;
+    }
+    function assertKnownKeys(obj, known, E, code, message) {
+      var describe = typeof message === "function" ? message : function(k) {
+        return message + JSON.stringify(k);
+      };
+      Object.keys(obj).forEach(function(k) {
+        if (!Object.prototype.hasOwnProperty.call(known, k)) throw E(code, describe(k));
+      });
+    }
+    module2.exports = { assertCanonicalOid, assertKnownKeys };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-header.js
+var require_guard_header = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-header.js"(exports2, module2) {
+    "use strict";
+    var C = require_constants();
+    function assertField(name, value, E, code) {
+      if (typeof name !== "string" || name.length === 0) throw new E(code, "a header field name must be a non-empty string");
+      for (var i = 0; i < name.length; i++) {
+        var nc = name.charCodeAt(i);
+        if (nc < 33 || nc > 126 || nc === 58) throw new E(code, "a header field name must be RFC 5322 ftext (printable ASCII, no space / ':' / control): " + JSON.stringify(name));
+      }
+      var v = typeof value === "string" ? value : String(value);
+      for (var j = 0; j < v.length; j++) {
+        var vc = v.charCodeAt(j);
+        if (vc === 0 || vc === 13 || vc === 10) throw new E(code, "a header field value must not contain CR / LF / NUL (header injection) in " + JSON.stringify(name));
+      }
+      if (Buffer.byteLength(name, "utf8") + 2 + Buffer.byteLength(v, "utf8") > C.LIMITS.HEADER_LINE_MAX_OCTETS) {
+        throw new E(code, "a header field line exceeds RFC 5322's " + C.LIMITS.HEADER_LINE_MAX_OCTETS + "-octet limit: " + JSON.stringify(name));
+      }
+      return v;
+    }
+    module2.exports = { assertField };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-compress.js
+var require_guard_compress = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-compress.js"(exports2, module2) {
+    "use strict";
+    var zlib = require("zlib");
+    var DECOMPRESS = {
+      zlib: zlib.inflateSync,
+      // RFC 1950
+      brotli: zlib.brotliDecompressSync,
+      // RFC 7932
+      zstd: zlib.zstdDecompressSync
+      // RFC 8478
+    };
+    var _PROBE_COMPRESS = {
+      zlib: zlib.deflateSync,
+      brotli: zlib.brotliCompressSync,
+      zstd: zlib.zstdCompressSync
+    };
+    function _reportsTruncation(name) {
+      var compress = _PROBE_COMPRESS[name];
+      var decompress = DECOMPRESS[name];
+      if (typeof compress !== "function" || typeof decompress !== "function") return false;
+      var sample = Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz0123456789");
+      var frame, whole;
+      try {
+        frame = compress(sample);
+      } catch (_e) {
+        return false;
+      }
+      if (!Buffer.isBuffer(frame) || frame.length < 4) return false;
+      try {
+        whole = decompress(frame, { maxOutputLength: 4096 });
+      } catch (_e2) {
+        return false;
+      }
+      if (!Buffer.isBuffer(whole) || !whole.equals(sample)) return false;
+      var cutAccepted = false;
+      try {
+        decompress(frame.subarray(0, frame.length - 2), { maxOutputLength: 4096 });
+        cutAccepted = true;
+      } catch (_e3) {
+      }
+      return !cutAccepted;
+    }
+    var SAFE = {};
+    Object.keys(DECOMPRESS).forEach(function(n) {
+      if (_reportsTruncation(n)) SAFE[n] = true;
+    });
+    function bounded(algorithm, stream, cap, E, codes, label) {
+      var decompress = DECOMPRESS[algorithm];
+      if (!Object.prototype.hasOwnProperty.call(SAFE, algorithm) || !decompress) {
+        throw new TypeError("guard.compress.bounded: unknown or unsafe algorithm " + JSON.stringify(algorithm));
+      }
+      if (!Buffer.isBuffer(stream)) {
+        throw new TypeError("guard.compress.bounded: stream must be a Buffer (route the input through guard.bytes.view first)");
+      }
+      if (!Number.isInteger(cap) || cap < 1) {
+        throw new TypeError("guard.compress.bounded: cap must be a positive integer");
+      }
+      var what = label || "the compressed input";
+      var res;
+      try {
+        res = decompress(stream, { maxOutputLength: cap, info: true });
+      } catch (e) {
+        if (e && e.code === "ERR_BUFFER_TOO_LARGE") {
+          throw E(codes.tooLarge, what + " decompresses to more than the " + cap + "-byte cap (a decompression-bomb defense)", e);
+        }
+        throw E(codes.failed, what + " could not be decompressed", e);
+      }
+      var consumed = res.engine.bytesWritten;
+      if (consumed !== stream.length) {
+        throw E(codes.failed, what + " carries " + (stream.length - consumed) + " trailing byte(s) after the end of the compressed stream");
+      }
+      return res.buffer;
+    }
+    function algorithms() {
+      return Object.keys(SAFE);
+    }
+    module2.exports = { bounded, algorithms };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/guard-all.js
+var require_guard_all = __commonJS({
+  "node_modules/@blamejs/pki/lib/guard-all.js"(exports2, module2) {
+    "use strict";
+    var bytes = require_guard_bytes();
+    var text = require_guard_text();
+    var limits = require_guard_limits();
+    var crypto = require_guard_crypto();
+    var range = require_guard_range();
+    var time = require_guard_time();
+    var name = require_guard_name();
+    var encoding = require_guard_encoding();
+    var json = require_guard_json();
+    var identifier = require_guard_identifier();
+    var header = require_guard_header();
+    var compress = require_guard_compress();
+    var secret = require_guard_secret();
+    var parsed = require_guard_parsed();
+    var async_ = require_guard_async();
+    module2.exports = {
+      bytes,
+      text,
+      limits,
+      crypto,
+      range,
+      time,
+      name,
+      encoding,
+      json,
+      identifier,
+      header,
+      compress,
+      secret,
+      parsed,
+      async: async_
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/asn1-der.js
+var require_asn1_der = __commonJS({
+  "node_modules/@blamejs/pki/lib/asn1-der.js"(exports2, module2) {
+    "use strict";
+    var constants = require_constants();
+    var frameworkError = require_framework_error();
+    var guard = require_guard_all();
+    var Asn1Error = frameworkError.Asn1Error;
+    var OidError = frameworkError.OidError;
+    function _asn1Error(c, m) {
+      return new Asn1Error(c, m);
+    }
+    function _oidErr(c, m) {
+      return new OidError(c, m);
+    }
+    var UNIVERSAL_TYPES = {
+      BOOLEAN: { tag: 1, form: "primitive" },
+      INTEGER: { tag: 2, form: "primitive" },
+      BIT_STRING: { tag: 3, form: "primitive" },
+      OCTET_STRING: { tag: 4, form: "primitive" },
+      NULL: { tag: 5, form: "primitive" },
+      OBJECT_IDENTIFIER: { tag: 6, form: "primitive" },
+      EXTERNAL: { tag: 8, form: "constructed" },
+      ENUMERATED: { tag: 10, form: "primitive" },
+      EMBEDDED_PDV: { tag: 11, form: "constructed" },
+      UTF8_STRING: { tag: 12, form: "primitive" },
+      SEQUENCE: { tag: 16, form: "constructed" },
+      SET: { tag: 17, form: "constructed" },
+      NUMERIC_STRING: { tag: 18, form: "primitive" },
+      PRINTABLE_STRING: { tag: 19, form: "primitive" },
+      TELETEX_STRING: { tag: 20, form: "primitive" },
+      IA5_STRING: { tag: 22, form: "primitive" },
+      UTC_TIME: { tag: 23, form: "primitive" },
+      GENERALIZED_TIME: { tag: 24, form: "primitive" },
+      VISIBLE_STRING: { tag: 26, form: "primitive" },
+      UNIVERSAL_STRING: { tag: 28, form: "primitive" },
+      CHARACTER_STRING: { tag: 29, form: "constructed" },
+      BMP_STRING: { tag: 30, form: "primitive" }
+    };
+    var TAGS = {};
+    Object.keys(UNIVERSAL_TYPES).forEach(function(k) {
+      TAGS[k] = UNIVERSAL_TYPES[k].tag;
+    });
+    var CLASS_UNIVERSAL = 0;
+    var CLASS_APPLICATION = 64;
+    var CLASS_CONTEXT = 128;
+    var CLASS_PRIVATE = 192;
+    var CONSTRUCTED_BIT = 32;
+    var CONSTRUCTED_ONLY_UNIVERSAL_TAGS = /* @__PURE__ */ Object.create(null);
+    Object.keys(UNIVERSAL_TYPES).forEach(function(k) {
+      var d = UNIVERSAL_TYPES[k];
+      if (d.form === "constructed") CONSTRUCTED_ONLY_UNIVERSAL_TAGS[d.tag] = true;
+    });
+    function _className(bits) {
+      switch (bits) {
+        case CLASS_UNIVERSAL:
+          return "universal";
+        case CLASS_APPLICATION:
+          return "application";
+        case CLASS_CONTEXT:
+          return "context";
+        case CLASS_PRIVATE:
+          return "private";
+        // Coverage residual -- tagClassBits is (first & 0xc0), always one of the 4 enumerated class values; the default arm is unreachable defensive code.
+        default:
+          return "universal";
+      }
+    }
+    function _asBuffer(input, who) {
+      return guard.bytes.view(input, Asn1Error, "asn1/not-buffer", who);
+    }
+    function decode(input, opts) {
+      opts = opts || {};
+      var buf = _asBuffer(input, "decode");
+      var maxBytes = guard.limits.cap(opts.maxBytes, "maxBytes", constants.LIMITS.DER_MAX_BYTES);
+      var maxDepth = guard.limits.depthCap(opts.maxDepth, "maxDepth", constants.LIMITS.DER_MAX_DEPTH);
+      var maxItems = guard.limits.cap(opts.maxItems, "maxItems", constants.LIMITS.DER_MAX_ITEMS);
+      if (buf.length > maxBytes) {
+        throw new Asn1Error("asn1/too-large", "input " + buf.length + " bytes exceeds cap " + maxBytes);
+      }
+      var ctr = guard.limits.counter(maxItems, _asn1Error, "asn1/too-many-items", "decoded DER node");
+      var r = _decodeTLV(buf, 0, buf.length, 0, maxDepth, opts.ber === true, void 0, ctr);
+      if (!opts.allowTrailing && r.end !== buf.length) {
+        throw new Asn1Error("asn1/trailing-bytes", buf.length - r.end + " trailing byte(s) after the top-level value");
+      }
+      return r.node;
+    }
+    function _decodeTLV(buf, start, limit, depth, maxDepth, ber, strDepth, ctr) {
+      if (depth > maxDepth) {
+        throw new Asn1Error("asn1/too-deep", "nesting exceeds depth cap " + maxDepth);
+      }
+      if (ctr) ctr.tick();
+      var p = start;
+      if (p >= limit) throw new Asn1Error("asn1/truncated", "expected an identifier octet");
+      var first = buf[p];
+      p += 1;
+      var tagClassBits = first & 192;
+      var constructed = (first & CONSTRUCTED_BIT) !== 0;
+      var tagNumber = first & 31;
+      if (tagNumber === 31) {
+        tagNumber = 0;
+        var seen = 0;
+        for (; ; ) {
+          if (p >= limit) throw new Asn1Error("asn1/truncated", "truncated high-tag-number");
+          var tb = buf[p];
+          p += 1;
+          if (seen === 0 && tb === 128) {
+            throw new Asn1Error("asn1/non-minimal-tag", "leading 0x80 in high-tag-number form");
+          }
+          tagNumber = tagNumber * 128 + (tb & 127);
+          seen += 1;
+          if (seen > 4) throw new Asn1Error("asn1/tag-too-large", "high-tag-number too large");
+          if ((tb & 128) === 0) break;
+        }
+        if (tagNumber < 31) {
+          throw new Asn1Error("asn1/non-minimal-tag", "high-tag-number form used for a low tag");
+        }
+      }
+      if (tagClassBits === CLASS_UNIVERSAL && CONSTRUCTED_ONLY_UNIVERSAL_TAGS[tagNumber] && !constructed) {
+        throw new Asn1Error("asn1/bad-tlv", "a universal constructed-only type (SEQUENCE/SET/EXTERNAL/EMBEDDED PDV/CHARACTER STRING) must be constructed");
+      }
+      if (tagClassBits === CLASS_UNIVERSAL && constructed && !CONSTRUCTED_ONLY_UNIVERSAL_TAGS[tagNumber]) {
+        if (!(ber && tagNumber === TAGS.OCTET_STRING)) {
+          throw new Asn1Error("asn1/constructed-primitive-type", "a universal primitive-only type must be encoded primitive in DER");
+        }
+        strDepth = (strDepth || 0) + 1;
+        if (strDepth > constants.LIMITS.BER_MAX_STRING_NESTING) {
+          throw new Asn1Error("asn1/bad-constructed-string", "constructed OCTET STRING nesting exceeds the cap " + constants.LIMITS.BER_MAX_STRING_NESTING);
+        }
+      }
+      if (p >= limit) throw new Asn1Error("asn1/truncated", "expected a length octet");
+      var lenByte = buf[p];
+      p += 1;
+      var length;
+      if (lenByte < 128) {
+        length = lenByte;
+      } else if (lenByte === 128) {
+        if (!ber || !constructed) {
+          throw new Asn1Error("asn1/indefinite-length", "indefinite length is not valid DER");
+        }
+        length = -1;
+      } else {
+        var numLenBytes = lenByte & 127;
+        if (numLenBytes > 6) throw new Asn1Error("asn1/length-too-large", "length uses more than 6 octets");
+        if (p + numLenBytes > limit) throw new Asn1Error("asn1/truncated", "truncated long-form length");
+        if (buf[p] === 0) throw new Asn1Error("asn1/non-minimal-length", "leading zero in long-form length");
+        length = 0;
+        for (var i = 0; i < numLenBytes; i++) length = length * 256 + buf[p + i];
+        p += numLenBytes;
+        if (length < 128) throw new Asn1Error("asn1/non-minimal-length", "long form used for a length < 128");
+      }
+      var contentStart = p;
+      var indefinite = length === -1;
+      var contentEnd = indefinite ? -1 : contentStart + length;
+      if (!indefinite && contentEnd > limit) throw new Asn1Error("asn1/truncated", "content length overruns the buffer");
+      var children = null;
+      var content = null;
+      var child;
+      var end;
+      if (constructed) {
+        children = [];
+        var cp = contentStart;
+        if (indefinite) {
+          for (; ; ) {
+            if (cp + 2 > limit) throw new Asn1Error("asn1/truncated", "indefinite-length value is missing its end-of-contents octets");
+            if (buf[cp] === 0 && buf[cp + 1] === 0) break;
+            child = _decodeTLV(buf, cp, limit, depth + 1, maxDepth, ber, strDepth, ctr);
+            children.push(child.node);
+            cp = child.end;
+          }
+          contentEnd = cp;
+          end = cp + 2;
+        } else {
+          while (cp < contentEnd) {
+            child = _decodeTLV(buf, cp, contentEnd, depth + 1, maxDepth, ber, strDepth, ctr);
+            children.push(child.node);
+            cp = child.end;
+          }
+          end = contentEnd;
+        }
+      } else {
+        content = buf.subarray(contentStart, contentEnd);
+        end = contentEnd;
+      }
+      var node = {
+        tagClass: _className(tagClassBits),
+        constructed,
+        tagNumber,
+        length: contentEnd - contentStart,
+        header: { start, end: contentStart },
+        contentStart,
+        contentEnd,
+        content,
+        children,
+        bytes: buf.subarray(start, end)
+      };
+      if (ber && constructed && tagClassBits === CLASS_UNIVERSAL && tagNumber === TAGS.OCTET_STRING) {
+        var segments = [];
+        for (var s = 0; s < children.length; s++) {
+          if (children[s].tagClass !== "universal" || children[s].tagNumber !== TAGS.OCTET_STRING) {
+            throw new Asn1Error("asn1/bad-constructed-string", "a constructed OCTET STRING segment must itself be an OCTET STRING");
+          }
+          segments.push(children[s].content);
+        }
+        node.content = Buffer.concat(segments);
+        node.constructed = false;
+        node.children = null;
+      }
+      if (ber && constructed && tagClassBits === CLASS_CONTEXT && node.children) {
+        node.ber = true;
+      }
+      return { node, end };
+    }
+    function _expectUniversal(node, tag, who) {
+      if (node.tagClass !== "universal" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", who + ": expected universal tag " + tag + ", got " + node.tagClass + "/" + node.tagNumber);
+      }
+    }
+    function _expectPrimitive(node, who) {
+      if (node.constructed) throw new Asn1Error("asn1/expected-primitive", who + ": expected a primitive encoding");
+    }
+    function readBoolean(node) {
+      _expectUniversal(node, TAGS.BOOLEAN, "readBoolean");
+      _expectPrimitive(node, "readBoolean");
+      if (node.content.length !== 1) throw new Asn1Error("asn1/bad-boolean", "BOOLEAN content must be 1 octet");
+      var v = node.content[0];
+      if (v === 0) return false;
+      if (v === 255) return true;
+      throw new Asn1Error("asn1/bad-boolean", "DER BOOLEAN must be 0x00 or 0xFF, got 0x" + v.toString(16));
+    }
+    function _readIntegerLikeContent(node, typeName, who) {
+      _expectPrimitive(node, who);
+      var c = node.content;
+      if (c.length === 0) throw new Asn1Error("asn1/bad-integer", typeName + " must have at least 1 content octet");
+      if (c.length > constants.LIMITS.DER_MAX_INTEGER_BYTES + 1) {
+        throw new Asn1Error(
+          "asn1/integer-too-large",
+          typeName + " content " + c.length + " bytes exceeds cap " + (constants.LIMITS.DER_MAX_INTEGER_BYTES + 1)
+        );
+      }
+      if (c.length > 1) {
+        if (c[0] === 0 && (c[1] & 128) === 0) throw new Asn1Error("asn1/non-minimal-integer", "non-minimal positive " + typeName);
+        if (c[0] === 255 && (c[1] & 128) !== 0) throw new Asn1Error("asn1/non-minimal-integer", "non-minimal negative " + typeName);
+      }
+      var neg = (c[0] & 128) !== 0;
+      var mag = c.length ? BigInt("0x" + Buffer.from(c).toString("hex")) : 0n;
+      return neg ? mag - (1n << BigInt(c.length * 8)) : mag;
+    }
+    function readInteger(node) {
+      _expectUniversal(node, TAGS.INTEGER, "readInteger");
+      return _readIntegerLikeContent(node, "INTEGER", "readInteger");
+    }
+    function readEnumerated(node) {
+      _expectUniversal(node, TAGS.ENUMERATED, "readEnumerated");
+      return _readIntegerLikeContent(node, "ENUMERATED", "readEnumerated");
+    }
+    function readIntegerImplicit(node, tag) {
+      if (node.tagClass !== "context" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", "readIntegerImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
+      }
+      return _readIntegerLikeContent(node, "INTEGER", "readIntegerImplicit");
+    }
+    function _readBitStringContent(node, who) {
+      _expectPrimitive(node, who);
+      var c = node.content;
+      if (c.length === 0) throw new Asn1Error("asn1/bad-bit-string", "BIT STRING must have >= 1 content octet");
+      var unusedBits = c[0];
+      if (unusedBits > 7) throw new Asn1Error("asn1/bad-bit-string", "unused-bit count " + unusedBits + " > 7");
+      if (unusedBits > 0 && c.length === 1) throw new Asn1Error("asn1/bad-bit-string", "unused bits declared over an empty body");
+      if (unusedBits > 0 && c.length > 1) {
+        var mask = (1 << unusedBits) - 1;
+        if ((c[c.length - 1] & mask) !== 0) throw new Asn1Error("asn1/bad-bit-string", "DER requires unused bits to be zero");
+      }
+      return { unusedBits, bytes: c.subarray(1) };
+    }
+    function readBitString(node) {
+      _expectUniversal(node, TAGS.BIT_STRING, "readBitString");
+      return _readBitStringContent(node, "readBitString");
+    }
+    function readBitStringImplicit(node, tag) {
+      if (node.tagClass !== "context" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", "readBitStringImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
+      }
+      return _readBitStringContent(node, "readBitStringImplicit");
+    }
+    function readOctetString(node) {
+      _expectUniversal(node, TAGS.OCTET_STRING, "readOctetString");
+      _expectPrimitive(node, "readOctetString");
+      return node.content;
+    }
+    function readOctetStringImplicit(node, tag) {
+      if (node.tagClass !== "context" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", "readOctetStringImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
+      }
+      if (node.constructed && node.ber === true) {
+        var segments = [];
+        for (var s = 0; s < node.children.length; s++) {
+          var seg = node.children[s];
+          if (seg.tagClass !== "universal" || seg.tagNumber !== TAGS.OCTET_STRING || seg.constructed || !seg.content) {
+            throw new Asn1Error("asn1/bad-constructed-string", "a constructed OCTET STRING segment must itself be an OCTET STRING");
+          }
+          segments.push(seg.content);
+        }
+        return Buffer.concat(segments);
+      }
+      _expectPrimitive(node, "readOctetStringImplicit");
+      return node.content;
+    }
+    function readNull(node) {
+      _expectUniversal(node, TAGS.NULL, "readNull");
+      _expectPrimitive(node, "readNull");
+      if (node.content.length !== 0) throw new Asn1Error("asn1/bad-null", "NULL must have empty content");
+      return null;
+    }
+    function readBooleanImplicit(node, tag) {
+      if (node.tagClass !== "context" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", "readBooleanImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
+      }
+      _expectPrimitive(node, "readBooleanImplicit");
+      if (node.content.length !== 1) throw new Asn1Error("asn1/bad-boolean", "BOOLEAN content must be 1 octet");
+      var v = node.content[0];
+      if (v === 0) return false;
+      if (v === 255) return true;
+      throw new Asn1Error("asn1/bad-boolean", "DER BOOLEAN must be 0x00 or 0xFF, got 0x" + v.toString(16));
+    }
+    function readNullImplicit(node, tag) {
+      if (node.tagClass !== "context" || node.tagNumber !== tag) {
+        throw new Asn1Error("asn1/unexpected-tag", "readNullImplicit: expected context tag [" + tag + "], got " + node.tagClass + "/" + node.tagNumber);
+      }
+      _expectPrimitive(node, "readNullImplicit");
+      if (node.content.length !== 0) throw new Asn1Error("asn1/bad-null", "IMPLICIT NULL must have empty content");
+      return null;
+    }
+    function readOid(node) {
+      _expectUniversal(node, TAGS.OBJECT_IDENTIFIER, "readOid");
+      _expectPrimitive(node, "readOid");
+      return decodeOidContent(node.content);
+    }
+    function decodeOidContent(buf) {
+      if (buf.length === 0) throw new OidError("oid/empty", "OBJECT IDENTIFIER content is empty");
+      var arcs = [];
+      var arcStart = 0;
+      for (var i = 0; i < buf.length; i++) {
+        var b = buf[i];
+        if (i === arcStart && b === 128) throw new OidError("oid/non-minimal", "non-minimal sub-identifier (leading 0x80)");
+        if (i - arcStart >= constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES) {
+          throw new OidError(
+            "oid/subidentifier-too-large",
+            "OID sub-identifier exceeds " + constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES + " octets"
+          );
+        }
+        if ((b & 128) === 0) {
+          var value = 0n;
+          for (var k = arcStart; k <= i; k++) value = value * 128n + BigInt(buf[k] & 127);
+          arcs.push(value);
+          arcStart = i + 1;
+        }
+      }
+      if (arcStart !== buf.length) throw new OidError("oid/truncated", "OBJECT IDENTIFIER ends mid sub-identifier");
+      var first = arcs[0];
+      var a1, a2;
+      if (first < 40n) {
+        a1 = 0n;
+        a2 = first;
+      } else if (first < 80n) {
+        a1 = 1n;
+        a2 = first - 40n;
+      } else {
+        a1 = 2n;
+        a2 = first - 80n;
+      }
+      var out = [a1.toString(), a2.toString()];
+      for (var j = 1; j < arcs.length; j++) out.push(arcs[j].toString());
+      return out.join(".");
+    }
+    function _decodeText(buf, encoding) {
+      return buf.toString(encoding);
+    }
+    function _decodeIa5(buf) {
+      for (var i = 0; i < buf.length; i++) {
+        if (buf[i] > 127) throw new Asn1Error("asn1/bad-ia5-string", "IA5String requires 7-bit ASCII");
+      }
+      return buf.toString("latin1");
+    }
+    function _decodeVisible(buf) {
+      for (var i = 0; i < buf.length; i++) {
+        if (buf[i] < 32 || buf[i] > 126) throw new Asn1Error("asn1/bad-visible-string", "VisibleString must be 0x20..0x7E");
+      }
+      return buf.toString("latin1");
+    }
+    function _decodePrintable(buf) {
+      var s = buf.toString("latin1");
+      if (!PRINTABLE_RE.test(s)) throw new Asn1Error("asn1/bad-printable-string", "PrintableString has characters outside the restricted set");
+      return s;
+    }
+    function readNumericString(node) {
+      _expectUniversal(node, TAGS.NUMERIC_STRING, "readNumericString");
+      _expectPrimitive(node, "readNumericString");
+      var s = node.content.toString("latin1");
+      if (!NUMERIC_RE.test(s)) throw new Asn1Error("asn1/bad-numeric-string", "NumericString has characters outside the digits-and-space set");
+      return s;
+    }
+    function _decodeUtf8Strict(buf) {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+      } catch (_e) {
+        throw new Asn1Error("asn1/bad-utf8-string", "invalid UTF-8 in UTF8String");
+      }
+    }
+    function readString(node) {
+      if (node.tagClass !== "universal") throw new Asn1Error("asn1/expected-string", "readString: not a universal string type");
+      _expectPrimitive(node, "readString");
+      switch (node.tagNumber) {
+        case TAGS.UTF8_STRING:
+          return _decodeUtf8Strict(node.content);
+        case TAGS.PRINTABLE_STRING:
+          return _decodePrintable(node.content);
+        case TAGS.IA5_STRING:
+          return _decodeIa5(node.content);
+        case TAGS.TELETEX_STRING:
+          return _decodeText(node.content, "latin1");
+        case TAGS.VISIBLE_STRING:
+          return _decodeVisible(node.content);
+        case TAGS.BMP_STRING:
+          return _decodeUtf16be(node.content);
+        case TAGS.UNIVERSAL_STRING:
+          return _decodeUtf32be(node.content);
+        default:
+          throw new Asn1Error("asn1/expected-string", "readString: tag " + node.tagNumber + " is not a known string type");
+      }
+    }
+    function _decodeUtf16be(buf) {
+      if (buf.length % 2 !== 0) throw new Asn1Error("asn1/bad-bmp-string", "BMPString length must be even");
+      for (var i = 0; i < buf.length; i += 2) {
+        var u = buf[i] << 8 | buf[i + 1];
+        if (u >= 55296 && u <= 57343) throw new Asn1Error("asn1/bad-bmp-string", "code point out of range");
+      }
+      var swapped = Buffer.from(buf);
+      swapped.swap16();
+      return swapped.toString("utf16le");
+    }
+    function _decodeUtf32be(buf) {
+      if (buf.length % 4 !== 0) throw new Asn1Error("asn1/bad-universal-string", "UniversalString length must be a multiple of 4");
+      var out = "";
+      for (var i = 0; i < buf.length; i += 4) {
+        var cp = buf[i] * 16777216 + (buf[i + 1] << 16) + (buf[i + 2] << 8) + buf[i + 3];
+        if (cp > 1114111 || cp >= 55296 && cp <= 57343) {
+          throw new Asn1Error("asn1/bad-universal-string", "code point out of range");
+        }
+        out += String.fromCodePoint(cp);
+      }
+      return out;
+    }
+    var UTC_RE = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/;
+    var GEN_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/;
+    var GEN_FRAC_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d+)Z$/;
+    function readTime(node, opts) {
+      if (node.tagClass !== "universal") throw new Asn1Error("asn1/expected-time", "readTime: not a universal time type");
+      _expectPrimitive(node, "readTime");
+      var s = node.content.toString("latin1");
+      var m, year;
+      if (node.tagNumber === TAGS.UTC_TIME) {
+        m = UTC_RE.exec(s);
+        if (!m) throw new Asn1Error("asn1/bad-utctime", "UTCTime must be YYMMDDHHMMSSZ, got " + JSON.stringify(s));
+        year = parseInt(m[1], 10);
+        year += year < 50 ? 2e3 : 1900;
+      } else if (node.tagNumber === TAGS.GENERALIZED_TIME) {
+        m = GEN_RE.exec(s);
+        if (!m) {
+          if (!(opts && opts.allowFractional)) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime must be YYYYMMDDHHMMSSZ, got " + JSON.stringify(s));
+          m = GEN_FRAC_RE.exec(s);
+          if (!m) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime must be YYYYMMDDHHMMSS[.fraction]Z, got " + JSON.stringify(s));
+          if (m[7].charAt(m[7].length - 1) === "0") throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime fraction must not have trailing zeros, got " + JSON.stringify(s));
+        }
+        year = parseInt(m[1], 10);
+      } else {
+        throw new Asn1Error("asn1/expected-time", "readTime: tag " + node.tagNumber + " is not a time type");
+      }
+      var month = parseInt(m[2], 10);
+      var day = parseInt(m[3], 10);
+      var hour = parseInt(m[4], 10);
+      var min = parseInt(m[5], 10);
+      var sec = parseInt(m[6], 10);
+      var ms = node.tagNumber === TAGS.GENERALIZED_TIME && m[7] ? parseInt((m[7] + "000").slice(0, 3), 10) : 0;
+      var d = /* @__PURE__ */ new Date(0);
+      d.setUTCFullYear(year, month - 1, day);
+      d.setUTCHours(hour, min, sec, ms);
+      if (isNaN(d.getTime())) throw new Asn1Error("asn1/bad-time", "unparseable time " + JSON.stringify(s));
+      if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day || d.getUTCHours() !== hour || d.getUTCMinutes() !== min || d.getUTCSeconds() !== sec) {
+        throw new Asn1Error("asn1/bad-time", "time component out of range " + JSON.stringify(s));
+      }
+      return d;
+    }
+    function encodeLength(n) {
+      if (typeof n !== "number" || !isFinite(n) || n < 0 || Math.floor(n) !== n) {
+        throw new Asn1Error("asn1/bad-length", "length must be a non-negative integer");
+      }
+      if (n < 128) return Buffer.from([n]);
+      var bytes = [];
+      var v = n;
+      while (v > 0) {
+        bytes.unshift(v & 255);
+        v = Math.floor(v / 256);
+      }
+      if (bytes.length > 126) throw new Asn1Error("asn1/length-too-large", "length needs more than 126 octets");
+      return Buffer.concat([Buffer.from([128 | bytes.length]), Buffer.from(bytes)]);
+    }
+    function sequenceTlv(node) {
+      var content = node.content != null ? node.content : Buffer.concat((node.children || []).map(function(c) {
+        return c.bytes;
+      }));
+      return Buffer.concat([Buffer.from([TAGS.SEQUENCE | CONSTRUCTED_BIT]), encodeLength(content.length), content]);
+    }
+    function encodeIdentifier(classBits, constructed, tagNumber) {
+      if (typeof tagNumber !== "number" || !isFinite(tagNumber) || tagNumber < 0 || Math.floor(tagNumber) !== tagNumber) {
+        throw new Asn1Error("asn1/bad-tag", "tag number must be a non-negative integer");
+      }
+      var lead = classBits | (constructed ? CONSTRUCTED_BIT : 0);
+      if (tagNumber < 31) return Buffer.from([lead | tagNumber]);
+      var body = [];
+      var v = tagNumber;
+      do {
+        body.unshift(v & 127);
+        v = Math.floor(v / 128);
+      } while (v > 0);
+      if (body.length > 4) throw new Asn1Error("asn1/tag-too-large", "high-tag-number too large");
+      for (var i = 0; i < body.length - 1; i++) body[i] |= 128;
+      return Buffer.concat([Buffer.from([lead | 31]), Buffer.from(body)]);
+    }
+    function encodeTLV(classBits, constructed, tagNumber, content) {
+      var body = Buffer.isBuffer(content) ? guard.bytes.view(content, Asn1Error, "asn1/not-buffer", "encodeTLV content") : Buffer.from(content || []);
+      var id = encodeIdentifier(classBits, constructed, tagNumber);
+      return Buffer.concat([id, encodeLength(body.length), body]);
+    }
+    function _universal(tagNumber, constructed, content) {
+      return encodeTLV(CLASS_UNIVERSAL, constructed, tagNumber, content);
+    }
+    function intToDer(v) {
+      if (typeof v === "number") {
+        if (!Number.isSafeInteger(v)) throw new Asn1Error("asn1/bad-integer", "unsafe integer; pass a BigInt");
+        v = BigInt(v);
+      }
+      if (typeof v !== "bigint") throw new Asn1Error("asn1/bad-integer", "integer must be number or BigInt");
+      if (v === 0n) return Buffer.from([0]);
+      var bytes = [];
+      if (v > 0n) {
+        var t = v;
+        while (t > 0n) {
+          bytes.unshift(Number(t & 0xffn));
+          t >>= 8n;
+        }
+        if (bytes[0] & 128) bytes.unshift(0);
+      } else {
+        var len = 1;
+        while (v < -(1n << BigInt(8 * len - 1))) len += 1;
+        var tc = (1n << BigInt(8 * len)) + v;
+        for (var i = len - 1; i >= 0; i--) {
+          bytes[i] = Number(tc & 0xffn);
+          tc >>= 8n;
+        }
+      }
+      return Buffer.from(bytes);
+    }
+    function encodeOidContent(dotted) {
+      guard.identifier.assertCanonicalOid(dotted, _oidErr, "oid/bad-input", "OID", "oid/bad-arc");
+      var arcs = dotted.split(".").map(function(p) {
+        return BigInt(p);
+      });
+      var a1 = arcs[0], a2 = arcs[1];
+      var subids = [a1 * 40n + a2].concat(arcs.slice(2));
+      var out = [];
+      for (var s = 0; s < subids.length; s++) {
+        var body = [];
+        var v = subids[s];
+        do {
+          body.unshift(Number(v & 0x7fn));
+          v >>= 7n;
+        } while (v > 0n);
+        if (body.length > constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES) {
+          throw new OidError(
+            "oid/subidentifier-too-large",
+            "OID sub-identifier exceeds " + constants.LIMITS.OID_MAX_SUBIDENTIFIER_BYTES + " octets"
+          );
+        }
+        for (var k = 0; k < body.length - 1; k++) body[k] |= 128;
+        for (var j = 0; j < body.length; j++) out.push(body[j]);
+      }
+      return Buffer.from(out);
+    }
+    var PRINTABLE_RE = /^[A-Za-z0-9 '()+,\-./:=?]*$/;
+    var NUMERIC_RE = /^[0-9 ]*$/;
+    function _fmtTwo(n) {
+      return (n < 10 ? "0" : "") + n;
+    }
+    function _generalizedTimeString(date) {
+      var y = date.getUTCFullYear();
+      if (y < 0 || y > 9999) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime year " + y + " outside 0000..9999");
+      var yyyy = ("000" + y).slice(-4);
+      return yyyy + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
+    }
+    function _utcTimeString(date) {
+      var y = date.getUTCFullYear();
+      if (y < 1950 || y > 2049) throw new Asn1Error("asn1/bad-utctime", "UTCTime year " + y + " outside 1950..2049; use GeneralizedTime");
+      var yy = y % 100;
+      return _fmtTwo(yy) + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
+    }
+    var build = {
+      boolean: function(v) {
+        return _universal(TAGS.BOOLEAN, false, Buffer.from([v ? 255 : 0]));
+      },
+      integer: function(v) {
+        return _universal(TAGS.INTEGER, false, _intContent(v, "build.integer"));
+      },
+      enumerated: function(v) {
+        return _universal(TAGS.ENUMERATED, false, _intContent(v, "build.enumerated"));
+      },
+      nullValue: function() {
+        return _universal(TAGS.NULL, false, Buffer.alloc(0));
+      },
+      oid: function(dotted) {
+        return _universal(TAGS.OBJECT_IDENTIFIER, false, encodeOidContent(dotted));
+      },
+      octetString: function(buf) {
+        return _universal(TAGS.OCTET_STRING, false, _asBuffer(buf, "build.octetString"));
+      },
+      bitString: function(buf, unusedBits) {
+        var u = guard.limits.cap(unusedBits == null ? 0 : unusedBits, "unusedBits", 0, { E: _asn1Error, code: "asn1/bad-bit-string", min: 0, max: 7 });
+        var body = _asBuffer(buf, "build.bitString");
+        if (u > 0 && body.length === 0) throw new Asn1Error("asn1/bad-bit-string", "empty BIT STRING must declare zero unused bits");
+        if (u > 0 && body.length > 0) {
+          var mask = (1 << u) - 1;
+          if ((body[body.length - 1] & mask) !== 0) throw new Asn1Error("asn1/bad-bit-string", "unused bits must be zero");
+        }
+        return _universal(TAGS.BIT_STRING, false, Buffer.concat([Buffer.from([u]), body]));
+      },
+      // A minimal DER NamedBitList BIT STRING (X.690 sec. 11.2.2): the asserted `positions` (0-based bit
+      // indices, 0 = the MSB of the first octet) with every trailing zero bit removed and the unused-bit
+      // count set below the last set bit. The single home the keyUsage / PKIFailureInfo / any named-bit
+      // encoder composes, so the minimal-encoding rule lives once (the CHECK side is
+      // schema.assertMinimalNamedBits). No bits asserted -> the empty BIT STRING.
+      namedBitString: function(positions) {
+        if (!Array.isArray(positions)) throw new Asn1Error("asn1/bad-bit-string", "namedBitString requires an array of bit positions");
+        var hi = -1, i, p;
+        for (i = 0; i < positions.length; i++) {
+          p = positions[i];
+          if (typeof p !== "number" || !isFinite(p) || p < 0 || (p | 0) !== p) throw new Asn1Error("asn1/bad-bit-string", "a named-bit position must be a non-negative integer");
+          if (p > hi) hi = p;
+        }
+        if (hi < 0) return build.bitString(Buffer.alloc(0), 0);
+        var buf = Buffer.alloc((hi >> 3) + 1);
+        for (i = 0; i < positions.length; i++) {
+          p = positions[i];
+          buf[p >> 3] |= 128 >> (p & 7);
+        }
+        return build.bitString(buf, 7 - (hi & 7));
+      },
+      utf8: function(s) {
+        return _universal(TAGS.UTF8_STRING, false, Buffer.from(String(s), "utf8"));
+      },
+      ia5: function(s) {
+        s = String(s);
+        for (var i = 0; i < s.length; i++) {
+          if (s.charCodeAt(i) > 127) throw new Asn1Error("asn1/bad-ia5-string", "IA5String requires 7-bit ASCII");
+        }
+        return _universal(TAGS.IA5_STRING, false, Buffer.from(s, "latin1"));
+      },
+      printable: function(s) {
+        s = String(s);
+        if (!PRINTABLE_RE.test(s)) throw new Asn1Error("asn1/bad-printable-string", "value has characters outside the PrintableString set");
+        return _universal(TAGS.PRINTABLE_STRING, false, Buffer.from(s, "latin1"));
+      },
+      bmpString: function(s) {
+        s = String(s);
+        var out = Buffer.alloc(s.length * 2);
+        for (var i = 0; i < s.length; i++) {
+          var u = s.charCodeAt(i);
+          if (u >= 55296 && u <= 57343) throw new Asn1Error("asn1/bad-bmp-string", "BMPString cannot encode a surrogate code point (non-BMP characters are unsupported)");
+          out[i * 2] = u >> 8 & 255;
+          out[i * 2 + 1] = u & 255;
+        }
+        return _universal(TAGS.BMP_STRING, false, out);
+      },
+      utcTime: function(date) {
+        return _universal(TAGS.UTC_TIME, false, Buffer.from(_utcTimeString(date), "latin1"));
+      },
+      generalizedTime: function(date) {
+        return _universal(TAGS.GENERALIZED_TIME, false, Buffer.from(_generalizedTimeString(date), "latin1"));
+      },
+      sequence: function(children) {
+        return _universal(TAGS.SEQUENCE, true, Buffer.concat(_asBufferArray(children, "build.sequence")));
+      },
+      set: function(children) {
+        var arr = _asBufferArray(children, "build.set").slice();
+        arr.sort(Buffer.compare);
+        return _universal(TAGS.SET, true, Buffer.concat(arr));
+      },
+      setOf: function(children) {
+        var arr = _asBufferArray(children, "build.setOf").slice();
+        arr.sort(Buffer.compare);
+        return _universal(TAGS.SET, true, Buffer.concat(arr));
+      },
+      // Context-tagged constructions for [n] EXPLICIT / IMPLICIT tagging.
+      explicit: function(tagNumber, inner) {
+        return encodeTLV(CLASS_CONTEXT, true, tagNumber, _asBuffer(inner, "build.explicit"));
+      },
+      contextPrimitive: function(tagNumber, content) {
+        return encodeTLV(CLASS_CONTEXT, false, tagNumber, _asBuffer(content, "build.contextPrimitive"));
+      },
+      contextConstructed: function(tagNumber, content) {
+        return encodeTLV(CLASS_CONTEXT, true, tagNumber, _asBuffer(content, "build.contextConstructed"));
+      },
+      // IMPLICIT [tag] retag of an already-encoded UNIVERSAL TLV: replace the source's tag with a context-class
+      // [tag] identifier, PRESERVING the source's primitive/constructed bit and content octets (X.680 sec. 30.6).
+      // A single home for the tag replacement so no format module re-inlines the P/C-bit handling (a decode of
+      // the source validates it is exactly one well-formed TLV; its content is the trailing `length` octets).
+      implicit: function(tagNumber, tlv) {
+        var buf = _asBuffer(tlv, "build.implicit");
+        var node = decode(buf);
+        return encodeTLV(CLASS_CONTEXT, node.constructed, tagNumber, buf.slice(buf.length - node.length));
+      },
+      raw: function(buf) {
+        return _asBuffer(buf, "build.raw");
+      }
+    };
+    function _intContent(v, who) {
+      if (Buffer.isBuffer(v)) {
+        if (v.length === 0) throw new Asn1Error("asn1/bad-integer", who + ": INTEGER content is empty");
+        if (v.length > 1) {
+          if (v[0] === 0 && (v[1] & 128) === 0) throw new Asn1Error("asn1/non-minimal-integer", who + ": non-minimal positive INTEGER");
+          if (v[0] === 255 && (v[1] & 128) !== 0) throw new Asn1Error("asn1/non-minimal-integer", who + ": non-minimal negative INTEGER");
+        }
+      }
+      var content = Buffer.isBuffer(v) ? v : intToDer(v);
+      if (content.length > constants.LIMITS.DER_MAX_INTEGER_BYTES + 1) {
+        throw new Asn1Error("asn1/integer-too-large", who + ": INTEGER content " + content.length + " bytes exceeds cap " + (constants.LIMITS.DER_MAX_INTEGER_BYTES + 1));
+      }
+      return content;
+    }
+    function _asBufferArray(arr, who) {
+      if (!Array.isArray(arr)) throw new Asn1Error("asn1/bad-children", who + ": expected an array of TLV buffers");
+      return arr.map(function(b) {
+        return _asBuffer(b, who);
+      });
+    }
+    module2.exports = {
+      TAGS,
+      decode,
+      // `encode` is the documented public name for the low-level TLV encoder;
+      // `encodeTLV` remains as the descriptive alias.
+      encode: encodeTLV,
+      encodeTLV,
+      encodeLength,
+      sequenceTlv,
+      encodeIdentifier,
+      decodeOidContent,
+      encodeOidContent,
+      build,
+      read: {
+        boolean: readBoolean,
+        integer: readInteger,
+        integerImplicit: readIntegerImplicit,
+        enumerated: readEnumerated,
+        bitString: readBitString,
+        bitStringImplicit: readBitStringImplicit,
+        octetString: readOctetString,
+        octetStringImplicit: readOctetStringImplicit,
+        nullValue: readNull,
+        nullImplicit: readNullImplicit,
+        booleanImplicit: readBooleanImplicit,
+        oid: readOid,
+        string: readString,
+        numericString: readNumericString,
+        time: readTime
+      }
+    };
+  }
+});
+
+// node_modules/@blamejs/pki/lib/cbor-det.js
+var require_cbor_det = __commonJS({
+  "node_modules/@blamejs/pki/lib/cbor-det.js"(exports2, module2) {
+    "use strict";
+    var constants = require_constants();
+    var frameworkError = require_framework_error();
+    var asn1 = require_asn1_der();
+    var guard = require_guard_all();
+    var CborError = frameworkError.CborError;
+    var _fbuf = new ArrayBuffer(8);
+    var _fdv = new DataView(_fbuf);
+    var _utf8 = new TextDecoder("utf-8", { fatal: true });
+    var _MAX_EPOCH_SECONDS = 8640000000000n;
+    function _asBuffer(input, who) {
+      return guard.bytes.view(input, CborError, "cbor/not-buffer", who);
+    }
+    function _profile(name) {
+      var p = name === void 0 ? "deterministic" : name;
+      if (p === "deterministic") return { mapKeyCompare: Buffer.compare };
+      throw new TypeError("decode: unknown profile " + JSON.stringify(p) + ' (only "deterministic" is supported)');
+    }
+    function _assertUtf8(buf) {
+      try {
+        _utf8.decode(buf);
+      } catch (_e) {
+        throw new CborError("cbor/bad-utf8", "text string is not well-formed UTF-8");
+      }
+    }
+    function _readFloatBits(argument, ai) {
+      if (ai === 25) {
+        _fdv.setUint16(0, Number(argument));
+        return _fdv.getFloat16(0);
+      }
+      if (ai === 26) {
+        _fdv.setUint32(0, Number(argument));
+        return _fdv.getFloat32(0);
+      }
+      _fdv.setBigUint64(0, argument);
+      return _fdv.getFloat64(0);
+    }
+    function _halfRoundtrips(d) {
+      _fdv.setFloat16(0, d);
+      return Object.is(_fdv.getFloat16(0), d);
+    }
+    function _singleRoundtrips(d) {
+      return Object.is(Math.fround(d), d);
+    }
+    function _decodeItem(buf, start, limit, depth, maxD, rules, state) {
+      if (depth > maxD) throw new CborError("cbor/too-deep", "nesting exceeds depth cap " + maxD);
+      state.n += 1;
+      if (state.n > state.max) throw new CborError("cbor/too-many-items", "decoded item count exceeds cap " + state.max);
+      var p = start;
+      if (p >= limit) throw new CborError("cbor/truncated", "expected an initial byte");
+      var ib = buf[p];
+      p += 1;
+      var mt = ib >> 5;
+      var ai = ib & 31;
+      if (ib === 255) throw new CborError("cbor/unexpected-break", "stray break byte (0xff) at an item head");
+      if (ai === 28 || ai === 29 || ai === 30) throw new CborError("cbor/reserved-ai", "reserved additional-info " + ai);
+      if (ai === 31) {
+        if (mt === 2 || mt === 3 || mt === 4 || mt === 5) {
+          throw new CborError("cbor/indefinite-length", "indefinite-length items are not valid deterministic CBOR");
+        }
+        throw new CborError("cbor/reserved-ai", "additional-info 31 is undefined for major type " + mt);
+      }
+      var argument;
+      var contentStart;
+      if (ai <= 23) {
+        argument = BigInt(ai);
+        contentStart = p;
+      } else {
+        var nBytes = ai === 24 ? 1 : ai === 25 ? 2 : ai === 26 ? 4 : 8;
+        if (p + nBytes > limit) throw new CborError("cbor/truncated", "truncated " + nBytes + "-byte argument");
+        if (nBytes === 1) argument = BigInt(buf[p]);
+        else if (nBytes === 2) argument = BigInt(buf.readUInt16BE(p));
+        else if (nBytes === 4) argument = BigInt(buf.readUInt32BE(p));
+        else argument = buf.readBigUInt64BE(p);
+        p += nBytes;
+        if (mt !== 7) {
+          var minForWidth = nBytes === 1 ? 24n : nBytes === 2 ? 256n : nBytes === 4 ? 65536n : 4294967296n;
+          if (argument < minForWidth) {
+            throw new CborError("cbor/non-minimal-argument", "argument " + argument + " is not in the shortest head form");
+          }
+        }
+        contentStart = p;
+      }
+      var content = null;
+      var children = null;
+      var end;
+      if (mt === 0 || mt === 1) {
+        end = contentStart;
+      } else if (mt === 2 || mt === 3) {
+        var len = Number(argument);
+        if (contentStart + len > limit) throw new CborError("cbor/truncated", "string content overruns the buffer");
+        content = buf.subarray(contentStart, contentStart + len);
+        if (mt === 3) _assertUtf8(content);
+        end = contentStart + len;
+      } else if (mt === 4) {
+        children = [];
+        var cp = contentStart;
+        for (var i = 0n; i < argument; i++) {
+          var el = _decodeItem(buf, cp, limit, depth + 1, maxD, rules, state);
+          children.push(el.node);
+          cp = el.end;
+        }
+        end = cp;
+      } else if (mt === 5) {
+        children = [];
+        var mp = contentStart;
+        for (var j = 0n; j < argument; j++) {
+          var k = _decodeItem(buf, mp, limit, depth + 1, maxD, rules, state);
+          mp = k.end;
+          var v = _decodeItem(buf, mp, limit, depth + 1, maxD, rules, state);
+          mp = v.end;
+          if (children.length > 0) {
+            var cmp = rules.mapKeyCompare(children[children.length - 1][0].bytes, k.node.bytes);
+            if (cmp > 0) throw new CborError("cbor/unsorted-map-keys", "map keys are not in bytewise-ascending order");
+            if (cmp === 0) throw new CborError("cbor/duplicate-map-key", "duplicate map key");
+          }
+          children.push([k.node, v.node]);
+        }
+        end = mp;
+      } else if (mt === 6) {
+        var inner = _decodeItem(buf, contentStart, limit, depth + 1, maxD, rules, state);
+        children = [inner.node];
+        end = inner.end;
+      } else {
+        if (ai <= 23) {
+          end = contentStart;
+        } else if (ai === 24) {
+          if (argument < 32n) {
+            throw new CborError("cbor/reserved-simple", "simple value " + argument + " must use the single-byte immediate form");
+          }
+          end = contentStart;
+        } else {
+          var d = _readFloatBits(argument, ai);
+          if (Number.isNaN(d)) {
+            if (!(ai === 25 && argument === 0x7e00n)) {
+              throw new CborError("cbor/non-canonical-nan", "a NaN must be the canonical half float 0xf97e00");
+            }
+          } else if (ai === 26) {
+            if (_halfRoundtrips(d)) throw new CborError("cbor/non-minimal-float", "a half-representable value must use the half form");
+          } else if (ai === 27) {
+            if (_halfRoundtrips(d) || _singleRoundtrips(d)) {
+              throw new CborError("cbor/non-minimal-float", "a value representable in a narrower float must use it");
+            }
+          }
+          end = contentStart;
+        }
+      }
+      var node = {
+        majorType: mt,
+        ai,
+        argument,
+        content,
+        children,
+        header: { start, end: contentStart },
+        contentStart,
+        contentEnd: end,
+        length: end - contentStart,
+        bytes: buf.subarray(start, end)
+      };
+      return { node, end };
+    }
+    function decode(input, opts) {
+      opts = opts || {};
+      var buf = _asBuffer(input, "decode");
+      var maxBytes = guard.limits.cap(opts.maxBytes, "maxBytes", constants.LIMITS.CBOR_MAX_BYTES);
+      var maxDepth = guard.limits.depthCap(opts.maxDepth, "maxDepth", constants.LIMITS.CBOR_MAX_DEPTH);
+      var maxItems = guard.limits.cap(opts.maxItems, "maxItems", constants.LIMITS.CBOR_MAX_ITEMS);
+      var rules = _profile(opts.profile);
+      if (buf.length > maxBytes) throw new CborError("cbor/too-large", "input " + buf.length + " bytes exceeds cap " + maxBytes);
+      var r = _decodeItem(buf, 0, buf.length, 0, maxDepth, rules, { n: 0, max: maxItems });
+      if (!opts.allowTrailing && r.end !== buf.length) {
+        throw new CborError("cbor/trailing-bytes", buf.length - r.end + " trailing byte(s) after the top-level item");
+      }
+      return r.node;
+    }
+    function _expectMajor(node, mt, who) {
+      if (!node || node.majorType !== mt) {
+        throw new CborError("cbor/unexpected-major", who + ": expected major type " + mt);
+      }
+    }
+    function _tagInner(node, tagNum, who) {
+      if (!node || node.majorType !== 6 || node.argument !== BigInt(tagNum)) {
+        throw new CborError("cbor/unexpected-tag", who + ": expected tag " + tagNum);
+      }
+      return node.children[0];
+    }
+    function readUint(node) {
+      _expectMajor(node, 0, "read.uint");
+      return node.argument;
+    }
+    function readNint(node) {
+      _expectMajor(node, 1, "read.nint");
+      return -1n - node.argument;
+    }
+    function readInt(node) {
+      if (node && node.majorType === 0) return node.argument;
+      if (node && node.majorType === 1) return -1n - node.argument;
+      throw new CborError("cbor/unexpected-major", "read.int: expected major type 0 or 1");
+    }
+    function readByteString(node) {
+      _expectMajor(node, 2, "read.byteString");
+      return node.content;
+    }
+    function readTextString(node) {
+      _expectMajor(node, 3, "read.textString");
+      return node.content.toString("utf8");
+    }
+    function readArray(node) {
+      _expectMajor(node, 4, "read.array");
+      return node.children;
+    }
+    function readMap(node) {
+      _expectMajor(node, 5, "read.map");
+      return node.children;
+    }
+    function readMapGet(node, key) {
+      _expectMajor(node, 5, "read.mapGet");
+      var wantText = typeof key === "string";
+      if (!wantText) {
+        if (typeof key === "number") {
+          if (!Number.isSafeInteger(key)) throw new TypeError("read.mapGet: a numeric key must be a safe integer");
+          key = BigInt(key);
+        } else if (typeof key !== "bigint") {
+          throw new TypeError("read.mapGet: key must be a text string or an integer");
+        }
+      }
+      for (var i = 0; i < node.children.length; i++) {
+        var k = node.children[i][0];
+        if (wantText) {
+          if (k.majorType === 3 && readTextString(k) === key) return node.children[i][1];
+        } else if ((k.majorType === 0 || k.majorType === 1) && readInt(k) === key) {
+          return node.children[i][1];
+        }
+      }
+      return null;
+    }
+    function readBoolean(node) {
+      _expectMajor(node, 7, "read.boolean");
+      if (node.ai === 20) return false;
+      if (node.ai === 21) return true;
+      throw new CborError("cbor/bad-simple", "read.boolean: simple value " + node.ai + " is not a boolean");
+    }
+    function readNull(node) {
+      _expectMajor(node, 7, "read.nullValue");
+      if (node.ai !== 22) throw new CborError("cbor/bad-simple", "read.nullValue: simple value " + node.ai + " is not null");
+      return null;
+    }
+    function readUndefined(node) {
+      _expectMajor(node, 7, "read.undefinedValue");
+      if (node.ai !== 23) throw new CborError("cbor/bad-simple", "read.undefinedValue: simple value " + node.ai + " is not undefined");
+      return void 0;
+    }
+    function readFloat(node) {
+      _expectMajor(node, 7, "read.float");
+      if (node.ai !== 25 && node.ai !== 26 && node.ai !== 27) {
+        throw new CborError("cbor/bad-simple", "read.float: node is a simple value, not a float");
+      }
+      return _readFloatBits(node.argument, node.ai);
+    }
+    function readBiguint(node) {
+      var inner = _tagInner(node, 2, "read.biguint");
+      if (inner.majorType !== 2) throw new CborError("cbor/bad-tag-content", "read.biguint: tag 2 must wrap a byte string");
+      var c = inner.content;
+      if (c.length > constants.LIMITS.CBOR_MAX_BIGUINT_BYTES) {
+        throw new CborError("cbor/biguint-too-large", "bignum " + c.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BIGUINT_BYTES);
+      }
+      if (c.length > 0 && c[0] === 0) throw new CborError("cbor/non-minimal-biguint", "bignum has a leading zero byte");
+      if (c.length <= 8) throw new CborError("cbor/non-minimal-biguint", "a value that fits a basic integer must not use a bignum");
+      return BigInt("0x" + c.toString("hex"));
+    }
+    function readTime(node) {
+      var inner = _tagInner(node, 1, "read.time");
+      if (inner.majorType !== 0 && inner.majorType !== 1) {
+        throw new CborError("cbor/bad-tag-content", "read.time: tag 1 must wrap an integer");
+      }
+      var secs = inner.majorType === 0 ? inner.argument : -1n - inner.argument;
+      if (secs < -_MAX_EPOCH_SECONDS || secs > _MAX_EPOCH_SECONDS) {
+        throw new CborError("cbor/bad-time", "epoch time out of range");
+      }
+      var ns = Number(secs);
+      var d = new Date(ns < 0 ? -constants.TIME.seconds(-ns) : constants.TIME.seconds(ns));
+      if (isNaN(d.getTime())) throw new CborError("cbor/bad-time", "epoch time out of range");
+      return d;
+    }
+    function readOid(node) {
+      var inner = _tagInner(node, 111, "read.oid");
+      if (inner.majorType !== 2) throw new CborError("cbor/bad-tag-content", "read.oid: tag 111 must wrap a byte string");
+      return asn1.decodeOidContent(inner.content);
+    }
+    function _cbItem(x, who) {
+      if (!Buffer.isBuffer(x)) throw new CborError("cbor/not-buffer", who + ": expected a pre-encoded CBOR item Buffer");
+      return x;
+    }
+    function _assertDecodes(out, who) {
+      try {
+        decode(out);
+      } catch (e) {
+        throw new CborError("cbor/bad-item", who + ": produced bytes the strict decoder rejects (" + (e && e.code) + ")", e);
+      }
+      return out;
+    }
+    function _capString(out, who) {
+      if (out.length > constants.LIMITS.CBOR_MAX_BYTES) throw new CborError("cbor/too-large", who + ": encoded " + out.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BYTES);
+      return out;
+    }
+    function _assertWellFormedText(str, who) {
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        if (c >= 55296 && c <= 56319) {
+          var n = str.charCodeAt(i + 1);
+          if (!(n >= 56320 && n <= 57343)) throw new CborError("cbor/bad-utf8", who + ": the string has an unpaired high surrogate");
+          i++;
+        } else if (c >= 56320 && c <= 57343) throw new CborError("cbor/bad-utf8", who + ": the string has an unpaired low surrogate");
+      }
+    }
+    function _head(mt, argument, who) {
+      var a = typeof argument === "bigint" ? argument : BigInt(argument);
+      if (a < 0n) throw new CborError("cbor/bad-argument", who + ": a CBOR head argument must be non-negative");
+      if (a > 0xffffffffffffffffn) throw new CborError("cbor/bad-argument", who + ": a CBOR head argument exceeds 64 bits");
+      var mtb = mt << 5, b;
+      if (a <= 23n) return Buffer.from([mtb | Number(a)]);
+      if (a < 256n) return Buffer.from([mtb | 24, Number(a)]);
+      if (a < 65536n) {
+        b = Buffer.alloc(3);
+        b[0] = mtb | 25;
+        b.writeUInt16BE(Number(a), 1);
+        return b;
+      }
+      if (a < 4294967296n) {
+        b = Buffer.alloc(5);
+        b[0] = mtb | 26;
+        b.writeUInt32BE(Number(a), 1);
+        return b;
+      }
+      b = Buffer.alloc(9);
+      b[0] = mtb | 27;
+      b.writeBigUInt64BE(a, 1);
+      return b;
+    }
+    var build = {
+      uint: function(n) {
+        var a = typeof n === "bigint" ? n : BigInt(n);
+        if (a < 0n) throw new CborError("cbor/bad-argument", "build.uint: value must be non-negative");
+        return _head(0, a, "build.uint");
+      },
+      nint: function(n) {
+        var a = typeof n === "bigint" ? n : BigInt(n);
+        if (a >= 0n) throw new CborError("cbor/bad-argument", "build.nint: value must be negative");
+        return _head(1, -1n - a, "build.nint");
+      },
+      int: function(n) {
+        var a = typeof n === "bigint" ? n : BigInt(n);
+        return a >= 0n ? _head(0, a, "build.int") : _head(1, -1n - a, "build.int");
+      },
+      byteString: function(buf) {
+        var b = _asBuffer(buf, "build.byteString");
+        return _capString(Buffer.concat([_head(2, b.length, "build.byteString"), b]), "build.byteString");
+      },
+      textString: function(s) {
+        var str = String(s);
+        _assertWellFormedText(str, "build.textString");
+        var b = Buffer.from(str, "utf8");
+        return _capString(Buffer.concat([_head(3, b.length, "build.textString"), b]), "build.textString");
+      },
+      array: function(items) {
+        if (!Array.isArray(items)) throw new CborError("cbor/bad-argument", "build.array: expected an array of pre-encoded items");
+        var parts = items.map(function(x, i) {
+          return _cbItem(x, "build.array[" + i + "]");
+        });
+        return _assertDecodes(Buffer.concat([_head(4, items.length, "build.array")].concat(parts)), "build.array");
+      },
+      map: function(pairs) {
+        if (!Array.isArray(pairs)) throw new CborError("cbor/bad-argument", "build.map: expected an array of [key, value] pairs");
+        var enc = pairs.map(function(p, i2) {
+          if (!Array.isArray(p) || p.length !== 2) throw new CborError("cbor/bad-argument", "build.map[" + i2 + "]: each entry is a [key, value] pair");
+          return [_cbItem(p[0], "build.map key"), _cbItem(p[1], "build.map value")];
+        });
+        enc.sort(function(a, b) {
+          return Buffer.compare(a[0], b[0]);
+        });
+        for (var i = 1; i < enc.length; i++) {
+          if (Buffer.compare(enc[i - 1][0], enc[i][0]) === 0) throw new CborError("cbor/duplicate-map-key", "build.map: duplicate map key");
+        }
+        var flat = [_head(5, pairs.length, "build.map")];
+        enc.forEach(function(p) {
+          flat.push(p[0], p[1]);
+        });
+        return _assertDecodes(Buffer.concat(flat), "build.map");
+      },
+      tag: function(tagNum, inner) {
+        return _assertDecodes(Buffer.concat([_head(6, tagNum, "build.tag"), _cbItem(inner, "build.tag content")]), "build.tag");
+      },
+      boolean: function(v) {
+        return Buffer.from([v ? 245 : 244]);
+      },
+      nullValue: function() {
+        return Buffer.from([246]);
+      },
+      raw: function(buf) {
+        return _assertDecodes(_asBuffer(buf, "build.raw"), "build.raw");
+      },
+      // Tagged leaves -- the inverse of read.biguint / read.time / read.oid.
+      biguint: function(n) {
+        var a = typeof n === "bigint" ? n : BigInt(n);
+        if (a < 0n) throw new CborError("cbor/bad-argument", "build.biguint: value must be non-negative");
+        var hex = a.toString(16);
+        if (hex.length % 2) hex = "0" + hex;
+        var mag = a === 0n ? Buffer.alloc(0) : Buffer.from(hex, "hex");
+        if (mag.length <= 8) throw new CborError("cbor/bad-argument", "build.biguint: a value that fits 8 bytes must use build.uint (RFC 8949 preferred serialization)");
+        if (mag.length > constants.LIMITS.CBOR_MAX_BIGUINT_BYTES) throw new CborError("cbor/biguint-too-large", "build.biguint: " + mag.length + " bytes exceeds cap " + constants.LIMITS.CBOR_MAX_BIGUINT_BYTES);
+        return build.tag(2, build.byteString(mag));
+      },
+      time: function(v) {
+        var ms;
+        if (v instanceof Date) {
+          ms = v.getTime();
+          if (Number.isNaN(ms)) throw new CborError("cbor/bad-time", "build.time: an Invalid Date has no epoch value");
+          if (ms % 1e3 !== 0) throw new CborError("cbor/bad-time", "build.time: a Date with sub-second precision cannot be a second-granularity CBOR epoch; round to whole seconds");
+        }
+        var secs = v instanceof Date ? BigInt(Math.floor(ms / 1e3)) : typeof v === "bigint" ? v : BigInt(v);
+        if (secs < -_MAX_EPOCH_SECONDS || secs > _MAX_EPOCH_SECONDS) throw new CborError("cbor/bad-time", "build.time: epoch seconds " + secs + " are outside the representable Date range");
+        return build.tag(1, build.int(secs));
+      },
+      oid: function(dotted) {
+        return build.tag(111, build.byteString(asn1.encodeOidContent(dotted)));
+      }
+    };
+    module2.exports = {
+      decode,
+      build,
+      read: {
+        uint: readUint,
+        nint: readNint,
+        int: readInt,
+        byteString: readByteString,
+        textString: readTextString,
+        array: readArray,
+        map: readMap,
+        mapGet: readMapGet,
+        boolean: readBoolean,
+        nullValue: readNull,
+        undefinedValue: readUndefined,
+        float: readFloat,
+        biguint: readBiguint,
+        time: readTime,
+        oid: readOid
+      }
+    };
+  }
+});
+
 // node_modules/@blamejs/pki/lib/schema-engine.js
 var require_schema_engine = __commonJS({
   "node_modules/@blamejs/pki/lib/schema-engine.js"(exports2, module2) {
@@ -5415,6 +5905,49 @@ var require_validator_cose = __commonJS({
       }
       var expectedParams = kty === 2n ? 5 : 4;
       if (node.children.length !== expectedParams) throw bad("the COSE_Key carries parameters beyond the canonical set for its key type (WebAuthn sec. 6.5.1)");
+      return assertKeyMaterial(key, E, code, unsupportedCode);
+    }
+    function assertKeyMaterial(key, E, code, unsupportedCode) {
+      function bad(msg, cause) {
+        return new E(code, msg, cause);
+      }
+      if (!key || typeof key !== "object") throw bad("a credential key must be a decoded COSE_Key object");
+      try {
+        key = { kty: key.kty, alg: key.alg, crv: key.crv, x: key.x, y: key.y, n: key.n, e: key.e };
+      } catch (e) {
+        throw bad("a credential key field could not be read", e);
+      }
+      var MAX = BigInt(Number.MAX_SAFE_INTEGER);
+      function _isInt(v) {
+        if (typeof v === "bigint") return v <= MAX && v >= -MAX;
+        return typeof v === "number" && Number.isSafeInteger(v);
+      }
+      if (!_isInt(key.kty)) throw bad("a COSE_Key kty (label 1) must be an integer");
+      if (!_isInt(key.alg)) throw bad("a COSE_Key alg (label 3) must be an integer");
+      if (key.crv !== void 0 && key.crv !== null && !_isInt(key.crv)) throw bad("a COSE_Key crv (label -1) must be an integer");
+      key.kty = Number(key.kty);
+      key.alg = Number(key.alg);
+      if (key.crv !== void 0 && key.crv !== null) key.crv = Number(key.crv);
+      var kty = BigInt(key.kty);
+      if (kty === 2n) {
+        var el2 = EC2_CRV_LEN[key.crv];
+        if (!Buffer.isBuffer(key.x) || !Buffer.isBuffer(key.y)) throw bad("an EC2 COSE_Key must carry crv (-1), x (-2), and y (-3)");
+        if (!el2 || key.x.length !== el2 || key.y.length !== el2) throw bad("an EC2 COSE_Key x/y length is inconsistent with its curve");
+      } else if (kty === 1n) {
+        var okp2 = OKP_CRV[key.crv];
+        if (!okp2 || !Buffer.isBuffer(key.x) || key.x.length !== okp2.len) throw bad("an OKP COSE_Key must be Ed25519 (crv 6) or Ed448 (crv 7) with a matching-length x (-2)");
+      } else if (kty === 3n) {
+        if (!Buffer.isBuffer(key.n) || !key.n.length || !Buffer.isBuffer(key.e) || !key.e.length) throw bad("an RSA COSE_Key must carry n (-1) and e (-2)");
+        if (key.n[0] === 0) throw bad("an RSA COSE_Key modulus (-1) must be minimally encoded, with no leading zero byte (RFC 8230 sec. 4)");
+        if (key.e[0] === 0) throw bad("an RSA COSE_Key exponent (-2) must be minimally encoded, with no leading zero byte (RFC 8230 sec. 4)");
+        var bits = _modulusBits(key.n);
+        if (bits < RSA_MIN_MODULUS_BITS) throw bad("an RSA COSE_Key modulus (-1) is " + bits + " bits, below the " + RSA_MIN_MODULUS_BITS + "-bit minimum");
+        if (key.e.length > RSA_MAX_EXPONENT_BYTES) throw bad("an RSA COSE_Key exponent (-2) is longer than " + RSA_MAX_EXPONENT_BYTES + " bytes");
+        if ((key.e[key.e.length - 1] & 1) === 0) throw bad("an RSA COSE_Key exponent (-2) must be odd");
+        if (key.e.length === 1 && key.e[0] <= 1) throw bad("an RSA COSE_Key exponent (-2) must be greater than 1 -- e = 1 makes RSA the identity function");
+      } else {
+        throw bad("unsupported COSE_Key kty " + Number(key.kty));
+      }
       var prof = ALG_PROFILE[String(key.alg)];
       if (!prof) throw new E(unsupportedCode || code, "unsupported credential key algorithm " + key.alg);
       if (prof.kty !== key.kty) throw bad("credential key algorithm " + key.alg + " is inconsistent with key type " + key.kty);
@@ -5424,7 +5957,7 @@ var require_validator_cose = __commonJS({
       } catch (e) {
         throw bad("the credential public key point is not valid for its curve", e);
       }
-      if (kty === 1n && !edwardsPoint.validate(key.x, key.crv)) throw bad("the OKP credential public key is not a valid, full-order Edwards point");
+      if (Number(key.kty) === 1 && !edwardsPoint.validate(key.x, key.crv)) throw bad("the OKP credential public key is not a valid, full-order Edwards point");
       return key;
     }
     function toSpki(key, E, code) {
@@ -5455,6 +5988,7 @@ var require_validator_cose = __commonJS({
     }
     module2.exports = {
       credentialKey,
+      assertKeyMaterial,
       toSpki,
       EC2_CRV_LEN,
       EC2_CRV_OID,
@@ -5845,11 +6379,20 @@ var require_validator_tpm = __commonJS({
         if (ap.allow !== void 0) {
           if (!Array.isArray(ap.allow)) throw new E(code, "opts.tpmPolicy.authPolicy.allow must be an array");
           allow = ap.allow.map(function(entry, i) {
-            if (Buffer.isBuffer(entry)) return entry;
-            if (typeof entry !== "string" || entry.length === 0 || entry.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(entry)) {
-              throw new E(code, "opts.tpmPolicy.authPolicy.allow[" + i + "] must be a Buffer or an even-length hex string");
+            if (Buffer.isBuffer(entry)) return guard.bytes.snapshot(entry, E, code, "opts.tpmPolicy.authPolicy.allow[" + i + "]");
+            var label = "opts.tpmPolicy.authPolicy.allow[" + i + "]";
+            if (typeof entry !== "string" || entry.length === 0) {
+              throw new E(code, label + " must be a Buffer or an even-length hex string");
             }
-            return Buffer.from(entry, "hex");
+            return guard.encoding.hex(
+              entry,
+              null,
+              function(c, m) {
+                return new E(c, m);
+              },
+              code,
+              label + " must be a Buffer or an even-length hex string --"
+            );
           });
         }
       }
@@ -6408,7 +6951,7 @@ var require_schema_x509 = __commonJS({
         };
       }
     });
-    var parse = pkix.makeParser({ pemLabel: "CERTIFICATE", PemError, ErrorClass: CertificateError, prefix: "x509", what: "certificate", topSchema: CERTIFICATE, ns: NS });
+    var parse = pkix.makeRecordingParser({ pemLabel: "CERTIFICATE", PemError, ErrorClass: CertificateError, prefix: "x509", what: "certificate", topSchema: CERTIFICATE, ns: NS }, "certificate");
     function matches(root) {
       var TAGS = asn1.TAGS;
       var tbs = pkix.signedEnvelopeTbs(root);
@@ -7464,6 +8007,37 @@ var require_schema_pkix = __commonJS({
       }
       throw ns.E(code, "DistributionPointName must be fullName [0] or nameRelativeToCRLIssuer [1] (RFC 5280 sec. 4.2.1.13)");
     }
+    var _KU_DECODER = /* @__PURE__ */ new WeakMap();
+    function keyUsageOf(ns, cert, E, code, label) {
+      var exts = cert && cert.extensions || [];
+      var want = ns.oid.byName("keyUsage");
+      for (var i = 0; i < exts.length; i++) {
+        if (exts[i].oid !== want || exts[i].value == null) continue;
+        var dec = _KU_DECODER.get(ns);
+        if (!dec) {
+          dec = certExtensionDecoders(ns).byOid[want];
+          _KU_DECODER.set(ns, dec);
+        }
+        try {
+          return dec(exts[i].value);
+        } catch (e) {
+          throw E(code, "the " + label + " keyUsage extension is malformed", e);
+        }
+      }
+      return null;
+    }
+    function issuingDistributionPoint(code) {
+      return schema.seq([
+        schema.trailing([
+          { tag: 0, name: "distributionPoint", schema: schema.any() },
+          { tag: 1, name: "onlyContainsUserCerts", schema: schema.implicitBoolean(1) },
+          { tag: 2, name: "onlyContainsCACerts", schema: schema.implicitBoolean(2) },
+          { tag: 3, name: "onlySomeReasons", schema: schema.implicitBitString(3) },
+          { tag: 4, name: "indirectCRL", schema: schema.implicitBoolean(4) },
+          { tag: 5, name: "onlyContainsAttributeCerts", schema: schema.implicitBoolean(5) }
+        ], { minTag: 0, maxTag: 5, unexpectedCode: code, orderCode: code })
+      ], { assert: "sequence", code, what: "IssuingDistributionPoint" });
+    }
     var _T = asn1.TAGS;
     function assertPolicyQualifiers(qNode, fail) {
       if (qNode.tagClass !== "universal" || qNode.tagNumber !== _T.SEQUENCE || !qNode.children || !qNode.children.length) {
@@ -8196,6 +8770,15 @@ var require_schema_pkix = __commonJS({
         return runParse(input, opts);
       };
     }
+    function makeRecordingParser(opts, kind) {
+      return guard.parsed.recordingParser(
+        kind,
+        makeParser(opts),
+        opts.ErrorClass,
+        opts.prefix + "/bad-input",
+        "a " + opts.what
+      );
+    }
     function signedEnvelope(ns, tbsSchema, opts) {
       return schema.seq([
         schema.field("toBeSigned", tbsSchema),
@@ -8257,6 +8840,7 @@ var require_schema_pkix = __commonJS({
       pbmac1Params,
       spki,
       makeParser,
+      makeRecordingParser,
       signedEnvelopeTbs,
       rootSequenceChildren,
       assertPolicyQualifiers,
@@ -8271,6 +8855,8 @@ var require_schema_pkix = __commonJS({
       generalName,
       generalNames,
       distributionPointName,
+      issuingDistributionPoint,
+      keyUsageOf,
       generalizedTime,
       utf8Text,
       rawNonEmptySequence,
@@ -10389,7 +10975,7 @@ var require_schema_crl = __commonJS({
         };
       }
     });
-    var parse = pkix.makeParser({ pemLabel: "X509 CRL", PemError, ErrorClass: CrlError, prefix: "crl", what: "CRL", topSchema: CERTIFICATE_LIST, ns: NS });
+    var parse = pkix.makeRecordingParser({ pemLabel: "X509 CRL", PemError, ErrorClass: CrlError, prefix: "crl", what: "CRL", topSchema: CERTIFICATE_LIST, ns: NS }, "crl");
     function pemDecode(text, label) {
       return pkix.pemDecode(text, label || "X509 CRL", PemError);
     }
@@ -10656,6 +11242,7 @@ var require_schema_cms = __commonJS({
     var asn1 = require_asn1_der();
     var schema = require_schema_engine();
     var pkix = require_schema_pkix();
+    var guard = require_guard_all();
     var oid = require_oid();
     var frameworkError = require_framework_error();
     var schemaX509 = require_schema_x509();
@@ -10770,6 +11357,78 @@ var require_schema_cms = __commonJS({
       }
       if (mode !== "countersig" && ct === 0) throw NS.E("cms/missing-content-type", "the attribute set must contain a content-type attribute (RFC 5652 sec. 11.1)");
       if (md === 0) throw NS.E("cms/missing-message-digest", "the attribute set must contain a message-digest attribute (RFC 5652 sec. 11.2)");
+    }
+    function _readsAs(vals, tagNumber, reader) {
+      if (vals.length !== 1 || !schema.isUniversal(vals[0], tagNumber)) return false;
+      var reads = true;
+      try {
+        reader(vals[0]);
+      } catch (_e) {
+        reads = false;
+      }
+      return reads;
+    }
+    function _readsAsTime(vals) {
+      if (vals.length !== 1) return false;
+      var reads = true;
+      try {
+        asn1.read.time(vals[0]);
+      } catch (_e) {
+        reads = false;
+      }
+      return reads;
+    }
+    function _ascendingDer(nodes) {
+      for (var i = 1; i < nodes.length; i++) {
+        if (Buffer.compare(nodes[i - 1].bytes, nodes[i].bytes) > 0) return false;
+      }
+      return true;
+    }
+    function looksLikeSignedAttributes(bytes) {
+      if (!bytes || !bytes.length) return false;
+      var node;
+      try {
+        node = asn1.decode(bytes);
+      } catch (_e) {
+        return false;
+      }
+      if (!schema.isUniversal(node, asn1.TAGS.SET) || !node.constructed) return false;
+      var kids = node.children || [];
+      if (!kids.length) return false;
+      if (!_ascendingDer(kids)) return false;
+      var sawContentType = false, sawMessageDigest = false, seenTypes = /* @__PURE__ */ Object.create(null);
+      for (var i = 0; i < kids.length; i++) {
+        var a = kids[i];
+        if (!schema.isUniversal(a, asn1.TAGS.SEQUENCE)) return false;
+        if (!a.children || a.children.length !== 2) return false;
+        var t = a.children[0], vs = a.children[1];
+        if (!schema.isUniversal(t, asn1.TAGS.OBJECT_IDENTIFIER)) return false;
+        if (!schema.isUniversal(vs, asn1.TAGS.SET)) return false;
+        var attrOid;
+        try {
+          attrOid = asn1.read.oid(t);
+        } catch (_e2) {
+          return false;
+        }
+        if (seenTypes[attrOid]) return false;
+        seenTypes[attrOid] = true;
+        var placement = ATTR_FORBIDDEN_IN[attrOid];
+        if (placement && placement.signed) return false;
+        var n = (vs.children || []).length;
+        if (n < 1) return false;
+        if (!_ascendingDer(vs.children || [])) return false;
+        var vals = vs.children || [];
+        if (attrOid === OID_CONTENT_TYPE) {
+          if (!_readsAs(vals, asn1.TAGS.OBJECT_IDENTIFIER, asn1.read.oid)) return false;
+          sawContentType = true;
+        } else if (attrOid === OID_MESSAGE_DIGEST) {
+          if (!_readsAs(vals, asn1.TAGS.OCTET_STRING, asn1.read.octetString)) return false;
+          sawMessageDigest = true;
+        } else if (attrOid === OID_SIGNING_TIME) {
+          if (!_readsAsTime(vals)) return false;
+        }
+      }
+      return sawContentType && sawMessageDigest;
     }
     function _assertContentTypeMatchesAttrs(attrs, eContentType) {
       for (var i = 0; i < attrs.length; i++) {
@@ -11529,7 +12188,7 @@ var require_schema_cms = __commonJS({
         return result;
       }
     });
-    var parse = pkix.makeParser({ pemLabel: "CMS", PemError, ErrorClass: CmsError, prefix: "cms", what: "CMS ContentInfo", topSchema: CONTENT_INFO, ns: NS });
+    var parse = pkix.makeRecordingParser({ pemLabel: "CMS", PemError, ErrorClass: CmsError, prefix: "cms", what: "CMS ContentInfo", topSchema: CONTENT_INFO, ns: NS }, "cms");
     function pemDecode(text, label) {
       return pkix.pemDecode(text, label || "CMS", PemError);
     }
@@ -11547,9 +12206,11 @@ var require_schema_cms = __commonJS({
     function walkEnvelopedData(node) {
       return schema.walk(ENVELOPED_DATA, node, NS).result;
     }
-    function walkSignedData(node) {
+    var walkSignedData = guard.parsed.recordingWalker("cms", function(node) {
       return schema.walk(SIGNED_DATA, node, NS).result;
-    }
+    }, function(der) {
+      return asn1.decode(der, { ber: true });
+    });
     function walkEncryptedData(node) {
       return schema.walk(ENCRYPTED_DATA, node, NS).result;
     }
@@ -11613,6 +12274,7 @@ var require_schema_cms = __commonJS({
       walkSignedData,
       walkEncryptedData,
       walkCountersignature,
+      looksLikeSignedAttributes,
       assertAttachedCiphertext,
       // The structure's own algorithm tables, exported (like the walk* helpers) as the single source
       // of truth the crypto layer (cms-encrypt / cms-decrypt) shares -- so the wrap<->KEK-length, the
@@ -12026,7 +12688,7 @@ var require_schema_pkcs12 = __commonJS({
       }
       throw ctx.E("pkcs12/bad-bag-type", (ctx.oid.name(rec.bagId) || rec.bagId) + " is not a recognized SafeBag bagId (RFC 7292 sec. 4.2)");
     }
-    var parse = pkix.makeParser({
+    var parse = pkix.makeRecordingParser({
       pemLabel: "PKCS12",
       PemError,
       ErrorClass: Pkcs12Error,
@@ -12035,7 +12697,7 @@ var require_schema_pkcs12 = __commonJS({
       topSchema: PFX,
       ns: NS,
       ber: true
-    });
+    }, "pkcs12Store");
     function pemDecode(text, label) {
       return pkix.pemDecode(text, label || "PKCS12", PemError);
     }
@@ -12392,7 +13054,7 @@ var require_schema_ocsp = __commonJS({
       }
     });
     var parseRequest = pkix.makeParser({ pemLabel: "OCSP REQUEST", PemError, ErrorClass: OcspError, prefix: "ocsp", what: "OCSP request", topSchema: OCSP_REQUEST, ns: NS });
-    var parseResponse = pkix.makeParser({ pemLabel: "OCSP RESPONSE", PemError, ErrorClass: OcspError, prefix: "ocsp", what: "OCSP response", topSchema: OCSP_RESPONSE, ns: NS });
+    var parseResponse = pkix.makeRecordingParser({ pemLabel: "OCSP RESPONSE", PemError, ErrorClass: OcspError, prefix: "ocsp", what: "OCSP response", topSchema: OCSP_RESPONSE, ns: NS }, "ocspResponse");
     function pemDecode(text, label) {
       return pkix.pemDecode(text, label || "OCSP RESPONSE", PemError);
     }
@@ -16161,6 +16823,7 @@ var require_sign_scheme = __commonJS({
     var webcrypto = require_webcrypto();
     var subtle = webcrypto.webcrypto.subtle;
     var validator = require_validator_all();
+    var guard = require_guard_all();
     var compositeSig = require_composite_sig();
     var b = asn1.build;
     function O(name) {
@@ -16313,8 +16976,8 @@ var require_sign_scheme = __commonJS({
       if (imp.namedCurve && ka.namedCurve !== imp.namedCurve) throw E("bad-input", "the signer CryptoKey curve (" + ka.namedCurve + ") does not match the certificate curve (" + imp.namedCurve + ")");
     }
     function _normPkcs8(k, label, E) {
-      if (Buffer.isBuffer(k)) return k;
-      if (k instanceof Uint8Array) return Buffer.from(k);
+      if (Buffer.isBuffer(k)) return guard.bytes.view(k, E, "bad-input", label);
+      if (k instanceof Uint8Array) return guard.bytes.snapshot(k, E, "bad-input", label);
       if (typeof k === "string") {
         try {
           return pkcs8.pemDecode(k);
@@ -16335,17 +16998,28 @@ var require_sign_scheme = __commonJS({
         _assertKeyMatchesScheme(key, imp, E);
         return webcrypto.adoptKey(key, imp, ["sign"], E, "bad-input");
       }
-      var der;
-      if (Buffer.isBuffer(key)) der = key;
-      else if (key instanceof Uint8Array) der = Buffer.from(key);
-      else if (typeof key === "string") {
+      var der, owned = false;
+      if (Buffer.isBuffer(key)) der = guard.bytes.view(key, E, "bad-input", "the signer private key");
+      else if (key instanceof Uint8Array) {
+        der = guard.bytes.snapshot(key, E, "bad-input", "the signer private key");
+        owned = true;
+      } else if (typeof key === "string") {
         try {
           der = pkcs8.pemDecode(key);
         } catch (e) {
           throw E("bad-input", "the signer PEM private key could not be decoded", e);
         }
+        owned = true;
       } else throw E("bad-input", "a signer key must be a CryptoKey, a PKCS#8 DER Buffer, or a PKCS#8 PEM string");
-      return subtle.importKey("pkcs8", der, imp, false, ["sign"]);
+      var imported = subtle.importKey("pkcs8", der, imp, false, ["sign"]);
+      if (!owned) return imported;
+      return imported.then(function(k) {
+        guard.secret.zeroize(der, E, "bad-input", "the signer private-key copy");
+        return k;
+      }, function(e) {
+        guard.secret.zeroize(der, E, "bad-input", "the signer private-key copy");
+        throw e;
+      });
     }
     function signOverTbs(scheme, key, signedBytes, E) {
       if (scheme.composite) {
@@ -16632,13 +17306,12 @@ var require_pki_build = __commonJS({
         return nodeCrypto.createHash("sha1").update(keyBytes).digest();
       }
       function skiKeyId(val, spkiDer) {
-        if (Buffer.isBuffer(val)) return val;
+        if (Buffer.isBuffer(val)) return guard.bytes.snapshot(val, ErrorClass, ctx.prefix + "/bad-input", "subjectKeyIdentifier");
         if (val === true) return spkiKeyId(spkiDer);
         throw E("bad-input", "subjectKeyIdentifier must be true (auto-derive) or a Buffer key id");
       }
       function reqDer(v, what) {
-        if (Buffer.isBuffer(v)) return v;
-        if (v instanceof Uint8Array) return Buffer.from(v);
+        if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, ErrorClass, ctx.prefix + "/bad-input", what);
         throw E("bad-input", what + " must be a DER Buffer");
       }
       function assertValidSpki(spkiDer, what) {
@@ -16834,7 +17507,12 @@ var require_pki_build = __commonJS({
       var hasVersion = tbs.children[0].tagClass === "context" && tbs.children[0].tagNumber === 0;
       return tbs.children[(hasVersion ? 1 : 0) + (which === "subject" ? 4 : 2)].bytes;
     }
-    module2.exports = { makeBuilder, KU_BIT, tbsNameField };
+    function tbsSerialNumber(cert) {
+      var tbs = asn1.decode(cert.tbsBytes);
+      var hasVersion = tbs.children[0].tagClass === "context" && tbs.children[0].tagNumber === 0;
+      return asn1.read.integer(tbs.children[hasVersion ? 1 : 0]);
+    }
+    module2.exports = { makeBuilder, KU_BIT, tbsNameField, tbsSerialNumber };
   }
 });
 
@@ -17015,9 +17693,11 @@ var require_crmf_sign = __commonJS({
       });
     }
     function build(spec, key, opts) {
-      return Promise.resolve().then(function() {
-        return _build(spec, key, opts);
-      });
+      return guard.bytes.fixedCall(CrmfError, "crmf/bad-input", [
+        [spec, "the certificate-request-message spec"],
+        [key, "the signing key"],
+        [opts, "pki.crmf.build options"]
+      ], _build);
     }
     function _buildCertReqMsg(spec, key, opts) {
       if (!spec || typeof spec !== "object" || Buffer.isBuffer(spec)) throw _err("crmf/bad-input", "each certificate-request-message spec must be an object");
@@ -17193,7 +17873,7 @@ var require_pbes2 = __commonJS({
         guard.secret.zeroize(key, E, prefix + "/bad-input", "the password-derived encryption key");
       }
     }
-    function pbes2Decrypt(pwBytes, params, ciphertext, opts, E, prefix) {
+    function pbes2Decrypt(pwBytes, params, ciphertext, opts, E, prefix, budget) {
       var keyBits, iv, pb;
       try {
         var p = seqChildren(params, 2, "PBES2 parameters", E, prefix);
@@ -17212,6 +17892,10 @@ var require_pbes2 = __commonJS({
           throw e;
         }
         throw E(prefix + "/bad-algorithm-parameters", "malformed PBES2 parameters", e);
+      }
+      if (budget) {
+        budget.rounds -= pb.iterations;
+        if (budget.rounds < 0) throw E(prefix + "/iteration-limit", "the aggregate PBKDF2 key-derivation work exceeds the budget (a hostile many-element input)");
       }
       var dk = nodeCrypto.pbkdf2Sync(pwBytes, pb.salt, pb.iterations, keyBits / 8, pb.prfNode);
       try {
@@ -17813,9 +18497,10 @@ var require_cmp_build = __commonJS({
       };
     }
     function build(message, opts) {
-      return Promise.resolve().then(function() {
-        return _build(message, opts);
-      });
+      return guard.bytes.fixedCall(CmpError, "cmp/bad-input", [
+        [message, "the PKIMessage spec"],
+        [opts, "pki.cmp.build options"]
+      ], _build);
     }
     function _build(message, opts) {
       opts = opts || {};
@@ -17926,7 +18611,7 @@ var require_cmp_build = __commonJS({
       throw _err("cmp/unexpected-status", "a CMP response must be HTTP 200 (or a 4xx/5xx carrying a CMP error), not " + JSON.stringify(status) + " (RFC 9811 sec. 3.1)");
     }
     function transfer(url, message, opts) {
-      return Promise.resolve().then(function() {
+      return guard.async.deferred(function() {
         return _transfer(url, message, opts);
       });
     }
@@ -18378,16 +19063,13 @@ var require_cmp_verify = __commonJS({
       return _verdict(m, "signature", protectionAlg, true, trust.trusted, trust.trusted ? null : "cmp/untrusted-signer", trust.reason, signer);
     }
     function _certKey(c) {
-      var p = c;
-      if (Buffer.isBuffer(c) || c instanceof Uint8Array) {
-        try {
-          p = x509.parse(c);
-        } catch (_e) {
-          return null;
-        }
+      try {
+        var p = guard.parsed.acceptDerived(c, "certificate", x509.parse, _err, "cmp/bad-input", "a pool certificate");
+        if (!guard.parsed.isCert(p)) return null;
+        return p.tbsBytes.toString("base64") + "|" + p.signatureValue.bytes.toString("base64");
+      } catch (_e) {
+        return null;
       }
-      if (!p || !p.tbsBytes) return null;
-      return p.tbsBytes.toString("base64") + "|" + (p.signatureValue && p.signatureValue.bytes ? p.signatureValue.bytes.toString("base64") : "");
     }
     async function _chainSigner(signer, m, opts, extra) {
       if (!_keyUsageAllowsSigning(signer.parsed)) {
@@ -18470,7 +19152,7 @@ var require_cmp_verify = __commonJS({
       return (Buffer.isBuffer(s) || s instanceof Uint8Array) && s.length > 0;
     }
     function verify(message, opts) {
-      return Promise.resolve().then(function() {
+      return guard.async.deferred(function() {
         return _verify(message, opts);
       });
     }
@@ -18732,8 +19414,10 @@ var require_cms_sign = __commonJS({
     }
     function _normCertDer(c) {
       if (c == null) throw _err("cms/bad-input", "each signer requires a certificate (cert)");
-      if (c instanceof Uint8Array && !Buffer.isBuffer(c)) c = Buffer.from(c);
-      if (Buffer.isBuffer(c)) return c[0] === 48 ? c : _pemToDer(c.toString("latin1"));
+      if (c instanceof Uint8Array || Buffer.isBuffer(c)) {
+        c = guard.bytes.snapshot(c, CmsError, "cms/bad-input", "a signer certificate");
+        return c[0] === 48 ? c : _pemToDer(c.toString("latin1"));
+      }
       if (typeof c === "string") return _pemToDer(c);
       throw _err("cms/bad-input", "a signer certificate must be a DER Buffer or a PEM string");
     }
@@ -18743,6 +19427,13 @@ var require_cms_sign = __commonJS({
       return Buffer.from(m[1].replace(/[^A-Za-z0-9+/=]/g, ""), "base64");
     }
     function sign(content, signers, opts) {
+      return guard.bytes.fixedCall(CmsError, "cms/bad-input", [
+        [content, "content"],
+        [signers, "the signer list"],
+        [opts, "pki.cms.sign options"]
+      ], _sign);
+    }
+    function _sign(content, signers, opts) {
       opts = opts || {};
       if (typeof opts !== "object" || Buffer.isBuffer(opts)) throw _err("cms/bad-input", "pki.cms.sign options must be an object");
       var contentBuf = _toBuf(content, "content");
@@ -18759,6 +19450,9 @@ var require_cms_sign = __commonJS({
       }
       if (opts.signedAttributes === false && eContentType !== OID_DATA) {
         throw _err("cms/bad-input", "signed attributes are required when eContentType is not id-data (RFC 5652 sec. 5.3)");
+      }
+      if (opts.signedAttributes === false && cms.looksLikeSignedAttributes(contentBuf)) {
+        throw _err("cms/ambiguous-content", "this content is itself an encoded SignedAttributes block, so signing it WITHOUT signed attributes would produce a signature that could be re-presented as one over attributes (RFC 5652 sec. 5.4); sign it with signed attributes instead");
       }
       if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertValid(opts.signingTime, _err, "cms/bad-input", "signingTime");
       return Promise.all(list.map(function(s) {
@@ -18808,8 +19502,7 @@ var require_cms_sign = __commonJS({
       return out;
     }
     function _toBuf(v, what) {
-      if (Buffer.isBuffer(v)) return v;
-      if (v instanceof Uint8Array) return Buffer.from(v);
+      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, CmsError, "cms/bad-input", what);
       throw _err("cms/bad-input", what + " must be a Buffer");
     }
     function _resolveSignerIndices(spec, n) {
@@ -18930,6 +19623,13 @@ var require_cms_sign = __commonJS({
       return _signatureOctets(values[j]);
     }
     function countersign(cmsInput, signers, opts) {
+      return guard.bytes.fixedCall(CmsError, "cms/bad-input", [
+        [cmsInput, "the CMS message"],
+        [signers, "the signer list"],
+        [opts, "pki.cms.countersign options"]
+      ], _countersign);
+    }
+    function _countersign(cmsInput, signers, opts) {
       opts = opts || {};
       if (typeof opts !== "object" || Buffer.isBuffer(opts)) throw _err("cms/bad-input", "pki.cms.countersign options must be an object");
       var list = Array.isArray(signers) ? signers : [signers];
@@ -19002,7 +19702,9 @@ var require_cms_encrypt = __commonJS({
     var pbes2 = require_pbes2();
     var b = asn1.build;
     var subtle = webcrypto.webcrypto.subtle;
+    var pkix = require_schema_pkix();
     var CmsError = frameworkError.CmsError;
+    var _KU_NS = pkix.makeNS("cms", CmsError, oid);
     var WRAP_KEK_LENGTHS = schemaCms.WRAP_KEK_LENGTHS;
     function O(n) {
       return oid.byName(n);
@@ -19014,8 +19716,7 @@ var require_cms_encrypt = __commonJS({
       return shape === "null" ? b.sequence([b.oid(O(name)), b.nullValue()]) : b.sequence([b.oid(O(name))]);
     }
     function _normCertDer(cert, what) {
-      if (Buffer.isBuffer(cert)) return cert;
-      if (cert instanceof Uint8Array) return Buffer.from(cert);
+      if (Buffer.isBuffer(cert) || cert instanceof Uint8Array) return guard.bytes.snapshot(cert, CmsError, "cms/bad-input", what || "a certificate");
       if (typeof cert === "string") {
         try {
           return x509.pemDecode(cert);
@@ -19069,22 +19770,9 @@ var require_cms_encrypt = __commonJS({
       }
       return null;
     }
-    var KU_BIT = { digitalSignature: 0, keyEncipherment: 2, dataEncipherment: 3, keyAgreement: 4 };
     function _assertKeyUsage(cert, bitName, arm) {
-      var exts = cert.extensions || [];
-      for (var i = 0; i < exts.length; i++) {
-        if (exts[i].name === "keyUsage" && exts[i].value != null) {
-          var ku;
-          try {
-            ku = asn1.read.bitString(asn1.decode(exts[i].value));
-          } catch (e) {
-            throw _err("cms/bad-input", "the recipient certificate's keyUsage extension is malformed", e);
-          }
-          var idx = KU_BIT[bitName], byteI = idx >> 3, mask = 128 >> (idx & 7);
-          if (byteI >= ku.bytes.length || (ku.bytes[byteI] & mask) === 0) throw _err("cms/bad-key-usage", "the " + arm + " recipient certificate's keyUsage does not assert " + bitName);
-          return;
-        }
-      }
+      var ku = pkix.keyUsageOf(_KU_NS, cert, _err, "cms/bad-input", "recipient certificate's");
+      if (ku && ku[bitName] !== true) throw _err("cms/bad-key-usage", "the " + arm + " recipient certificate's keyUsage does not assert " + bitName);
     }
     var OAEP_HASH = { sha256: "SHA-256", sha384: "SHA-384", sha512: "SHA-512" };
     function _oaepParams(hashName) {
@@ -19569,8 +20257,7 @@ var require_cms_decrypt = __commonJS({
       return schemaCms.parse(_toDer(input));
     }
     function _toDer(input) {
-      if (Buffer.isBuffer(input)) return input;
-      if (input instanceof Uint8Array) return Buffer.from(input);
+      if (Buffer.isBuffer(input) || input instanceof Uint8Array) return guard.bytes.snapshot(input, CmsError, "cms/bad-input", "input");
       if (typeof input === "string") {
         try {
           return schemaCms.pemDecode(input);
@@ -19674,34 +20361,39 @@ var require_cms_decrypt = __commonJS({
     }
     async function _ktriCek(ri, km) {
       var kea = ri.keyEncryptionAlgorithm;
-      var keyDer = _normKeyDer(km.key);
-      if (kea.oid === O("rsaesOaep")) {
-        var hash = _oaepHashFromParams(kea.parameters);
-        var pub = await subtle.importKey("pkcs8", keyDer, { name: "RSA-OAEP", hash }, false, ["decrypt"]);
-        return Buffer.from(await subtle.decrypt({ name: "RSA-OAEP" }, pub, ri.encryptedKey));
-      }
-      if (kea.oid === O("rsaEncryption")) {
-        var keyObj = nodeCrypto.createPrivateKey({ key: keyDer, format: "der", type: "pkcs8" });
-        try {
-          return nodeCrypto.privateDecrypt({ key: keyObj, padding: nodeCrypto.constants.RSA_PKCS1_PADDING }, ri.encryptedKey);
-        } catch (_e) {
-          return null;
+      var k = _normKeyDer(km.key);
+      try {
+        if (kea.oid === O("rsaesOaep")) {
+          var hash = _oaepHashFromParams(kea.parameters);
+          var pub = await subtle.importKey("pkcs8", k.der, { name: "RSA-OAEP", hash }, false, ["decrypt"]);
+          return Buffer.from(await subtle.decrypt({ name: "RSA-OAEP" }, pub, ri.encryptedKey));
         }
+        if (kea.oid === O("rsaEncryption")) {
+          var keyObj = nodeCrypto.createPrivateKey({ key: k.der, format: "der", type: "pkcs8" });
+          try {
+            return nodeCrypto.privateDecrypt({ key: keyObj, padding: nodeCrypto.constants.RSA_PKCS1_PADDING }, ri.encryptedKey);
+          } catch (_e) {
+            return null;
+          }
+        }
+        throw _err("cms/unsupported-algorithm", "unsupported ktri keyEncryptionAlgorithm " + kea.oid);
+      } finally {
+        _releaseKeyDer(k);
       }
-      throw _err("cms/unsupported-algorithm", "unsupported ktri keyEncryptionAlgorithm " + kea.oid);
     }
     async function _kariCek(ri, km) {
-      var keyDer = _normKeyDer(km.key);
-      var kea = ri.keyEncryptionAlgorithm;
-      var wrapAlg = _kariWrap(kea);
-      var scheme = kea.oid;
-      var origSpki = _originatorSpki(ri.originator);
-      var rek = km.cert != null && _kariRekFor(ri, x509.parse(_normCertDer(km.cert))) || ri.recipientEncryptedKeys[0];
-      var kekBytes = WRAP_KEK_LENGTHS[wrapAlg.oid];
-      if (!kekBytes) throw _err("cms/unsupported-algorithm", "unsupported kari key-wrap");
-      var ukm = ri.ukm || null;
+      var k = _normKeyDer(km.key);
       var kek, z, mz;
       try {
+        var keyDer = k.der;
+        var kea = ri.keyEncryptionAlgorithm;
+        var wrapAlg = _kariWrap(kea);
+        var scheme = kea.oid;
+        var origSpki = _originatorSpki(ri.originator);
+        var rek = km.cert != null && _kariRekFor(ri, x509.parse(_normCertDer(km.cert))) || ri.recipientEncryptedKeys[0];
+        var kekBytes = WRAP_KEK_LENGTHS[wrapAlg.oid];
+        if (!kekBytes) throw _err("cms/unsupported-algorithm", "unsupported kari key-wrap");
+        var ukm = ri.ukm || null;
         if (_isMont(origSpki)) {
           var mont = _montName(origSpki);
           var recipPriv = await subtle.importKey("pkcs8", keyDer, { name: mont.name }, false, ["deriveBits"]);
@@ -19728,6 +20420,7 @@ var require_cms_decrypt = __commonJS({
         return await _aesKwUnwrap(kek, rek.encryptedKey);
       } finally {
         guard.secret.zeroizeAll([z, mz, kek], CmsError, "cms/bad-input", "the key-agreement shared secret");
+        _releaseKeyDer(k);
       }
     }
     async function _kekriCek(ri, km) {
@@ -19770,7 +20463,13 @@ var require_cms_decrypt = __commonJS({
       var kekBytes = Number(k.kekLength);
       var wrapAlg = k.wrap;
       if (WRAP_KEK_LENGTHS[wrapAlg.oid] !== kekBytes) throw _fail();
-      var priv = await subtle.importKey("pkcs8", _normKeyDer(km.key), { name: wcName }, false, ["decapsulateBits"]);
+      var keyCopy = _normKeyDer(km.key);
+      var priv;
+      try {
+        priv = await subtle.importKey("pkcs8", keyCopy.der, { name: wcName }, false, ["decapsulateBits"]);
+      } finally {
+        _releaseKeyDer(keyCopy);
+      }
       var ss = null, kek = null, ssAb = null, kekAb = null;
       try {
         ssAb = await subtle.decapsulateBits({ name: wcName }, priv, kemct);
@@ -20085,20 +20784,24 @@ var require_cms_decrypt = __commonJS({
       throw _fail();
     }
     function _normKeyDer(key) {
-      if (Buffer.isBuffer(key)) return key;
-      if (key instanceof Uint8Array) return Buffer.from(key);
+      if (Buffer.isBuffer(key)) return { der: key, owned: false };
+      if (key instanceof Uint8Array) return { der: Buffer.from(key), owned: true };
       if (typeof key === "string") {
+        var der;
         try {
-          return pkcs8.pemDecode(key);
+          der = pkcs8.pemDecode(key);
         } catch (e) {
           throw _err("cms/bad-input", "the recipient private-key PEM could not be decoded", e);
         }
+        return { der, owned: true };
       }
       throw _err("cms/bad-input", "the recipient private key must be a PKCS#8 DER Buffer or PEM string");
     }
+    function _releaseKeyDer(k) {
+      if (k && k.owned) guard.secret.zeroize(k.der, CmsError, "cms/bad-input", "the recipient private-key copy");
+    }
     function _normCertDer(cert) {
-      if (Buffer.isBuffer(cert)) return cert;
-      if (cert instanceof Uint8Array) return Buffer.from(cert);
+      if (Buffer.isBuffer(cert) || cert instanceof Uint8Array) return guard.bytes.snapshot(cert, CmsError, "cms/bad-input", "the recipient certificate");
       if (typeof cert === "string") {
         try {
           return x509.pemDecode(cert);
@@ -20182,8 +20885,7 @@ var require_cms_compress = __commonJS({
       };
     }
     function _toDer(input) {
-      if (Buffer.isBuffer(input)) return input;
-      if (input instanceof Uint8Array) return Buffer.from(input);
+      if (Buffer.isBuffer(input) || input instanceof Uint8Array) return guard.bytes.snapshot(input, CmsError, "cms/bad-input", "input");
       if (typeof input === "string") {
         try {
           return schemaCms.pemDecode(input);
@@ -20303,8 +21005,7 @@ var require_cms_verify = __commonJS({
     EC_CURVE[oid.byName("secp384r1")] = { curve: "P-384", coordLen: 48 };
     EC_CURVE[oid.byName("secp521r1")] = { curve: "P-521", coordLen: 66 };
     function _toBuf(v, what) {
-      if (Buffer.isBuffer(v)) return v;
-      if (v instanceof Uint8Array) return Buffer.from(v);
+      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, CmsError, "cms/bad-input", what);
       throw _err("cms/bad-input", what + " must be a Buffer");
     }
     function _findSignerCerts(sid, parsedCerts) {
@@ -20530,7 +21231,15 @@ var require_cms_verify = __commonJS({
     }
     function _computeSignedBytes(si, content, eContentType) {
       return Promise.resolve().then(function() {
-        if (!si.signedAttrsBytes) return content;
+        if (!si.signedAttrsBytes) {
+          if (cms.looksLikeSignedAttributes(content)) {
+            return { mismatch: {
+              code: "cms/ambiguous-content",
+              message: "the content of a SignerInfo with no signed attributes is itself an encoded SignedAttributes block, which is indistinguishable from a signature over attributes re-presented as one over content (RFC 5652 sec. 5.4); sign such content WITH signed attributes"
+            } };
+          }
+          return content;
+        }
         var reTagged = Buffer.from(si.signedAttrsBytes);
         reTagged[0] = 49;
         var attrs;
@@ -20651,10 +21360,17 @@ var require_cms_verify = __commonJS({
     }
     var _VERIFY_OPTS = { certs: 1, content: 1, trustAnchors: 1, time: 1, requiredEku: 1, checkPurpose: 1 };
     function verify(input, opts) {
+      return guard.async.deferred(function() {
+        return _verify(input, opts);
+      });
+    }
+    function _verify(input, opts) {
       opts = opts || {};
       if (typeof opts !== "object" || Buffer.isBuffer(opts)) throw _err("cms/bad-input", "pki.cms.verify options must be an object");
       guard.identifier.assertKnownKeys(opts, _VERIFY_OPTS, _err, "cms/bad-input", "pki.cms.verify has an unknown option ");
-      var parsed = input && typeof input === "object" && !Buffer.isBuffer(input) && Array.isArray(input.signerInfos) ? input : cms.parse(_snapshotIfBytes(input, "pki.cms.verify"));
+      var parsed = guard.parsed.acceptDerived(input, "cms", function(bytes) {
+        return cms.parse(_snapshotIfBytes(bytes, "pki.cms.verify"));
+      }, _err, "cms/bad-input", "the SignedData");
       if (!Array.isArray(parsed.signerInfos)) throw _err("cms/bad-input", "input is not a CMS SignedData");
       var content = parsed.encapContentInfo.eContent;
       if (content == null) {
@@ -20679,13 +21395,18 @@ var require_cms_verify = __commonJS({
           return _verifyCountersignatures(si, parsedCerts).then(function(countersignatures) {
             verdict.countersignatures = countersignatures;
             verdict.unsignedAttrs = _surfaceUnsignedAttrs(si);
+            verdict.signedAttributesPresent = !!si.signedAttrsBytes;
             return verdict;
           });
         });
       })).then(function(signers) {
-        var res = { valid: signers.length > 0 && signers.every(function(s) {
-          return s.ok === true;
-        }), signers };
+        var res = {
+          valid: signers.length > 0 && signers.every(function(s) {
+            return s.ok === true;
+          }),
+          eContentType: parsed.encapContentInfo.eContentType,
+          signers
+        };
         return _applyTrust(res, parsedCerts, trustCfg).then(function() {
           return res;
         });
@@ -21068,9 +21789,9 @@ var require_cmp_session = __commonJS({
     }
     function _certIdentity(cert) {
       try {
-        var p = cert && Buffer.isBuffer(cert.tbsBytes) ? cert : x509.parse(cert);
-        if (!p || !Buffer.isBuffer(p.tbsBytes)) return null;
-        return p.tbsBytes.toString("base64") + "|" + (p.signatureValue && p.signatureValue.bytes ? p.signatureValue.bytes.toString("base64") : "");
+        var p = guard.parsed.acceptDerived(cert, "certificate", x509.parse, _err, "cmp/bad-input", "a pool certificate");
+        if (!guard.parsed.isCert(p)) return null;
+        return p.tbsBytes.toString("base64") + "|" + p.signatureValue.bytes.toString("base64");
       } catch (_e) {
         return null;
       }
@@ -21204,8 +21925,7 @@ var require_cmp_session = __commonJS({
         var _es = opts.expectedSender;
         try {
           if (_es && Buffer.isBuffer(_es.tbsBytes)) {
-            if (_engine && _engine.coerceCert) _engine.coerceCert(_es);
-            _expectedSenderCert = _es;
+            _expectedSenderCert = _engine && _engine.coerceCert ? _engine.coerceCert(_es) : _es;
           } else if (Buffer.isBuffer(_es) || _es instanceof Uint8Array) {
             _expectedSenderDer = Buffer.from(_es);
             _expectedSenderCert = x509.parse(_expectedSenderDer);
@@ -21547,8 +22267,7 @@ var require_cmp_session = __commonJS({
           }
         }
         var pk = armSpec && armSpec.certTemplate ? armSpec.certTemplate.publicKey : null;
-        if (Buffer.isBuffer(pk)) return pk;
-        if (pk instanceof Uint8Array) return Buffer.from(pk);
+        if (Buffer.isBuffer(pk) || pk instanceof Uint8Array) return guard.bytes.snapshot(pk, CmpError, "cmp/bad-input", "the certTemplate publicKey");
         return null;
       }
       async function _validateLeaf(leaf, caPubs) {
@@ -22501,8 +23220,8 @@ var require_path_validate = __commonJS({
       if (!Array.isArray(path)) throw E("path/bad-input", "validate: path must be an array of certificates");
       var maxCerts = guard.limits.cap(opts.maxPathCerts, "validate: opts.maxPathCerts", constants.LIMITS.PATH_MAX_CERTS, { E, code: "path/bad-input", min: 1 });
       if (path.length > maxCerts) throw E("path/bad-input", "validate: the certification path has " + path.length + " certificates, exceeding the maxPathCerts limit (" + maxCerts + ")");
-      var certs = path.map(function(c) {
-        return c && c.tbsBytes ? c : x509.parse(c);
+      var certs = path.map(function(c, ci) {
+        return coerceCert(c, "validate: path[" + ci + "]");
       });
       var n = certs.length;
       if (n < 1) throw E("path/empty-path", "validate: the certification path is empty");
@@ -22533,6 +23252,11 @@ var require_path_validate = __commonJS({
       var softFail = opts.softFail === true;
       var requireRevocation = opts.requireRevocation === true;
       var failed = false;
+      var revocationRan = false, revocationWaived = false, revocationUndetermined = false;
+      var anchorDistrustApplied = false, anchorPurposeApplied = false;
+      if (!checkPurpose && opts.trustAnchor && _hasPurposeScopedMetadata(opts.trustAnchor)) {
+        throw E("path/bad-input", "validate: the trust anchor carries purpose-scoped metadata (distrustAfter / purposes), which is keyed by key purpose -- supply opts.checkPurpose to say which purpose this validation is for, or the constraint cannot be applied");
+      }
       for (var idx = 0; idx < n; idx++) {
         var i = idx + 1;
         var cert = certs[idx];
@@ -22597,23 +23321,32 @@ var require_path_validate = __commonJS({
         }
         if (revocationChecker) {
           var issuerCert = idx > 0 ? certs[idx - 1] : null;
-          var rv;
+          var rv, rvError = null;
           try {
             rv = await revocationChecker.check(cert, { workingIssuerName: state.workingIssuerName, workingPublicKey: state.workingPublicKey, workingPublicKeyAlgorithm: state.workingPublicKeyAlgorithm, issuerCert }, { time: opts.time, historicalMode: opts.historicalMode === true });
-          } catch (_e) {
-            rv = { status: "unknown" };
+          } catch (e) {
+            rv = { status: "error" };
+            rvError = e;
           }
+          var rvStatus = rv && typeof rv.status === "string" ? rv.status : "unknown";
           if (rv && rv.status === "good") {
-            checks.push({ name: "revocation", ok: true });
+            checks.push({ name: "revocation", ok: true, status: "good" });
           } else if (rv && rv.status === "revoked") {
-            checks.push({ name: "revocation", ok: false, code: "path/revoked" });
+            checks.push({ name: "revocation", ok: false, status: "revoked", code: "path/revoked" });
+            failed = true;
+          } else if (rvError) {
+            checks.push({ name: "revocation", ok: false, status: "error", code: "path/revocation-checker-error", error: rvError });
+            revocationUndetermined = true;
             failed = true;
           } else if (softFail) {
-            checks.push({ name: "revocation", ok: true });
+            checks.push({ name: "revocation", ok: true, status: rvStatus, waived: true });
+            revocationWaived = true;
           } else {
-            checks.push({ name: "revocation", ok: false, code: "path/revocation-undetermined" });
+            checks.push({ name: "revocation", ok: false, status: rvStatus, code: "path/revocation-undetermined" });
+            revocationUndetermined = true;
             failed = true;
           }
+          revocationRan = true;
         } else if (requireRevocation) {
           checks.push({ name: "revocation", ok: false, code: "path/revocation-undetermined" });
           failed = true;
@@ -22683,14 +23416,18 @@ var require_path_validate = __commonJS({
           var ta = opts.trustAnchor;
           var distrustDate = assertAnchorConstraints(ta, checkPurpose);
           if (distrustDate != null) {
+            anchorDistrustApplied = true;
             if (cert.validity.notBefore > distrustDate) {
               checks.push({ name: "distrustAfter", ok: false, code: "path/distrusted-after" });
               failed = true;
             }
           }
-          if (checkPurpose && ta.purposes && ta.purposes[checkPurpose] !== true) {
-            checks.push({ name: "purposeTrust", ok: false, code: "path/purpose-not-trusted" });
-            failed = true;
+          if (checkPurpose && ta.purposes) {
+            anchorPurposeApplied = true;
+            if (ta.purposes[checkPurpose] !== true) {
+              checks.push({ name: "purposeTrust", ok: false, code: "path/purpose-not-trusted" });
+              failed = true;
+            }
           }
           updateWorkingKey(state, cert);
         }
@@ -22719,6 +23456,18 @@ var require_path_validate = __commonJS({
       }
       return {
         valid: !failed,
+        // What the revocation rule and the anchor's own trust metadata actually decided. `valid` alone
+        // cannot answer either, and both are questions a stored verdict is re-read to settle: was this
+        // certificate ever established as un-revoked, and was the anchor's distrust date consulted.
+        // The WEAKEST outcome on the path, not the fact that a checker ran: a certificate nobody could
+        // answer for leaves revocation unestablished however many others answered, and deriving the word
+        // from "a checker ran" put that run on the same value as one that established every answer.
+        revocationChecked: !revocationRan ? false : revocationUndetermined ? "undetermined" : revocationWaived ? "waived" : "determined",
+        anchorConstraints: {
+          checkedPurpose: checkPurpose || null,
+          distrustAfterApplied: anchorDistrustApplied,
+          purposeTrustApplied: anchorPurposeApplied
+        },
         path: certs,
         results: state.results,
         workingPublicKey: state.workingPublicKey,
@@ -22757,16 +23506,7 @@ var require_path_validate = __commonJS({
     var OID_AUTHORITY_KEY_ID = oid.byName("authorityKeyIdentifier");
     var OID_CRL_NUMBER = oid.byName("cRLNumber");
     var OID_FRESHEST_CRL = oid.byName("freshestCRL");
-    var IDP_SCHEMA = schema.seq([
-      schema.trailing([
-        { tag: 0, name: "distributionPoint", schema: schema.any() },
-        { tag: 1, name: "onlyContainsUserCerts", schema: schema.implicitBoolean(1) },
-        { tag: 2, name: "onlyContainsCACerts", schema: schema.implicitBoolean(2) },
-        { tag: 3, name: "onlySomeReasons", schema: schema.implicitBitString(3) },
-        { tag: 4, name: "indirectCRL", schema: schema.implicitBoolean(4) },
-        { tag: 5, name: "onlyContainsAttributeCerts", schema: schema.implicitBoolean(5) }
-      ], { minTag: 0, maxTag: 5, unexpectedCode: "path/bad-idp", orderCode: "path/bad-idp" })
-    ], { assert: "sequence", code: "path/bad-idp", what: "IssuingDistributionPoint" });
+    var IDP_SCHEMA = pkix.issuingDistributionPoint("path/bad-idp");
     var ALL_REASONS = 510;
     function reasonMaskFromBitString(bs) {
       if (!bs || !bs.bytes) return null;
@@ -22948,8 +23688,15 @@ var require_path_validate = __commonJS({
       return best;
     }
     function crlChecker(crls, opts) {
-      var parsed = (crls || []).map(function(c) {
-        return c && c.tbsBytes ? c : crl.parse(c);
+      var parsed = (crls || []).map(function(c, ci) {
+        return guard.parsed.acceptDerived(
+          c,
+          "crl",
+          crl.parse,
+          E,
+          "path/bad-input",
+          "crlChecker: crls[" + ci + "]"
+        );
       });
       var useDeltas = !(opts && opts.useDeltas === false);
       return {
@@ -23177,7 +23924,7 @@ var require_path_validate = __commonJS({
     });
     function ocspChecker(responses) {
       var parsed = (responses || []).map(function(r) {
-        return r && r.responseStatus ? r : ocsp.parseResponse(r);
+        return _ocspFromBytes(r);
       });
       return {
         check: async function(cert, issuer, ctx) {
@@ -23217,7 +23964,35 @@ var require_path_validate = __commonJS({
         }
       };
     }
-    function verifyOcspResponse(parsedResponse, cert, issuerCert, time, opts) {
+    function verifyOcspResponse(response, cert, issuerCert, time, opts) {
+      var parsedResponse, subject, issuer;
+      try {
+        parsedResponse = _ocspFromBytes(response);
+        subject = coerceCert(cert, "the certificate");
+        issuer = coerceCert(issuerCert, "the issuer certificate");
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      return _verifyOcspParsed(parsedResponse, subject, issuer, time, opts);
+    }
+    var _OCSP_CLAIM = ["responseStatus", "basicResponse", "tbsResponseDataBytes"];
+    function _ocspFromBytes(response) {
+      return guard.parsed.fromTrustedSource(
+        response,
+        "ocspResponse",
+        _OCSP_CLAIM,
+        function(bytes) {
+          if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array) && typeof bytes !== "string") {
+            throw E("path/bad-input", "verifyOcspResponse: the response must be an OCSP response DER Buffer, a PEM string, or a pki.schema.ocsp.parseResponse result");
+          }
+          return ocsp.parseResponse(bytes);
+        },
+        E,
+        "path/bad-input",
+        "verifyOcspResponse: the response must be its DER bytes, a PEM string, or an unmodified pki.schema.ocsp.parseResponse result: the signature, the algorithm that verifies it and the bytes it covers are separate properties of a parsed object, so a REBUILT response (Object.assign, spread, a JSON round-trip) could have the three describe different responses and is refused"
+      );
+    }
+    function _verifyOcspParsed(parsedResponse, cert, issuerCert, time, opts) {
       opts = opts || {};
       if (!(time instanceof Date) || isNaN(time.getTime())) {
         return Promise.reject(E("path/bad-input", "verifyOcspResponse: time must be a valid Date (the currency + responder-validity check date)"));
@@ -23271,18 +24046,22 @@ var require_path_validate = __commonJS({
         return false;
       }
     }
-    function _isExtensionEntry(e) {
-      return !!e && typeof e.oid === "string" && Buffer.isBuffer(e.value);
+    function coerceCert(input, label) {
+      return guard.parsed.acceptDerived(
+        input,
+        "certificate",
+        x509.parse,
+        E,
+        "path/bad-input",
+        label || "a certificate"
+      );
     }
-    function _isParsedCert(o) {
-      return Buffer.isBuffer(o.tbsBytes) && typeof o.serialNumberHex === "string" && !!o.signatureAlgorithm && typeof o.signatureAlgorithm.oid === "string" && !!o.signatureValue && Buffer.isBuffer(o.signatureValue.bytes) && !!o.validity && o.validity.notBefore instanceof Date && o.validity.notAfter instanceof Date && !!o.issuer && Array.isArray(o.issuer.rdns) && !!o.subject && Array.isArray(o.subject.rdns) && Buffer.isBuffer(o.subject.bytes) && !!o.subjectPublicKeyInfo && Buffer.isBuffer(o.subjectPublicKeyInfo.bytes) && !!o.subjectPublicKeyInfo.algorithm && typeof o.subjectPublicKeyInfo.algorithm.oid === "string" && !!o.subjectPublicKeyInfo.publicKey && Buffer.isBuffer(o.subjectPublicKeyInfo.publicKey.bytes) && typeof o.subjectPublicKeyInfo.publicKey.unusedBits === "number" && Array.isArray(o.extensions) && o.extensions.every(_isExtensionEntry);
-    }
-    function coerceCert(input) {
-      if (input && typeof input === "object" && !Buffer.isBuffer(input) && input.tbsBytes !== void 0) {
-        if (!_isParsedCert(input)) throw E("path/bad-input", "build: an input has tbsBytes but is not a well-formed parsed certificate");
-        return input;
-      }
-      return x509.parse(input);
+    function _hasPurposeScopedMetadata(ta) {
+      if (!ta || typeof ta !== "object") return false;
+      return ["distrustAfter", "purposes"].some(function(k) {
+        var m = ta[k];
+        return !!m && typeof m === "object" && Object.keys(m).length > 0;
+      });
     }
     function assertAnchorConstraints(ta, checkPurpose) {
       var d = checkPurpose && ta && ta.distrustAfter ? ta.distrustAfter[checkPurpose] : null;
@@ -24054,6 +24833,46 @@ var require_smime = __commonJS({
     function _err(code, msg, cause) {
       return new SmimeError(code, msg, cause);
     }
+    var SIGN_OPTS = {
+      form: 1,
+      entity: 1,
+      contentType: 1,
+      signingTime: 1,
+      protectHeaders: 1,
+      headers: 1,
+      hcp: 1,
+      sid: 1,
+      signedAttributes: 1,
+      additionalSignedAttributes: 1
+    };
+    var VERIFY_OPTS = {
+      certs: 1,
+      trustAnchors: 1,
+      time: 1,
+      requiredEku: 1,
+      checkPurpose: 1,
+      strictMicalg: 1,
+      legacyHeaderProtection: 1
+    };
+    var ENCRYPT_OPTS = {
+      entity: 1,
+      contentType: 1,
+      protectHeaders: 1,
+      headers: 1,
+      hcp: 1,
+      contentEncryptionAlgorithm: 1,
+      oaepHash: 1,
+      keyIdentifier: 1,
+      ukm: 1
+    };
+    var DECRYPT_OPTS = { recipientIndex: 1, maxIterations: 1, strictSmimeType: 1, legacyHeaderProtection: 1 };
+    var COMPRESS_OPTS = { entity: 1, contentType: 1, level: 1 };
+    var DECOMPRESS_OPTS = { maxOutputBytes: 1 };
+    function _knownOpts(opts, known, verb) {
+      guard.identifier.assertKnownKeys(opts, known, _err, "smime/bad-input", function(k) {
+        return "unknown option " + JSON.stringify(k) + " for pki.smime." + verb + " -- accepted: " + Object.keys(known).sort().join(", ");
+      });
+    }
     function _isPkcs7(type, kind) {
       var t = (type || "").toLowerCase();
       return t === "application/pkcs7-" + kind || t === "application/x-pkcs7-" + kind;
@@ -24315,6 +25134,7 @@ var require_smime = __commonJS({
     }
     async function sign(content, signers, opts) {
       opts = opts || {};
+      _knownOpts(opts, SIGN_OPTS, "sign");
       var hp = opts.protectHeaders === true;
       var hpList = hp ? _hpHeaderList(opts.headers) : null;
       var outerList = hp ? _outerHeaderList(hpList, "clear", opts.hcp) : null;
@@ -24344,6 +25164,7 @@ var require_smime = __commonJS({
     }
     async function verify(message, opts) {
       opts = opts || {};
+      _knownOpts(opts, VERIFY_OPTS, "verify");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       var vOpts = {};
@@ -24416,6 +25237,7 @@ var require_smime = __commonJS({
     }
     async function encrypt(content, recipients, opts) {
       opts = opts || {};
+      _knownOpts(opts, ENCRYPT_OPTS, "encrypt");
       var hp = opts.protectHeaders === true;
       var hpList = hp ? _hpHeaderList(opts.headers) : null;
       var outerList = hp ? _outerHeaderList(hpList, "cipher", opts.hcp) : null;
@@ -24428,6 +25250,7 @@ var require_smime = __commonJS({
     }
     async function decrypt(message, keyMaterial, opts) {
       opts = opts || {};
+      _knownOpts(opts, DECRYPT_OPTS, "decrypt");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       if (!_isPkcs7(ct.type, "mime")) throw _err("smime/unsupported-type", "not an encrypted S/MIME message (Content-Type " + JSON.stringify(ct.type) + ")");
@@ -24452,6 +25275,7 @@ var require_smime = __commonJS({
     }
     async function compress(content, opts) {
       opts = opts || {};
+      _knownOpts(opts, COMPRESS_OPTS, "compress");
       var entity = _entityBytes(content, opts);
       var cOpts = {};
       if (opts.level !== void 0) cOpts.level = opts.level;
@@ -24461,6 +25285,7 @@ var require_smime = __commonJS({
     }
     async function decompress(message, opts) {
       opts = opts || {};
+      _knownOpts(opts, DECOMPRESS_OPTS, "decompress");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       if (!_isPkcs7(ct.type, "mime")) throw _err("smime/unsupported-type", "not a compressed S/MIME message (Content-Type " + JSON.stringify(ct.type) + ")");
@@ -24740,8 +25565,7 @@ var require_cmc_build = __commonJS({
       return guard.range.authoredInteger(v, E, "cmc/bad-input", what);
     }
     function _der(v, what) {
-      if (Buffer.isBuffer(v)) return v;
-      if (v instanceof Uint8Array) return Buffer.from(v);
+      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, CmcError, "cmc/bad-input", what);
       throw E("cmc/bad-input", what + " must be DER bytes");
     }
     function _oidOf(v) {
@@ -24804,11 +25628,11 @@ var require_cmc_build = __commonJS({
       }
     }
     function build(spec, signer, opts) {
-      try {
-        return _build(spec, signer, opts);
-      } catch (e) {
-        return Promise.reject(e);
-      }
+      return guard.bytes.fixedCall(CmcError, "cmc/bad-input", [
+        [spec, "the CMC request spec"],
+        [signer, "the signer"],
+        [opts, "pki.cmc.build options"]
+      ], _build);
     }
     function _build(spec, signer, opts) {
       opts = opts || {};
@@ -25261,7 +26085,7 @@ var require_cmc_verify = __commonJS({
       } catch (e) {
         return Promise.reject(e);
       }
-      return Promise.resolve().then(function() {
+      return guard.async.deferred(function() {
         return _verify(frozenResponse, frozenSent);
       });
     }
@@ -25279,7 +26103,7 @@ var require_cmc_verify = __commonJS({
       return input;
     }
     function _copyAnyBytes(v) {
-      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v);
+      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, CmcError, "cmc/bad-input", "a byte field of the request");
       if (ArrayBuffer.isView(v)) return Buffer.from(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
       if (v instanceof ArrayBuffer) return Buffer.from(new Uint8Array(v));
       return v;
@@ -25455,10 +26279,12 @@ var require_tsp_sign = __commonJS({
     var pkiX509 = require_schema_x509();
     var smime = require_schema_smime();
     var schemaTsp = require_schema_tsp();
-    var schema = require_schema_engine();
     var guard = require_guard_all();
     var frameworkError = require_framework_error();
+    var pkix = require_schema_pkix();
+    var pkiBuild = require_pki_build();
     var TspError = frameworkError.TspError;
+    var _NS = pkix.makeNS("tsp", TspError, oid);
     var b = asn1.build;
     function _err(code, message, cause) {
       return new TspError(code, message, cause);
@@ -25466,8 +26292,24 @@ var require_tsp_sign = __commonJS({
     function O(name) {
       return oid.byName(name);
     }
+    var _b = pkiBuild.makeBuilder({
+      ErrorClass: TspError,
+      prefix: "tsp",
+      O,
+      NS: _NS,
+      NAME_SCHEMA: pkix.name(_NS),
+      SPKI_SCHEMA: pkix.spki(_NS)
+    });
     var NODE_DIGEST = { sha256: "sha256", sha384: "sha384", sha512: "sha512" };
     var HASH_LEN = { sha256: 32, sha384: 48, sha512: 64 };
+    var _REVOCATION_RANK = { "false": 0, "undetermined": 1, "waived": 2, "determined": 3 };
+    function _rankRevocation(v) {
+      var r = _REVOCATION_RANK[String(v)];
+      return r === void 0 ? 0 : r;
+    }
+    function _moreEstablished(candidate, current) {
+      return _rankRevocation(candidate) > _rankRevocation(current);
+    }
     function _hashAlgId(name) {
       if (!NODE_DIGEST[name]) throw _err("tsp/unsupported-algorithm", "unsupported hash algorithm " + JSON.stringify(name));
       return b.sequence([b.oid(O(name)), b.nullValue()]);
@@ -25494,6 +26336,13 @@ var require_tsp_sign = __commonJS({
       return b.sequence([b.sequence([essCertId])]);
     }
     function sign(messageImprint, tsa, opts) {
+      return guard.bytes.fixedCall(TspError, "tsp/bad-input", [
+        [messageImprint, "the messageImprint"],
+        [tsa, "the TSA"],
+        [opts, "pki.tsp.sign options"]
+      ], _sign);
+    }
+    function _sign(messageImprint, tsa, opts) {
       opts = opts || {};
       if (typeof opts !== "object" || Buffer.isBuffer(opts)) throw _err("tsp/bad-input", "pki.tsp.sign options must be an object");
       var mi = messageImprint || {};
@@ -25508,10 +26357,11 @@ var require_tsp_sign = __commonJS({
       var imprint = b.sequence([_hashAlgId(mi.hashAlgorithm), b.octetString(Buffer.from(mi.hashedMessage))]);
       if (opts.genTime != null) guard.time.assertValid(opts.genTime, _err, "tsp/bad-input", "genTime");
       var genTime = opts.genTime instanceof Date ? opts.genTime : /* @__PURE__ */ new Date();
-      var fields = [b.integer(1n), _policy(opts.policy), imprint, b.integer(BigInt(opts.serialNumber)), b.generalizedTime(genTime)];
+      var serial = guard.range.authoredInteger(opts.serialNumber, _err, "tsp/bad-input", "serialNumber");
+      var fields = [b.integer(1n), _policy(opts.policy), imprint, b.integer(serial), b.generalizedTime(genTime)];
       if (opts.accuracy) fields.push(_accuracy(opts.accuracy));
       if (opts.ordering === true) fields.push(b.boolean(true));
-      if (opts.nonce != null) fields.push(b.integer(BigInt(opts.nonce)));
+      if (opts.nonce != null) fields.push(b.integer(guard.range.authoredInteger(opts.nonce, _err, "tsp/bad-input", "nonce")));
       var tstInfo = b.sequence(fields);
       var signCert = { type: "signingCertificateV2", values: [_signingCertV2(certDer, certHashAlg)] };
       var extra = [signCert].concat(opts.additionalSignedAttributes || []);
@@ -25571,16 +26421,23 @@ var require_tsp_sign = __commonJS({
       var imprint = b.sequence([_hashAlgId(mi.hashAlgorithm), b.octetString(Buffer.from(mi.hashedMessage))]);
       var fields = [b.integer(1n), imprint];
       if (opts.reqPolicy != null) fields.push(_policy(opts.reqPolicy));
-      if (opts.nonce != null) fields.push(b.integer(BigInt(opts.nonce)));
+      if (opts.nonce != null) fields.push(b.integer(guard.range.authoredInteger(opts.nonce, _err, "tsp/bad-input", "nonce")));
       if (opts.certReq != null && typeof opts.certReq !== "boolean") throw _err("tsp/bad-input", "certReq must be a boolean");
       if (opts.certReq === true) fields.push(b.boolean(true));
       if (opts.extensions != null) {
         if (!Array.isArray(opts.extensions) || !opts.extensions.every(function(e) {
           return Buffer.isBuffer(e) || e instanceof Uint8Array;
         })) throw _err("tsp/bad-input", "extensions must be an array of encoded Extension DER buffers");
-        if (opts.extensions.length) fields.push(b.contextConstructed(0, Buffer.concat(opts.extensions.map(function(e) {
-          return Buffer.from(e);
-        }))));
+        var seenExt = {};
+        var encoded = opts.extensions.map(function(e, i) {
+          var der2 = Buffer.from(e);
+          _b.assertValidExtension(der2, i);
+          var extnId = asn1.read.oid(asn1.decode(der2).children[0]);
+          if (seenExt[extnId]) throw _err("tsp/bad-input", "duplicate request extension " + extnId + " (RFC 5280 sec. 4.2)");
+          seenExt[extnId] = true;
+          return der2;
+        });
+        if (encoded.length) fields.push(b.contextConstructed(0, Buffer.concat(encoded)));
       }
       var der = b.sequence(fields);
       return opts.pem ? schemaTsp.pemEncode(der, "TIMESTAMP REQUEST") : der;
@@ -25709,22 +26566,13 @@ var require_tsp_sign = __commonJS({
         return "tsp/bad-eku";
       }
       if (purposes.length !== 1 || purposes[0] !== O("timeStamping")) return "tsp/eku-not-exclusive";
-      var kuExts = (cert.extensions || []).filter(function(e) {
-        return e.oid === O("keyUsage");
-      });
-      if (kuExts.length) {
-        var ku;
-        try {
-          ku = asn1.read.bitString(asn1.decode(kuExts[0].value));
-          schema.assertMinimalNamedBits(ku.unusedBits, ku.bytes, function(m) {
-            throw _err("tsp/bad-key-usage", m);
-          });
-        } catch (_e) {
-          return "tsp/bad-key-usage";
-        }
-        var byte0 = ku.bytes.length ? ku.bytes[0] : 0;
-        if (!(byte0 >> 7 & 1) && !(byte0 >> 6 & 1)) return "tsp/bad-key-usage";
+      var ku;
+      try {
+        ku = pkix.keyUsageOf(_NS, cert, _err, "tsp/bad-key-usage", "TSA certificate");
+      } catch (_e) {
+        return "tsp/bad-key-usage";
       }
+      if (ku && !ku.digitalSignature && !ku.nonRepudiation) return "tsp/bad-key-usage";
       return true;
     }
     function _tsaMatchesCert(tsaBytes, signerCert) {
@@ -25797,8 +26645,10 @@ var require_tsp_sign = __commonJS({
       var tokenDer = _tokenDer(token);
       var parsed = schemaTsp.parseToken(tokenDer);
       var tst = parsed.tstInfo;
+      var revocationChecked = false;
+      var anchorConstraints = null;
       function fail(code, reason) {
-        return { valid: false, code, reason: reason || null, genTime: tst.genTime, accuracy: tst.accuracy, serialNumber: tst.serialNumber, serialNumberHex: tst.serialNumberHex, policy: tst.policy, nonce: tst.nonce, tsa: tst.tsa, tstInfo: tst, signer: null };
+        return { valid: false, trusted: false, revocationChecked, anchorConstraints, code, reason: reason || null, genTime: tst.genTime, accuracy: tst.accuracy, serialNumber: tst.serialNumber, serialNumberHex: tst.serialNumberHex, policy: tst.policy, nonce: tst.nonce, tsa: tst.tsa, tstInfo: tst, signer: null };
       }
       var cmsRes = await cmsVerify.verify(tokenDer, { certs: opts.certs });
       var signer = cmsRes.signers[0];
@@ -25808,7 +26658,7 @@ var require_tsp_sign = __commonJS({
       var mi = _imprintMatches(tst.messageImprint, data);
       if (mi !== true) return fail(mi);
       if (opts.nonce != null) {
-        var wantNonce = BigInt(opts.nonce);
+        var wantNonce = guard.range.authoredInteger(opts.nonce, _err, "tsp/bad-input", "opts.nonce");
         if (tst.nonce == null || tst.nonce !== wantNonce) return fail("tsp/nonce-mismatch");
       }
       if (opts.reqPolicy != null) {
@@ -25833,6 +26683,7 @@ var require_tsp_sign = __commonJS({
         }
         if (!_tsaMatchesCert(tst.tsa.bytes, sc)) return fail("tsp/tsa-mismatch");
       }
+      var trusted = false;
       if (opts.trustAnchor) {
         var pathRes = null;
         var floorT = tst.genTime;
@@ -25846,30 +26697,36 @@ var require_tsp_sign = __commonJS({
           (opts.certs || []).forEach(function(c) {
             pool.push(pkiX509.parse(c));
           });
-          var chains = _buildTsaChains(pkiX509.parse(tsaCertDer), pool);
-          for (var ci = 0; ci < chains.length && !(pathRes && pathRes.valid); ci++) {
-            pathRes = await pathValidate.validate(chains[ci], {
-              time: floorT,
+          async function validateAt(chain, when) {
+            var res = await pathValidate.validate(chain, {
+              time: when,
               trustAnchor: opts.trustAnchor,
               requiredEku: ["timeStamping"],
+              checkPurpose: "timeStamping",
               revocationChecker: opts.revocationChecker
             });
-            if (pathRes.valid && ceilT !== floorT) {
-              pathRes = await pathValidate.validate(chains[ci], {
-                time: ceilT,
-                trustAnchor: opts.trustAnchor,
-                requiredEku: ["timeStamping"],
-                revocationChecker: opts.revocationChecker
-              });
-            }
+            if (_moreEstablished(res.revocationChecked, revocationChecked)) revocationChecked = res.revocationChecked;
+            if (anchorConstraints == null && res.anchorConstraints != null) anchorConstraints = res.anchorConstraints;
+            return res;
+          }
+          var chains = _buildTsaChains(pkiX509.parse(tsaCertDer), pool);
+          for (var ci = 0; ci < chains.length && !(pathRes && pathRes.valid); ci++) {
+            pathRes = await validateAt(chains[ci], floorT);
+            if (pathRes.valid && ceilT !== floorT) pathRes = await validateAt(chains[ci], ceilT);
           }
         } catch (e) {
           return fail("tsp/untrusted-tsa", e && e.message || String(e));
         }
         if (!pathRes || !pathRes.valid) return fail("tsp/untrusted-tsa", "the TSA certificate did not validate to the trust anchor at genTime");
+        revocationChecked = pathRes.revocationChecked;
+        anchorConstraints = pathRes.anchorConstraints;
+        trusted = true;
       }
       return {
         valid: true,
+        trusted,
+        revocationChecked,
+        anchorConstraints,
         genTime: tst.genTime,
         accuracy: tst.accuracy,
         serialNumber: tst.serialNumber,
@@ -25928,26 +26785,39 @@ var require_ocsp = __commonJS({
       });
     }
     function _certOf(arg, what) {
-      if (arg && arg.subjectPublicKeyInfo && arg.tbsBytes) return arg;
-      var der;
-      if (Buffer.isBuffer(arg)) der = arg;
-      else if (arg instanceof Uint8Array) der = Buffer.from(arg);
-      else if (typeof arg === "string") {
-        try {
-          der = x509.pemDecode(arg);
-        } catch (e) {
-          throw _err("ocsp/bad-input", (what || "a certificate") + " PEM could not be decoded", e);
+      var label = what || "a certificate";
+      return guard.parsed.acceptDerived(arg, "certificate", function(bytes) {
+        var der = bytes;
+        if (typeof bytes === "string") {
+          try {
+            der = x509.pemDecode(bytes);
+          } catch (e) {
+            throw _err("ocsp/bad-input", label + " PEM could not be decoded", e);
+          }
         }
-      } else throw _err("ocsp/bad-input", (what || "a certificate") + " must be a parsed certificate, a DER Buffer, or a PEM string");
-      try {
-        return x509.parse(der);
-      } catch (e) {
-        throw _err("ocsp/bad-input", (what || "a certificate") + " is not a well-formed X.509 certificate", e);
-      }
+        try {
+          return x509.parse(der);
+        } catch (e) {
+          throw _err("ocsp/bad-input", label + " is not a well-formed X.509 certificate", e);
+        }
+      }, _err, "ocsp/bad-input", label);
+    }
+    var _RESPONSE_CLAIM = ["responseStatus", "basicResponse", "tbsResponseDataBytes"];
+    function _responseFromBytes(response) {
+      return guard.parsed.fromTrustedSource(
+        response,
+        "ocspResponse",
+        _RESPONSE_CLAIM,
+        function(bytes) {
+          return ocspSchema.parseResponse(_toDer(bytes, "the OCSP response"));
+        },
+        _err,
+        "ocsp/bad-input",
+        "the OCSP response must be its DER bytes, a PEM string, or an unmodified pki.schema.ocsp.parseResponse result: the signature, the algorithm that verifies it and the bytes it covers are separate properties of a parsed object, so a REBUILT response (Object.assign, spread, a JSON round-trip) could have the three describe different responses and is refused"
+      );
     }
     function _toDer(input, what) {
-      if (Buffer.isBuffer(input)) return input;
-      if (input instanceof Uint8Array) return Buffer.from(input);
+      if (Buffer.isBuffer(input) || input instanceof Uint8Array) return guard.bytes.snapshot(input, OcspError, "ocsp/bad-input", what || "input");
       if (typeof input === "string") {
         try {
           return ocspSchema.pemDecode(input);
@@ -25985,6 +26855,12 @@ var require_ocsp = __commonJS({
       });
     }
     function buildRequest(query, opts) {
+      return guard.bytes.fixedCall(OcspError, "ocsp/bad-input", [
+        [query, "the OCSP request query"],
+        [opts, "pki.ocsp.buildRequest options"]
+      ], _buildRequest);
+    }
+    function _buildRequest(query, opts) {
       opts = opts || {};
       var lightweight = opts.profile === "lightweight";
       var hashName = opts.hashAlgorithm || "sha1";
@@ -26034,13 +26910,12 @@ var require_ocsp = __commonJS({
       return opts.pem ? ocspSchema.pemEncode(der, "OCSP REQUEST") : der;
     }
     function _nameDer(name) {
-      if (Buffer.isBuffer(name)) return name;
+      if (Buffer.isBuffer(name)) return guard.bytes.snapshot(name, OcspError, "ocsp/bad-input", "requestorName");
       if (name && name.bytes) return name.bytes;
       throw _err("ocsp/bad-input", "requestorName must be a DER Name Buffer or a parsed Name");
     }
     function _normCertDer(cert, what) {
-      if (Buffer.isBuffer(cert)) return cert;
-      if (cert instanceof Uint8Array) return Buffer.from(cert);
+      if (Buffer.isBuffer(cert) || cert instanceof Uint8Array) return guard.bytes.snapshot(cert, OcspError, "ocsp/bad-input", what || "a certificate");
       if (typeof cert === "string") {
         try {
           return x509.pemDecode(cert);
@@ -26054,6 +26929,13 @@ var require_ocsp = __commonJS({
       throw _err("ocsp/bad-input", (what || "a certificate") + " must be a DER Buffer, Uint8Array, or PEM string");
     }
     function sign(responseData, responder, opts) {
+      return guard.bytes.fixedCall(OcspError, "ocsp/bad-input", [
+        [responseData, "the OCSP responseData"],
+        [responder, "the responder"],
+        [opts, "pki.ocsp.sign options"]
+      ], _sign);
+    }
+    function _sign(responseData, responder, opts) {
       opts = opts || {};
       responseData = responseData || {};
       if (!responder || responder.cert == null || responder.key == null) throw _err("ocsp/bad-input", "a responder must be { cert, key }");
@@ -26176,7 +27058,7 @@ var require_ocsp = __commonJS({
       if (opts.cert == null || opts.issuer == null) return Promise.reject(_err("ocsp/bad-input", "verify requires opts.cert and opts.issuer"));
       var parsed, cert, issuerCert, time;
       try {
-        parsed = response && response.responseStatus ? response : ocspSchema.parseResponse(_toDer(response, "the OCSP response"));
+        parsed = _responseFromBytes(response);
         cert = _certOf(opts.cert, "the target certificate");
         issuerCert = _certOf(opts.issuer, "the issuer certificate");
         time = opts.time == null ? /* @__PURE__ */ new Date() : _asDate(opts.time);
@@ -26186,7 +27068,7 @@ var require_ocsp = __commonJS({
       return pathValidate.verifyOcspResponse(parsed, cert, issuerCert, time, { historicalMode: opts.historicalMode === true }).then(function(verdict) {
         if (opts.requestNonce == null) return Object.assign({}, verdict, { nonceMatched: null });
         var respNonce = _responseNonce(parsed);
-        var reqNonce = Buffer.isBuffer(opts.requestNonce) ? opts.requestNonce : opts.requestNonce instanceof Uint8Array ? Buffer.from(opts.requestNonce) : null;
+        var reqNonce = Buffer.isBuffer(opts.requestNonce) || opts.requestNonce instanceof Uint8Array ? guard.bytes.snapshot(opts.requestNonce, OcspError, "ocsp/bad-input", "opts.requestNonce") : null;
         var matched = respNonce != null && reqNonce != null && guard.crypto.constantTimeEqual(respNonce, reqNonce);
         var out = Object.assign({}, verdict, { nonceMatched: matched });
         if (!matched && verdict.status === "good") {
@@ -26284,7 +27166,7 @@ var require_x509_sign = __commonJS({
       return null;
     }
     function _akiKeyId(val, ctx) {
-      if (Buffer.isBuffer(val)) return val;
+      if (Buffer.isBuffer(val)) return guard.bytes.snapshot(val, CertificateError, "x509/bad-input", "the authorityKeyIdentifier keyIdentifier");
       if (val === true) {
         if (ctx.issuerCert) {
           var ski = _skiValueOf(ctx.issuerCert);
@@ -26415,9 +27297,11 @@ var require_x509_sign = __commonJS({
       return false;
     }
     function sign(spec, issuer, opts) {
-      return Promise.resolve().then(function() {
-        return _sign(spec, issuer, opts);
-      });
+      return guard.bytes.fixedCall(CertificateError, "x509/bad-input", [
+        [spec, "the certificate spec"],
+        [issuer, "the issuer"],
+        [opts, "pki.x509.sign options"]
+      ], _sign);
     }
     function _sign(spec, issuer, opts) {
       opts = opts || {};
@@ -26434,8 +27318,7 @@ var require_x509_sign = __commonJS({
         issuerDer = subjectDer;
         issuerSpki = spki;
       } else if (issuer.cert != null) {
-        issuerCert = Buffer.isBuffer(issuer.cert) || typeof issuer.cert === "string" ? x509.parse(issuer.cert) : issuer.cert;
-        if (!issuerCert || !issuerCert.tbsBytes) throw _err("x509/bad-input", "issuer.cert must be a certificate DER/PEM or a parsed certificate");
+        issuerCert = guard.parsed.acceptDerived(issuer.cert, "certificate", x509.parse, _err, "x509/bad-input", "issuer.cert");
         issuerPathLen = _assertIssuerIsCa(issuerCert);
         issuerDer = pkiBuild.tbsNameField(issuerCert, "subject");
         issuerSpki = issuerCert.subjectPublicKeyInfo.bytes;
@@ -26541,9 +27424,11 @@ var require_csr_sign = __commonJS({
       return PRINTABLE_RE.test(pw) ? b.printable(pw) : b.utf8(pw);
     }
     function sign(spec, key, opts) {
-      return Promise.resolve().then(function() {
-        return _sign(spec, key, opts);
-      });
+      return guard.bytes.fixedCall(CsrError, "csr/bad-input", [
+        [spec, "the certification-request spec"],
+        [key, "the signing key"],
+        [opts, "pki.csr.sign options"]
+      ], _sign);
     }
     function _sign(spec, key, opts) {
       opts = opts || {};
@@ -26663,16 +27548,14 @@ var require_attrcert_sign = __commonJS({
     var CLASSLIST_BIT = { unmarked: 0, unclassified: 1, restricted: 2, confidential: 3, secret: 4, topSecret: 5 };
     var _tbsNameBytes = pkiBuild.tbsNameField;
     function _parseCert(cert, what) {
-      if (!Buffer.isBuffer(cert) && typeof cert !== "string") {
-        if (!cert || !cert.tbsBytes) throw _err("attrcert/bad-input", what + " must be a certificate DER/PEM or a parsed certificate");
-        return cert;
-      }
-      try {
-        return x509.parse(cert);
-      } catch (e) {
-        if (e instanceof AttrCertError) throw e;
-        throw _err("attrcert/bad-input", what + " is not a well-formed certificate", e);
-      }
+      return guard.parsed.acceptDerived(cert, "certificate", function(bytes) {
+        try {
+          return x509.parse(bytes);
+        } catch (e) {
+          if (e instanceof AttrCertError) throw e;
+          throw _err("attrcert/bad-input", what + " is not a well-formed certificate", e);
+        }
+      }, _err, "attrcert/bad-input", what);
     }
     function _oidContent(name) {
       var dotted = O(name) || name;
@@ -26729,7 +27612,7 @@ var require_attrcert_sign = __commonJS({
       }
       if (holder.fromCertificate != null) {
         var pkc = _parseCert(holder.fromCertificate, "holder.fromCertificate");
-        var content = _issuerSerialContent({ issuer: [{ directoryName: _tbsNameBytes(pkc, "issuer") }], serial: pkc.serialNumber });
+        var content = _issuerSerialContent({ issuer: [{ directoryName: _tbsNameBytes(pkc, "issuer") }], serial: pkiBuild.tbsSerialNumber(pkc) });
         return b.sequence([b.contextConstructed(0, content)]);
       }
       return b.sequence([b.contextConstructed(2, _objectDigestInfoContent(holder.objectDigestInfo))]);
@@ -26986,9 +27869,11 @@ var require_attrcert_sign = __commonJS({
       return b.sequence(out);
     }
     function sign(spec, issuer, opts) {
-      return Promise.resolve().then(function() {
-        return _sign(spec, issuer, opts);
-      });
+      return guard.bytes.fixedCall(AttrCertError, "attrcert/bad-input", [
+        [spec, "the attribute-certificate spec"],
+        [issuer, "the issuer"],
+        [opts, "pki.attrcert.sign options"]
+      ], _sign);
     }
     function _sign(spec, issuer, opts) {
       opts = opts || {};
@@ -27051,6 +27936,7 @@ var require_crl_sign = __commonJS({
     var guard = require_guard_all();
     var frameworkError = require_framework_error();
     var pkix = require_schema_pkix();
+    var schema = require_schema_engine();
     var pkiBuild = require_pki_build();
     var constants = require_constants();
     require_path_validate();
@@ -27156,7 +28042,7 @@ var require_crl_sign = __commonJS({
       return codeNum;
     }
     function _akiKeyId(val, ctx) {
-      if (Buffer.isBuffer(val)) return val;
+      if (Buffer.isBuffer(val)) return guard.bytes.snapshot(val, CrlError, "crl/bad-input", "the authorityKeyIdentifier keyIdentifier");
       if (val === true) {
         if (ctx.issuerCert) {
           var ski = (ctx.issuerCert.extensions || []).filter(function(e) {
@@ -27199,17 +28085,16 @@ var require_crl_sign = __commonJS({
       if (!children.length) throw _err("crl/bad-idp", "issuingDistributionPoint MUST NOT be empty (RFC 5280 sec. 5.2.5)");
       return b.sequence(children);
     }
+    var _PRE_ENCODED_IDP_SCHEMA = pkix.issuingDistributionPoint("crl/bad-idp");
     function _validatePreEncodedIdp(inner) {
       if (!inner.children || !inner.children.length) throw _err("crl/bad-idp", "pre-encoded issuingDistributionPoint MUST NOT be empty (RFC 5280 sec. 5.2.5)");
-      var scopeTrue = 0;
-      inner.children.forEach(function(c) {
-        if (c.tagClass !== "context") throw _err("crl/bad-idp", "pre-encoded issuingDistributionPoint members must be context-tagged (RFC 5280 sec. 5.2.5)");
-        var isTrue = c.content != null && c.content.length > 0 && c.content[c.content.length - 1] !== 0;
-        if (c.tagNumber === 4) throw _err("crl/bad-idp", _INDIRECT_IDP_DEFERRED);
-        if (c.tagNumber === 5 && isTrue) throw _err("crl/bad-idp", "onlyContainsAttributeCerts=TRUE is not permitted for a conforming CRL issuer (RFC 5280 sec. 5.2.5)");
-        if ((c.tagNumber === 1 || c.tagNumber === 2) && isTrue) scopeTrue++;
+      var f = schema.walk(_PRE_ENCODED_IDP_SCHEMA, inner, NS).fields;
+      ["onlyContainsUserCerts", "onlyContainsCACerts", "onlyContainsAttributeCerts"].forEach(function(name) {
+        if (f[name].present && f[name].value !== true) throw _err("crl/bad-idp", "pre-encoded issuingDistributionPoint " + name + " encodes its DEFAULT FALSE, which DER omits (X.690 sec. 11.5)");
       });
-      if (scopeTrue > 1) throw _err("crl/bad-idp", "at most one of onlyContainsUserCerts / onlyContainsCACerts may be TRUE (RFC 5280 sec. 5.2.5)");
+      if (f.indirectCRL.present) throw _err("crl/bad-idp", _INDIRECT_IDP_DEFERRED);
+      if (f.onlyContainsAttributeCerts.present) throw _err("crl/bad-idp", "onlyContainsAttributeCerts=TRUE is not permitted for a conforming CRL issuer (RFC 5280 sec. 5.2.5)");
+      if (f.onlyContainsUserCerts.present && f.onlyContainsCACerts.present) throw _err("crl/bad-idp", "at most one of onlyContainsUserCerts / onlyContainsCACerts may be TRUE (RFC 5280 sec. 5.2.5)");
     }
     function _freshestValue(spec) {
       if (!Array.isArray(spec) || !spec.length) throw _err("crl/bad-input", "freshestCRL must be a non-empty array of GeneralNames (or { fullName } distribution points)");
@@ -27365,9 +28250,7 @@ var require_crl_sign = __commonJS({
       return { entries, anyExt };
     }
     function _parseIssuerCert(cert) {
-      var parsed = Buffer.isBuffer(cert) || typeof cert === "string" ? x509Schema.parse(cert) : cert;
-      if (!parsed || !parsed.tbsBytes || !parsed.subjectPublicKeyInfo) throw _err("crl/bad-input", "issuer.cert must be a certificate DER/PEM or a parsed certificate");
-      return parsed;
+      return guard.parsed.acceptDerived(cert, "certificate", x509Schema.parse, _err, "crl/bad-input", "issuer.cert");
     }
     function _assertIssuerCanSignCrl(issuerCert) {
       var kuExt = (issuerCert.extensions || []).filter(function(e) {
@@ -27434,39 +28317,52 @@ var require_crl_sign = __commonJS({
       });
     }
     function sign(spec, issuer, opts) {
-      return Promise.resolve().then(function() {
-        return _sign(spec, issuer, opts);
-      });
+      return guard.bytes.fixedCall(CrlError, "crl/bad-input", [
+        [spec, "the CRL spec"],
+        [issuer, "the issuer"],
+        [opts, "pki.crl.sign options"]
+      ], _sign);
     }
     function _coerceCrl(crl) {
-      if (Buffer.isBuffer(crl) || typeof crl === "string") return crlSchema.parse(crl);
-      if (crl && typeof crl === "object" && crl.tbsBytes && crl.signatureValue && crl.signatureAlgorithm) return crl;
-      throw _err("crl/bad-input", "crl must be a CRL DER Buffer, a PEM string, or a parsed CRL (from pki.schema.crl.parse)");
+      return guard.parsed.acceptDerived(crl, "crl", crlSchema.parse, _err, "crl/bad-input", "the CRL");
     }
-    function _resolveIssuerSpki(issuer) {
+    function _resolveIssuer(issuer) {
       if (issuer == null) throw _err("crl/bad-input", "an issuer is required to verify a CRL");
       if (Buffer.isBuffer(issuer)) {
         _assertValidSpki(issuer, "issuer SPKI");
-        return issuer;
+        return { spki: issuer, cert: null };
       }
-      if (issuer.cert != null) return _parseIssuerCert(issuer.cert).subjectPublicKeyInfo.bytes;
+      if (issuer.cert != null) {
+        var ic = _parseIssuerCert(issuer.cert);
+        return { spki: ic.subjectPublicKeyInfo.bytes, cert: ic };
+      }
       if (issuer.publicKey != null) {
         var spki = _reqDer(issuer.publicKey, "issuer.publicKey");
         _assertValidSpki(spki, "issuer.publicKey");
-        return spki;
+        return { spki, cert: null };
       }
-      if (issuer.subjectPublicKeyInfo && issuer.subjectPublicKeyInfo.bytes) return issuer.subjectPublicKeyInfo.bytes;
+      if (issuer.subjectPublicKeyInfo && issuer.subjectPublicKeyInfo.bytes) {
+        var pc = _parseIssuerCert(issuer);
+        return { spki: pc.subjectPublicKeyInfo.bytes, cert: pc };
+      }
       throw _err("crl/bad-input", "issuer must be { cert }, { publicKey } (SPKI DER), or a raw SPKI Buffer");
     }
+    function _issuerMaySign(parsed, cert) {
+      if (!guard.name.dnEqual(parsed.issuer.rdns, cert.subject.rdns, _err, "crl/bad-issuer", "the CRL issuer")) return false;
+      var ku = pkix.keyUsageOf(NS, cert, _err, "crl/bad-issuer", "issuer certificate");
+      if (!ku) return true;
+      return ku.cRLSign === true;
+    }
     function verify(crl, issuer) {
-      return Promise.resolve().then(function() {
+      return guard.async.deferred(function() {
         return _verify(crl, issuer);
       });
     }
     function _verify(crl, issuer) {
       var parsed = _coerceCrl(crl);
-      var spki = _resolveIssuerSpki(issuer);
-      return crlVerify.verifyCrlSignature(parsed, spki);
+      var resolved = _resolveIssuer(issuer);
+      if (resolved.cert && !_issuerMaySign(parsed, resolved.cert)) return false;
+      return crlVerify.verifyCrlSignature(parsed, resolved.spki);
     }
     function _serialHexOf(serial) {
       var v;
@@ -27489,10 +28385,40 @@ var require_crl_sign = __commonJS({
     function isRevoked(crl, serialNumber) {
       var parsed = _coerceCrl(crl);
       var hex = _serialHexOf(serialNumber);
+      if (_findExtOid(parsed.crlExtensions, "deltaCRLIndicator")) {
+        throw _err("crl/delta-not-authoritative", "this is a delta CRL: it lists changes since a base CRL, so a serial appearing in it may be RELEASED rather than revoked. Merge it with its base -- pki.path.crlChecker does -- rather than reading a revocation status out of the delta alone");
+      }
+      var idp = _findExtOid(parsed.crlExtensions, "issuingDistributionPoint");
+      if (idp) _assertAuthoritativeScope(idp);
       for (var i = 0; i < parsed.revokedCertificates.length; i++) {
-        if (parsed.revokedCertificates[i].serialNumberHex === hex) return parsed.revokedCertificates[i];
+        if (_findExtOid(parsed.revokedCertificates[i].crlEntryExtensions, "certificateIssuer")) {
+          throw _err("crl/indirect-not-supported", "a revoked-certificate entry carries certificateIssuer, which names another issuer, on a CRL that does not declare itself indirect -- the entry and the CRL disagree about whose certificates this list covers, so no revocation status follows from it");
+        }
+      }
+      for (var j = 0; j < parsed.revokedCertificates.length; j++) {
+        if (parsed.revokedCertificates[j].serialNumberHex === hex) return parsed.revokedCertificates[j];
       }
       return null;
+    }
+    function _findExtOid(list, name) {
+      var want = O(name);
+      return (list || []).filter(function(e) {
+        return e.oid === want;
+      })[0] || null;
+    }
+    var _IDP_SCHEMA = pkix.issuingDistributionPoint("crl/scope-not-authoritative");
+    var _INDIRECT_REFUSAL = "this CRL is marked indirect (issuingDistributionPoint indirectCRL): its entries name their own issuers, so a serial alone does not identify a certificate. Reading a revocation status from it by serial would attribute another issuer's revocation to yours";
+    var _SCOPED_REFUSAL = "this CRL carries an issuingDistributionPoint, so it speaks for part of its issuer's certificates rather than all of them, and which part is decided against fields of the certificate -- which this verb is not given. A serial absent from it is not a certificate that is unrevoked. Use pki.path.crlChecker, which is handed the certificate and performs the RFC 5280 sec. 6.3.3 scope correspondence";
+    function _assertAuthoritativeScope(ext) {
+      var m;
+      try {
+        m = schema.walk(_IDP_SCHEMA, asn1.decode(ext.value), NS);
+      } catch (e) {
+        throw _err("crl/scope-not-authoritative", "the issuingDistributionPoint cannot be read, so this CRL's scope cannot be established", e);
+      }
+      var f = m.fields;
+      if (f.indirectCRL.present && f.indirectCRL.value === true) throw _err("crl/indirect-not-supported", _INDIRECT_REFUSAL);
+      throw _err("crl/scope-not-authoritative", _SCOPED_REFUSAL);
     }
     module2.exports = { sign, verify, isRevoked };
   }
@@ -28137,7 +29063,7 @@ var require_pkcs12_build = __commonJS({
     var MAC_SALT_BYTES = 8;
     var MAX_PBMAC1_KEYLEN = 1024;
     var CLASSIC_MAC_MAX_ITERATIONS = 1e6;
-    var LEGACY_KDF_MAX_ROUNDS = CLASSIC_MAC_MAX_ITERATIONS;
+    var KDF_MAX_ROUNDS = CLASSIC_MAC_MAX_ITERATIONS;
     var P12_KDF_UV = {
       sha1: { u: 20, v: 64 },
       sha224: { u: 28, v: 64 },
@@ -28153,15 +29079,15 @@ var require_pkcs12_build = __commonJS({
     var PRF_WC = { hmacWithSHA1: "SHA-1", hmacWithSHA256: "SHA-256", hmacWithSHA384: "SHA-384", hmacWithSHA512: "SHA-512" };
     var CIPHER_NAME = { "aes-128-cbc": "aes128-CBC", "aes-192-cbc": "aes192-CBC", "aes-256-cbc": "aes256-CBC" };
     var DIGEST_NAME = { sha1: "sha1", sha256: "sha256", sha384: "sha384", sha512: "sha512" };
+    var _MISSING_PASSWORD = 'a password must be a string, Buffer, or Uint8Array -- an omitted password is not the empty password; pass "" to use the empty one deliberately';
+    var _INTEGRITY_OPTS = { mode: 1, signer: 1, signers: 1, certificates: 1, sid: 1, signingTime: 1 };
     function _p12PasswordOwned(pw) {
-      if (Buffer.isBuffer(pw)) return { bytes: pw, owned: false };
+      if (Buffer.isBuffer(pw)) return { bytes: guard.bytes.view(pw, Pkcs12Error, "pkcs12/bad-input", "the password"), owned: false };
       return { bytes: _p12Encode(pw), owned: true };
     }
     function _p12Encode(pw) {
-      if (pw == null) pw = "";
-      if (Buffer.isBuffer(pw)) return pw;
-      if (pw instanceof Uint8Array) return Buffer.from(pw);
-      if (typeof pw !== "string") throw _err("pkcs12/bad-input", "a password must be a string, Buffer, or Uint8Array");
+      if (Buffer.isBuffer(pw) || pw instanceof Uint8Array) return guard.bytes.snapshot(pw, Pkcs12Error, "pkcs12/bad-input", "the password");
+      if (typeof pw !== "string") throw _err("pkcs12/bad-input", _MISSING_PASSWORD);
       var out = Buffer.alloc(pw.length * 2 + 2);
       for (var i = 0; i < pw.length; i++) {
         var u = pw.charCodeAt(i);
@@ -28171,12 +29097,14 @@ var require_pkcs12_build = __commonJS({
       }
       return out;
     }
-    function _pbePassword(pw) {
-      if (pw == null) pw = "";
-      if (Buffer.isBuffer(pw)) return pw;
-      if (pw instanceof Uint8Array) return Buffer.from(pw);
-      if (typeof pw !== "string") throw _err("pkcs12/bad-input", "a password must be a string, Buffer, or Uint8Array");
-      return Buffer.from(pw, "utf8");
+    function _pbePasswordOwned(pw) {
+      if (Buffer.isBuffer(pw)) return { bytes: guard.bytes.view(pw, Pkcs12Error, "pkcs12/bad-input", "the password"), owned: false };
+      if (pw instanceof Uint8Array) return { bytes: guard.bytes.snapshot(pw, Pkcs12Error, "pkcs12/bad-input", "the password"), owned: true };
+      if (typeof pw !== "string") throw _err("pkcs12/bad-input", _MISSING_PASSWORD);
+      return { bytes: Buffer.from(pw, "utf8"), owned: true };
+    }
+    function _wipePw(owned) {
+      if (owned.owned) guard.secret.zeroize(owned.bytes, Pkcs12Error, "pkcs12/bad-input", "the password encoding");
     }
     function _blockFill(src, blockSize) {
       if (src.length === 0) return Buffer.alloc(0);
@@ -28278,8 +29206,13 @@ var require_pkcs12_build = __commonJS({
             throw _err("pkcs12/bad-input", "shroudedKey key is not a well-formed PKCS#8 PrivateKeyInfo", e2);
           }
           var enc = bag.encrypt || {};
-          var pw = _pbePassword(enc.password != null ? enc.password : opts.password);
-          var r = pbes2.pbes2Encrypt(pw, kDer, _pbeOpts(enc), _err, "pkcs12");
+          var pw = _pbePasswordOwned(enc.password != null ? enc.password : opts.password);
+          var r;
+          try {
+            r = pbes2.pbes2Encrypt(pw.bytes, kDer, _pbeOpts(enc), _err, "pkcs12");
+          } finally {
+            _wipePw(pw);
+          }
           return _safeBag("pkcs8ShroudedKeyBag", b.sequence([r.algId, b.octetString(r.ct)]), bag);
         }
         case "cert": {
@@ -28312,6 +29245,20 @@ var require_pkcs12_build = __commonJS({
         default:
           throw _err("pkcs12/bad-input", "unknown bag type " + JSON.stringify(bag.type) + " (key / shroudedKey / cert / crl / secret / safeContents)");
       }
+    }
+    var _STORE_CLAIM = ["integrityMode", "mac", "macedBytes"];
+    function _storeFromBytes(pfx) {
+      return guard.parsed.fromTrustedSource(
+        pfx,
+        "pkcs12Store",
+        _STORE_CLAIM,
+        function(bytes) {
+          return schemaPkcs12.parse(_coerceDer(bytes, "pfx"));
+        },
+        _err,
+        "pkcs12/bad-input",
+        "pfx must be the store's DER bytes, a PEM string, or an unmodified pki.schema.pkcs12.parse result: the MAC is verified over a byte range carried on the object and the bags returned as verified are a separate property of it, so a REBUILT store (Object.assign, spread, a JSON round-trip) could have the two describe different stores and is refused"
+      );
     }
     function _reqDer(input, label) {
       if (input == null) throw _err("pkcs12/bad-input", label + " is required");
@@ -28362,8 +29309,13 @@ var require_pkcs12_build = __commonJS({
         return b.sequence([b.oid(O("data")), b.explicit(0, b.octetString(safeContentsDer))]);
       }
       if (!sc.encrypt || typeof sc.encrypt !== "object") throw _err("pkcs12/bad-input", "safeContents.encrypt must be an object { password? } (RFC 7292 sec. 5.1) -- omit it entirely for a plaintext safe");
-      var pw = _pbePassword(sc.encrypt.password != null ? sc.encrypt.password : opts.password);
-      var r = pbes2.pbes2Encrypt(pw, safeContentsDer, _pbeOpts(sc.encrypt), _err, "pkcs12");
+      var pw = _pbePasswordOwned(sc.encrypt.password != null ? sc.encrypt.password : opts.password);
+      var r;
+      try {
+        r = pbes2.pbes2Encrypt(pw.bytes, safeContentsDer, _pbeOpts(sc.encrypt), _err, "pkcs12");
+      } finally {
+        _wipePw(pw);
+      }
       var eci = b.sequence([b.oid(O("data")), r.algId, b.contextPrimitive(0, r.ct)]);
       var encData = b.sequence([b.integer(0n), eci]);
       return b.sequence([b.oid(O("encryptedData")), b.explicit(0, encData)]);
@@ -28396,7 +29348,13 @@ var require_pkcs12_build = __commonJS({
         var iter2 = _assertMacIter(macOpts.iterations == null ? DEFAULT_PBMAC1_ITER : macOpts.iterations, C.LIMITS.PBKDF2_MAX_ITERATIONS);
         var keyLen = macOpts.keyLength != null ? macOpts.keyLength : prf.keyLen;
         if (typeof keyLen !== "number" || !Number.isInteger(keyLen) || keyLen < 20 || keyLen > MAX_PBMAC1_KEYLEN) throw _err("pkcs12/bad-input", "PBMAC1 keyLength must be an integer in [20, " + MAX_PBMAC1_KEYLEN + "] (RFC 9579 sec. 9)");
-        var mac = await pbes2.pbmac1(_pbePassword(password), salt, iter2, keyLen, prf.wc, prf.wc, authSafeDer);
+        var macPw2 = _pbePasswordOwned(password);
+        var mac;
+        try {
+          mac = await pbes2.pbmac1(macPw2.bytes, salt, iter2, keyLen, prf.wc, prf.wc, authSafeDer);
+        } finally {
+          _wipePw(macPw2);
+        }
         var desc = { salt, iterationCount: iter2, keyLength: keyLen, prfName: prf.prfName, macName: prf.prfName };
         var digestInfo2 = b.sequence([pbes2.pbmac1AlgId(desc), b.octetString(mac)]);
         return b.sequence([digestInfo2, b.octetString(salt), b.integer(BigInt(iter2))]);
@@ -28429,9 +29387,22 @@ var require_pkcs12_build = __commonJS({
       }
       throw _err("pkcs12/bad-input", "spec must be { safeContents: [...] } or { key, cert, ca? }");
     }
-    async function build(spec, opts) {
+    function build(spec, opts) {
+      return guard.bytes.fixedCall(Pkcs12Error, "pkcs12/bad-input", [
+        [spec, "the PKCS#12 spec"],
+        [opts, "pki.pkcs12.build options"]
+      ], _build);
+    }
+    async function _build(spec, opts) {
       opts = opts || {};
-      var pubKey = opts.integrity != null && opts.integrity.mode === "public-key";
+      if (opts.integrity != null) {
+        if (typeof opts.integrity !== "object" || Array.isArray(opts.integrity)) throw _err("pkcs12/bad-input", "opts.integrity must be an object { mode, signer|signers, ... }");
+        guard.identifier.assertKnownKeys(opts.integrity, _INTEGRITY_OPTS, _err, "pkcs12/bad-input", "opts.integrity has an unknown option ");
+        if (opts.integrity.mode !== "public-key") {
+          throw _err("pkcs12/bad-integrity-mode", 'opts.integrity.mode must be "public-key" (the only mode it selects); omit opts.integrity for password integrity, got ' + JSON.stringify(opts.integrity.mode));
+        }
+      }
+      var pubKey = opts.integrity != null;
       if (pubKey && opts.mac != null && opts.mac !== false) throw _err("pkcs12/bad-integrity-mode", "public-key integrity has no MacData -- do not combine opts.mac with opts.integrity.mode 'public-key' (RFC 7292 sec. 4)");
       var safeContentsSpecs = _normalizeSpec(spec, opts);
       if (!Array.isArray(safeContentsSpecs) || !safeContentsSpecs.length) throw _err("pkcs12/bad-input", "the store has no safe contents");
@@ -28459,8 +29430,10 @@ var require_pkcs12_build = __commonJS({
       return opts.pem ? schemaPkcs12.pemEncode(pfx, "PKCS12") : pfx;
     }
     async function verifyMac(pfx, password, opts) {
+      return _verifyMacOfStore(_storeFromBytes(pfx), password, opts);
+    }
+    async function _verifyMacOfStore(m, password, opts) {
       opts = opts || {};
-      var m = pfx && pfx.integrityMode !== void 0 && pfx.mac !== void 0 ? pfx : schemaPkcs12.parse(_coerceDer(pfx, "pfx"));
       if (m.integrityMode !== "password" || !m.mac) throw _err("pkcs12/bad-input", "the store carries no password MAC (integrityMode " + m.integrityMode + ")");
       var expected = m.mac.macValue;
       var computed;
@@ -28484,7 +29457,12 @@ var require_pkcs12_build = __commonJS({
         if (!macWc) throw _err("pkcs12/unsupported-algorithm", "unsupported PBMAC1 messageAuthScheme " + m.mac.pbmac1.schemeName);
         if (prfWc === "SHA-1" || macWc === "SHA-1") throw _err("pkcs12/unsupported-algorithm", "PBMAC1 with a <= 160-bit digest (SHA-1) is refused (RFC 9579 sec. 5/7)");
         _capWork(kdf.iterationCount, kdf.salt, opts, kdf.keyLength, C.LIMITS.PBKDF2_MAX_ITERATIONS);
-        computed = await pbes2.pbmac1(_pbePassword(password), kdf.salt, kdf.iterationCount, kdf.keyLength, prfWc, macWc, m.macedBytes);
+        var vPw = _pbePasswordOwned(password);
+        try {
+          computed = await pbes2.pbmac1(vPw.bytes, kdf.salt, kdf.iterationCount, kdf.keyLength, prfWc, macWc, m.macedBytes);
+        } finally {
+          _wipePw(vPw);
+        }
       }
       return computed.length === expected.length && guard.crypto.constantTimeEqual(computed, expected);
     }
@@ -28503,7 +29481,7 @@ var require_pkcs12_build = __commonJS({
       if (opts.maxIterations != null && (typeof opts.maxIterations !== "number" || !isFinite(opts.maxIterations) || opts.maxIterations < 1 || Math.floor(opts.maxIterations) !== opts.maxIterations)) {
         throw _err("pkcs12/bad-input", "maxIterations must be a positive integer");
       }
-      var m = pfx && pfx.integrityMode !== void 0 && pfx.mac !== void 0 ? pfx : schemaPkcs12.parse(_coerceDer(pfx, "pfx"));
+      var m = _storeFromBytes(pfx);
       var macVerified = false;
       var signers = null;
       if (m.integrityMode === "public-key") {
@@ -28511,14 +29489,14 @@ var require_pkcs12_build = __commonJS({
         if (!res.valid) throw _err("pkcs12/signature-invalid", "the PKCS#12 SignedData signature did not verify (an untrusted or tampered store)");
         signers = res.signers;
       } else if (m.integrityMode === "password") {
-        macVerified = await verifyMac(m, password, opts);
+        macVerified = await _verifyMacOfStore(m, password, opts);
         if (!macVerified) throw _err("pkcs12/mac-mismatch", "the PKCS#12 MAC did not verify (wrong password or a tampered store)");
       } else if (!opts.allowUnauthenticated) {
         throw _err("pkcs12/no-integrity", "the store carries no integrity MAC (integrityMode " + m.integrityMode + "); set opts.allowUnauthenticated to open it anyway");
       }
       var out = { integrityMode: m.integrityMode, macVerified, signers, keys: [], certs: [], crls: [], secrets: [] };
       var i;
-      var kdfBudget = { rounds: LEGACY_KDF_MAX_ROUNDS };
+      var kdfBudget = { rounds: KDF_MAX_ROUNDS };
       for (i = 0; i < m.safeBags.length; i++) _openBag(m.safeBags[i], password, opts, out, 0, kdfBudget);
       for (i = 0; i < m.encryptedSafes.length; i++) await _openEncryptedSafe(m.encryptedSafes[i], password, opts, out, 0, kdfBudget);
       if (opts.keys === "crypto") {
@@ -28598,7 +29576,14 @@ var require_pkcs12_build = __commonJS({
       }
     }
     function _decryptBag(ea, ct, password, opts, budget) {
-      if (ea.oid === O("pbes2")) return pbes2.pbes2Decrypt(_pbePassword(password), ea.parameters, ct, opts, _err, "pkcs12");
+      if (ea.oid === O("pbes2")) {
+        var pw = _pbePasswordOwned(password);
+        try {
+          return pbes2.pbes2Decrypt(pw.bytes, ea.parameters, ct, opts, _err, "pkcs12", budget);
+        } finally {
+          _wipePw(pw);
+        }
+      }
       return _decryptLegacyPbe(ea, ct, password, opts, budget);
     }
     function _decryptShroudedKey(encrypted, password, opts, budget) {
@@ -28708,8 +29693,18 @@ var require_merkle = __commonJS({
     function emptyRootHash() {
       return _sha256(EMPTY);
     }
+    var _INCLUSION_KEYS = { leafIndex: 1, treeSize: 1, leafHash: 1, rootHash: 1, proof: 1 };
     function verifyInclusion(opts) {
       opts = opts || {};
+      guard.identifier.assertKnownKeys(
+        opts,
+        _INCLUSION_KEYS,
+        function(c, m) {
+          return new MerkleError(c, m);
+        },
+        "merkle/bad-input",
+        "unknown verifyInclusion option "
+      );
       var leafIndex = _coerceCoord(opts.leafIndex, "leafIndex");
       var treeSize = _coerceCoord(opts.treeSize, "treeSize");
       if (treeSize === 0n) throw new MerkleError("merkle/empty-tree", "an empty tree has no leaves to include");
@@ -28740,8 +29735,18 @@ var require_merkle = __commonJS({
       if (sn !== 0n) throw new MerkleError("merkle/bad-proof-length", "proof is shorter than the tree geometry requires");
       return _ctEq(r, rootHash);
     }
+    var _CONSISTENCY_KEYS = { oldSize: 1, newSize: 1, oldRoot: 1, newRoot: 1, proof: 1 };
     function verifyConsistency(opts) {
       opts = opts || {};
+      guard.identifier.assertKnownKeys(
+        opts,
+        _CONSISTENCY_KEYS,
+        function(c2, m) {
+          return new MerkleError(c2, m);
+        },
+        "merkle/bad-input",
+        "unknown verifyConsistency option "
+      );
       var oldSize = _coerceCoord(opts.oldSize, "oldSize");
       var newSize = _coerceCoord(opts.newSize, "newSize");
       var oldRoot = _node32(opts.oldRoot, "oldRoot");
@@ -29369,7 +30374,32 @@ var require_hpke = __commonJS({
         throw _err("hpke/bad-key", "invalid recipient private key (expected a node KeyObject or { skm, pkm })", e);
       }
     }
-    function _mode(opts) {
+    var _COMMON_KEYS = { mode: 1, info: 1, psk: 1, pskId: 1 };
+    function _withCommon(extra) {
+      var out = {};
+      Object.keys(_COMMON_KEYS).forEach(function(k) {
+        out[k] = 1;
+      });
+      Object.keys(extra).forEach(function(k) {
+        out[k] = 1;
+      });
+      return out;
+    }
+    var _SETUP_S_KEYS = _withCommon({
+      senderKey: 1,
+      // auth modes: the sender's OWN KEM private key
+      eph: 1
+      // test-vector determinism: fixes the ephemeral key this side generates
+    });
+    var _SETUP_R_KEYS = _withCommon({
+      senderPublicKey: 1
+      // auth modes: the sender's KEM public key, to authenticate them
+    });
+    function _mode(opts, keys, who) {
+      guard.identifier.assertKnownKeys(opts, keys, _err, "hpke/bad-input", function(k) {
+        var other = keys === _SETUP_S_KEYS ? _SETUP_R_KEYS : _SETUP_S_KEYS;
+        return "unknown HPKE " + who + " option " + JSON.stringify(k) + (Object.prototype.hasOwnProperty.call(other, k) ? " -- that option belongs to the other end of the exchange, where it would authenticate or seed; here it would do nothing" : "") + " -- accepted: " + Object.keys(keys).sort().join(", ");
+      });
       var mode = opts.mode == null ? MODE_BASE : opts.mode;
       if (mode !== MODE_BASE && mode !== MODE_PSK && mode !== MODE_AUTH && mode !== MODE_AUTH_PSK) {
         throw _err("hpke/unknown-mode", "unsupported HPKE mode " + JSON.stringify(mode) + " (RFC 9180 sec. 5.1 defines base / psk / auth / auth-psk)");
@@ -29385,7 +30415,7 @@ var require_hpke = __commonJS({
     function _setupS(ids, pkR, opts) {
       opts = opts || {};
       var suite = _suite(ids);
-      var mode = _mode(opts);
+      var mode = _mode(opts, _SETUP_S_KEYS, "sender setup");
       var r = _recipPublic(suite, pkR);
       var kem = suite.kem, k;
       if (mode === MODE_AUTH || mode === MODE_AUTH_PSK) {
@@ -29402,7 +30432,7 @@ var require_hpke = __commonJS({
     function _setupR(ids, enc, skR, opts) {
       opts = opts || {};
       var suite = _suite(ids);
-      var mode = _mode(opts);
+      var mode = _mode(opts, _SETUP_R_KEYS, "recipient setup");
       var r = _recipPrivate(suite, skR);
       var kem = suite.kem, ss;
       if (mode === MODE_AUTH || mode === MODE_AUTH_PSK) {
@@ -29835,6 +30865,7 @@ var require_sigstore = __commonJS({
     }
     var IDENTITY_FIELDS = ["san", "issuer", "sourceRepositoryURI"];
     var IDENTITY_KEYS = { san: 1, issuer: 1, sourceRepositoryURI: 1 };
+    var _VERIFY_BUNDLE_OPTS = { fulcioRoots: 1, rekorKeys: 1, identity: 1, predicateType: 1, time: 1 };
     function _checkIdentity(id, policy) {
       var ran = { san: false, issuer: false, sourceRepositoryURI: false };
       if (policy === void 0 || policy === null) return ran;
@@ -29877,6 +30908,7 @@ var require_sigstore = __commonJS({
         throw new TypeError("verifyBundle: bundle must be an object, JSON string, or Buffer");
       }
       opts = opts || {};
+      guard.identifier.assertKnownKeys(opts, _VERIFY_BUNDLE_OPTS, _err, "sigstore/bad-input", "pki.sigstore.verifyBundle has an unknown option ");
       var b = parseBundle(bundle);
       var vm = b.verificationMaterial;
       var env = b.dsseEnvelope;
@@ -30292,6 +31324,59 @@ var require_est = __commonJS({
     var OID_SMIME_CAPABILITIES = oid.byName("smimeCapabilities");
     var OID_TEMPLATE = oid.byName("certificationRequestInfoTemplate");
     var OPERATIONS = ["cacerts", "simpleenroll", "simplereenroll", "fullcmc", "serverkeygen", "csrattrs"];
+    var CLIENT_OPTS = {
+      transport: 1,
+      tls: 1,
+      label: 1,
+      timeout: 1,
+      maxResponseBytes: 1,
+      maxRedirects: 1,
+      now: 1,
+      auth: 1,
+      username: 1,
+      password: 1,
+      allowCrossOriginRedirect: 1
+    };
+    function _withClient(extra) {
+      var out = {};
+      Object.keys(CLIENT_OPTS).forEach(function(k) {
+        out[k] = 1;
+      });
+      Object.keys(extra || {}).forEach(function(k) {
+        out[k] = 1;
+      });
+      return out;
+    }
+    var CACERTS_OPTS = _withClient(null);
+    var SIMPLEENROLL_OPTS = _withClient({ strict: 1 });
+    var SIMPLEREENROLL_OPTS = _withClient({ strict: 1, oldCert: 1 });
+    var SERVERKEYGEN_OPTS = _withClient({
+      requestedEncryption: 1,
+      expectedRecipientKeyId: 1,
+      expectedRecipientIssuerSerial: 1
+    });
+    var CSRATTRS_OPTS = _withClient(null);
+    var FULLCMC_OPTS = _withClient({
+      transactionId: 1,
+      senderNonce: 1,
+      dataReturn: 1,
+      responderCerts: 1,
+      responseRecipient: 1,
+      allowUnverifiedResponse: 1
+    });
+    var CLASSIFY_OPTS = { op: 1, now: 1 };
+    var PATHS_OPTS = { label: 1 };
+    var PARSE_SERVERKEYGEN_OPTS = {
+      requestedEncryption: 1,
+      expectedRecipientKeyId: 1,
+      expectedRecipientKind: 1,
+      expectedRecipientIssuerSerial: 1
+    };
+    function _knownOpts(opts, known, verb) {
+      guard.identifier.assertKnownKeys(opts, known, E, "est/bad-input", function(k) {
+        return "unknown option " + JSON.stringify(k) + " for pki.est." + verb + " -- accepted: " + Object.keys(known).sort().join(", ");
+      });
+    }
     function transferDecode(body) {
       var b64Len = Math.ceil(constants.LIMITS.DER_MAX_BYTES * 4 / 3);
       var cap = b64Len + Math.ceil(b64Len / 8) + constants.BYTES.kib(64);
@@ -30475,6 +31560,7 @@ var require_est = __commonJS({
     }
     function parseServerKeygenResponse(body, contentType, opts) {
       opts = opts || {};
+      _knownOpts(opts, PARSE_SERVERKEYGEN_OPTS, "parseServerKeygenResponse");
       var parts = splitMultipartMixed(body, contentType);
       if (parts.length !== 2) throw E("est/bad-multipart", "a serverkeygen response must have exactly two parts (RFC 7030 sec. 4.4.2)");
       var keyPart = null, certPart = null, encrypted = false;
@@ -30534,6 +31620,7 @@ var require_est = __commonJS({
     var NOT_IMPLEMENTED_OPS = { fullcmc: 1 };
     function classifyResponse(status, headers, body, opts) {
       opts = opts || {};
+      _knownOpts(opts, CLASSIFY_OPTS, "classifyResponse");
       var op = opts.op;
       if (op !== void 0 && op !== null && CLASSIFIABLE_OPS.indexOf(op) === -1) throw E("est/unsupported-operation", "unrecognized EST operation " + JSON.stringify(op));
       var h = {
@@ -30576,6 +31663,7 @@ var require_est = __commonJS({
     }
     function paths(baseUrl, opts) {
       opts = opts || {};
+      _knownOpts(opts, PATHS_OPTS, "paths");
       var prefix = String(baseUrl).replace(/\/+$/, "") + "/.well-known/est";
       if (opts.label != null) {
         var label = String(opts.label);
@@ -30677,7 +31765,7 @@ var require_est = __commonJS({
     var DEFAULT_TIMEOUT = constants.TIME.seconds(30);
     var MAX_TIMEOUT = constants.TIME.seconds(600);
     function _csrDer(input) {
-      if (Buffer.isBuffer(input)) return input;
+      if (Buffer.isBuffer(input)) return guard.bytes.snapshot(input, EstError, "est/bad-input", "a CSR");
       if (typeof input === "string") return csr.pemDecode(input);
       throw E("est/bad-input", "a CSR must be a DER Buffer or a PEM CERTIFICATE REQUEST string");
     }
@@ -30889,6 +31977,7 @@ var require_est = __commonJS({
       var der, wanted, sent;
       try {
         if (typeof opts !== "object" || Buffer.isBuffer(opts)) throw E("est/bad-input", "pki.est.fullcmc options must be an object");
+        _knownOpts(opts, FULLCMC_OPTS, "fullcmc");
         der = _cmcRequestDer(request);
         wanted = _requestedPublicKeys(der);
         sent = _cmcSent(opts, der);
@@ -31024,7 +32113,7 @@ var require_est = __commonJS({
       };
     }
     function _copyBytes(v) {
-      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v);
+      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return guard.bytes.snapshot(v, EstError, "est/bad-input", "a byte field of the request");
       if (ArrayBuffer.isView(v)) return Buffer.from(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
       if (v instanceof ArrayBuffer) return Buffer.from(new Uint8Array(v));
       return v;
@@ -31138,8 +32227,9 @@ var require_est = __commonJS({
       return out;
     }
     function _cmcRequestDer(request) {
-      if (Buffer.isBuffer(request)) return Buffer.from(request);
-      if (request instanceof Uint8Array) return Buffer.from(request);
+      if (Buffer.isBuffer(request) || request instanceof Uint8Array) {
+        return guard.bytes.snapshot(request, EstError, "est/bad-input", "the Full PKI Request");
+      }
       if (typeof request === "string") return cms.pemDecode(request);
       throw E("est/bad-input", "pki.est.fullcmc requires the Full PKI Request as DER bytes or a PEM CMS block");
     }
@@ -31248,6 +32338,7 @@ var require_est = __commonJS({
     function cacerts(baseUrl, opts) {
       opts = opts || {};
       return Promise.resolve().then(function() {
+        _knownOpts(opts, CACERTS_OPTS, "cacerts");
         return _client("cacerts", "GET", baseUrl, null, { accept: "application/pkcs7-mime" }, opts);
       }).then(function(res) {
         return _certsResult("cacerts", res, opts, null);
@@ -31256,12 +32347,14 @@ var require_est = __commonJS({
     function simpleenroll(baseUrl, csrInput, opts) {
       opts = opts || {};
       return Promise.resolve().then(function() {
+        _knownOpts(opts, SIMPLEENROLL_OPTS, "simpleenroll");
         return _enroll("simpleenroll", baseUrl, csrInput, opts);
       });
     }
     function simplereenroll(baseUrl, csrInput, opts) {
       opts = opts || {};
       return Promise.resolve().then(function() {
+        _knownOpts(opts, SIMPLEREENROLL_OPTS, "simplereenroll");
         if (!opts.oldCert) throw E("est/bad-input", "simplereenroll requires opts.oldCert (the certificate being renewed, RFC 7030 sec. 4.2.2)");
         reenrollGuard(opts.oldCert, _csrDer(csrInput));
         return _enroll("simplereenroll", baseUrl, csrInput, opts);
@@ -31353,6 +32446,7 @@ var require_est = __commonJS({
     function serverkeygen(baseUrl, csrInput, opts) {
       opts = opts || {};
       return Promise.resolve().then(function() {
+        _knownOpts(opts, SERVERKEYGEN_OPTS, "serverkeygen");
         var csrDer = _csrDer(csrInput);
         var derived = _serverkeygenEncryptionFromCsr(csrDer);
         if (opts.requestedEncryption !== void 0 && !!opts.requestedEncryption !== derived.requestedEncryption) throw E("est/bad-input", "opts.requestedEncryption (" + !!opts.requestedEncryption + ") contradicts the CSR's advertised key-encryption attribute (" + derived.requestedEncryption + ") (RFC 7030 sec. 4.4.1)");
@@ -31387,6 +32481,7 @@ var require_est = __commonJS({
     function csrattrs(baseUrl, opts) {
       opts = opts || {};
       return Promise.resolve().then(function() {
+        _knownOpts(opts, CSRATTRS_OPTS, "csrattrs");
         return _client("csrattrs", "GET", baseUrl, null, { accept: "application/csrattrs" }, opts);
       }).then(function(res) {
         return _csrattrsResult(res, opts);
@@ -31574,8 +32669,10 @@ var require_jose = __commonJS({
       }
       return jwk;
     }
+    var _VERIFY_KEYS = { key: 1, profile: 1 };
     async function verify(jws, opts) {
       opts = opts || {};
+      guard.identifier.assertKnownKeys(opts, _VERIFY_KEYS, E, "jose/bad-input", "unknown pki.jose.verify option ");
       if (!jws || typeof jws !== "object" || Array.isArray(jws)) throw E("jose/bad-jws", "a flattened JWS object is required");
       if (Object.prototype.hasOwnProperty.call(jws, "signatures")) throw E("jose/bad-jws", "the multi-signature signatures member is forbidden");
       if (Object.prototype.hasOwnProperty.call(jws, "header")) throw E("jose/bad-jws", "the unprotected header member is forbidden");
@@ -31624,8 +32721,10 @@ var require_jose = __commonJS({
       if (!ok) throw E("jose/verify-failed", "the JWS signature did not verify");
       return { header, payload: b64uDecode(jws.payload), keySource };
     }
+    var _SIGN_KEYS = { protected: 1, payload: 1, key: 1, jwk: 1, profile: 1 };
     async function sign(opts) {
       opts = opts || {};
+      guard.identifier.assertKnownKeys(opts, _SIGN_KEYS, E, "jose/bad-input", "unknown pki.jose.sign option ");
       var header = opts.protected;
       var payload = opts.payload;
       if (!Buffer.isBuffer(payload)) throw E("jose/bad-input", "payload must be a Buffer (empty Buffer for POST-as-GET)");
@@ -32113,14 +33212,17 @@ var require_acme = __commonJS({
       if (obj === void 0) return Buffer.alloc(0);
       return Buffer.from(JSON.stringify(obj), "utf8");
     }
+    var _promised = guard.async.deferred;
     function _signOuter(o, payloadObj) {
       if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
       if (!o.key) throw E("acme/bad-input", "a signing key (opts.key) is required");
       return jose.sign({ protected: _outerHeader(o), payload: _payloadBuf(payloadObj), key: o.key, jwk: o.jwk, profile: "acme-outer" });
     }
     function postAsGet(o) {
-      if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
-      return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, void 0);
+      return _promised(function() {
+        if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
+        return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, void 0);
+      });
     }
     function _assertContacts(contacts) {
       if (!Array.isArray(contacts)) throw E("acme/bad-contact", "contact must be an array of URL strings");
@@ -32135,25 +33237,27 @@ var require_acme = __commonJS({
       });
     }
     function newAccount(o) {
-      if (!_isObject(o) || !_isObject(o.jwk)) throw E("acme/bad-input", "newAccount must embed the account public jwk (RFC 8555 sec. 7.3)");
-      var payload = {};
-      if (o.contact !== void 0) {
-        _assertContacts(o.contact);
-        payload.contact = o.contact;
-      }
-      if (o.termsOfServiceAgreed !== void 0) {
-        if (typeof o.termsOfServiceAgreed !== "boolean") throw E("acme/bad-input", "termsOfServiceAgreed must be a boolean");
-        payload.termsOfServiceAgreed = o.termsOfServiceAgreed;
-      }
-      if (o.onlyReturnExisting !== void 0) {
-        if (typeof o.onlyReturnExisting !== "boolean") throw E("acme/bad-input", "onlyReturnExisting must be a boolean");
-        payload.onlyReturnExisting = o.onlyReturnExisting;
-      }
-      if (o.externalAccountBinding !== void 0) {
-        if (!_isObject(o.externalAccountBinding)) throw E("acme/bad-input", "externalAccountBinding must be an EAB inner JWS object");
-        payload.externalAccountBinding = o.externalAccountBinding;
-      }
-      return jose.sign({ protected: { alg: o.alg, nonce: o.nonce, url: o.url, jwk: o.jwk }, payload: _payloadBuf(payload), key: o.key, jwk: o.jwk, profile: "acme-outer" });
+      return _promised(function() {
+        if (!_isObject(o) || !_isObject(o.jwk)) throw E("acme/bad-input", "newAccount must embed the account public jwk (RFC 8555 sec. 7.3)");
+        var payload = {};
+        if (o.contact !== void 0) {
+          _assertContacts(o.contact);
+          payload.contact = o.contact;
+        }
+        if (o.termsOfServiceAgreed !== void 0) {
+          if (typeof o.termsOfServiceAgreed !== "boolean") throw E("acme/bad-input", "termsOfServiceAgreed must be a boolean");
+          payload.termsOfServiceAgreed = o.termsOfServiceAgreed;
+        }
+        if (o.onlyReturnExisting !== void 0) {
+          if (typeof o.onlyReturnExisting !== "boolean") throw E("acme/bad-input", "onlyReturnExisting must be a boolean");
+          payload.onlyReturnExisting = o.onlyReturnExisting;
+        }
+        if (o.externalAccountBinding !== void 0) {
+          if (!_isObject(o.externalAccountBinding)) throw E("acme/bad-input", "externalAccountBinding must be an EAB inner JWS object");
+          payload.externalAccountBinding = o.externalAccountBinding;
+        }
+        return jose.sign({ protected: { alg: o.alg, nonce: o.nonce, url: o.url, jwk: o.jwk }, payload: _payloadBuf(payload), key: o.key, jwk: o.jwk, profile: "acme-outer" });
+      });
     }
     var _HMAC_HASH = { HS256: "SHA-256", HS384: "SHA-384", HS512: "SHA-512" };
     async function externalAccountBinding(o) {
@@ -32194,21 +33298,23 @@ var require_acme = __commonJS({
       return { type, value };
     }
     function newOrder(o) {
-      if (!_isObject(o) || !Array.isArray(o.identifiers) || o.identifiers.length === 0) throw E("acme/bad-order", "newOrder requires a non-empty identifiers array (RFC 8555 sec. 7.4)");
-      var payload = { identifiers: o.identifiers.map(_validateOrderIdentifier) };
-      if (o.notBefore !== void 0) {
-        if (!_isRfc3339(o.notBefore)) throw E("acme/bad-order", "notBefore must be an RFC 3339 date-time");
-        payload.notBefore = o.notBefore;
-      }
-      if (o.notAfter !== void 0) {
-        if (!_isRfc3339(o.notAfter)) throw E("acme/bad-order", "notAfter must be an RFC 3339 date-time");
-        payload.notAfter = o.notAfter;
-      }
-      if (o.replaces !== void 0) {
-        if (!_isString(o.replaces)) throw E("acme/bad-order", "replaces must be an ARI certID string (RFC 9773 sec. 5)");
-        payload.replaces = o.replaces;
-      }
-      return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
+      return _promised(function() {
+        if (!_isObject(o) || !Array.isArray(o.identifiers) || o.identifiers.length === 0) throw E("acme/bad-order", "newOrder requires a non-empty identifiers array (RFC 8555 sec. 7.4)");
+        var payload = { identifiers: o.identifiers.map(_validateOrderIdentifier) };
+        if (o.notBefore !== void 0) {
+          if (!_isRfc3339(o.notBefore)) throw E("acme/bad-order", "notBefore must be an RFC 3339 date-time");
+          payload.notBefore = o.notBefore;
+        }
+        if (o.notAfter !== void 0) {
+          if (!_isRfc3339(o.notAfter)) throw E("acme/bad-order", "notAfter must be an RFC 3339 date-time");
+          payload.notAfter = o.notAfter;
+        }
+        if (o.replaces !== void 0) {
+          if (!_isString(o.replaces)) throw E("acme/bad-order", "replaces must be an ARI certID string (RFC 9773 sec. 5)");
+          payload.replaces = o.replaces;
+        }
+        return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
+      });
     }
     function newAuthz(o) {
       if (!_isObject(o) || !_isObject(o.identifier)) throw E("acme/bad-identifier", "newAuthz requires a single identifier object (RFC 8555 sec. 7.4.1)");
@@ -32309,32 +33415,38 @@ var require_acme = __commonJS({
       return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
     }
     function challengeResponse(o) {
-      if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
-      var payload = o.payload !== void 0 ? o.payload : {};
-      if (!_isObject(payload)) throw E("acme/bad-input", "a challenge response payload must be a JSON object (RFC 8555 sec. 7.5.1)");
-      return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
+      return _promised(function() {
+        if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
+        var payload = o.payload !== void 0 ? o.payload : {};
+        if (!_isObject(payload)) throw E("acme/bad-input", "a challenge response payload must be a JSON object (RFC 8555 sec. 7.5.1)");
+        return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, payload);
+      });
     }
     function deactivate(o) {
-      if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
-      return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, { status: "deactivated" });
+      return _promised(function() {
+        if (!_isObject(o)) throw E("acme/bad-input", "a request options object is required");
+        return _signOuter({ key: o.key, alg: o.alg, nonce: o.nonce, url: o.url, kid: o.kid }, { status: "deactivated" });
+      });
     }
     function revokeCert(o) {
-      if (!_isObject(o) || !Buffer.isBuffer(o.certificate)) throw E("acme/bad-input", "revokeCert requires a DER certificate Buffer (opts.certificate)");
-      x509.parse(o.certificate);
-      var hasKid = Object.prototype.hasOwnProperty.call(o, "kid");
-      var hasJwk = Object.prototype.hasOwnProperty.call(o, "jwk");
-      if (hasKid === hasJwk) throw E("acme/bad-input", "revokeCert must be signed with EXACTLY ONE of the account kid or the certificate jwk (RFC 8555 sec. 7.6)");
-      var payload = { certificate: jose.base64url.encode(o.certificate) };
-      if (o.reason !== void 0) {
-        if (typeof o.reason !== "number" || !isFinite(o.reason) || Math.floor(o.reason) !== o.reason || CRL_REASONS.indexOf(o.reason) === -1) {
-          throw E("acme/bad-revocation-reason", "reason must be an assigned RFC 5280 CRLReason (0-6, 8-10; value 7 is unassigned)");
+      return _promised(function() {
+        if (!_isObject(o) || !Buffer.isBuffer(o.certificate)) throw E("acme/bad-input", "revokeCert requires a DER certificate Buffer (opts.certificate)");
+        x509.parse(o.certificate);
+        var hasKid = Object.prototype.hasOwnProperty.call(o, "kid");
+        var hasJwk = Object.prototype.hasOwnProperty.call(o, "jwk");
+        if (hasKid === hasJwk) throw E("acme/bad-input", "revokeCert must be signed with EXACTLY ONE of the account kid or the certificate jwk (RFC 8555 sec. 7.6)");
+        var payload = { certificate: jose.base64url.encode(o.certificate) };
+        if (o.reason !== void 0) {
+          if (typeof o.reason !== "number" || !isFinite(o.reason) || Math.floor(o.reason) !== o.reason || CRL_REASONS.indexOf(o.reason) === -1) {
+            throw E("acme/bad-revocation-reason", "reason must be an assigned RFC 5280 CRLReason (0-6, 8-10; value 7 is unassigned)");
+          }
+          payload.reason = o.reason;
         }
-        payload.reason = o.reason;
-      }
-      var header = { alg: o.alg, nonce: o.nonce, url: o.url };
-      if (hasKid) header.kid = o.kid;
-      else header.jwk = o.jwk;
-      return jose.sign({ protected: header, payload: _payloadBuf(payload), key: o.key, jwk: o.jwk, profile: "acme-outer" });
+        var header = { alg: o.alg, nonce: o.nonce, url: o.url };
+        if (hasKid) header.kid = o.kid;
+        else header.jwk = o.jwk;
+        return jose.sign({ protected: header, payload: _payloadBuf(payload), key: o.key, jwk: o.jwk, profile: "acme-outer" });
+      });
     }
     async function keyChange(o) {
       if (!_isObject(o)) throw E("acme/bad-input", "a keyChange options object is required");
@@ -32927,26 +34039,39 @@ var require_acme = __commonJS({
         });
       }
       function _getOrder(url) {
-        return _postAsGet(_clientUrl(url)).then(function(res) {
-          return validate("order", _json(res));
+        return _promised(function() {
+          return _postAsGet(_clientUrl(url)).then(function(res) {
+            return validate("order", _json(res));
+          });
         });
       }
       function _getAuthorization(url) {
-        return _postAsGet(_clientUrl(url)).then(function(res) {
-          return validate("authorization", _json(res));
+        return _promised(function() {
+          return _postAsGet(_clientUrl(url)).then(function(res) {
+            return validate("authorization", _json(res));
+          });
         });
       }
       function _getChallenge(url) {
-        return _postAsGet(_clientUrl(url)).then(function(res) {
-          return validate("challenge", _json(res));
+        return _promised(function() {
+          return _postAsGet(_clientUrl(url)).then(function(res) {
+            return validate("challenge", _json(res));
+          });
         });
       }
       function _respondToChallenge(url) {
-        return _post(_clientUrl(url), challengeResponse, null, "kid").then(function(res) {
-          return validate("challenge", _json(res));
+        return _promised(function() {
+          return _post(_clientUrl(url), challengeResponse, null, "kid").then(function(res) {
+            return validate("challenge", _json(res));
+          });
         });
       }
       function _finalize(order, o) {
+        return _promised(function() {
+          return _finalizeBody(order, o);
+        });
+      }
+      function _finalizeBody(order, o) {
         o = o || {};
         if (!_isObject(order) || !_isString(order.finalize)) throw E("acme/bad-input", "finalize requires the order object with its finalize URL");
         if (!Array.isArray(order.identifiers)) throw E("acme/bad-input", "finalize requires the order's identifiers to enforce the RFC 8555 sec. 7.4 CSR-set match");
@@ -33064,16 +34189,25 @@ var require_acme = __commonJS({
         });
       }
       function _deactivateAccount() {
-        return _post(_requireKid(), deactivate, null, "kid").then(function(res) {
-          return validate("account", _json(res));
+        return _promised(function() {
+          return _post(_requireKid(), deactivate, null, "kid").then(function(res) {
+            return validate("account", _json(res));
+          });
         });
       }
       function _deactivateAuthorization(url) {
-        return _post(_clientUrl(url), deactivate, null, "kid").then(function(res) {
-          return validate("authorization", _json(res));
+        return _promised(function() {
+          return _post(_clientUrl(url), deactivate, null, "kid").then(function(res) {
+            return validate("authorization", _json(res));
+          });
         });
       }
       function _keyChange(o) {
+        return _promised(function() {
+          return _keyChangeBody(o);
+        });
+      }
+      function _keyChangeBody(o) {
         o = o || {};
         if (!o.newKey || !_isObject(o.newJwk) || !_isString(o.newAlg)) throw E("acme/bad-input", "keyChange requires newKey, newJwk, and newAlg");
         var account = _requireKid();
@@ -33095,6 +34229,11 @@ var require_acme = __commonJS({
         });
       }
       function _renewalInfo(certDer, clockFn, retryAfterCapSeconds) {
+        return _promised(function() {
+          return _renewalInfoBody(certDer, clockFn, retryAfterCapSeconds);
+        });
+      }
+      function _renewalInfoBody(certDer, clockFn, retryAfterCapSeconds) {
         if (!Buffer.isBuffer(certDer)) throw E("acme/bad-input", "renewalInfo requires a DER certificate Buffer");
         var _rawClk = typeof clockFn === "function" ? clockFn : clock;
         function clk() {
@@ -33450,7 +34589,7 @@ var require_trust = __commonJS({
     }
     function _mkAnchor(cert, meta) {
       var spki = cert.subjectPublicKeyInfo;
-      return {
+      var entry = {
         name: cert.subject,
         // the object with .rdns (name chaining)
         publicKey: spki.bytes,
@@ -33465,6 +34604,44 @@ var require_trust = __commonJS({
         label: meta.label,
         mozillaCaPolicy: meta.mozillaCaPolicy
       };
+      _DERIVED_FROM.set(entry, {
+        // The RDN entries are copied too, not just the arrays holding them: a shallow slice shares
+        // every attribute object, so editing one in place would still reach the record.
+        name: _copyName(cert.subject),
+        publicKey: Buffer.from(spki.bytes),
+        algorithm: spki.algorithm.oid,
+        parameters: spki.algorithm.parameters == null ? spki.algorithm.parameters : Buffer.from(spki.algorithm.parameters),
+        purposes: _copyPurposes(meta.purposes),
+        distrustAfter: _copyDistrustAfter(meta.distrustAfter)
+      });
+      return entry;
+    }
+    var _DERIVED_FROM = /* @__PURE__ */ new WeakMap();
+    function _copyPurposes(src) {
+      return {
+        serverAuth: !!src && src.serverAuth === true,
+        emailProtection: !!src && src.emailProtection === true,
+        codeSigning: !!src && src.codeSigning === true
+      };
+    }
+    function _copyDistrustAfter(src) {
+      var out = {};
+      if (!src || typeof src !== "object") return out;
+      Object.keys(src).forEach(function(k) {
+        out[k] = src[k] instanceof Date ? new Date(src[k].getTime()) : src[k];
+      });
+      return out;
+    }
+    function _copyName(name) {
+      if (!name || !Array.isArray(name.rdns)) return name;
+      var out = Object.assign({}, name);
+      out.rdns = name.rdns.map(function(rdn) {
+        return Array.isArray(rdn) ? rdn.map(function(atv) {
+          return Object.assign({}, atv);
+        }) : rdn;
+      });
+      out.bytes = Buffer.isBuffer(name.bytes) ? Buffer.from(name.bytes) : name.bytes;
+      return out;
     }
     function _datesEqual(x, y) {
       var kx = Object.keys(x).sort(), ky = Object.keys(y).sort();
@@ -33733,25 +34910,38 @@ var require_trust = __commonJS({
       return { anchors: _dedupAnchors(anchors) };
     }
     function anchor(entry, opts) {
-      if (!entry || typeof entry !== "object" || !Buffer.isBuffer(entry.publicKey) || typeof entry.algorithm !== "string" || !entry.name || !Array.isArray(entry.name.rdns)) {
+      if (!entry || typeof entry !== "object") {
         throw E("trust/bad-input", "anchor expects a trust-store entry ({ name, publicKey, algorithm, ... })");
       }
       opts = opts || {};
+      var derived = _DERIVED_FROM.get(entry);
+      var meta = derived || entry;
+      if (!derived && (!Buffer.isBuffer(entry.publicKey) || typeof entry.algorithm !== "string" || !entry.name || !Array.isArray(entry.name.rdns))) {
+        throw E("trust/bad-input", "anchor expects a trust-store entry ({ name, publicKey, algorithm, ... })");
+      }
       if (opts.purpose !== void 0) {
         if (PURPOSES.indexOf(opts.purpose) === -1) {
           throw E("trust/bad-input", "anchor: opts.purpose must be one of " + PURPOSES.join(" | "));
         }
-        if (!entry.purposes || entry.purposes[opts.purpose] !== true) {
+        if (!meta.purposes || meta.purposes[opts.purpose] !== true) {
           throw E("trust/purpose-not-trusted", "this root is not a trusted delegator for " + opts.purpose);
         }
       }
+      if (!derived && (entry.purposes != null || entry.distrustAfter && Object.keys(entry.distrustAfter).length)) {
+        throw E("trust/bad-input", "this entry carries a trust store's per-purpose metadata but is not the entry the store produced -- it has been rebuilt, and the metadata is a statement about the key the store read, not about whichever key the copy now names. Pass pki.trust.parseCertdata / parseCcadbCsv output unmodified");
+      }
       return {
-        name: entry.name,
-        publicKey: entry.publicKey,
-        algorithm: entry.algorithm,
-        parameters: entry.parameters !== void 0 ? entry.parameters : null,
-        distrustAfter: entry.distrustAfter || {},
-        purposes: entry.purposes || { serverAuth: false, emailProtection: false, codeSigning: false }
+        name: _copyName(meta.name),
+        publicKey: Buffer.isBuffer(meta.publicKey) ? Buffer.from(meta.publicKey) : meta.publicKey,
+        algorithm: meta.algorithm,
+        parameters: Buffer.isBuffer(meta.parameters) ? Buffer.from(meta.parameters) : meta.parameters !== void 0 ? meta.parameters : null,
+        // The METADATA comes from the same source as the key, and is copied for the same reason on the
+        // way out: handing back the record's own object let a consumer write
+        // `anchor(entry).purposes.serverAuth = true` and have the next call pass a gate the store never
+        // opened. `distrustAfter` holds Dates, which are mutable in the same way. Everything on this
+        // object is fresh, so two anchors from one entry share nothing.
+        distrustAfter: _copyDistrustAfter(meta.distrustAfter),
+        purposes: _copyPurposes(meta.purposes)
       };
     }
     module2.exports = {
@@ -34561,11 +35751,18 @@ var require_lint = __commonJS({
       if (detail && detail.context) f.context = detail.context;
       return f;
     }
-    function _looksParsed(o) {
-      return o && typeof o === "object" && !Buffer.isBuffer(o) && Buffer.isBuffer(o.tbsBytes) && o.validity && o.subjectPublicKeyInfo && Array.isArray(o.extensions);
+    function _derivedCert(o) {
+      if (!o || typeof o !== "object" || Buffer.isBuffer(o) || ArrayBuffer.isView(o) || o instanceof ArrayBuffer) return null;
+      try {
+        var p = guard.parsed.acceptDerived(o, "certificate", x509.parse, _cfg, "lint/bad-input", "the certificate");
+        return guard.parsed.isCert(p) ? p : null;
+      } catch (_e) {
+        return null;
+      }
     }
     function _ingest(input) {
-      if (_looksParsed(input)) return { cert: input };
+      var derived = _derivedCert(input);
+      if (derived) return { cert: derived };
       var der;
       if (Buffer.isBuffer(input)) der = input;
       else if (typeof input === "string") {
@@ -35299,7 +36496,6 @@ var require_webauthn_mds = __commonJS({
   "node_modules/@blamejs/pki/lib/webauthn-mds.js"(exports2, module2) {
     "use strict";
     var frameworkError = require_framework_error();
-    var asn1 = require_asn1_der();
     var x509 = require_schema_x509();
     var guard = require_guard_all();
     var jose = require_jose();
@@ -35310,7 +36506,10 @@ var require_webauthn_mds = __commonJS({
     var edwardsPoint = require_edwards_point();
     var webcrypto = require_webcrypto();
     var nodeCrypto = require("crypto");
+    var oid = require_oid();
+    var pkix = require_schema_pkix();
     var WebauthnError = frameworkError.WebauthnError;
+    var _KU_NS = pkix.makeNS("webauthn", WebauthnError, oid);
     function _err(code, message, cause) {
       return new WebauthnError(code, message, cause);
     }
@@ -35418,42 +36617,25 @@ var require_webauthn_mds = __commonJS({
       "x5t#S256": 1
     });
     function _assertLeafSigns(leaf) {
-      var exts = leaf.extensions || [];
-      for (var i = 0; i < exts.length; i++) {
-        if (exts[i].name !== "keyUsage" || exts[i].value == null) continue;
-        var ku;
-        try {
-          ku = asn1.read.bitString(asn1.decode(exts[i].value));
-        } catch (e) {
-          throw _err("webauthn/bad-att-cert", "the metadata BLOB x5c leaf keyUsage extension is malformed", e);
-        }
-        if (!ku.bytes.length || (ku.bytes[0] & 128) === 0) {
-          throw _err("webauthn/bad-att-cert", "the metadata BLOB x5c leaf keyUsage does not assert digitalSignature, so it may not sign the BLOB (RFC 5280 sec. 4.2.1.3)");
-        }
-        return;
+      var ku = pkix.keyUsageOf(_KU_NS, leaf, _err, "webauthn/bad-att-cert", "metadata BLOB x5c leaf");
+      if (ku && ku.digitalSignature !== true) {
+        throw _err("webauthn/bad-att-cert", "the metadata BLOB x5c leaf keyUsage does not assert digitalSignature, so it may not sign the BLOB (RFC 5280 sec. 4.2.1.3)");
       }
     }
     function _isAnchorItself(cert, anchor) {
       return guard.name.dnEqual(cert.subject.rdns, anchor.subject.rdns, _err, "webauthn/bad-att-cert", "the anchor subject") && cert.subjectPublicKeyInfo.bytes.equals(anchor.subjectPublicKeyInfo.bytes);
     }
     function _asCert(v, label) {
-      if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
-        v = guard.bytes.source(v, WebauthnError, "webauthn/bad-input", label);
-      }
-      if (v && typeof v === "object" && !Buffer.isBuffer(v) && !(v instanceof Uint8Array) && v.subject && v.subjectPublicKeyInfo && Buffer.isBuffer(v.subjectPublicKeyInfo.bytes) && v.signatureAlgorithm && typeof v.signatureAlgorithm.oid === "string" && // `validity` is what separates a certificate from the other signed structures that carry a
-      // subject, a public key and a signature algorithm: a parsed certification request has all
-      // three and would otherwise be installed as a trust anchor.
-      v.validity && v.validity.notBefore !== void 0) {
-        return v;
-      }
-      try {
-        return x509.parse(v);
-      } catch (e) {
-        throw _err("webauthn/bad-input", label + " is not a decodable certificate", e);
-      }
+      return guard.parsed.acceptDerived(v, "certificate", function(bytes) {
+        try {
+          return x509.parse(bytes);
+        } catch (e) {
+          throw _err("webauthn/bad-input", label + " is not a decodable certificate", e);
+        }
+      }, _err, "webauthn/bad-input", label);
     }
     function verifyMetadataBlob(blob, opts) {
-      return Promise.resolve().then(function() {
+      return guard.async.deferred(function() {
         return _verifyMetadataBlob(blob, opts);
       });
     }
@@ -36294,22 +37476,6 @@ var require_webauthn = __commonJS({
       expectedTopOrigin: 1
     });
     var _FORMAT_SCOPED_BOOLEAN_OPTS = ["verifySafetyNetJws", "requireCtsProfileMatch"];
-    function _cloneParsed(v, depth) {
-      if (depth > 64) throw _err("webauthn/bad-input", "opts.rootCertificates[] is nested too deeply to be a parsed certificate");
-      if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v);
-      if (Array.isArray(v)) return v.map(function(x) {
-        return _cloneParsed(x, depth + 1);
-      });
-      if (v instanceof Date) return new Date(v.getTime());
-      if (v && typeof v === "object") {
-        var out = {};
-        Object.keys(v).forEach(function(k) {
-          out[k] = _cloneParsed(v[k], depth + 1);
-        });
-        return out;
-      }
-      return v;
-    }
     function _isBufferSource(v) {
       return ArrayBuffer.isView(v) || v instanceof ArrayBuffer;
     }
@@ -36325,7 +37491,6 @@ var require_webauthn = __commonJS({
         if (_isBufferSource(root)) {
           return guard.bytes.snapshotSource(root, WebauthnError, "webauthn/bad-input", "opts.rootCertificates[]");
         }
-        if (root && typeof root === "object") return _cloneParsed(root, 0);
         return root;
       });
     }
@@ -36334,16 +37499,14 @@ var require_webauthn = __commonJS({
         throw _err("webauthn/bad-input", "opts.rootCertificates must be a non-empty array of root certificates (DER, PEM, or parsed)");
       }
       var roots = supplied.map(function(root, i) {
-        var cert;
-        try {
-          cert = _isBufferSource(root) ? x509.parse(guard.bytes.source(root, WebauthnError, "webauthn/bad-input", "opts.rootCertificates[" + i + "]")) : typeof root === "string" ? x509.parse(root) : root;
-        } catch (e) {
-          throw _err("webauthn/bad-input", "opts.rootCertificates[" + i + "] is not a decodable certificate", e);
-        }
-        if (!cert || !cert.subject || !cert.subjectPublicKeyInfo) {
-          throw _err("webauthn/bad-input", "opts.rootCertificates[" + i + "] is not a certificate");
-        }
-        return cert;
+        var label = "opts.rootCertificates[" + i + "]";
+        return guard.parsed.acceptDerived(root, "certificate", function(bytes) {
+          try {
+            return x509.parse(_isBufferSource(bytes) ? guard.bytes.source(bytes, WebauthnError, "webauthn/bad-input", label) : bytes);
+          } catch (e) {
+            throw _err("webauthn/bad-input", label + " is not a decodable certificate", e);
+          }
+        }, _err, "webauthn/bad-input", label);
       });
       var paths = onlyPaths || (res.fmt === "compound" && Array.isArray(res.compound) ? res.compound.filter(function(el) {
         return el.trustPath && el.trustPath.length;
@@ -36763,16 +37926,14 @@ var require_webauthn = __commonJS({
       var anchors;
       try {
         anchors = roots.map(function(root, i) {
-          var anchorCert;
-          try {
-            anchorCert = _isBufferSource(root) ? x509.parse(guard.bytes.source(root, WebauthnError, "webauthn/bad-input", "opts.safetyNetRoots[" + i + "]")) : typeof root === "string" ? x509.parse(root) : root;
-          } catch (e) {
-            throw _err("webauthn/bad-input", "opts.safetyNetRoots[" + i + "] is not a decodable certificate", e);
-          }
-          if (!anchorCert || !anchorCert.subject || !anchorCert.subjectPublicKeyInfo) {
-            throw _err("webauthn/bad-input", "opts.safetyNetRoots[" + i + "] is not a certificate");
-          }
-          return anchorCert;
+          var label = "opts.safetyNetRoots[" + i + "]";
+          return guard.parsed.acceptDerived(root, "certificate", function(bytes) {
+            try {
+              return x509.parse(_isBufferSource(bytes) ? guard.bytes.source(bytes, WebauthnError, "webauthn/bad-input", label) : bytes);
+            } catch (e) {
+              throw _err("webauthn/bad-input", label + " is not a decodable certificate", e);
+            }
+          }, _err, "webauthn/bad-input", label);
         });
       } catch (e) {
         return Promise.reject(e);
@@ -37220,7 +38381,12 @@ var require_webauthn = __commonJS({
         var key = {}, kk;
         for (kk in out.credentialPublicKey) {
           if (!Object.prototype.hasOwnProperty.call(out.credentialPublicKey, kk)) continue;
-          var v = out.credentialPublicKey[kk];
+          var v;
+          try {
+            v = out.credentialPublicKey[kk];
+          } catch (e) {
+            throw _err("webauthn/bad-cose-key", "credentialPublicKey." + kk + " could not be read", e);
+          }
           key[kk] = _isBufferSource(v) ? guard.bytes.snapshotSource(v, WebauthnError, "webauthn/bad-input", "credentialPublicKey." + kk) : v;
         }
         out.credentialPublicKey = key;
@@ -37268,7 +38434,9 @@ var require_webauthn = __commonJS({
         var coseKey = input.credentialPublicKey;
         if (Buffer.isBuffer(coseKey) || ArrayBuffer.isView(coseKey) || coseKey instanceof ArrayBuffer) {
           coseKey = parseCoseKey(coseKey);
-        } else if (!_isPlainObject(coseKey)) {
+        } else if (_isPlainObject(coseKey)) {
+          coseKey = validator.cose.assertKeyMaterial(coseKey, WebauthnError, "webauthn/bad-cose-key", "webauthn/unsupported-algorithm");
+        } else {
           throw _err("webauthn/bad-input", "credentialPublicKey must be the stored COSE key -- the object pki.webauthn.verify returned, or its COSE bytes");
         }
         var bindingChecked = _applyBindings(authData, coseKey, input);

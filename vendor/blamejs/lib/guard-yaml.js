@@ -95,20 +95,98 @@ var SAFE_CORE_TAGS = Object.freeze([
   "!!binary", "!!timestamp", "!!merge",
 ]);
 
-// Anchor declaration — &name. Alias reference — *name.
-var ANCHOR_DECL_RE = /(^|\s|:|-)(&[A-Za-z_][A-Za-z0-9_-]*)/g;
-var ALIAS_REF_RE   = /(^|\s|:|-|\[|\{|,)(\*[A-Za-z_][A-Za-z0-9_-]*)/g;
+// Characters that may precede an anchor declaration (`&name`) or an alias
+// reference (`*name`) — the start of the document, whitespace, or one of the
+// structural characters a name can follow.
+var ANCHOR_LEAD_CHARS = ":-";
+var ALIAS_LEAD_CHARS  = ":-[{,";
 
-// Norway problem — unquoted YAML 1.1 boolean-shaped tokens at scalar
-// position. true/false ARE valid YAML 1.2 booleans so we don't flag
-// them; only the no/yes/y/n/on/off quirks fire.
-var NORWAY_BOOL_QUIRK_RE = /:\s*(no|yes|y|n|on|off)\b/gi;
+// The YAML 1.1 boolean-shaped tokens that make an unquoted scalar change type.
+// `true` and `false` are valid YAML 1.2 booleans and are not flagged; these
+// are the quirks — a country code `NO` parsing as false is the canonical one.
+var NORWAY_TOKENS = ["no", "yes", "y", "n", "on", "off"];
 
-// Leading-zero octals — 0777 etc. at scalar position.
-var LEADING_ZERO_OCTAL_RE = /:\s*0\d+\b/g;
+var _isAsciiDigit = codepointClass.isAsciiDigit;
+// The word boundary a `\b` supplies: a token cannot run into a further
+// identifier character, or `nope` reads as `no`.
+var _isWordChar = codepointClass.isIdentifierChar;
 
-// Merge keys — <<: *anchor chain.
-var MERGE_KEY_RE = /<<\s*:\s*\*/;
+function _isNameStart(cc) { return codepointClass.isAsciiLetter(cc) || cc === 0x5F; }
+function _isNameChar(cc) { return _isWordChar(cc) || cc === 0x2D; }        // "-"
+function _isSpace(cc) {
+  return codepointClass.inRanges(cc, codepointClass.WHITESPACE_RANGES);
+}
+
+// Every `&name` / `*name` in the document, given the sigil and the characters
+// that may precede it. Returns the names, in order.
+function _collectSigilNames(text, sigil, leadChars) {
+  var out = [];
+  for (var i = 0; i < text.length; i += 1) {
+    if (text.charAt(i) !== sigil) continue;
+    if (i > 0) {
+      var lead = text.charCodeAt(i - 1);
+      if (!_isSpace(lead) && leadChars.indexOf(text.charAt(i - 1)) === -1) continue;
+    }
+    if (!_isNameStart(text.charCodeAt(i + 1))) continue;
+    var end = i + 2;
+    while (end < text.length && _isNameChar(text.charCodeAt(end))) end += 1;
+    out.push(text.slice(i, end));
+    i = end - 1;
+  }
+  return out;
+}
+
+// The first `: <token>` whose token is one of the YAML 1.1 boolean quirks,
+// compared without regard to ASCII case, or null.
+function _firstNorwayToken(text) {
+  for (var i = 0; i < text.length; i += 1) {
+    if (text.charAt(i) !== ":") continue;
+    var j = i + 1;
+    while (j < text.length && _isSpace(text.charCodeAt(j))) j += 1;
+    for (var t = 0; t < NORWAY_TOKENS.length; t += 1) {
+      var token = NORWAY_TOKENS[t];
+      var slice = text.slice(j, j + token.length);
+      if (slice.length !== token.length) continue;
+      if (!codepointClass.containsFolded(slice, token)) continue;
+      var after = text.charCodeAt(j + token.length);
+      if (!isNaN(after) && _isWordChar(after)) continue;
+      return { index: i, token: slice };
+    }
+  }
+  return null;
+}
+
+// A `:` then whitespace then a `0` leading a digit run — a value YAML 1.1
+// reads as octal.
+function _hasLeadingZeroOctal(text) {
+  for (var i = 0; i < text.length; i += 1) {
+    if (text.charAt(i) !== ":") continue;
+    var j = i + 1;
+    while (j < text.length && _isSpace(text.charCodeAt(j))) j += 1;
+    if (text.charCodeAt(j) !== 0x30) continue;                         // "0"
+    var end = j + 1;
+    while (end < text.length && _isAsciiDigit(text.charCodeAt(end))) end += 1;
+    if (end === j + 1) continue;                                       // a bare "0"
+    var after = text.charCodeAt(end);
+    if (isNaN(after) || !_isWordChar(after)) return true;
+  }
+  return false;
+}
+
+// A merge key with an anchor reference — `<<` then optional whitespace, `:`,
+// optional whitespace, `*`.
+function _hasMergeKeyAlias(text) {
+  for (var i = 0; i + 1 < text.length; i += 1) {
+    if (text.charAt(i) !== "<" || text.charAt(i + 1) !== "<") continue;
+    var j = i + 2;
+    while (j < text.length && _isSpace(text.charCodeAt(j))) j += 1;
+    if (text.charAt(j) !== ":") continue;
+    j += 1;
+    while (j < text.length && _isSpace(text.charCodeAt(j))) j += 1;
+    if (text.charAt(j) === "*") return true;
+  }
+  return false;
+}
 
 // ---- Profile presets ----
 
@@ -181,6 +259,23 @@ var DEFAULTS = gateContract.strictDefaults(PROFILES, {
 
 var COMPLIANCE_POSTURES = gateContract.compliancePostures(PROFILES, { base: 256 });
 
+// Document separators — a `---` at the start of a line, followed by
+// whitespace. A line starts at index 0 or after an LF, and those are separate
+// facts: a document that opens with a blank line has its first separator at
+// index 1, which a scan that treats index 0 as "the start" and then looks for
+// LFs from index 1 onward steps straight over — and an empty first document
+// is the cheapest way to write a multi-document stream.
+function _countDocumentSeparators(text) {
+  var n = 0;
+  for (var at = 0; at + 3 < text.length; at += 1) {
+    if (at > 0 && text.charCodeAt(at - 1) !== 0x0A) continue;
+    if (text.slice(at, at + 3) !== "---") continue;
+    if (!_isSpace(text.charCodeAt(at + 3))) continue;
+    n += 1;
+  }
+  return n;
+}
+
 // ---- Helpers ----
 
 function _isDangerousTag(tag) {
@@ -194,18 +289,37 @@ function _isSafeCoreTag(tag) {
   return SAFE_CORE_TAGS.indexOf(tag) !== -1;
 }
 
-// _scanTags — find every tag-prefix occurrence in the source.
+// The characters a YAML tag handle runs through after its leading letter.
+var TAG_TAIL = codepointClass.ASCII_ALNUM + "_./:-";
+
+// _scanTags — find every tag-prefix occurrence in the source. A tag opens at
+// the start of the document or after whitespace, is one or two `!`, then a
+// letter and the tail set.
 function _scanTags(text) {
   var matches = [];
-  var iter = text.matchAll(/(^|\s)(![A-Za-z][\w./:-]*|!![A-Za-z][\w./:-]*)/g);
-  var m;
-  for (m of iter) {
-    var tag = m[2];
+  var tags = [];
+  for (var i = 0; i < text.length; i += 1) {
+    if (text.charAt(i) !== "!") continue;
+    var atStart = i === 0 ||
+                  codepointClass.inRanges(text.charCodeAt(i - 1), codepointClass.WHITESPACE_RANGES);
+    if (!atStart) continue;
+    var nameAt = text.charAt(i + 1) === "!" ? i + 2 : i + 1;
+    if (!codepointClass.isAsciiLetter(text.charCodeAt(nameAt))) continue;
+    var end = nameAt + 1;
+    while (end < text.length && TAG_TAIL.indexOf(text.charAt(end)) !== -1) end += 1;
+    // The reported location is where the SEPARATOR before the tag sits, which
+    // is where the pattern's match began; at the start of the document there
+    // is no separator and the tag's own index is the start.
+    tags.push({ tag: text.slice(i, end), location: i === 0 ? 0 : i - 1 });
+    i = end - 1;
+  }
+  for (var t = 0; t < tags.length; t += 1) {
+    var tag = tags[t].tag;
     var kind;
     if (_isDangerousTag(tag)) kind = "dangerous";
     else if (_isSafeCoreTag(tag)) kind = "safe-core";
     else kind = "custom";
-    matches.push({ tag: tag, location: m.index, kind: kind });
+    matches.push({ tag: tag, location: tags[t].location, kind: kind });
   }
   return matches;
 }
@@ -253,14 +367,8 @@ function _detectIssues(input, opts) {
   }
 
   // 2. Anchor / alias recursion scan.
-  var anchors = [];
-  var aIter = input.matchAll(ANCHOR_DECL_RE);
-  var aM;
-  for (aM of aIter) anchors.push(aM[2]);
-  var aliases = [];
-  var alIter = input.matchAll(ALIAS_REF_RE);
-  var alM;
-  for (alM of alIter) aliases.push(alM[2]);
+  var anchors = _collectSigilNames(input, "&", ANCHOR_LEAD_CHARS);
+  var aliases = _collectSigilNames(input, "*", ALIAS_LEAD_CHARS);
   if (anchors.length > opts.maxAnchors) {
     issues.push({
       kind: "anchor-cap", severity: "high",
@@ -292,7 +400,7 @@ function _detectIssues(input, opts) {
   }
 
   // 3. Multi-document.
-  var docs = (input.match(/(^|\n)---\s/g) || []).length;
+  var docs = _countDocumentSeparators(input);
   if (docs > 0 && opts.multiDocPolicy !== "allow") {
     if (opts.multiDocPolicy === "reject" ||
         (docs + 1) > opts.maxDocuments) {
@@ -308,28 +416,23 @@ function _detectIssues(input, opts) {
 
   // 4. Norway-problem implicit booleans.
   if (opts.norwayPolicy !== "allow") {
-    var norwayIter = input.matchAll(NORWAY_BOOL_QUIRK_RE);
-    var norwayM;
-    var seen = false;
-    for (norwayM of norwayIter) {
-      if (!seen) {
-        issues.push({
-          kind: "norway-implicit-bool",
-          severity: opts.norwayPolicy === "reject" ? "critical" : "warn",
-          ruleId: "yaml.norway",
-          location: norwayM.index,
-          snippet: "implicit YAML 1.1 boolean " + JSON.stringify(norwayM[1]) +
-                   " (Norway problem — country code 'NO' parses as false; " +
-                   "quote scalars to disambiguate)",
-        });
-        seen = true;
-      }
+    var norway = _firstNorwayToken(input);
+    if (norway) {
+      issues.push({
+        kind: "norway-implicit-bool",
+        severity: opts.norwayPolicy === "reject" ? "critical" : "warn",
+        ruleId: "yaml.norway",
+        location: norway.index,
+        snippet: "implicit YAML 1.1 boolean " + JSON.stringify(norway.token) +
+                 " (Norway problem — country code 'NO' parses as false; " +
+                 "quote scalars to disambiguate)",
+      });
     }
   }
 
   // 5. Leading-zero octals.
   if (opts.leadingZeroPolicy !== "allow") {
-    if (LEADING_ZERO_OCTAL_RE.test(input)) {                                     // allow:regex-no-length-cap — input bounded by maxBytes above
+    if (_hasLeadingZeroOctal(input)) {
       issues.push({
         kind: "leading-zero-octal",
         severity: opts.leadingZeroPolicy === "reject" ? "high" : "warn",
@@ -340,7 +443,7 @@ function _detectIssues(input, opts) {
   }
 
   // 6. Merge-key chain depth.
-  if (opts.mergeKeyPolicy !== "allow" && MERGE_KEY_RE.test(input)) {             // allow:regex-no-length-cap — input bounded by maxBytes above
+  if (opts.mergeKeyPolicy !== "allow" && _hasMergeKeyAlias(input)) {
     issues.push({
       kind: "merge-key",
       severity: opts.mergeKeyPolicy === "reject" ? "high" : "warn",
@@ -385,17 +488,44 @@ function _detectIssues(input, opts) {
   return issues;
 }
 
+// The `<indent><key>:` shape of a mapping entry, or null. The key runs to the
+// FIRST colon that is followed by whitespace or ends the line, which is where
+// a value begins — a colon inside the key (a timestamp, a URL) does not end
+// it unless whitespace follows.
+function _mappingEntryAt(line) {
+  var indent = 0;
+  while (indent < line.length && _isSpace(line.charCodeAt(indent))) indent += 1;
+  if (indent === line.length) return null;
+  for (var i = indent; i < line.length; i += 1) {
+    if (line.charAt(i) !== ":") continue;
+    var after = line.charCodeAt(i + 1);
+    if (i + 1 < line.length && !_isSpace(after)) continue;
+    if (i === indent) return null;                                     // no key before the colon
+    return { indent: indent, key: line.slice(indent, i) };
+  }
+  return null;
+}
+
+// Is the line blank, or a comment?
+function _isCommentLine(line) {
+  var i = 0;
+  while (i < line.length && _isSpace(line.charCodeAt(i))) i += 1;
+  return i < line.length && line.charAt(i) === "#";
+}
+
+var _splitLines = codepointClass.splitLines;
+
 function _detectDuplicateKeysYaml(text) {
   var dups = Object.create(null);
-  var lines = text.split(/\r?\n/);
+  var lines = _splitLines(text);
   var indentScopes = Object.create(null);
   for (var i = 0; i < lines.length; i += 1) {
     var line = lines[i];
-    if (line.length === 0 || /^\s*#/.test(line)) continue;
-    var indentMatch = line.match(/^(\s*)([^\s].*?):(\s|$)/);
-    if (!indentMatch) continue;
-    var indent = indentMatch[1].length;
-    var key = indentMatch[2].trim();
+    if (line.length === 0 || _isCommentLine(line)) continue;
+    var entry = _mappingEntryAt(line);
+    if (!entry) continue;
+    var indent = entry.indent;
+    var key = entry.key.trim();
     if (key.charAt(0) === "-" || key.charAt(0) === "[" || key.charAt(0) === "{") continue;
     if (!indentScopes[indent]) indentScopes[indent] = Object.create(null);
     if (indentScopes[indent][key]) dups[key] = true;
@@ -548,7 +678,10 @@ var INTEGRATION_FIXTURES = Object.freeze({
   // Hostile: deserialization-tag injection (CVE-2026-24009 PyYAML
   // class). Parser-runtime would attempt to instantiate the named
   // language-specific class.
-  hostileBytes: Buffer.from("!!python/object/new:cls\nargs: [\"x\"]\n", "utf8"),
+  // Carries a deserialization tag AND a leading-zero octal, so a harness
+  // driving this fixture exercises more than one rule — a fixture that trips
+  // exactly one scan can only ever report on that scan.
+  hostileBytes: Buffer.from("!!python/object/new:cls\nargs: [\"x\"]\nmode: 0777\n", "utf8"),
 });
 
 // Assembled from the gate-contract guard factory: error class, registry

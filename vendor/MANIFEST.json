@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.27",
+      "version": "0.18.32",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.27",
-      "bundledAt": "2026-08-15",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.27:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.27",
+      "tag": "v0.18.32",
+      "bundledAt": "2026-08-16",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.32:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.32",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -42,9 +42,9 @@
       },
       "hashes": {
         "index": "sha256:2d2c81c19e4177450b701dba05f582a8b6ef9581d202f01ec04d912556266a2f",
-        "safe-json": "sha256:3ebfbf8e5d9e4a19063eeed7518ca19f2e4f898792bea9602c4bf138e506df6f",
+        "safe-json": "sha256:2c3746f440a8a6dbe7b01e2c5009f327f5c685e942691607d4b28c2fbd806e5f",
         "safe-url": "sha256:d6024d0e64936b25833cc1a0a3113d8d5c9f3048ba7452ebcbbebb581c41cd4d",
-        "pqc-agent": "sha256:e13dc788a3e791d6a1834230f949c84abd33b2892d27940e1fc67cf0e03b7189",
+        "pqc-agent": "sha256:1483642d742faaae064c5710e770393b4d038559d22cba554c472fc1112d716e",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
         "http-client": "sha256:2f82fba6290cf877166a10d589a7ff9eb77021ababc61005f18e5ed01485b978",
         "ws-client": "sha256:348d01cd552fed583f05944d1853f71b0119105cb067c2e607b19ec9e6f47aee",
@@ -172,28 +172,28 @@
               "data_js": "lib/vendor/public-suffix-list.data.js"
             },
             "hashes": {
-              "server": "sha256:0240b3f1e8c90ecd4af5b94597afb5ba89997ad395f292f87318caefb7e10413",
-              "data_js": "sha256:7994e24e1865f197540a988783de567fe20fb29e7f6c3a5c142766bb0cfd9bfd"
+              "server": "sha256:99017337721c6d3ec351894eb50d1c287113a0a0120c0280114dab5f2e3ce64e",
+              "data_js": "sha256:368d2b20829d20c3d03d7d37f9ba929569dda03bb46453ffef79762ee5076570"
             },
-            "bundledAt": "2026-07-25T00:00:00Z"
+            "bundledAt": "2026-08-15T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.5.3",
+            "version": "0.5.7",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.5.3:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.5.7:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:5d0408c098fe4b801896db68ee8957fdd60a841bffcfea88972fd6aaa10865dd"
+              "server": "sha256:731ca9709731fbfcfa3b030532e393f511569b0c9729e000a2c3f2b0462373c3"
             },
-            "bundledAt": "2026-08-14T00:00:00Z"
+            "bundledAt": "2026-08-16T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-IOdBwzQy3cqrAsQ7okLtBJPRC2BYGjk7rXXRBHmemZvj0OhQjVJx74okQrLmFdBeF7Cq2ifMB++nlBdMWh58og=="
+      "integrity": "sha512-2e2Ko3SoCrVpw0YgIWHZI0ZwSHJWaWOumUfiT8HAUt6TuBjyUVv4ga8Jq+BPfPoUeqDHBmcCzDtRT4uP+9zpMg=="
     }
   }
 }

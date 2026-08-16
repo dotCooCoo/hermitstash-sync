@@ -62,11 +62,6 @@ var { GuardTextError } = require("./framework-error");
 var _err = GuardTextError.factory;
 var HEX_RADIX = 16;                                                 // base-16 radix, not byte size
 
-// ---- Shared codepoint catalog (composed from lib/codepoint-class) ----
-// Pre-compiled regexes pulled from the shared catalog; this guard adds no
-// codepoint table of its own.
-var TAG_RE        = codepointClass.TAG_RE;
-
 // ---- Profile presets ----
 // policy axis vocabulary mirrors the codepoint-class opt names so
 // detectCharThreats / assertNoCharThreats / applyCharStripPolicies read them
@@ -146,8 +141,21 @@ function _firstMatch(text, re) {
 // ENCODING (the byte→codepoint layer) is distinct from the codepoint regexes.
 var _STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
 // Unpaired UTF-16 surrogate in an already-decoded JS string (malformed Unicode
-// that a Buffer round-trip can't represent).
-var _LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+// that a Buffer round-trip can't represent). A high surrogate must be followed
+// by a low one, and a low one must be preceded by a high one.
+function _hasLoneSurrogate(text) {
+  for (var i = 0; i < text.length; i += 1) {
+    var cc = text.charCodeAt(i);
+    if (cc >= 0xD800 && cc <= 0xDBFF) {
+      var next = text.charCodeAt(i + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      i += 1;                                                                     // a well-formed pair, consumed
+    } else if (cc >= 0xDC00 && cc <= 0xDFFF) {
+      return true;                                                                // a low surrogate with no high one before it
+    }
+  }
+  return false;
+}
 
 // _strictText — decode `input` to a JS string AND report a malformed encoding.
 // Buffer → strict UTF-8 (fatal); string → unpaired-surrogate check. Returns
@@ -162,9 +170,7 @@ function _strictText(input) {
   }
   if (typeof input === "string") {
     return { text: input,
-             // allow:regex-no-length-cap — _LONE_SURROGATE_RE is a single-pass char-class
-             // alternation (no quantifier, no backtracking); O(n) on any input length.
-             encodingError: _LONE_SURROGATE_RE.test(input) ? "unpaired UTF-16 surrogate" : null };
+             encodingError: _hasLoneSurrogate(input) ? "unpaired UTF-16 surrogate" : null };
   }
   return { text: null, encodingError: null };
 }
@@ -194,19 +200,6 @@ function _detectIssues(text, opts) {
   // Invisible chars spoof displayed text (homoglyph), so zero-width is `high`.
   issues.push.apply(issues, codepointClass.detectCharThreats(text, opts, "text", "high"));
 
-  if (opts.tagsPolicy !== "allow") {
-    // TAG_RE uses the `u` flag (astral block U+E0000..U+E007F); index is the
-    // UTF-16 offset of the first tag codepoint.
-    var tagMatch = text.match(TAG_RE);
-    if (tagMatch) {
-      issues.push({
-        kind: "unicode-tags", severity: "critical", ruleId: "text.unicode-tags",
-        location: tagMatch.index,
-        snippet: "Unicode Tags block char (ASCII-smuggling / prompt-injection) at offset " +
-                 tagMatch.index,
-      });
-    }
-  }
 
   if (opts.confusablePolicy !== "allow") {
     var scripts = codepointClass.detectMixedScripts(text, opts.allowedScripts || null);
@@ -301,16 +294,6 @@ function _dispositionFor(issue, opts) {
       return (issue.severity === "high" || issue.severity === "critical")
         ? "reject" : "audit";
   }
-}
-
-// _stripIssues — sanitize path. Removes only the invisible / dangerous
-// codepoints whose policy is "strip"; never touches legitimate letters, never
-// repairs a confusable (no safe automated repair). Delegates the bidi /
-// control / null / zero-width / tags strips to the shared catalog helper so
-// the replace() sequence lives once.
-function _stripIssues(text, opts) {
-  if (typeof text !== "string") return text;
-  return codepointClass.applyCharStripPolicies(text, opts);
 }
 
 // ---- Public surface ----
@@ -413,6 +396,11 @@ function validate(input, opts) {
  * when the output exceeds `sanitizeAmplificationCap` (default 1.5x) the
  * function throws `GuardTextError("text.sanitize-amplified")`.
  *
+ * A class set to `"reject"` throws rather than returning: `"reject"` refuses,
+ * `"strip"` repairs, and `"audit"` reports through `validate` while leaving
+ * the text alone. Under `strict` every class is `"reject"`, so sanitize there
+ * either returns clean input or throws — it never hands back a threat.
+ *
  * @opts
  *   profile:           "strict"|"balanced"|"permissive",
  *   compliancePosture: "hipaa"|"pci-dss"|"gdpr"|"soc2",
@@ -442,12 +430,7 @@ function sanitize(input, opts) {
       "cannot sanitize input with " + decoded.encodingError + " (not repairable)");
   }
   var text = decoded.text;
-  var byteLen = Buffer.byteLength(text, "utf8");
-  if (byteLen > opts.maxBytes) {
-    throw _err("text.too-large",
-      "input " + byteLen + " bytes exceeds maxBytes " + opts.maxBytes);
-  }
-  var sanitized = _stripIssues(text, opts);
+  var sanitized = codepointClass.scrubCharThreats(text, opts, _err, "text");
   var amplification = sanitized.length / Math.max(text.length, 1);
   if (amplification > opts.sanitizeAmplificationCap) {
     throw _err("text.sanitize-amplified",
