@@ -95,8 +95,21 @@ function _capture(cmd, args, opts) {
   };
 }
 
+// _capture returns the exit status alongside the output, and reading only the
+// output throws that away: git writes its failures to stderr, so a status that
+// did not run leaves stdout empty and `=== ''` reports a clean tree. `prepare`
+// and `tag` both gate on this, and both read "clean" as permission to proceed —
+// so a lookup that failed would let `tag` sign an immutable tag over a tree it
+// could not read. Refuse instead; a release gate has to have an answer, not a
+// default.
 function _gitClean() {
-  return _capture('git', ['status', '--porcelain']).stdout === '';
+  var rv = _capture('git', ['status', '--porcelain']);
+  if (rv.status !== 0) {
+    throw new Error('release: could not read the working tree (git status exited '
+      + rv.status + ') — refusing rather than assuming it is clean'
+      + (rv.stderr ? ': ' + rv.stderr : ''));
+  }
+  return rv.stdout === '';
 }
 
 function _gitBranch() {
@@ -522,7 +535,13 @@ function cmdTag() {
   var next = _readVersion();
   var tag = 'v' + next;
 
-  if (_capture('git', ['tag', '-l', tag]).stdout === tag) {
+  var existing = _capture('git', ['tag', '-l', tag]);
+  if (existing.status !== 0) {
+    throw new Error('release: could not check whether ' + tag + ' already exists (git tag -l exited '
+      + existing.status + ') — refusing rather than assuming it does not'
+      + (existing.stderr ? ': ' + existing.stderr : ''));
+  }
+  if (existing.stdout === tag) {
     throw new Error('release: tag ' + tag + ' already exists locally');
   }
 
@@ -605,7 +624,12 @@ function cmdAll(opts) {
 function cmdStatus() {
   _section('status');
   console.log('branch:          ' + _gitBranch());
-  console.log('clean:           ' + _gitClean());
+  // status is a read-only report, so an unreadable tree is shown as unreadable
+  // rather than ending the command the way it ends a gate.
+  var cleanLine;
+  try { cleanLine = String(_gitClean()); }
+  catch (e) { cleanLine = 'unreadable — ' + e.message; }
+  console.log('clean:           ' + cleanLine);
   var versionLine;
   try {
     versionLine = _readVersion() + ' (constants.js + package.json match)';

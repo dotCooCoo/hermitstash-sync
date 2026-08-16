@@ -1566,4 +1566,36 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     _assertClean('docs-secret-shape', hits);
   });
 
+  // release-script-capture-status-unchecked
+  //
+  // scripts/ is outside the scan above, but the release script is the one place
+  // where reading a command's output without its exit status decides whether a
+  // gate runs. _capture() returns { status, stdout, stderr }; git reports its
+  // failures on stderr, so a lookup that did not run leaves stdout empty and
+  // `=== ''` reads as a clean tree. `prepare` and `tag` both treat clean as
+  // permission to proceed, which would let `tag` sign an immutable tag over a
+  // tree nothing could read.
+  it('release lookups that gate a decision consult the exit status', () => {
+    var file = path.join(REPO_ROOT, 'scripts', 'release.js');
+    var src = fs.readFileSync(file, 'utf8');
+
+    // Anchored: prove the helper still exists, so this cannot pass on a slice
+    // of nothing after a rename.
+    var start = src.indexOf('function _gitClean()');
+    assert.notEqual(start, -1, 'scripts/release.js must still define _gitClean');
+    var body = src.slice(start, start + 700);
+
+    assert.ok(/rv\.status !== 0|\.status !== 0/.test(body),
+      '_gitClean must refuse a lookup that did not run rather than reporting a clean tree');
+    assert.ok(!/return _capture\('git', \['status', '--porcelain'\]\)\.stdout === ''/.test(src),
+      "`_capture(...).stdout === ''` reads a failed git status as a clean tree");
+
+    // The tag-exists check gates an immutable tag the same way.
+    var tagIdx = src.indexOf("_capture('git', ['tag', '-l', tag])");
+    assert.notEqual(tagIdx, -1, 'the tag-exists lookup must still be present');
+    var tagWindow = src.slice(tagIdx, tagIdx + 500);
+    assert.ok(/\.status !== 0/.test(tagWindow),
+      'the tag-exists lookup must refuse an answer it could not get, not assume the tag is absent');
+  });
+
 });
