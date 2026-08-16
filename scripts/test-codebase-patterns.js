@@ -1596,6 +1596,26 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
     var tagWindow = src.slice(tagIdx, tagIdx + 500);
     assert.ok(/\.status !== 0/.test(tagWindow),
       'the tag-exists lookup must refuse an answer it could not get, not assume the tag is absent');
+
+    // The two stray-file gates exist to keep anything outside the release set
+    // out of the commit. Reading their output alone means an empty answer and a
+    // failed lookup both say "nothing stray", and the gate passes either way.
+    [
+      ["diff', '--cached', '--name-only'", 'the staged-file gate'],
+      ["'--porcelain', '--untracked-files=all'", 'the working-tree gate'],
+    ].forEach(function (pair) {
+      var i = src.indexOf("_capture('git', ['" + pair[0].replace(/^diff', /, "diff', "));
+      if (i === -1) i = src.indexOf(pair[0]);
+      assert.notEqual(i, -1, pair[1] + ' must still be present');
+      // The status check sits just above the consumption of .stdout.
+      var w = src.slice(Math.max(0, i - 400), i + 400);
+      assert.ok(/\.status !== 0/.test(w),
+        pair[1] + ' must refuse a lookup that did not run, not read it as "nothing stray"');
+    });
+
+    // And nothing may go back to consuming .stdout straight off the call.
+    assert.ok(!/_capture\((?:[^)]|\)(?!\s*\.stdout))*\)\s*\.stdout\s*\n?\s*\.split/.test(src),
+      'a gate must store the capture and consult .status before splitting .stdout');
   });
 
 });

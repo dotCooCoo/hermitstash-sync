@@ -477,7 +477,13 @@ function cmdCommit() {
   // `git diff --cached --name-only` prints repo-root-relative, forward-slashed
   // paths; a path with unusual bytes may be quoted, which only ever fails the
   // allowlist (the safe direction) — the release files are plain ASCII.
-  var stagedStray = _capture('git', ['diff', '--cached', '--name-only']).stdout
+  var stagedRv = _capture('git', ['diff', '--cached', '--name-only']);
+  if (stagedRv.status !== 0) {
+    throw new Error('release: could not list the staged files (git diff --cached exited '
+      + stagedRv.status + ') — refusing rather than assuming nothing extra is staged'
+      + (stagedRv.stderr ? ': ' + stagedRv.stderr : ''));
+  }
+  var stagedStray = stagedRv.stdout
     .split('\n')
     .map(function (p) { return p.trim(); })
     .filter(function (p) { return p.length > 0; })
@@ -501,7 +507,13 @@ function cmdCommit() {
   // own — surface it as an error rather than committing a partial or sweeping
   // it in on a later broad add. Ignored paths (e.g. .scratch/) never appear in
   // --porcelain, so the commit-message file is not flagged.
-  var stray = _capture('git', ['status', '--porcelain', '--untracked-files=all']).stdout
+  var strayRv = _capture('git', ['status', '--porcelain', '--untracked-files=all']);
+  if (strayRv.status !== 0) {
+    throw new Error('release: could not list the working tree (git status exited '
+      + strayRv.status + ') — refusing rather than assuming nothing is stray'
+      + (strayRv.stderr ? ': ' + strayRv.stderr : ''));
+  }
+  var stray = strayRv.stdout
     .split('\n')
     .filter(function (l) { return l.length > 0; })
     .filter(function (l) {
