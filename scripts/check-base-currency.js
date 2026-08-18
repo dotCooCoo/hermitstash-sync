@@ -128,7 +128,17 @@ function listDockerfiles(dir, out, rel) {
  * Reading the FROM alone would miss the pin in both shapes.
  */
 function parseDockerfile(relPath) {
-  var text = fs.readFileSync(path.join(REPO, relPath), "utf8");
+  // Confine the read to the repository before opening it. Today every caller
+  // gets relPath from listDockerfiles, which builds it from directory entry
+  // names — a single path segment each, so nothing can climb out. That is a
+  // property of the current caller rather than of this function, and the
+  // function is the thing holding a filesystem read, so it checks for itself.
+  var full = path.resolve(REPO, relPath);
+  var inside = path.relative(REPO, full);
+  if (inside === "" || inside.split(path.sep)[0] === ".." || path.isAbsolute(inside)) {
+    throw new Error("refusing to read a Dockerfile outside the repository: " + relPath);
+  }
+  var text = fs.readFileSync(full, "utf8");
   var lines = text.split(/\r?\n/);
   var args = {};
   var stages = {};

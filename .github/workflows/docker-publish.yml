@@ -270,7 +270,25 @@ jobs:
             COMMIT_SHA=${{ needs.resolve-tag.outputs.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Only a run building the tag that was just pushed may WRITE the shared
+          # cache. Both of this workflow's triggers can otherwise build an
+          # arbitrary existing release tag: workflow_dispatch takes the version
+          # from its caller, and a workflow_run fires for a MANUAL dispatch of
+          # the Release workflow too, which can target any ref. Either way the
+          # job executes that tag's code — its Dockerfile, its install scripts —
+          # in a run whose cache scope is the default branch's, so allowing the
+          # export would seed layers from superseded code into the cache every
+          # later build reads.
+          #
+          # Hence both halves: the trigger must be workflow_run AND the upstream
+          # Release run must itself have come from the tag push. Checking only
+          # the first lets a manual Release dispatch through, which is the same
+          # hole one level up.
+          #
+          # Reading stays on. A cache nothing untrusted can write is safe to
+          # consume, so a rebuild of an old tag still gets the speedup without
+          # leaving anything behind.
+          cache-to: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && 'type=gha,mode=max' || '' }}
           provenance: true
           sbom: true
 

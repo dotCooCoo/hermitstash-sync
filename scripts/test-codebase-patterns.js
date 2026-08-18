@@ -1604,7 +1604,7 @@ describe('codebase-patterns', { timeout: 30000 }, () => {
       ["diff', '--cached', '--name-only'", 'the staged-file gate'],
       ["'--porcelain', '--untracked-files=all'", 'the working-tree gate'],
     ].forEach(function (pair) {
-      var i = src.indexOf("_capture('git', ['" + pair[0].replace(/^diff', /, "diff', "));
+      var i = src.indexOf("_capture('git', ['" + pair[0]);
       if (i === -1) i = src.indexOf(pair[0]);
       assert.notEqual(i, -1, pair[1] + ' must still be present');
       // The status check sits just above the consumption of .stdout.
