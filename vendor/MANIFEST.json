@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.34",
+      "version": "0.18.35",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.34",
+      "tag": "v0.18.35",
       "bundledAt": "2026-08-18",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.34:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.34",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.35:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.35",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -178,22 +178,22 @@
             "bundledAt": "2026-08-17T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.5.9",
+            "version": "0.5.10",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.5.9:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.5.10:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:15cea20b7d6ac11427a0c3ca40a055fa057c9dc3fb304f3beb043ce3f82780aa"
+              "server": "sha256:c7c7b82d0c5cd604e726c52332de66ff06ffb7877d4a44720d8bbd746c5d6023"
             },
             "bundledAt": "2026-08-18T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-4sOdtWT2qdZgM4HIIVZYtdLaI9GeLR34xrGDkCtaOg8yO4096vaNGph1yvdsGCPp0DBisAFs4eJiYwDopSStIQ=="
+      "integrity": "sha512-+GYjf0efWmN2aJIAkOiMC3GSMVczjW4yxYiLpHiS/HNdLTLHeOPST1z8udt83HMTUL+8PnsuOI7B0qPxZOmx4g=="
     }
   }
 }
