@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.37",
+      "version": "0.18.39",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.37",
-      "bundledAt": "2026-08-18",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.37:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.37",
+      "tag": "v0.18.39",
+      "bundledAt": "2026-08-19",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.39:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.39",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -42,7 +42,7 @@
       },
       "hashes": {
         "index": "sha256:2d2c81c19e4177450b701dba05f582a8b6ef9581d202f01ec04d912556266a2f",
-        "safe-json": "sha256:2c3746f440a8a6dbe7b01e2c5009f327f5c685e942691607d4b28c2fbd806e5f",
+        "safe-json": "sha256:5be73e22c4ab5360d9b623d88c92d17eb66596b12afe923280a0d5ce404ecf26",
         "safe-url": "sha256:3652fce0dfb6ccbb8ca252efe582fb362589552e983e3feb75397d9d01a29536",
         "pqc-agent": "sha256:1483642d742faaae064c5710e770393b4d038559d22cba554c472fc1112d716e",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
@@ -178,22 +178,22 @@
             "bundledAt": "2026-08-17T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.5.10",
+            "version": "0.5.11",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.5.10:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.5.11:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:c7c7b82d0c5cd604e726c52332de66ff06ffb7877d4a44720d8bbd746c5d6023"
+              "server": "sha256:dfcaa10473eb0980958b1c6a4019114c69260191899edd5dc596605f21543249"
             },
-            "bundledAt": "2026-08-18T00:00:00Z"
+            "bundledAt": "2026-08-19T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-YnVa1EkwhqN0YbtBcLHXXMdO2uMprRHTtinnbxmuEP3H6ndOGavaIYeeW+uVKmFdUmGIfP/A2rmG+2PwIOJI3Q=="
+      "integrity": "sha512-Qe8MIMzg1necum5TyARcJmOiYIN48q6t4NKSQS/8NT2TfTiBeorlZSPlws1q4Bz5pFWBjH+FEeEeqUeTIXWB5g=="
     }
   }
 }
