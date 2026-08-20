@@ -159,7 +159,14 @@ if [ "$PKG" = "blamejs" ]; then
   # Empty the directory's CONTENTS rather than removing it: on this platform a
   # file-syncing agent can hold the directory handle open, so the final rmdir
   # fails even after every child is gone and leaves the tree half-removed.
-  node -e "var fs=require('fs'),p=require('path');fs.mkdirSync('$DEST',{recursive:true});for(var e of fs.readdirSync('$DEST')){fs.rmSync(p.join('$DEST',e),{recursive:true,force:true,maxRetries:60,retryDelay:300});}"
+  #
+  # Leaving the TOP directory alone is not enough on its own — removing a child
+  # directory recursively still ends in an rmdir of that child, so a lock one
+  # level down (lib/) kills the run exactly the same way. _vendor-wipe.js falls
+  # back to emptying a held directory instead of removing it, and fails loudly
+  # if a FILE survives: extracting over leftover files would mix two releases,
+  # which is worse than stopping.
+  node scripts/_vendor-wipe.js "$DEST"
   tar -xzf "$TARBALL" -C "$DEST" --strip-components=1
   _cleanup_pack
 
