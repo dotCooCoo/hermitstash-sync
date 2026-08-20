@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.40",
+      "version": "0.18.41",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.40",
+      "tag": "v0.18.41",
       "bundledAt": "2026-08-20",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.40:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.40",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.41:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.41",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -46,7 +46,7 @@
         "safe-url": "sha256:3652fce0dfb6ccbb8ca252efe582fb362589552e983e3feb75397d9d01a29536",
         "pqc-agent": "sha256:1483642d742faaae064c5710e770393b4d038559d22cba554c472fc1112d716e",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
-        "http-client": "sha256:2f82fba6290cf877166a10d589a7ff9eb77021ababc61005f18e5ed01485b978",
+        "http-client": "sha256:6f24ed42a5f5bca9c83c725da5df4570fb5892cb674fac89997e2810bced21eb",
         "ws-client": "sha256:348d01cd552fed583f05944d1853f71b0119105cb067c2e607b19ec9e6f47aee",
         "log-stream": "sha256:af17229ed636d95791908c23fd4d2795f5d9cc1445bfcdadd8fc1d72d0924352",
         "log-stream-local": "sha256:c589a6d39de96877f4fa81fc2f5650679e2768ee0e0c607883aceaab4abce940",
@@ -193,7 +193,7 @@
           }
         }
       },
-      "integrity": "sha512-fksZDkKA5v7q8D+Eln9XLdqXtZleHFt53KwQFZIVJ0HHi9yKLWIrc7Hqpsk+PIbZp6U0pBHgniVg9WNOvR0jbQ=="
+      "integrity": "sha512-VZPFAJV4oc6UuDoXqr+f0t0D0h5AWwIY3psqFazmLes4EItkAH+rdm2RPtS4ofnp+nWDbBhVDVSCc8U2nwOWxg=="
     }
   }
 }
