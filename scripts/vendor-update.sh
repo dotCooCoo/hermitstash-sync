@@ -111,11 +111,10 @@ echo "=== Vendoring $PKG@$VER ==="
 # published as @blamejs/core — the bare name `blamejs` on npm belongs to an
 # UNRELATED package and must never be installed.
 #
-# Refreshing this used to be a manual sequence of clone, copy and hand-repair
-# steps, which is how line endings and stray paths kept getting into the tree.
-# The published tarball avoids all of it: tar writes the bytes as published, so
-# nothing rewrites line endings on the way in, and the archive contains only
-# what actually runs.
+# The refresh takes the published tarball rather than a clone: tar writes the
+# bytes as published, so nothing rewrites line endings on the way in, and the
+# archive holds only what actually runs. Cloning and copying instead is how
+# line endings and stray paths get into the tree.
 if [ "$PKG" = "blamejs" ]; then
   NPM_NAME="@blamejs/core"
   if [ "$VER" = "latest" ]; then

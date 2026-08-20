@@ -333,11 +333,10 @@ function cmdPrepare(opts) {
   // `prepare` runs before the release commit exists and long before any tag, so
   // failing here costs nothing but a re-run. (ci.yml deliberately keeps its copy
   // advisory — there it would only fire on the push that already carries an
-  // immutable tag, punishing a cut it cannot prevent, and it used to skip the
-  // real linters when it did.)
+  // immutable tag, punishing a cut it cannot prevent.)
   //
-  // Severity is GRADED off the script's own exit codes, which is what let this
-  // be advisory before: 1 = actually behind upstream (a release blocker),
+  // Severity is GRADED off the script's own exit codes:
+  // 1 = actually behind upstream (a release blocker),
   // 2 = could not reach the API at all (a network blip must not block a cut).
   var freshness = _run('node', ['scripts/check-blamejs-version.js'], { allowFail: true });
   if (freshness.status === 0) {

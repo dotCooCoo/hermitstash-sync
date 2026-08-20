@@ -135,9 +135,9 @@ echo ""
 
 # Podman major version. Quadlet (.container files) is the supported path on
 # Podman >= 4.4; `podman generate systemd` is deprecated there and removed on
-# 5.x, where the cwd side-effect file it used to write is no longer produced —
-# so the old move-and-enable dance would silently leave no unit and then abort
-# on `systemctl enable`. Pick the mechanism by version.
+# 5.x, where it writes no side-effect file into the cwd — so a move-and-enable
+# approach leaves no unit behind and then aborts on `systemctl enable`. Pick the
+# mechanism by version.
 podman_major() {
   podman version --format '{{.Client.Version}}' 2>/dev/null \
     | sed -E 's/^([0-9]+)\..*/\1/' \

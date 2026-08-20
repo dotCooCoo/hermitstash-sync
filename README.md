@@ -120,7 +120,7 @@ In addition to the Docker image, the repo ships reference configs for running th
 | Platform | File | Notes |
 | --- | --- | --- |
 | **Unraid** | `unraid-template.xml` | Community Apps template. Point the template URL at `https://raw.githubusercontent.com/dotCooCoo/hermitstash-sync/main/unraid-template.xml` to install. |
-| **systemd (native Linux)** | `deploy/install.sh` + `deploy/hermitstash-sync.service` | `curl | sudo bash` one-liner: downloads the signed SEA binary, verifies SHA3-512 + P-384 ECDSA, installs under `/usr/local/bin/hermitstash-sync`, creates a `hermit` system user, and lays down a hardened systemd unit. Pair with `deploy/update.sh` + timer for unattended updates. Uninstall via `deploy/uninstall.sh`. |
+| **systemd (native Linux)** | `deploy/install.sh` + `deploy/hermitstash-sync.service` | `curl \| sudo bash` one-liner: downloads the signed SEA binary, verifies SHA3-512 + P-384 ECDSA, installs under `/usr/local/bin/hermitstash-sync`, creates a `hermit` system user, and lays down a hardened systemd unit. Pair with `deploy/update.sh` + timer for unattended updates. Uninstall via `deploy/uninstall.sh`. |
 | **Podman** | `deploy/podman.sh` | Rootless by default (RHEL/Fedora/Alma/Rocky idiomatic). Also generates a user or system systemd unit for auto-restart. Image carries the `io.containers.autoupdate=registry` label so `podman-auto-update.timer` can refresh it. |
 | **Kubernetes** | `deploy/kubernetes.yml` | Namespace + 2 PVCs + Deployment (replicas=1, strategy=Recreate) + Secret for enrollment. No Service — the client is outbound-only. `runAsNonRoot`, `readOnlyRootFilesystem`, dropped capabilities. |
 
@@ -422,7 +422,7 @@ The `status` command shows which state the daemon is in:
 | `RECONNECTING` | Connection lost, waiting to retry |
 | `ERROR` | Something went wrong (check logs) |
 
-`status` exits `0` when the daemon is running and `3` when it is not (the init-script "not running" convention), so a health probe — a container `HEALTHCHECK`, a Kubernetes liveness/readiness exec, a systemd check, or a plain `hermitstash-sync status && …` — can detect a stopped daemon by exit code. The printed lines above are unchanged for text-based checks.
+`status` exits `0` when the daemon is running and `3` when it is not (the init-script "not running" convention), so a health probe — a container `HEALTHCHECK`, a Kubernetes liveness/readiness exec, a systemd check, or a plain `hermitstash-sync status && ...` — can detect a stopped daemon by exit code. The printed lines above are unchanged for text-based checks.
 
 ## Security
 

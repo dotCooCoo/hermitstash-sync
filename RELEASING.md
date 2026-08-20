@@ -132,7 +132,7 @@ node scripts/release.js all
 |---------------------------|-------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `docs-leak-vocab`         | README, SECURITY, RELEASING, CHANGELOG                | Internal-process numbering (phase / sweep / tier / batch / slice / pass + digit); AI-tooling vocab; conversation residue; tautological pass/green claims; references to the internal maintainer-config file.        |
 | `current-version-stamp`   | README, SECURITY, RELEASING (CHANGELOG excluded)      | The current `VERSION` from `lib/constants.js` baked literally into doc prose. Use `vX.Y.Z` placeholder for command examples; historical-boundary references (`v0.6.13`) are exempt because they describe fixed past state. |
-| `docs-secret-shape`       | README, SECURITY, RELEASING, CHANGELOG                | JWT compact serialisations (`eyJ…{20,}`) and Stripe live keys (`sk_live_…{20,}`) — fundamental secret shapes that CI gitleaks-style scans flag regardless of context.       |
+| `docs-secret-shape`       | README, SECURITY, RELEASING, CHANGELOG                | JWT compact serialisations (`eyJ[A-Za-z0-9_-]{20,}`) and Stripe live keys (`sk_live_[A-Za-z0-9]{20,}`) — fundamental secret shapes that CI gitleaks-style scans flag regardless of context.       |
 
 All three gates accept an inline `allow:<class>` marker on the offending line when the prose is genuinely intentional — an `allow:current-version-stamp` marker on a `SECURITY.md` line pinning a fingerprint to the live release, for instance.
 

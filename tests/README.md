@@ -35,7 +35,7 @@ The following stay gitignored even though the rest of `tests/` ships:
 
 | File | Purpose |
 |---|---|
-| `tests/.env` | S3 + backup test credentials. Format: `KEY=value` per line, `#` comments, optional `"…"` or `'…'` quotes around values. Parsed (not sourced) by `loadDotEnv()` in `run-all.js` so arbitrary shell can't execute. |
+| `tests/.env` | S3 + backup test credentials. Format: `KEY=value` per line, `#` comments, optional `"..."` or `'...'` quotes around values. Parsed (not sourced) by `loadDotEnv()` in `run-all.js` so arbitrary shell can't execute. |
 | `tests/autoupdate-signing.key` | P-384 private key for the auto-update signature test. Generate once with `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out tests/autoupdate-signing.key`. `test-autoupdate.js` skips itself if missing. |
 | `tests/certs/` | Per-run test CA + server cert + client cert generated at startup by `generateTestCerts()`. Excluded as defense-in-depth in case a stale run leaves keys on disk. |
 
