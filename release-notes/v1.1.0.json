@@ -1,0 +1,37 @@
+{
+  "version": "1.1.0",
+  "date": "2026-08-22",
+  "headline": "The container image picks up an OpenSSL denial-of-service fix",
+  "summary": "A high-severity OpenSSL flaw was disclosed after the previous release shipped, so the image that release was built on carries it. The pinned base now names a rebuild with the patched packages. The vendored framework moves forward eight releases alongside it, and the pins on every action the release workflows call are brought current.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Rebuild on a base image with the patched OpenSSL",
+          "body": "CVE-2026-14456 is a denial of service through unbounded memory in OpenSSL, affecting the libcrypto3 and libssl3 packages at 3.6.3-r4 and fixed upstream in 3.6.3-r5. It was disclosed after v1.0.14 was built, so that image scanned clean when it shipped and does not now. The pinned digest now names the Chainguard rebuild carrying the patch."
+        },
+        {
+          "title": "What the base pin does and does not reach",
+          "body": "The pin governs the container image. The signed platform binaries are built from the Node runtime they embed rather than from this image, so the change does not alter them."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored framework moves to blamejs 0.18.47",
+          "body": "Eight releases forward from 0.18.39. Nothing in that range changes what this client does. The fixes land on session cookie writing, request filtering, mail authentication, hostname canonicalization, a durable queue and a Markdown renderer, and this client calls none of them. The bump keeps it on the same framework version as the server, which the two share for anything crossing the wire."
+        },
+        {
+          "title": "Action pins brought current",
+          "body": "Every action the release and container workflows call is pinned to the commit of its latest release; several had fallen behind, among them the code-scanning action. Those workflows produce the binaries the updater fetches and the image operators pull, which is the one place a republished tag would reach a user."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "CVE-2026-14456", "url": "https://www.cve.org/CVERecord?id=CVE-2026-14456" }
+  ]
+}
