@@ -158,13 +158,25 @@ ENV HERMITSTASH_SYNC_CONFIG_DIR=/config \
     HERMITSTASH_SYNC_FOLDER=/data \
     HERMITSTASH_AUTO_UPDATE=false
 
-USER hermit
+# Numeric, not `hermit`. A host mounting these volumes matches ownership by id
+# and cannot read the image's passwd file, so a name tells it nothing. This is
+# the same identity, not a change of one: the account is created above with
+# --uid 1000 --gid 1000.
+USER 1000:1000
 WORKDIR /data
 VOLUME ["/config", "/data"]
 
-# status exits 0 when the daemon's PID file resolves to a live process.
+# `status` exits 0 when the daemon's PID file resolves to a live process and 3
+# when it does not. That is the contract lib/cli.js documents for this check in
+# so many words: "detects a dead daemon by exit code alone instead of grepping
+# the human-readable banner".
+#
+# Exec form, so there is no shell here and no dependence on the wording of a
+# line meant for a person to read — a later release rewording the banner would
+# otherwise leave the healthcheck reporting unhealthy forever with nothing to
+# say why.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD hermitstash-sync status 2>&1 | grep -q "Status: RUNNING" || exit 1
+  CMD ["hermitstash-sync", "status"]
 
 # `-e 143` remaps the SEA Node bug exit code to 0. Node 24 SEA binaries exit
 # with signal-default code 143 (128 + SIGTERM) when process.exit(0) is called
