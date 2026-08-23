@@ -2,7 +2,7 @@
   "version": "1.1.0",
   "date": "2026-08-22",
   "headline": "The container image picks up an OpenSSL denial-of-service fix",
-  "summary": "A high-severity OpenSSL flaw was disclosed after the previous release shipped, so the image that release was built on carries it. The pinned base now names a rebuild with the patched packages. The vendored framework moves forward eight releases alongside it, and the pins on every action the release workflows call are brought current.",
+  "summary": "A high-severity OpenSSL flaw was disclosed after the previous release shipped, so the image that release was built on carries it. The pinned base now names a rebuild with the patched packages. The vendored framework moves forward eleven releases alongside it, and the pins on every action the release workflows call are brought current.",
   "sections": [
     {
       "heading": "Security",
@@ -21,8 +21,8 @@
       "heading": "Supply chain",
       "items": [
         {
-          "title": "Vendored framework moves to blamejs 0.18.47",
-          "body": "Eight releases forward from 0.18.39. Nothing in that range changes what this client does. The fixes land on session cookie writing, request filtering, mail authentication, hostname canonicalization, a durable queue and a Markdown renderer, and this client calls none of them. The bump keeps it on the same framework version as the server, which the two share for anything crossing the wire."
+          "title": "Vendored framework moves to blamejs 0.18.50",
+          "body": "Eleven releases forward from 0.18.39. Nothing in that range changes what this client does. The fixes land on session cookie writing, request filtering, mail authentication and filtering, hostname canonicalization, a durable queue, a Markdown renderer, and pattern matching in JSON Schema and JSONPath, and this client calls none of them. The bump keeps it on the same framework version as the server, which the two share for anything crossing the wire."
         },
         {
           "title": "Action pins brought current",

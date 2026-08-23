@@ -201,14 +201,15 @@ function _classUsesSetSyntax(text, from) {
 // ---- pattern parsing ------------------------------------------------------
 //
 // Every analysis below reads a parse tree. None of them reads the pattern
-// source. Reading source with regexes is what this module used to do, and each
-// reader drew the token boundaries a little differently: one could not see
-// past a nested group, one decided whether a `?` was a quantifier by looking at
-// the previous CHARACTER (so the `?` in `\*?` read as a lazy marker and the
-// length variation it contributes was lost), one capped the digits inside
-// `{n,m}` (so a longer bound read as no quantifier at all). Each disagreement
-// was a way to write a catastrophic pattern that one reader found and another
-// waved through, and patching them one at a time only moved the edge.
+// source. Reading source with regexes puts a separate reader behind each
+// analysis, and separate readers draw the token boundaries differently: one
+// cannot see past a nested group, one decides whether a `?` is a quantifier by
+// looking at the previous CHARACTER (so the `?` in `\*?` reads as a lazy marker
+// and the length variation it contributes is lost), one caps the digits inside
+// `{n,m}` (so a longer bound reads as no quantifier at all). Every such
+// disagreement is a way to write a catastrophic pattern that one reader finds
+// and another waves through, and patching them one at a time moves the edge
+// rather than closing it.
 //
 // So: one tokenizer, one tree, and anything it cannot represent becomes an
 // OPAQUE node — which every analysis treats as "cannot prove", never as
@@ -754,9 +755,9 @@ function _codePointAt(src, at, flags) {
 // `k`, but `k` uppercases to `K` and never back to the Kelvin sign, so a pass
 // starting at `K` never reaches it and two branches that both match it were
 // proven disjoint. Which characters an engine treats as equal under `i` is a
-// rule the language states, so the rule is applied — it used to be discovered
-// by building a RegExp per pair of characters and seeing which ones matched,
-// which is the screen reaching for the construct it exists to screen.
+// rule the language states, so the rule is applied rather than discovered by
+// building a RegExp per pair of characters and seeing which ones match, which
+// would be the screen reaching for the construct it exists to screen.
 //
 // Only characters PRESENT in the pattern can create an overlap between two of
 // its sets, so the comparison is made over that alphabet alone. Pairs whose
@@ -796,9 +797,9 @@ function _foldGroups(src, flags) {
       var x = alphabet[a], y = alphabet[b];
       if (_linkedByCase(x, y)) continue;                    // already found by folding
       // Which characters an engine treats as the same under `i` is a rule, not
-      // something to be discovered by asking. This used to build a RegExp per
-      // pair and see whether one matched the other — the screen reaching for
-      // the very construct it screens, and a pattern's worth of them per call.
+      // something to be discovered by asking. Building a RegExp per pair and
+      // seeing whether one matches the other is the screen reaching for the very
+      // construct it screens, and a pattern's worth of them per call.
       // The rule itself is exact and costs a comparison.
       if (_canonical(x, unicodeMode) !== _canonical(y, unicodeMode)) continue;
       _linkFold(groups, x, y);
@@ -2586,7 +2587,7 @@ function _detectNestedExtglob(input, opts, issues) {
  *   bidiPolicy:             "reject"|"audit"|"allow",
  *   controlPolicy:          "reject"|"audit"|"allow",
  *   nullBytePolicy:         "reject"|"audit"|"allow",
- *   zeroWidthPolicy:        "reject"|"strip"|"audit"|"allow",
+ *   zeroWidthPolicy:        "reject"|"audit"|"allow",
  *   nestedQuantPolicy:      "reject"|"audit"|"allow",
  *   alternationQuantPolicy: "reject"|"audit"|"allow",
  *   boundedRepeatPolicy:    "reject"|"audit"|"allow",
@@ -2840,7 +2841,22 @@ function assertSafe(input, label, ErrorClass, code, opts) {
 // compliancePosture / loadRulePack wiring, plus the per-guard inspection
 // surface (validate / sanitize / gate). The bespoke `gate` carries
 // guardRegex's ctx.identifier || ctx.pattern dispatch unchanged.
+// Each policy's vocabulary, so a misspelling is a boot error rather than a
+// runtime surprise. Read leniently, a typo takes whichever branch is not the
+// strict one: `nestedQuantPolicy: "rejct"` is not "allow", so the check runs,
+// and it is not "reject" either, so a catastrophic-backtracking pattern drops
+// from high to warn.
+//
+// The character policies are absent on purpose — they are derived for the
+// whole guard family, and an entry here would shadow that derivation.
+var POLICY_ENUM = gateContract.policyVocabulary([
+  "nestedQuantPolicy", "alternationQuantPolicy", "boundedRepeatPolicy",
+  "lookaroundQuantPolicy", "consecutiveStarPolicy", "nestedExtglobPolicy",
+  "unanchoredScanPolicy",
+], gateContract.POLICY_VALUES.rejectAuditAllow);
+
 var _guard = module.exports = gateContract.defineGuard({
+  enumOpts:    POLICY_ENUM,
   name:        "regex",
   kind:        "identifier",
   errorClass:  GuardRegexError,

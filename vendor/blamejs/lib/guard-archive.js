@@ -115,11 +115,12 @@ var MAGIC_SIGNATURES = Object.freeze([
 
 // Character-class policy for an entry NAME comes from `filenameProfile`, which
 // routes the name through b.guardFilename — this guard never reads a
-// bidi/control/null/zero-width policy of its own. It used to declare them in
-// every profile anyway, so an operator passing `zeroWidthPolicy` here was
-// configuring nothing and had no way to find that out. The declarations are
-// gone rather than wired, because `filenameProfile` is already the one place
-// that decides it and two spellings of the same setting is how they disagree.
+// bidi/control/null/zero-width policy of its own, and does not declare them in
+// its profiles either. Declaring an option nothing reads leaves an operator
+// setting `zeroWidthPolicy` here configuring nothing, with no way to find that
+// out. Wiring them instead would give the same setting two spellings, which is
+// how the two come to disagree, and `filenameProfile` is already the one place
+// that decides it.
 var PROFILES = Object.freeze({
   "strict": {
     traversalPolicy:           "reject",
@@ -197,6 +198,20 @@ var INT_OPTS = ["maxEntries", "maxTotalBytes", "maxEntryBytes",
 // DERIVED from DEFAULTS rather than written out, because a hand-kept list is
 // what drifted away from the defaults it was meant to mirror and left limits
 // unchecked across the family.
+// Each policy's vocabulary, so a misspelling is a boot error rather than a
+// runtime surprise. Read leniently, a typo takes whichever branch is not the
+// strict one: `symlinkPolicy: "rejct"` is not "allow", so the check runs, and
+// it is not "reject" either, so the finding drops from critical to warn.
+//
+// `audit-only` is deliberately absent, unlike elsewhere in the family:
+// nestedArchivePolicy tests for "audit" exactly, so the synonym would fall
+// past both branches and record nothing at all.
+var POLICY_ENUM = gateContract.policyVocabulary([
+  "traversalPolicy", "absolutePathPolicy", "symlinkPolicy", "hardlinkPolicy",
+  "nestedArchivePolicy", "duplicateNamePolicy", "caseInsensitiveCollisionPolicy",
+  "encryptionPolicy", "sparseEntryPolicy",
+], ["reject", "audit", "allow"]);
+
 function _resolveOpts(opts) {
   return gateContract.resolveProfileAndPosture(opts, {
     profiles:           PROFILES,
@@ -206,6 +221,7 @@ function _resolveOpts(opts) {
     errCodePrefix:      "archive",
     intOpts:            INT_OPTS,
     nonNegativeOpts:    gateContract.capKeysOf(DEFAULTS),
+    enumOpts:           POLICY_ENUM,
   });
 }
 
@@ -866,6 +882,9 @@ module.exports = {
   // ---- guard-* family registry exports (consumed by b.guardAll) ----
   NAME:                "archive",
   KIND:                "entries",                                                 // archive-entries guard (consumes ctx.entries)
+  // The value each policy accepts. Named here rather than derived, because
+  // this guard binds its own resolver instead of going through defineGuard.
+  POLICY_VOCABULARY:   POLICY_ENUM,
   INTEGRATION_FIXTURES: Object.freeze({
     kind:           "entries",
     contentType:    "application/zip",

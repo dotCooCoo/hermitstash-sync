@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.18.47",
+      "version": "0.18.50",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.18.47",
+      "tag": "v0.18.50",
       "bundledAt": "2026-08-22",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.47:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.18.47",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.18.50:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.18.50",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -47,7 +47,7 @@
         "pqc-agent": "sha256:1483642d742faaae064c5710e770393b4d038559d22cba554c472fc1112d716e",
         "pqc-software": "sha256:40d0d7cb0839d3703e8dc0866d3480421ea6254fefc43490604c37fa81cea5eb",
         "http-client": "sha256:6f24ed42a5f5bca9c83c725da5df4570fb5892cb674fac89997e2810bced21eb",
-        "ws-client": "sha256:348d01cd552fed583f05944d1853f71b0119105cb067c2e607b19ec9e6f47aee",
+        "ws-client": "sha256:28b00e7439075f14bb65c1227b9763b645e0e5b3916e82b02a87d493a2bd45ec",
         "log-stream": "sha256:af17229ed636d95791908c23fd4d2795f5d9cc1445bfcdadd8fc1d72d0924352",
         "log-stream-local": "sha256:c589a6d39de96877f4fa81fc2f5650679e2768ee0e0c607883aceaab4abce940",
         "atomic-file": "sha256:3bf2b256a7befc5963fd0d58ecbe8131a53cb7f1c87a1c93695aeda207d66cfa",
@@ -193,7 +193,7 @@
           }
         }
       },
-      "integrity": "sha512-xBuXIWOa18OxNk/iMmF+ZkVk4mJj23gu8Brm+rn3AZfR64S6WFfR7BETK2avGcTsH3SkCqMGfQ3w+Nh9eLeXww=="
+      "integrity": "sha512-qz49Nk47TUx3I7McuJ/dyRfDnCDCdBqf+2o2BeI1DTHUhpFHlGowPnHfU6I42knkksYvu4BhLW0h2kl7nqURqw=="
     }
   }
 }
