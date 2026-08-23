@@ -686,43 +686,168 @@ function cmdTag() {
   console.log('\nnext: node scripts/release.js watch   (release.yml ~5-8 min, then docker-publish.yml ~3 min)');
 }
 
-function _pollForRun(workflow, branch) {
-  // gh run list can lag the push; poll until the run for this tag appears.
+// Find the run for THIS release, identified by the commit it was built from.
+//
+// Taking the newest run on a branch is only correct when the branch is the tag,
+// because a tag has exactly one run. docker-publish.yml is workflow_run-chained
+// and therefore always reports branch `main`, where runs from every previous
+// release are already sitting: `--limit 1` returns the newest EXISTING one and
+// returns it on the first attempt, so the poll never waits for the new run. That
+// reported a four-day-old run as v1.1.0's Docker result and exited 0 — a failing
+// publish would have been reported as a pass.
+//
+// headSha is the exact correlation. A workflow_run child carries the same commit
+// as the run that triggered it, and the local tag dereferences to that commit,
+// so no timestamp comparison is involved.
+// `select` receives the runs OLDEST-FIRST and returns the one to watch, or null
+// to keep polling. Passing the whole list rather than a per-run predicate is
+// what lets the Docker selector prefer an exact commit match while still having
+// a time boundary to fall back on.
+function _pollForRun(workflow, branch, select) {
   for (var attempt = 0; attempt < 30; attempt++) {
     var rv = _capture('gh', ['run', 'list', '--workflow=' + workflow, '--branch', branch,
-      '--limit', '1', '--json', 'databaseId', '--jq', '.[0].databaseId']);
-    if (rv.stdout) return rv.stdout;
+      '--limit', '30', '--json', 'databaseId,headSha,createdAt']);
+    if (rv.stdout) {
+      var runs;
+      try {
+        runs = b.safeJson.parse(rv.stdout, { maxBytes: b.constants.BYTES.mib(1) });
+      } catch (_e) {
+        runs = null;
+      }
+      if (Array.isArray(runs)) {
+        var hit = select(runs.slice().reverse());   // gh returns newest-first
+        if (hit) return String(hit.databaseId);
+      }
+    }
     _sleepSync(10000);
   }
   return null;
+}
+
+// When a run last changed. For a completed run that is when it finished, which
+// is the only boundary a workflow_run child cannot predate. Retried, because it
+// is a hard prerequisite: without it every candidate falls outside the window
+// and the correlation below can never match anything.
+function _runUpdatedAt(runId) {
+  for (var attempt = 0; attempt < 3; attempt++) {
+    var rv = _capture('gh', ['run', 'view', runId, '--json', 'updatedAt', '--jq', '.updatedAt']);
+    if (rv.status === 0 && rv.stdout) return rv.stdout;
+    if (attempt < 2) _sleepSync(5000);
+  }
+  return '';
 }
 
 function cmdWatch() {
   _section('watch');
   var tag = 'v' + _readVersion();
 
+  // The commit the tag points at. `^{}` dereferences an annotated tag to its
+  // commit, which is what a workflow run reports as headSha. Both workflows are
+  // matched on it, so neither can latch onto a run from an earlier release.
+  var shaRv = _capture('git', ['rev-parse', tag + '^{}']);
+  var headSha = shaRv.status === 0 ? shaRv.stdout : '';
+  if (!headSha) {
+    throw new Error('release: could not resolve ' + tag + ' to a commit (git rev-parse ' +
+      tag + '^{} exited ' + shaRv.status + ') — refusing rather than watching whichever ' +
+      'run happens to be newest');
+  }
+
   _section('release.yml');
-  var releaseRun = _pollForRun('release.yml', tag);
+  var releaseRun = _pollForRun('release.yml', tag, function (runs) {
+    // Scoped to the tag already, so the commit match is a belt-and-braces check
+    // that the run belongs to the tag we are about to watch.
+    return runs.filter(function (r) { return r.headSha === headSha; })[0] || null;
+  });
   if (!releaseRun) {
-    throw new Error('release: release.yml run for ' + tag + ' did not appear — check `gh run list`');
+    throw new Error('release: release.yml run for ' + tag + ' (' + headSha.slice(0, 12) +
+      ') did not appear — check `gh run list`');
   }
   console.log('release.yml run: ' + releaseRun);
   _run('gh', ['run', 'watch', releaseRun, '--exit-status'], { allowFail: true });
 
   // docker-publish.yml is workflow_run-triggered: it only appears AFTER
-  // release.yml succeeds, so watch it second, not concurrently.
+  // release.yml succeeds, so watch it second, not concurrently. It reports
+  // branch `main` rather than the tag, so a branch scope alone selects whichever
+  // previous release's run happens to be newest.
+  //
+  // The boundary is when the release run FINISHED, not when it started. A
+  // workflow_run child cannot exist before its parent completes, so that line
+  // excludes every earlier run in one stroke: previous releases, and the old
+  // child of a re-run of this same tag, which carries an identical headSha and
+  // would otherwise be matched and returned immediately.
+  //
+  // Inside that window the commit must ALSO match, and nothing is watched
+  // without it. A run started by a dispatch or by an overlapping release lands
+  // in the same window, and watching one of those reports another build's
+  // result as this release's — the exact failure this replaces.
+  //
+  // A workflow_run child normally carries the SHA of the run that triggered it.
+  // Where the default branch has moved on it can carry the branch head instead,
+  // and then no run matches. That case ends in a report naming the candidates
+  // rather than a guess: an unresolved correlation the operator checks costs a
+  // minute, and a confident wrong answer is what cost a release its Docker
+  // verification.
   _section('docker-publish.yml');
-  var dockerRun = _pollForRun('docker-publish.yml', 'main');
+  var dockerUnresolved = false;
+  var releaseFinishedAt = _runUpdatedAt(releaseRun);
+  if (!releaseFinishedAt) {
+    throw new Error('release: could not read when release.yml run ' + releaseRun +
+      ' finished, and that timestamp is what separates this release\'s Docker run from ' +
+      'every earlier one. Without it nothing can match, so `watch` would poll for five ' +
+      'minutes and then report success having verified nothing. Re-run `watch` once ' +
+      '`gh run view ' + releaseRun + '` responds.');
+  }
+  var inWindow = function (r) {
+    // ISO-8601 UTC strings, so a lexical compare is a chronological one.
+    return Boolean(r.createdAt) && Boolean(releaseFinishedAt) && r.createdAt >= releaseFinishedAt;
+  };
+  var dockerRun = _pollForRun('docker-publish.yml', 'main', function (runs) {
+    return runs.filter(function (r) { return inWindow(r) && r.headSha === headSha; })[0] || null;
+  });
   if (dockerRun) {
     console.log('docker-publish.yml run: ' + dockerRun);
     _run('gh', ['run', 'watch', dockerRun, '--exit-status'], { allowFail: true });
   } else {
-    console.log('docker-publish.yml run not found yet (it chains off release.yml success).');
+    console.log('no docker-publish.yml run carries ' + headSha.slice(0, 12) +
+      ' and started after release.yml finished (' + (releaseFinishedAt || 'unknown') + ').');
+    var listRv = _capture('gh', ['run', 'list', '--workflow=docker-publish.yml', '--branch', 'main',
+      '--limit', '30', '--json', 'databaseId,headSha,createdAt']);
+    var candidates = [];
+    if (listRv.stdout) {
+      try {
+        var all = b.safeJson.parse(listRv.stdout, { maxBytes: b.constants.BYTES.mib(1) });
+        if (Array.isArray(all)) candidates = all.filter(inWindow);
+      } catch (_e) { /* leave the list empty and say so below */ }
+    }
+    if (candidates.length) {
+      console.log('Runs in that window, none matching the commit — check which belongs to this release:');
+      candidates.forEach(function (r) {
+        console.log('  ' + r.databaseId + '  ' + String(r.headSha).slice(0, 12) + '  ' + r.createdAt);
+      });
+    } else {
+      console.log('No run has started in that window yet; it chains off release.yml success.');
+    }
+    dockerUnresolved = true;
   }
 
   var slug = _repoSlug();
   if (slug) {
     console.log('\nrelease page: https://github.com/' + slug + '/releases/tag/' + tag);
+  }
+
+  // Thrown here rather than at the point of discovery, so the release-page URL
+  // above is printed first — it is the next thing an operator needs when the
+  // Docker correlation is the part that failed.
+  //
+  // It throws at all because `watch` is the step that verifies the release
+  // actually published. A caller reading the exit status must not be told an
+  // unverified release succeeded: that is the same false green this correlation
+  // exists to remove, relocated into the exit code.
+  if (dockerUnresolved) {
+    throw new Error('release: the docker-publish.yml run for this release could not be ' +
+      'identified, so the image is NOT confirmed published. The diagnostics above list ' +
+      'what was running in the window; confirm by hand, then re-run `watch` if a matching ' +
+      'run appears.');
   }
 }
 
