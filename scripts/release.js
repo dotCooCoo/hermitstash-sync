@@ -379,6 +379,28 @@ function cmdPrepare(opts) {
       'release blocker. Digest drift alone does NOT reach here; it warns above.');
   }
 
+  _section('actions currency');
+  // A stale action pin FAILS, unlike base-image drift above. An action release
+  // is a deliberate upstream act rather than a continuous rebuild, so "behind"
+  // is a real statement here, and there is no Trivy step downstream to catch
+  // the consequence the way there is for a base image.
+  //
+  // Graded the same way as the vendored-framework gate:
+  // 1 = a pin is behind its action's latest release (a blocker),
+  // 2 = the GitHub API could not be reached (unverified, not known-stale).
+  var actionsCurrency = _run('node', ['scripts/check-actions-currency.js'], { allowFail: true });
+  if (actionsCurrency.status === 0) {
+    _ok('action pins current');
+  } else if (actionsCurrency.status === 2) {
+    console.warn('warning: could not reach the GitHub API to check action-pin currency — ' +
+      'unverified, not known-stale. Re-run `prepare` when connectivity returns if you want the proof.');
+  } else {
+    throw new Error(
+      'a GitHub Actions pin is behind its latest release (see the report above). These workflows build ' +
+      'the SEA binary auto-update fetches and the image operators pull, so a stale pin here is the one ' +
+      'that reaches a user. Paste the pin the report prints, then re-run.');
+  }
+
   console.log('\nESLint, ShellCheck, and Hadolint run in CI (ci.yml), not locally.');
   console.log('next: node scripts/release.js test');
 }
