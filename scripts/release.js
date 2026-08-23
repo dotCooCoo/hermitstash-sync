@@ -41,6 +41,7 @@ var b = require('../vendor/blamejs');
 var ROOT = path.resolve(__dirname, '..');
 var CONSTANTS_PATH = path.join(ROOT, 'lib', 'constants.js');
 var PACKAGE_PATH = path.join(ROOT, 'package.json');
+var LOCK_PATH = path.join(ROOT, 'package-lock.json');
 
 // ---- Helpers -------------------------------------------------------------
 
@@ -158,6 +159,31 @@ function _readVersion() {
     throw new Error('release: version mismatch — package.json=' + pkg.version +
       ' lib/constants.js=' + m[1] + ' (they MUST match; fix before releasing)');
   }
+
+  // The lockfile is checked here too, not only where prepare writes it. `commit`
+  // is independently dispatchable and stages package-lock.json as release
+  // output, so without this a stale or hand-edited lockfile rides into a signed,
+  // pushed release advertising a different version. Both fields npm keeps equal
+  // to package.json are compared; nothing else gates them, which is how this one
+  // sat a release behind while the other two moved together.
+  // Absence is a failure, not a skip. `commit` stages package-lock.json as
+  // release output with an -A pathspec, so a deleted lockfile would be committed
+  // AS a deletion and ship a release whose `npm ci` no longer resolves. Skipping
+  // the check when the file is gone makes deleting it the way around the check.
+  if (!fs.existsSync(LOCK_PATH)) {
+    throw new Error('release: package-lock.json is missing. It pins the dev toolchain ' +
+      '(eslint, c8 and their transitives) and is part of the release set, so a cut ' +
+      'without it ships a tree `npm ci` cannot install. Restore it before releasing.');
+  }
+  var lock = b.safeJson.parse(fs.readFileSync(LOCK_PATH, 'utf8'), { maxBytes: b.constants.BYTES.mib(8) });
+  var lockRoot = lock && lock.version;
+  var lockSelf = lock && lock.packages && lock.packages[''] && lock.packages[''].version;
+  if (lockRoot !== pkg.version || lockSelf !== pkg.version) {
+    throw new Error('release: version mismatch — package.json=' + pkg.version +
+      ' package-lock.json root=' + lockRoot + ' packages[""]=' + lockSelf +
+      ' (all MUST match; `npm install --package-lock-only` or fix by hand before releasing)');
+  }
+
   return pkg.version;
 }
 
@@ -173,37 +199,92 @@ function _readVersion() {
 // constants.js write throws (ENOSPC, an AV lock on Windows, a kill) — is
 // made self-healing: the first file is restored from its in-memory
 // original before the error propagates, so the two never diverge.
+// package-lock.json states the version twice: on the root object and again on
+// `packages[""]`, which npm keeps equal to package.json. Both sit ahead of the
+// first `"node_modules/` key, so the rewrite is bounded to that header region
+// and cannot reach a dependency that happens to share the version string.
+//
+// Exactly two occurrences are required. Finding another count means the file
+// is not the shape this assumes, and guessing which to rewrite is how a
+// lockfile ends up describing a package that does not exist.
+function _lockVersionRewrite(src, current, next) {
+  var boundary = src.indexOf('"node_modules/');
+  var head = boundary === -1 ? src : src.slice(0, boundary);
+  var tail = boundary === -1 ? '' : src.slice(boundary);
+
+  var needle = '"version": "' + current + '"';
+  var parts = head.split(needle);
+  if (parts.length - 1 !== 2) {
+    throw new Error('release: package-lock.json carries ' + (parts.length - 1) +
+      ' occurrence(s) of ' + needle + ' before the first dependency, expected 2 ' +
+      '(the root object and packages[""]). Refusing to guess which to rewrite — ' +
+      'check the lockfile by hand.');
+  }
+  return parts.join('"version": "' + next + '"') + tail;
+}
+
 function _writeVersion(next) {
-  var pkgSrc = fs.readFileSync(PACKAGE_PATH, 'utf8');
-  var pkgNext = pkgSrc.replace(/"version":\s*"[^"]+"/, '"version": "' + next + '"');
-  if (pkgNext === pkgSrc) {
-    throw new Error('release: failed to rewrite package.json version line');
-  }
-  var constSrc = fs.readFileSync(CONSTANTS_PATH, 'utf8');
-  var constNext = constSrc.replace(/const VERSION = '[^']+'/, "const VERSION = '" + next + "'");
-  if (constNext === constSrc) {
-    throw new Error('release: failed to rewrite lib/constants.js VERSION line');
-  }
-  // 0o644: package.json and lib/constants.js are world-readable tracked
-  // source; the atomic primitive defaults to 0o600, which would silently
-  // tighten their mode on every release.
-  b.atomicFile.writeSync(PACKAGE_PATH, pkgNext, { fileMode: 0o644 });
-  try {
-    b.atomicFile.writeSync(CONSTANTS_PATH, constNext, { fileMode: 0o644 });
-  } catch (e) {
-    // Second write failed AFTER the first landed — roll package.json back to
-    // its pre-bump content so the two version sources never diverge. The
-    // restore is itself atomic; if it also fails, surface both faults.
-    try {
-      b.atomicFile.writeSync(PACKAGE_PATH, pkgSrc, { fileMode: 0o644 });
-    } catch (restoreErr) {
-      throw new Error('release: lib/constants.js write failed (' + (e && e.message || e) +
-        ') AND the package.json rollback ALSO failed (' + (restoreErr && restoreErr.message || restoreErr) +
-        ') — package.json now advertises ' + next + ' while lib/constants.js does not; ' +
-        'restore package.json by hand before re-running.');
+  var current = _readVersion();
+
+  // Every file carrying the version, written as one unit. package.json and
+  // lib/constants.js are what release.yml's tag gate compares; package-lock.json
+  // is gated nowhere, which is exactly how it sat a release behind while the
+  // other two moved, and an SBOM or an auditor reads it as this package's
+  // version all the same.
+  var targets = [
+    {
+      path: PACKAGE_PATH, label: 'package.json',
+      rewrite: function (src) {
+        return src.replace(/"version":\s*"[^"]+"/, '"version": "' + next + '"');
+      },
+    },
+    {
+      path: CONSTANTS_PATH, label: 'lib/constants.js',
+      rewrite: function (src) {
+        return src.replace(/const VERSION = '[^']+'/, "const VERSION = '" + next + "'");
+      },
+    },
+    {
+      path: LOCK_PATH, label: 'package-lock.json',
+      rewrite: function (src) { return _lockVersionRewrite(src, current, next); },
+    },
+  ];
+
+  // Read and rewrite everything BEFORE writing anything, so a file that cannot
+  // be rewritten fails with nothing on disk changed.
+  targets.forEach(function (t) {
+    t.src = fs.readFileSync(t.path, 'utf8');
+    t.next = t.rewrite(t.src);
+    if (t.next === t.src) {
+      throw new Error('release: failed to rewrite the version in ' + t.label);
     }
-    throw new Error('release: lib/constants.js version write failed (' + (e && e.message || e) +
-      '); rolled package.json back to ' + b.safeJson.parse(pkgSrc, { maxBytes: b.constants.BYTES.mib(1) }).version + ' so the two stay in lockstep — re-run prepare.');
+  });
+
+  // 0o644: these are world-readable tracked source, and the atomic primitive
+  // defaults to 0o600, which would silently tighten their mode every release.
+  var written = [];
+  try {
+    targets.forEach(function (t) {
+      b.atomicFile.writeSync(t.path, t.next, { fileMode: 0o644 });
+      written.push(t);
+    });
+  } catch (e) {
+    // A write landed and a later one threw (ENOSPC, an AV lock on Windows, a
+    // kill). Restore what already changed from its in-memory original so the
+    // version sources never diverge; each restore is itself atomic.
+    var failedRestores = [];
+    written.forEach(function (t) {
+      try { b.atomicFile.writeSync(t.path, t.src, { fileMode: 0o644 }); }
+      catch (restoreErr) { failedRestores.push(t.label + ' (' + (restoreErr && restoreErr.message || restoreErr) + ')'); }
+    });
+    if (failedRestores.length) {
+      throw new Error('release: a version write failed (' + (e && e.message || e) +
+        ') AND rolling back ALSO failed for: ' + failedRestores.join(', ') +
+        ' — those files now advertise ' + next + ' while the rest do not; ' +
+        'restore them by hand before re-running.');
+    }
+    throw new Error('release: a version write failed (' + (e && e.message || e) +
+      '); rolled the others back to ' + current + ' so they stay in lockstep — re-run prepare.');
   }
 }
 
@@ -316,7 +397,7 @@ function cmdPrepare(opts) {
   _ensureReleaseNotes(next);
 
   _writeVersion(next);
-  _ok('bumped lib/constants.js + package.json -> ' + next);
+  _ok('bumped lib/constants.js + package.json + package-lock.json -> ' + next);
 
   _section('regen artifacts');
   var minorRotated = current.split('.')[1] !== next.split('.')[1];
@@ -476,13 +557,15 @@ function cmdCommit() {
   // an independently-dispatchable subcommand, so an operator can reach it with
   // unrelated edits in the tree; a broad add would fold those into the signed,
   // pushed release commit silently (the signature is over whatever happened to
-  // be staged). The version bump touches package.json + lib/constants.js; the
-  // regen rewrites CHANGELOG.md; and the whole release-notes/ tree is release
-  // output (the per-patch v<next>.json plus, on a minor rotation, the deleted
-  // per-patch files and the new/extended consolidated rollup). Stage that exact
-  // set with -A pathspecs so deletions from the rollup are captured too.
+  // be staged). The version bump touches package.json, lib/constants.js and
+  // package-lock.json; the regen rewrites CHANGELOG.md; and the whole
+  // release-notes/ tree is release output (the per-patch v<next>.json plus, on
+  // a minor rotation, the deleted per-patch files and the new/extended
+  // consolidated rollup). Stage that exact set with -A pathspecs so deletions
+  // from the rollup are captured too.
   _run('git', ['add', '--',
     'package.json',
+    'package-lock.json',
     'lib/constants.js',
     'CHANGELOG.md',
     'release-notes',
@@ -510,6 +593,7 @@ function cmdCommit() {
     .filter(function (p) { return p.length > 0; })
     .filter(function (p) {
       return p !== 'package.json' &&
+        p !== 'package-lock.json' &&
         p !== 'lib/constants.js' &&
         p !== 'CHANGELOG.md' &&
         p !== 'release-notes' &&
@@ -517,7 +601,7 @@ function cmdCommit() {
     });
   if (stagedStray.length > 0) {
     throw new Error('release: the git index has staged changes outside the release set ' +
-      '(package.json / lib/constants.js / CHANGELOG.md / release-notes/):\n' +
+      '(package.json / package-lock.json / lib/constants.js / CHANGELOG.md / release-notes/):\n' +
       stagedStray.join('\n') +
       '\nUnstage them with `git restore --staged <path>` before committing — the ' +
       'signed release commit must contain only release output.');
@@ -547,7 +631,7 @@ function cmdCommit() {
     });
   if (stray.length > 0) {
     throw new Error('release: working tree has changes outside the release set after staging ' +
-      'package.json / lib/constants.js / CHANGELOG.md / release-notes/:\n' +
+      'package.json / package-lock.json / lib/constants.js / CHANGELOG.md / release-notes/:\n' +
       stray.join('\n') +
       '\nStash or revert those before committing — the release commit must contain only release output.');
   }
@@ -665,7 +749,7 @@ function cmdStatus() {
   console.log('clean:           ' + cleanLine);
   var versionLine;
   try {
-    versionLine = _readVersion() + ' (constants.js + package.json match)';
+    versionLine = _readVersion() + ' (constants.js + package.json + package-lock.json match)';
   } catch (e) {
     versionLine = 'MISMATCH — ' + e.message;
   }

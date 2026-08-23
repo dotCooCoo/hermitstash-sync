@@ -453,6 +453,18 @@ function seedReleaseRepo(root, version) {
   writeConstants(root, version);
   nodeFs.writeFileSync(nodePath.join(root, 'package.json'),
     JSON.stringify({ name: 'hermitstash-sync', version: version }, null, 2) + '\n');
+  // The lockfile is part of the release set `commit` stages, and `prepare`
+  // rewrites the version on the root object AND on packages[""], so the fixture
+  // carries both. Without it the `git add` pathspec matches nothing and the
+  // command fails before the behaviour under test runs.
+  nodeFs.writeFileSync(nodePath.join(root, 'package-lock.json'),
+    JSON.stringify({
+      name: 'hermitstash-sync',
+      version: version,
+      lockfileVersion: 3,
+      requires: true,
+      packages: { '': { name: 'hermitstash-sync', version: version, license: 'AGPL-3.0-or-later' } },
+    }, null, 2) + '\n');
   nodeFs.writeFileSync(nodePath.join(root, 'release-notes', 'v' + version + '.json'),
     JSON.stringify(minimalReleaseNote(version), null, 2) + '\n');
   // Rebuild CHANGELOG so the drift gate that `commit` now runs passes.
