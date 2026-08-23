@@ -1,0 +1,406 @@
+{
+  "minor": "1.0",
+  "releases": [
+    {
+      "version": "1.0.14",
+      "date": "2026-08-19",
+      "headline": "Framework currency, a refreshed base image, and a build cache an old tag can no longer write",
+      "summary": "A maintenance release. The vendored framework moves forward eight releases, carrying upstream fixes to constant-time comparison and to the parsers that read untrusted input; the container base image is refreshed; and the release workflow no longer lets a rebuild of a superseded tag write the cache every later build reads.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Rebuilding an old release tag can no longer write the shared build cache",
+              "body": "Both of the Docker workflow's triggers can build an arbitrary existing release tag: the dispatch takes a version from its caller, and the workflow_run trigger fires for a manual dispatch of the release workflow as well as for the tag push. Either route runs that tag's own Dockerfile and install scripts in a job whose cache scope belongs to the default branch, so rebuilding a superseded tag seeded layers built from superseded code into the cache every later build reads. Writing the cache now requires both that the trigger is a workflow_run and that the upstream run came from the tag push. Reading is unchanged, so rebuilding an old tag is still fast and leaves nothing behind."
+            },
+            {
+              "title": "Constant-time comparisons in the framework compare every candidate",
+              "body": "Eight places in the vendored framework compared a presented value against a list and stopped at the first match, so the time taken reported the match's position even though each comparison was individually constant-time. Certificate revocation checks, webhook signature verification, HTTP message signatures, attestation nonces, the rotating DPoP nonce, one-time-password drift and breached-password range lookups are all affected."
+            },
+            {
+              "title": "Parsers that read untrusted input carry no pattern literals",
+              "body": "The framework's YAML, TOML, INI, .env and XML parsers drop 55 regular expressions, so screening an input costs the length of that input and the byte cap that bounds the input also bounds the screen. A YAML tag beginning with a digit is now refused, as the surrounding rule always described."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Vendored framework moves to blamejs 0.18.39",
+              "body": "Eight releases forward. Beyond the fixes above: a guard now applies the character policy it declares rather than deciding by a finding's severity, the public suffix list ranks a wildcard rule by label count as the specification requires, and citations across the framework move to the documents that replaced RFC 7230-7235, 7489 and 4122. The client keeps pace with the server, which the two have to share for anything crossing the wire."
+            },
+            {
+              "title": "Runtime base image moves to the current build",
+              "body": "The pinned Chainguard wolfi-base digest is refreshed. That image is rebuilt whenever upstream fixes land, so a pin left in place falls behind on patches without anything changing here."
+            }
+          ]
+        },
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "The base-image currency check reads each Dockerfile from the path it already resolved",
+              "body": "The check rebuilt an absolute path from a relative string on every read rather than using the one its own directory walk already held. Behaviour is unchanged; the reader now opens a path built from directory entries and verifies it stays inside the repository before opening it."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.13",
+      "date": "2026-08-15",
+      "headline": "Refresh the vendored framework and the runtime base image",
+      "summary": "A maintenance release. Nothing about how the client talks to a server changes, and no configuration needs revisiting.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The vendored framework moves to 0.18.27",
+              "body": "Passkey verification moves onto the certificate toolkit already vendored here, and the separate WebAuthn library it used is gone from the tree. Manufacturer attestations are anchored to pinned vendor roots, binary fields in a response must be canonically encoded, and a response must name the one credential type the specification defines. None of this is on the path this client uses to reach a server; it ships because the framework is vendored whole."
+            },
+            {
+              "title": "The runtime base image moves to the current Chainguard rebuild",
+              "body": "The pinned digest had been superseded upstream. Bumping it picks up whatever package fixes landed in the rebuild."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.12",
+      "date": "2026-08-10",
+      "headline": "Refresh the vendored framework",
+      "summary": "The framework moves to 0.18.21. Nothing this client does changes; the release is here because the framework is where its wire, crypto and update primitives come from, and staying on the current one is how a fix reaches this client without a separate decision each time.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The vendored framework moves to 0.18.21",
+              "body": "The changes across it concern serving HTTP responses and building SQL identifiers — this client does neither, so no behaviour here is affected. The framework also began publishing browser builds of the vendored crypto, which a client with no browser surface does not ship; the transitive inventory correctly continues to list only what actually ships in the binary."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.11",
+      "date": "2026-08-10",
+      "headline": "Restore the container image build",
+      "summary": "The image has not been published since 2026-08-08. Three patterns in the release tooling were written in a shape the unsafe-regex screen refuses, which failed the lint job that gates the image build — while the release workflow carried on publishing binaries, so nothing looked wrong from the outside.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "The container image builds again",
+              "body": "Publishing is gated behind a lint job, and that job had been failing since 2026-08-08 on three patterns that put a repetition inside an optional group. The screen refuses that shape on sight, though an optional group repeats at most once and none of the three could actually backtrack badly. They now run through the framework's linear matcher, which cannot backtrack at all, so the work each does is bounded by the length of what it is matched against whatever the pattern looks like — and there is no longer a pattern for the screen to judge. Matching behaviour is unchanged, verified against the platform engine. Releases from v1.0.9 through v1.0.10 published their binaries and signatures normally; only the container image is affected, and pulling either tag now gets an image built from that release."
+            },
+            {
+              "title": "The lint gate can be run before pushing",
+              "body": "Its rules were written out by the workflow itself and existed only while that step ran, so there was no way to check a change against them before pushing — which is why the break above went unnoticed for two days. They were also duplicated, once in the test workflow and once in the one that gates the image, free to drift apart from each other as well as from anything local. Both now read a single committed configuration, so `npx eslint .` reproduces exactly what either workflow will do."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The vendored framework moves to 0.18.19",
+              "body": "Brings the linear matcher used above, and a fix for a request that failed partway through its response being finished off as though it had succeeded."
+            },
+            {
+              "title": "The runtime base image moves to the current Chainguard rebuild",
+              "body": "The pinned digest had been superseded upstream. Bumping it picks up whatever package fixes landed in the rebuild."
+            }
+          ]
+        },
+        {
+          "heading": "Removed",
+          "items": [
+            {
+              "title": "The base-image check no longer advertises --max-age-days",
+              "body": "The flag was documented and parsed, but its value was never read, so passing it did nothing. Implementing it needs the build date behind a digest, which that check does not fetch, so the claim is gone rather than left looking like a working control."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.10",
+      "date": "2026-08-09",
+      "headline": "Refresh the vendored framework and keep self-update within its rewritten pattern screen",
+      "summary": "The vendored framework moves to 0.18.18, which rewrites the screen every operator-supplied pattern is checked against before it is allowed to run. The pattern this client matches release assets with is no longer accepted in the form it was written, so it has been respelled — without that, self-update refuses to start.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "The release-asset matcher is accepted by the framework's pattern screen again",
+              "body": "Self-update screens its asset and signature patterns for catastrophic backtracking before running them, and refuses to construct if either is rejected. The optional prerelease and build-metadata tail was written as a bare bounded character class, which the rewritten screen declines because the class also matches the platform suffix that follows it, leaving the boundary between them undecided. The tail now leads with its single separator character, which fixes where it starts. Every name that matched before still matches — stable, prerelease, build metadata, and both at once — and the wrong-platform, wrong-architecture and ML-DSA sidecar names are still excluded."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The vendored framework moves to 0.18.18",
+              "body": "A handshake the outbound posture refuses now reports which clause refused it and against which peer, instead of surfacing a bare alert that named neither and was routinely read as the wrong cause. The post-quantum primitives behind ML-KEM, ML-DSA and SLH-DSA refresh to @noble/post-quantum 0.7.0, an arithmetic and allocation rework whose outputs were compared byte-for-byte against the previous release; the certificate toolkit moves to @blamejs/pki 0.4.11."
+            },
+            {
+              "title": "The TLS group preference is configured in one place",
+              "body": "Each outbound agent set the preference twice: once through the option the TLS layer reads, and again by assigning it to a second name afterwards. That second name is not a TLS option — a value assigned to it is accepted and discarded — so it never carried the preference, and its presence suggested a second handle that could be narrowed when narrowing it would have changed nothing. Only the option the TLS layer actually reads is set now. The groups offered on the wire are unchanged."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.9",
+      "date": "2026-08-08",
+      "headline": "Vendor the framework from a verified published package",
+      "summary": "The vendored framework was assembled by hand from a clone, which checks nothing about what it fetched. It now comes from the published package and its bytes are verified against the registry's advertised digest before anything is unpacked.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "The vendored framework is verified against a published digest",
+              "body": "It was previously copied out of a shallow clone of a release tag, which trusts whatever that tag resolves to at the moment of the fetch and leaves no way to tell afterwards whether the tree matches anything upstream published. The bytes are now checked against the registry's advertised SHA-512 before being unpacked, the refresh stops rather than vendoring on a mismatch, and that digest is recorded alongside the version so the tree stays traceable to a specific published artifact. The per-file hashes the client verifies at startup are recomputed in the same run, so the tree and the manifest cannot be left disagreeing."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The binary no longer carries the framework's test and example trees",
+              "body": "The published package contains only what actually runs, so the framework's test, example, documentation, benchmark and fuzzing trees are no longer vendored. Roughly a thousand files leave the tree. Nothing the client calls is affected — the framework surface is unchanged."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.8",
+      "date": "2026-08-08",
+      "headline": "Refresh the container base image for upstream glibc fixes",
+      "summary": "The runtime base image was pinned to a rebuild from seven weeks earlier and had missed the glibc updates published since. The pin now points at a current rebuild.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "Refreshed the container base image",
+              "body": "The image is pinned to an immutable base digest so builds stay reproducible and a republished tag cannot swap the base underneath a signed image. The cost of that guarantee is that a pin does not pick up upstream rebuilds on its own, and this one had fallen seven weeks behind — long enough to miss several glibc updates, including CVE-2026-6791. The pin now points at a current rebuild carrying glibc 2.43-r12. Pull the new image to take the fix; the binary distributions are unaffected."
+            }
+          ]
+        },
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "The release checks whether base-image pins have gone stale",
+              "body": "Both stages of the image are digest-pinned, and each is now compared against the digest its tag resolves to now, with the replacement ready to paste when one has moved. Drift is a warning rather than a failure: these bases rebuild continuously, so failing on drift would block nearly every release and encourage bumping the pin blindly to quiet the check. A pin that no longer resolves, a stage carrying no digest, or a file the check cannot read does fail — each means either the build is already broken or the check is not running at all."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.7",
+      "date": "2026-08-08",
+      "headline": "Restore the container image, which could not start in 1.0.6",
+      "summary": "The 1.0.6 image was missing a shared library that release's binary needs, so the container exited before the entrypoint ran. The image now installs it, and the runtime that builds the binary is pinned so the two cannot drift apart again.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "The 1.0.6 container image could not start",
+              "body": "The pre-built binary in 1.0.6 is dynamically linked against libatomic.so.1, which the runtime image did not install. The container failed at load with \"error while loading shared libraries\" before reaching the entrypoint, so it never started at all. The image now installs it. Pull 1.0.7 if you are on the 1.0.6 image; the standalone binaries, the installer, and source installs were not affected."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "The release build pins the exact runtime that produces the binary",
+              "body": "The build resolved its Node version from a range, so it used whichever release was newest on the build machine and crossed a major version between two releases with no accompanying change in this repository. Which shared libraries the pre-built binary needs is decided by that version, which is how the image above came to be missing one. The version is now pinned exactly and stays on the long-term-support line, so a change of runtime has to be a deliberate, visible edit."
+            },
+            {
+              "title": "The installer and updater ask for Node.js 24 or newer",
+              "body": "Both use Node only to verify the release signature before installing, and both named a version that has since reached end of life. They now name 24, matching the version this project requires elsewhere. Pre-built binaries embed their own runtime and are unaffected by the version installed on the machine."
+            }
+          ]
+        },
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Reconnects no longer wait for the previous connection to time out",
+              "body": "The client now sends a stable identifier for this installation when it opens the sync WebSocket. A server that understands it closes this installation's own earlier connection immediately, rather than leaving it to expire while it counts against the per-key connection limit — so reconnecting after a network drop or a restart succeeds straight away instead of being refused until the stale connection is reaped. The identifier is kept alongside the rest of the client's state and survives a restart. It identifies the installation, it does not authenticate it: the API key and client certificate continue to do that. Other installations sharing the same API key are unaffected, and an older server simply ignores it."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.6",
+      "date": "2026-08-08",
+      "headline": "Refuse a connection that cannot be shown to be post-quantum",
+      "summary": "The post-quantum floor accepted a connection whose key exchange the runtime did not report, on the assumption that silence meant a post-quantum group. Node 24.19.0 reports those groups, so silence no longer means that and the connection is refused instead.",
+      "sections": [
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "An unreported key exchange is no longer treated as post-quantum",
+              "body": "The client checks the negotiated key exchange after each handshake and refuses a classical one. Until now, a connection that reported no key exchange at all was allowed through, because older runtimes reported nothing for a post-quantum hybrid and the two cases were indistinguishable. From Node 24.19.0 a hybrid identifies itself, so an empty report means only what it says: the key exchange was not ephemeral — neither post-quantum nor forward-secret. That connection is now refused under enforcement, with an error naming the reason. Set HERMITSTASH_ALLOW_CLASSICAL_TLS=1 to permit it deliberately, as with a classical group. The auto-update downloader remains observe-only and still warns rather than failing."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Raised the Node.js floor to 24.19.0",
+              "body": "24.19.0 is the current long-term-support release, and its reporting of the negotiated key exchange is what the change above relies on. The boot check, the container image, and the continuous-integration matrix move together. Pre-built binaries embed their own runtime and are unaffected by the version installed on the machine."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.5",
+      "date": "2026-08-06",
+      "headline": "Reach the server inside a Tailscale or WireGuard tunnel",
+      "summary": "Sync clients that reach the HermitStash server over a Tailscale/WireGuard tunnel can now verify it by a pinned server key instead of the tunnel hostname, which the server's external TLS certificate does not carry.",
+      "sections": [
+        {
+          "heading": "Added",
+          "items": [
+            {
+              "title": "Tunnel mode",
+              "body": "When the server is reached inside a Tailscale (or other WireGuard) tunnel — on its MagicDNS name or tailnet IP — its external TLS leaf will not carry that hostname, so the normal hostname check fails. Tunnel mode skips only that hostname match while still enforcing the pinned server key, the mTLS chain, and the post-quantum group floor; the tunnel, the pin, and mTLS bind the server's identity. Enable it at enrollment with \"hermitstash-sync init --tunnel\", or HERMITSTASH_TUNNEL_MODE=1 for a headless setup. It is explicit opt-in only — never inferred from a URL — and fail-closed: turning it on without a pinned server key is refused, because relaxing the hostname check with no pin would accept any certificate that chains to a trusted authority."
+            },
+            {
+              "title": "Server key pinning from an out-of-band value, or from a confirmed one",
+              "body": "Tunnel mode prefers a pin supplied through HERMITSTASH_PINNED_SERVER_SPKI, read off the server beforehand; when one is supplied no probe is made. With no pin supplied, interactive setup shows the key it observes and asks you to confirm it matches the server. A headless setup requires the supplied pin — it has nobody to compare an observed key against, and a proceed-anyway flag would only mean pin whatever answers, which names no value and so cannot tell your server from an interceptor. Because tunnel mode does not check the hostname, that pin is what binds the server's identity: anyone able to intercept the connection during setup could otherwise have their own key pinned, and the interception would persist on every later connection instead of failing visibly."
+            }
+          ]
+        },
+        {
+          "heading": "Security",
+          "items": [
+            {
+              "title": "TLS options in the config file no longer override server verification",
+              "body": "The config file could carry TLS options for the WebSocket transport, and they were applied last — so they overrode the client's own settings. Setting rejectUnauthorized to false disabled certificate-chain validation on that connection and skipped the server-key pin check along with it; a ca entry would instead replace the trust anchors with an attacker's root, servername would choose the name the identity check validates against, and a version or cipher setting would drop the connection to TLS 1.2. Each yields an intercepted control channel, and with it the API key, which on macOS and Windows is otherwise held in the operating system keychain. TLS options from the config file are now ignored outright and logged rather than applied. Set HERMITSTASH_ALLOW_INSECURE_TLS=1 to apply them deliberately, for a self-signed test server."
+            }
+          ]
+        },
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Refreshed the vendored blamejs framework to 0.18.14",
+              "body": "Keeps the vendored framework current, including its refreshed elliptic-curve and certificate bundles. The primitives the client relies on — the WebSocket transport, JSON parsing, URL and path safety, and the certificate and crypto bootstrap — are unchanged, so the sync behavior is identical."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "date": "2026-08-06",
+      "headline": "Refresh the vendored blamejs framework",
+      "summary": "A maintenance release that brings the vendored blamejs framework to its current version; there is no change to how the client syncs.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Refreshed the vendored blamejs framework to 0.18.12",
+              "body": "Keeps the vendored framework current. The primitives the client relies on — the WebSocket transport, JSON parsing, URL and path safety, and the certificate and crypto bootstrap — are unchanged, so the sync behavior is identical."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.2",
+      "date": "2026-08-05",
+      "headline": "Refresh the vendored blamejs framework",
+      "summary": "A maintenance release that brings the vendored blamejs framework to its current version; there is no change to how the client syncs.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Refreshed the vendored blamejs framework to 0.18.11",
+              "body": "Brings the vendored framework current, consolidating its accumulated wire-layer and crypto hardening. The primitives the client relies on — the WebSocket transport, JSON parsing, URL and path safety, and the certificate and crypto bootstrap — are unchanged, so the sync behavior is identical."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.1",
+      "date": "2026-08-05",
+      "headline": "Recover automatically from a rate-limited sync connection",
+      "summary": "A sync daemon whose WebSocket connection is briefly refused by the server's rate limit now reconnects on its own once the limit clears, instead of stopping until it is manually restarted.",
+      "sections": [
+        {
+          "heading": "Fixed",
+          "items": [
+            {
+              "title": "Reconnect after a rate-limited WebSocket upgrade instead of stopping",
+              "body": "When the server answers the sync WebSocket upgrade with 429 Too Many Requests — a saturated per-IP handshake window, or a per-key connection limit that is momentarily full while a dropped connection is still being reaped — the daemon now treats it as temporary and reconnects with backoff once the limit clears. Previously a 429 was treated as permanent, so the daemon stopped and stayed offline until it was restarted. A 408 Request Timeout recovers the same way."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-07-30",
+      "headline": "Post-quantum sync certificate-authority interoperability and a refreshed certificate stack",
+      "summary": "hermitstash-sync 1.0.0 interoperates with a HermitStash server whose sync certificate authority signs with ML-DSA-87 (FIPS 204) — the post-quantum default in server 1.14.0 — as well as with a classical ECDSA P-384 authority. Enrollment and the mutual-TLS channel are signature-algorithm agnostic, so no configuration change is needed to connect to either. The vendored framework moves to the @blamejs/pki certificate stack.",
+      "sections": [
+        {
+          "heading": "Changed",
+          "items": [
+            {
+              "title": "Interoperate with a post-quantum sync certificate authority",
+              "body": "A HermitStash server on 1.14.0 issues sync client certificates from an ML-DSA-87 (FIPS 204) certificate authority by default, or from a classical ECDSA P-384 authority when the operator supplies one. The client authenticates the mutual-TLS channel by pinning the server's leaf public key and verifying the certificate identity, both of which are signature-algorithm agnostic — so enrollment and reconnection succeed against either authority with no configuration change."
+            },
+            {
+              "title": "Gate a certificate-authority algorithm change on a runtime handshake check",
+              "body": "When the server rotates its sync certificate authority to a new signature algorithm and pushes replacement credentials to a connected client, the client now runs an in-process loopback handshake to confirm its own TLS runtime can present and verify that algorithm before replacing its identity. A build too old to complete the handshake keeps its current certificate, logs the algorithm it cannot yet use, and stays connected on the existing authority, so a future algorithm upgrade cannot strand a client on credentials it is unable to present. The incoming credentials are validated — key match plus issuer chain with a certificate-authority basic-constraint check — and staged atomically, so a rejected or interrupted rotation leaves the working identity untouched."
+            }
+          ]
+        },
+        {
+          "heading": "Supply chain",
+          "items": [
+            {
+              "title": "Refresh the vendored framework and move the mTLS certificate stack to @blamejs/pki",
+              "body": "The vendored blamejs bundle advances to 0.18.3, which replaces the previous certificate-handling library with @blamejs/pki. Certificate parsing, chain validation, and the SPKI pin comparison applied to the server's TLS leaf run through the refreshed stack. The CycloneDX software bill of materials attached to each release lists @blamejs/pki in place of the former peculiar-pki bundle."
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "label": "FIPS 204 (ML-DSA)",
+          "url": "https://csrc.nist.gov/pubs/fips/204/final"
+        }
+      ]
+    }
+  ]
+}
