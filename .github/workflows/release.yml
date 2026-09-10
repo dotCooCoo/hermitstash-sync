@@ -74,7 +74,7 @@ jobs:
           # shipped an image that could not start (missing libatomic.so.1). Keep
           # this equal to package.json engines.node, and keep it on an Active LTS
           # line — 25 and 26 are Current, not LTS.
-          node-version: '24.19.0'
+          node-version: '24.21.0'
 
       - name: Get version
         id: version
@@ -220,7 +220,7 @@ jobs:
         # zizmor: ignore[cache-poisoning] no cache input set, so setup-node caches nothing.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.21.0'
 
       - name: Get version
         id: version
@@ -496,7 +496,7 @@ jobs:
           ls -l artifacts/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions] deliberate: atomic multi-asset gh release create with provenance attach
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3 # zizmor: ignore[superfluous-actions] deliberate: atomic multi-asset gh release create with provenance attach
         with:
           body_path: release-notes.md
           files: artifacts/*

@@ -75,7 +75,7 @@ jobs:
       - name: Upload SARIF
         if: ${{ always() && hashFiles('zizmor.sarif') != '' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: zizmor.sarif
           category: zizmor
@@ -111,7 +111,7 @@ jobs:
       - name: Upload SARIF
         if: ${{ always() && hashFiles('semgrep.sarif') != '' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -134,7 +134,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.19.0'
+          node-version: '24.21.0'
       - name: Build CycloneDX SBOM
         run: node scripts/build-sbom.js --out build
       - name: Install OSV-Scanner
@@ -177,7 +177,7 @@ jobs:
       - name: Upload SARIF
         if: ${{ always() && hashFiles('osv.sarif') != '' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: osv.sarif
           category: osv-scanner
