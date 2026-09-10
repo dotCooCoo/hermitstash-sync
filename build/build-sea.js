@@ -5,7 +5,7 @@
  * Build a Node.js Single Executable Application (SEA)
  *
  * Prerequisites:
- *   - Node.js 22+ (with SEA support)
+ *   - Node.js 24.21.0+ (matches package.json engines.node; the build embeds this runtime)
  *   - npx postject (installed globally or via npx)
  *   - npx esbuild (for bundling into single file)
  *

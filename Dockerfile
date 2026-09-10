@@ -19,16 +19,16 @@ ARG VERSION
 # Verify-stage base — DIGEST-PINNED for the same reason RUNTIME_BASE is. The
 # stage-1 `verify` image both RUNS the SHA3-512 + ECDSA signature check and
 # materializes the binary COPY'd into the runtime image, so a tag-republish of
-# node:24.19.0-slim (Docker Official Images re-point version tags on base-OS
+# node:24.21.0-slim (Docker Official Images re-point version tags on base-OS
 # rebuilds; a registry compromise is the same class the RUNTIME_BASE pin
 # defends) could force the check to pass on any bytes or swap the binary after
 # it — shipping a backdoored binary that is then cosign-signed + SLSA-attested.
 # Pinning the toolchain base closes that half of the build. Refresh the digest
 # deliberately on each Node bump (resolve via
-#   docker buildx imagetools inspect node:24.19.0-slim
+#   docker buildx imagetools inspect node:24.21.0-slim
 # and copy the index Digest), updating the trailing date, on the same cadence
 # as RUNTIME_BASE and the GitHub Action pins.
-ARG NODE_VERSION=24.19.0-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03  # node 24.19.0-slim 2026-08-07
+ARG NODE_VERSION=24.21.0-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553  # node 24.21.0-slim 2026-09-09
 # Runtime base: Chainguard wolfi-base — glibc-dynamic, apk-based, rebuilt
 # continuously by Chainguard when upstream CVE fixes land. Typical CVE
 # count at any given digest is near zero; chosen over debian-slim to avoid
@@ -50,7 +50,7 @@ ARG NODE_VERSION=24.19.0-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba32
 # refresh surfaces as a failed build rather than a silently-vulnerable
 # image. RUNTIME_BASE stays a build-arg so a refresh is visible in the diff
 # and an operator can override it for a local rebuild against a newer base.
-ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:a31344ab2cb8618db84f535eec56f76f6178b142cb92cb2e48676cc2dcebea72  # wolfi-base 2026-08-22
+ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:918a593b8268c222afd4e2c4f06860ac984e60719b4697e4c71d796bc8fcd042  # wolfi-base 2026-09-09
 
 # ---------- Stage 1: download + verify the signed binary ----------
 FROM node:${NODE_VERSION} AS verify
