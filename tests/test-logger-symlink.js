@@ -4,7 +4,7 @@
 //
 // Exercises the REAL production logger (no reimplementation). Symlink refusal
 // is delegated to b.logStream's local sink, which opens the active log file
-// with O_NOFOLLOW append and throws a typed SYMLINK_REFUSED LogStreamError;
+// with O_NOFOLLOW append and throws a typed log-stream-local/symlink-refused LogStreamError;
 // lib/logger.js#init translates that into the actionable "refusing to write
 // logs through it" message.
 //

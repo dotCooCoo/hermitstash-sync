@@ -221,9 +221,9 @@ async function encryptedRequest(ctx, urlPath, opts = {}) {
     // Surface 4xx/5xx as a plain { statusCode, body } so test code can
     // assert on resp.statusCode the same way it does with httpRequest.
     // b.httpClient.encrypted's underlying request comes back as a generic
-    // FrameworkError("HTTP_ERROR", "HTTP <N> <msg>") since we don't pass an
-    // errorClass here — extract the status from the message tail.
-    if (err && err.code === 'HTTP_ERROR' && typeof err.message === 'string') {
+    // FrameworkError("http-client/http-error", "HTTP <N>: <body slice>") since
+    // we don't pass an errorClass here — extract the status from the message tail.
+    if (err && err.code === 'http-client/http-error' && typeof err.message === 'string') {
       // Vendor format: "HTTP <N>: <body slice>"
       const m = err.message.match(/^HTTP (\d{3}):\s?(.*)$/s);
       if (m) {

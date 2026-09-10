@@ -10,8 +10,8 @@
  * the sync client functional across server keypair rotation / session expiry /
  * restart:
  *
- *   (a) a client-side sid/ctr mismatch (CLIENT_RESPONSE_SID /
- *       CLIENT_RESPONSE_REPLAY) -> reset the session + retry once;
+ *   (a) a client-side sid/ctr mismatch (api-encrypt/client-response-sid /
+ *       api-encrypt/client-response-replay) -> reset the session + retry once;
  *   (b) a 401 with a session-* body -> rebuild + retry once;
  *   (c) a 400 encrypted-payload-rejected (sealed to a rotated pubkey) ->
  *       re-fetch the pubkey + retry once;
@@ -76,9 +76,9 @@ function installScript(client, script) {
 }
 
 describe('encrypted-session recovery branches', () => {
-  it('CLIENT_RESPONSE_REPLAY -> reset + retry once -> success', async () => {
+  it('api-encrypt/client-response-replay -> reset + retry once -> success', async () => {
     const client = makeClient();
-    const replay = new Error('replay'); replay.code = 'CLIENT_RESPONSE_REPLAY';
+    const replay = new Error('replay'); replay.code = 'api-encrypt/client-response-replay';
     const ctl = installScript(client, [
       { throw: replay },
       { resp: { statusCode: 200, body: { ok: true } } },
@@ -90,17 +90,17 @@ describe('encrypted-session recovery branches', () => {
     client.destroy();
   });
 
-  it('CLIENT_RESPONSE_SID retry is terminal — a second failure propagates, no infinite loop', async () => {
+  it('api-encrypt/client-response-sid retry is terminal — a second failure propagates, no infinite loop', async () => {
     const client = makeClient();
-    const sid1 = new Error('sid1'); sid1.code = 'CLIENT_RESPONSE_SID';
-    const sid2 = new Error('sid2'); sid2.code = 'CLIENT_RESPONSE_SID';
+    const sid1 = new Error('sid1'); sid1.code = 'api-encrypt/client-response-sid';
+    const sid2 = new Error('sid2'); sid2.code = 'api-encrypt/client-response-sid';
     const ctl = installScript(client, [
       { throw: sid1 },
       { throw: sid2 },
     ]);
     await assert.rejects(
       client._encryptedRequest('POST', '/sync/rename', { a: 1 }),
-      (e) => e.code === 'CLIENT_RESPONSE_SID',
+      (e) => e.code === 'api-encrypt/client-response-sid',
     );
     assert.strictEqual(ctl.callCount, 2, 'retried exactly once then gave up');
     assert.strictEqual(ctl.resetCount, 1, 'reset once on the first failure only');
@@ -300,11 +300,11 @@ describe('encrypted-request wall-clock cap (timeoutMs forwarded to the primitive
 
   it('a non-timeout rejection passes through untranslated', async () => {
     const client = makeClient();
-    const orig = new Error('decrypt failed'); orig.code = 'CLIENT_RESPONSE_NOT_JSON';
+    const orig = new Error('decrypt failed'); orig.code = 'api-encrypt/client-response-not-json';
     installScript(client, [{ throw: orig }]);
     await assert.rejects(
       client._encryptedRequest('POST', '/x', { a: 1 }),
-      (e) => e === orig && e.code === 'CLIENT_RESPONSE_NOT_JSON',
+      (e) => e === orig && e.code === 'api-encrypt/client-response-not-json',
     );
     client.destroy();
   });
