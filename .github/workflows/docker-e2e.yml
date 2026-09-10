@@ -19,6 +19,7 @@ on:
       - 'scripts/verify-release.js'
       - 'scripts/standalone-verifier.js'
       - 'scripts/test-codebase-patterns.js'
+      - 'scripts/docker-smoke.sh'
       - '.github/workflows/docker-e2e.yml'
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - 'scripts/verify-release.js'
       - 'scripts/standalone-verifier.js'
       - 'scripts/test-codebase-patterns.js'
+      - 'scripts/docker-smoke.sh'
       - '.github/workflows/docker-e2e.yml'
   workflow_dispatch:
 

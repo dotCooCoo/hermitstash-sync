@@ -42,9 +42,20 @@ fi
 
 # ── Non-root user + volumes ─────────────────────────────────────────────
 log "Checking user + volumes"
+# The Dockerfile sets USER numerically, so a host mounting /config and /data
+# matches ownership by id without reading the image's passwd file. 1000:1000 is
+# the hermit account: the Dockerfile creates it with --uid 1000 --gid 1000.
 USER_FIELD=$(docker inspect -f '{{.Config.User}}' "$IMAGE")
-if [ "$USER_FIELD" != "hermit" ]; then
-  fail "expected User=hermit, got ${USER_FIELD}"
+if [ "$USER_FIELD" != "1000:1000" ]; then
+  fail "expected User=1000:1000, got ${USER_FIELD}"
+fi
+# Confirm hermit still carries that id inside the image, so a base-image change
+# that renumbers the account fails here rather than at an operator's volume
+# mount. Looked up by name: busybox `id` takes a user name, not a uid.
+HERMIT_IDS=$(docker run --rm --user 0:0 --entrypoint sh "$IMAGE" \
+  -c 'printf "%s:%s" "$(id -u hermit)" "$(id -g hermit)"' 2>/dev/null || true)
+if [ "$HERMIT_IDS" != "1000:1000" ]; then
+  fail "hermit must be uid:gid 1000:1000 inside the image, got '${HERMIT_IDS}'"
 fi
 VOLS=$(docker inspect -f '{{range $k,$v := .Config.Volumes}}{{$k}} {{end}}' "$IMAGE")
 for v in /config /data; do
