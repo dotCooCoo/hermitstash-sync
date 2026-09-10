@@ -1,0 +1,29 @@
+{
+  "version": "1.1.2",
+  "date": "2026-09-10",
+  "headline": "The packaging check matches the container user the image declares",
+  "summary": "The script that verifies a pulled image asserted the container user by name while the image declares it by id, so it rejected every image. The binaries and the image contents are unchanged from v1.1.1.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "The packaging check accepts the image's numeric user",
+          "body": "scripts/docker-smoke.sh verifies a pulled image: its labels, volumes, environment defaults, entrypoint error path and non-root identity. The image declares its user as 1000:1000, so that a host mounting /config and /data matches ownership by id without reading the image's passwd file, but the check still compared against the name hermit and failed with \"expected User=hermit, got 1000:1000\". It now asserts the numeric form, and separately confirms that hermit still carries uid and gid 1000 inside the image, so a base image that renumbers the account is caught here rather than at a volume mount."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "The image is identical to v1.1.1 apart from the version it reports",
+          "body": "Nothing in the runtime, the vendored framework or the base images moved. Operators already on v1.1.1 gain nothing by pulling this one. It exists so the packaging check runs against a release whose own copy of the script is the corrected one."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "Release verification + signatures", "url": "https://github.com/dotCooCoo/hermitstash-sync/blob/main/SECURITY.md" }
+  ]
+}
