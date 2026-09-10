@@ -15,5 +15,107 @@
     "hermitstash-sync@<version>:macos-arm64",
     "hermitstash-sync@<version>:container"
   ],
-  "statements": []
+  "_opensslNote": "The ten entries below cover OpenSSL 3.5.8 (25 August 2026). The platform binaries are Node.js single-executable applications, so OpenSSL is linked into the shipped artifact and a scanner that inspects the binary will see it. The vulnerable code is present, which rules out component_not_present and vulnerable_code_not_present; the client never reaches it, which is vulnerable_code_not_in_execute_path. This client is a TLS 1.3 client over TCP: it runs no QUIC, DTLS, CMS or CMP code, terminates no handshake, and performs no authenticated encryption through OpenSSL's EVP_Cipher() interface. Releases from v1.1.1 also carry the patched OpenSSL 3.5.8 in the embedded runtime.",
+  "statements": [
+    {
+      "cveId": "CVE-2026-18798",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "A double free in the OpenSSL QUIC server when processing an INITIAL packet. This client speaks TLS 1.3 over TCP, runs no QUIC endpoint and accepts no inbound connection of any kind, so the QUIC server code is never entered. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-14456",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Unbounded memory growth in the OpenSSL QUIC server incoming channel queue. This client runs no QUIC endpoint and accepts no inbound connection, so the queue is never allocated. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-63075",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Memory exhaustion through QUIC ACK-only packet retention. This client runs no QUIC endpoint, so no ACK-only packet is ever retained. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-54874",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Excessive memory use buffering DTLS records for a future epoch. Every connection this client opens is TLS 1.3 over TCP, pinned by minVersion; it opens no datagram transport, so the DTLS record layer is never entered. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-63072",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Heap buffer overflow in CMS key unwrapping. This client performs no Cryptographic Message Syntax processing. Its application-layer envelope is ML-KEM-1024 with ECDH P-384 and XChaCha20-Poly1305, and the signature checks on a downloaded release use raw ECDSA P-384 and ML-DSA-65 rather than a CMS structure. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-63076",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Invalid pointer dereference in the CMP server through a crafted protectionAlg. This client implements no Certificate Management Protocol endpoint. Client certificates are issued by the HermitStash server over the enrollment API and written to disk. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-63073",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "An untrusted Sender distinguished name used as a format string during CMP response validation. This client implements no Certificate Management Protocol client or server, so it validates no CMP response. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-63074",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Indefinite cache growth of CMP extraCerts. This client implements no Certificate Management Protocol client or server, so the extraCerts cache is never populated. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-14457",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "A dereference of a missing certificate during raw-public-key signature algorithm selection on the server side of a handshake. This client only ever initiates a handshake and terminates none, and it negotiates no raw public key: both peers present X.509 certificates under mutual TLS. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    },
+    {
+      "cveId": "CVE-2026-75803",
+      "status": "known_not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impactStatement": "Authenticated-encryption forgeries with an empty ciphertext through EVP_Cipher(), and authentication-tag checking for empty ciphertexts in CCM mode. This client calls no OpenSSL cipher interface directly: its application-layer authenticated encryption is XChaCha20-Poly1305 from the vendored @noble/ciphers implementation, which is JavaScript and does not enter OpenSSL. The only OpenSSL authenticated encryption it reaches is the TLS 1.3 record layer, which negotiates TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256 or TLS_AES_128_GCM_SHA256; no CCM suite is offered. Releases from v1.1.1 embed OpenSSL 3.5.8, which carries the fix.",
+      "productScope": "all",
+      "references": [
+        { "url": "https://openssl-library.org/news/vulnerabilities-3.5/", "summary": "OpenSSL 3.5 vulnerabilities" }
+      ]
+    }
+  ]
 }

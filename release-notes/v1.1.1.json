@@ -2,7 +2,7 @@
   "version": "1.1.1",
   "date": "2026-09-09",
   "headline": "The runtime floor moves to Node.js 24.21.0 and OpenSSL 3.5.8",
-  "summary": "OpenSSL 3.5.8 is a security patch release fixing ten flaws, the most severe rated Moderate. The runtime floor moves to Node.js 24.21.0, which carries that release along with root certificates from NSS 3.126. The vendored framework moves to blamejs 0.19.7, and the container bases and workflow action pins are brought current.",
+  "summary": "OpenSSL 3.5.8 is a security patch release fixing ten flaws, the most severe rated Moderate. The runtime floor moves to Node.js 24.21.0, which carries that release along with root certificates from NSS 3.126. The release attaches a VEX document recording how each of the ten applies here. The vendored framework moves to blamejs 0.19.7, and the container bases and workflow action pins are brought current.",
   "sections": [
     {
       "heading": "Security",
@@ -36,6 +36,10 @@
         {
           "title": "A WebSocket connection with no resolved address now reports ENOTFOUND",
           "body": "When the request filter resolved a host to an empty address list, the WebSocket client continued to dial and surfaced whatever the socket layer reported. It now fails with ENOTFOUND naming the host, and the reconnect loop retries it as a transient failure."
+        },
+        {
+          "title": "The release attaches a CSAF 2.1 VEX document",
+          "body": "All ten OpenSSL advisories are recorded as known_not_affected under the CSAF justification vulnerable_code_not_in_execute_path, each with the reason it does not apply. OpenSSL is linked into the platform binaries, so a scanner reading the binary sees it and flags the advisories; hermitstash-sync-v1.1.1.vex.json is what a CSAF-aware scanner reads to resolve them. The statements cover the four platform binaries and the container image."
         },
         {
           "title": "Container bases and action pins brought current",
