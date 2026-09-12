@@ -1,4 +1,4 @@
-// @blamejs/pki v0.6.55 — vendored (Apache-2.0). Zero-dep pure CJS.
+// @blamejs/pki v0.7.37 — vendored (Apache-2.0). Zero-dep pure CJS.
 // https://github.com/blamejs/pki  Exports: x509, crl, pkcs12, key, webcrypto, schema, csr, cms, ...
 // Backs lib/mtls-engine-default.js (PQC-capable CA + PKCS#12 engine).
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -32,6 +32,7 @@ var require_guard_intrinsic = __commonJS({
     var _isView = ArrayBuffer.isView;
     var _isInteger = Number.isInteger;
     var _isSafeInteger = Number.isSafeInteger;
+    var _numberIsFinite = Number.isFinite;
     var _fromCharCode = String.fromCharCode;
     var _objectCreate = Object.create;
     var _getPrototypeOf = Object.getPrototypeOf;
@@ -86,6 +87,8 @@ var require_guard_intrinsic = __commonJS({
     var _Boolean = Boolean;
     var _BigInt = BigInt;
     var _Date = Date;
+    var _dateParse = Date.parse;
+    var _numberIsNaN = Number.isNaN;
     var _isFinite = globalThis.isFinite;
     var _ArrayBuffer = ArrayBuffer;
     var _Uint8Array = Uint8Array;
@@ -145,6 +148,7 @@ var require_guard_intrinsic = __commonJS({
       isView: _isView,
       isInteger: _isInteger,
       isSafeInteger: _isSafeInteger,
+      numberIsFinite: _numberIsFinite,
       fromCharCode: _fromCharCode,
       create: _objectCreate,
       getPrototypeOf: _getPrototypeOf,
@@ -192,6 +196,8 @@ var require_guard_intrinsic = __commonJS({
       Boolean: _Boolean,
       BigInt: _BigInt,
       Date: _Date,
+      dateParse: _dateParse,
+      numberIsNaN: _numberIsNaN,
       isFinite: _isFinite,
       ArrayBuffer: _ArrayBuffer,
       Uint8Array: _Uint8Array,
@@ -366,7 +372,7 @@ var require_package = __commonJS({
   "node_modules/@blamejs/pki/package.json"(exports2, module2) {
     module2.exports = {
       name: "@blamejs/pki",
-      version: "0.6.55",
+      version: "0.7.37",
       description: "Pure-JavaScript PKI toolkit that owns its stack \u2014 X.509, ASN.1/DER, CMS, PQC-first.",
       license: "Apache-2.0",
       author: "blamejs contributors",
@@ -417,7 +423,7 @@ var require_package = __commonJS({
         "owns-its-stack"
       ],
       engines: {
-        node: ">=24.19.0"
+        node: ">=24.21.0"
       },
       files: [
         "index.js",
@@ -434,7 +440,8 @@ var require_package = __commonJS({
         test: "node test/smoke.js",
         lint: "eslint --max-warnings 0 .",
         fuzz: "npm ci --prefix fuzz && npx --prefix fuzz jazzer fuzz/asn1-der.fuzz.js -- -max_total_time=60",
-        gates: "node test/layer-0-primitives/codebase-patterns.test.js && node scripts/validate-source-comment-blocks.js && node scripts/check-api-snapshot.js && node scripts/check-spelling-consistency.js",
+        gates: "node test/layer-0-primitives/codebase-patterns.test.js && node scripts/validate-source-comment-blocks.js && node scripts/check-api-snapshot.js && node scripts/check-spelling-consistency.js && node scripts/check-engine-floor.js",
+        "check:engine-floor": "node scripts/check-engine-floor.js",
         "check:spelling": "node scripts/check-spelling-consistency.js",
         coverage: "c8 --include=lib/** --include=index.js --reporter=text-summary --reporter=lcov node test/smoke.js",
         "check:prose": "node scripts/check-operator-prose.js",
@@ -449,7 +456,7 @@ var require_package = __commonJS({
       devDependencies: {
         c8: "12.0.0",
         esbuild: "0.28.2",
-        eslint: "10.9.1"
+        eslint: "10.10.0"
       }
     };
   }
@@ -540,6 +547,7 @@ var require_constants = __commonJS({
       CBOR_MAX_ITEMS: 1e6,
       SCT_MAX_BYTES: BYTES.kib(64) + 1,
       SCT_MAX_COUNT: 256,
+      TLOG_MAX_COUNT: 32,
       CMS_MAX_KARI_ENCRYPTED_KEYS: 64,
       CMP_KEM_MAX_KEY_BYTES: 1024,
       CMP_KEM_MIN_KEY_BYTES: 20,
@@ -643,7 +651,9 @@ var require_constants = __commonJS({
         invalidityDate: "Invalidity Date",
         certificateIssuer: "X509v3 Certificate Issuer",
         signedCertificateTimestampList: "CT Precertificate SCTs",
-        precertificatePoison: "CT Precertificate Poison"
+        precertificatePoison: "CT Precertificate Poison",
+        subjectDirectoryAttributes: "X509v3 Subject Directory Attributes",
+        ocspNoCheck: "OCSP No Check"
       },
       KEY_USAGE: {
         digitalSignature: "Digital Signature",
@@ -901,6 +911,14 @@ var require_guard_identifier = __commonJS({
         if (_hasOwn(known, k)) return;
         throw E(code, describe(typeof k === "symbol" ? _String(k) : k));
       });
+    }
+    function snapshotOptions(obj, known) {
+      var out = _create(null);
+      if (obj === null || obj === void 0) return out;
+      _forEach(_getOwnPropertyNames(known), function(k) {
+        out[k] = obj[k];
+      });
+      return out;
     }
     var _PRISTINE_OBJECT_PROTO = (function() {
       var s = _create(null);
@@ -1225,6 +1243,7 @@ var require_guard_identifier = __commonJS({
       isPlainRecord,
       optionsObject,
       refuseAccessorFields,
+      snapshotOptions,
       readableNames,
       readableIndices
     });
@@ -1242,12 +1261,23 @@ var require_guard_time = __commonJS({
     var _isNaN = Number.isNaN;
     var _Date = Date;
     var _dateGetTime = require_guard_intrinsic().uncurry(Date.prototype.getTime);
+    var _dateGetUTCFullYear = require_guard_intrinsic().uncurry(Date.prototype.getUTCFullYear);
+    var DER_YEAR_MIN = 0;
+    var DER_YEAR_MAX = 9999;
     function instantOf(value) {
       return _dateGetTime(value);
     }
     function assertValid(value, E, code, label) {
       if (!util.types.isDate(value) || _isNaN(instantOf(value))) {
         throw E(code, (label || "value") + " must be a valid Date");
+      }
+      return value;
+    }
+    function assertEncodable(value, E, code, label) {
+      assertValid(value, E, code, label);
+      var year = _dateGetUTCFullYear(value);
+      if (year < DER_YEAR_MIN || year > DER_YEAR_MAX) {
+        throw E(code, (label || "value") + " year " + year + " is outside " + DER_YEAR_MIN + ".." + DER_YEAR_MAX + ", the range a DER time can carry");
       }
       return value;
     }
@@ -1270,6 +1300,7 @@ var require_guard_time = __commonJS({
     }
     module2.exports = _freeze({
       assertValid,
+      assertEncodable,
       instantOf,
       isDate,
       toDate,
@@ -1762,14 +1793,17 @@ var require_oid = __commonJS({
         "aes128-wrap": 5,
         "aes128-GCM": 6,
         "aes128-CCM": 7,
+        "aes128-GMAC": 9,
         "aes192-CBC": 22,
         "aes192-wrap": 25,
         "aes192-GCM": 26,
         "aes192-CCM": 27,
+        "aes192-GMAC": 29,
         "aes256-CBC": 42,
         "aes256-wrap": 45,
         "aes256-GCM": 46,
-        "aes256-CCM": 47
+        "aes256-CCM": 47,
+        "aes256-GMAC": 49
       } },
       nistHash: { base: [2, 16, 840, 1, 101, 3, 4, 2], of: {
         sha256: 1,
@@ -1778,7 +1812,9 @@ var require_oid = __commonJS({
         "sha3-256": 8,
         "sha3-512": 10,
         shake128: 11,
-        shake256: 12
+        shake256: 12,
+        kmacWithSHAKE128: 19,
+        kmacWithSHAKE256: 20
       } },
       nistSig: { base: [2, 16, 840, 1, 101, 3, 4, 3], of: {
         "id-rsassa-pkcs1-v1_5-with-sha3-224": 13,
@@ -4478,6 +4514,11 @@ var require_guard_name = __commonJS({
     function stripTrailingDot(s) {
       return _charAt(s, s.length - 1) === "." ? _strSlice(s, 0, -1) : s;
     }
+    function uriSchemeIs(s, scheme) {
+      if (typeof s !== "string" || s.length <= scheme.length) return false;
+      if (_charCodeAt(s, scheme.length) !== 58) return false;
+      return lowerAscii(_strSlice(s, 0, scheme.length)) === scheme;
+    }
     function isFqdnHost(host) {
       var h = stripTrailingDot(host);
       if (h === "" || _indexOf(h, ".") === -1) return false;
@@ -4697,6 +4738,7 @@ var require_guard_name = __commonJS({
       escapeControlBytes,
       escapeDnValue,
       lowerAscii,
+      uriSchemeIs,
       stripTrailingDot,
       isFqdnHost,
       splitMailbox,
@@ -5291,6 +5333,15 @@ var require_asn1_der = __commonJS({
     var intrinsic = require_guard_intrinsic();
     var _isArray = intrinsic.isArray;
     var _charCodeAt = intrinsic.uncurry(String.prototype.charCodeAt);
+    var _dateGetUTCFullYear = intrinsic.uncurry(Date.prototype.getUTCFullYear);
+    var _dateGetUTCMonth = intrinsic.uncurry(Date.prototype.getUTCMonth);
+    var _dateGetUTCDate = intrinsic.uncurry(Date.prototype.getUTCDate);
+    var _dateGetUTCHours = intrinsic.uncurry(Date.prototype.getUTCHours);
+    var _dateGetUTCMinutes = intrinsic.uncurry(Date.prototype.getUTCMinutes);
+    var _dateGetUTCSeconds = intrinsic.uncurry(Date.prototype.getUTCSeconds);
+    var _dateGetUTCMilliseconds = intrinsic.uncurry(Date.prototype.getUTCMilliseconds);
+    var _dateSetUTCFullYear = intrinsic.uncurry(Date.prototype.setUTCFullYear);
+    var _dateSetUTCHours = intrinsic.uncurry(Date.prototype.setUTCHours);
     var Asn1Error = frameworkError.Asn1Error;
     var OidError = frameworkError.OidError;
     function _asn1Error(c, m) {
@@ -5685,6 +5736,18 @@ var require_asn1_der = __commonJS({
       if (!_isNumericString(s)) throw new Asn1Error("asn1/bad-numeric-string", "NumericString has characters outside the digits-and-space set");
       return s;
     }
+    function _assertWellFormedUtf16(s) {
+      for (var i = 0; i < s.length; i++) {
+        var c = _charCodeAt(s, i);
+        if (c >= 55296 && c <= 56319) {
+          var n = i + 1 < s.length ? _charCodeAt(s, i + 1) : -1;
+          if (!(n >= 56320 && n <= 57343)) throw new Asn1Error("asn1/bad-utf8-string", "UTF8String has an unpaired high surrogate");
+          i++;
+        } else if (c >= 56320 && c <= 57343) {
+          throw new Asn1Error("asn1/bad-utf8-string", "UTF8String has an unpaired low surrogate");
+        }
+      }
+    }
     function _decodeUtf8Strict(buf) {
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(buf);
@@ -5825,10 +5888,10 @@ var require_asn1_der = __commonJS({
       var sec = t.sec;
       var ms = node.tagNumber === TAGS.GENERALIZED_TIME && t.hasFrac ? t.ms : 0;
       var d = /* @__PURE__ */ new Date(0);
-      d.setUTCFullYear(year, month - 1, day);
-      d.setUTCHours(hour, min, sec, ms);
+      _dateSetUTCFullYear(d, year, month - 1, day);
+      _dateSetUTCHours(d, hour, min, sec, ms);
       if (isNaN(guard.time.instantOf(d))) throw new Asn1Error("asn1/bad-time", "unparseable time " + JSON.stringify(s));
-      if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day || d.getUTCHours() !== hour || d.getUTCMinutes() !== min || d.getUTCSeconds() !== sec) {
+      if (_dateGetUTCFullYear(d) !== year || _dateGetUTCMonth(d) !== month - 1 || _dateGetUTCDate(d) !== day || _dateGetUTCHours(d) !== hour || _dateGetUTCMinutes(d) !== min || _dateGetUTCSeconds(d) !== sec) {
         throw new Asn1Error("asn1/bad-time", "time component out of range " + JSON.stringify(s));
       }
       return d;
@@ -5979,17 +6042,44 @@ var require_asn1_der = __commonJS({
     function _fmtTwo(n) {
       return (n < 10 ? "0" : "") + n;
     }
-    function _generalizedTimeString(date) {
-      var y = date.getUTCFullYear();
+    function _generalizedTimeString(date, fractional) {
+      var y = _dateGetUTCFullYear(date);
       if (y < 0 || y > 9999) throw new Asn1Error("asn1/bad-generalizedtime", "GeneralizedTime year " + y + " outside 0000..9999");
       var yyyy = ("000" + y).slice(-4);
-      return yyyy + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
+      return yyyy + _fmtTwo(_dateGetUTCMonth(date) + 1) + _fmtTwo(_dateGetUTCDate(date)) + _fmtTwo(_dateGetUTCHours(date)) + _fmtTwo(_dateGetUTCMinutes(date)) + _fmtTwo(_dateGetUTCSeconds(date)) + (fractional ? _fractionString(_dateGetUTCMilliseconds(date)) : "") + "Z";
+    }
+    function _fractionString(ms) {
+      if (ms === 0) return "";
+      var digits = (ms < 10 ? "00" : ms < 100 ? "0" : "") + ms;
+      var end = digits.length;
+      while (end > 0 && _charCodeAt(digits, end - 1) === 48) end--;
+      var out = ".";
+      for (var i = 0; i < end; i++) out += digits[i];
+      return out;
+    }
+    var _GENERALIZED_TIME_OPTS = intrinsic.create(null);
+    _GENERALIZED_TIME_OPTS.fractional = 1;
+    function _generalizedTimeOptions(opts) {
+      if (opts === void 0 || opts === null) return false;
+      if (typeof opts !== "object") throw new Asn1Error("asn1/bad-generalizedtime", "build.generalizedTime options must be an object");
+      guard.identifier.assertKnownKeys(
+        opts,
+        _GENERALIZED_TIME_OPTS,
+        function(code, message) {
+          return new Asn1Error(code, message);
+        },
+        "asn1/bad-generalizedtime",
+        "build.generalizedTime has an unknown option "
+      );
+      var fractional = opts.fractional;
+      if (fractional !== void 0 && typeof fractional !== "boolean") throw new Asn1Error("asn1/bad-generalizedtime", "build.generalizedTime fractional must be a boolean");
+      return fractional === true;
     }
     function _utcTimeString(date) {
-      var y = date.getUTCFullYear();
+      var y = _dateGetUTCFullYear(date);
       if (y < 1950 || y > 2049) throw new Asn1Error("asn1/bad-utctime", "UTCTime year " + y + " outside 1950..2049; use GeneralizedTime");
       var yy = y % 100;
-      return _fmtTwo(yy) + _fmtTwo(date.getUTCMonth() + 1) + _fmtTwo(date.getUTCDate()) + _fmtTwo(date.getUTCHours()) + _fmtTwo(date.getUTCMinutes()) + _fmtTwo(date.getUTCSeconds()) + "Z";
+      return _fmtTwo(yy) + _fmtTwo(_dateGetUTCMonth(date) + 1) + _fmtTwo(_dateGetUTCDate(date)) + _fmtTwo(_dateGetUTCHours(date)) + _fmtTwo(_dateGetUTCMinutes(date)) + _fmtTwo(_dateGetUTCSeconds(date)) + "Z";
     }
     var build = intrinsic.assign(intrinsic.create(null), {
       boolean: function(v) {
@@ -6037,7 +6127,9 @@ var require_asn1_der = __commonJS({
         return build.bitString(buf, 7 - (hi & 7));
       },
       utf8: function(s) {
-        return _universal(TAGS.UTF8_STRING, false, Buffer.from(String(s), "utf8"));
+        var v = String(s);
+        _assertWellFormedUtf16(v);
+        return _universal(TAGS.UTF8_STRING, false, Buffer.from(v, "utf8"));
       },
       ia5: function(s) {
         s = String(s);
@@ -6065,8 +6157,8 @@ var require_asn1_der = __commonJS({
       utcTime: function(date) {
         return _universal(TAGS.UTC_TIME, false, Buffer.from(_utcTimeString(date), "latin1"));
       },
-      generalizedTime: function(date) {
-        return _universal(TAGS.GENERALIZED_TIME, false, Buffer.from(_generalizedTimeString(date), "latin1"));
+      generalizedTime: function(date, opts) {
+        return _universal(TAGS.GENERALIZED_TIME, false, Buffer.from(_generalizedTimeString(date, _generalizedTimeOptions(opts)), "latin1"));
       },
       sequence: function(children) {
         return encodeConstructed(CLASS_UNIVERSAL, TAGS.SEQUENCE, _asBufferArray(children, "build.sequence"));
@@ -9603,12 +9695,22 @@ var require_ct = __commonJS({
       }
       return Buffer.from([n >> 16 & 255, n >> 8 & 255, n & 255]);
     }
+    var _X509_ENTRY_KEYS = intrinsic.assign(intrinsic.create(null), { entryType: 1, leafCert: 1 });
+    var _PRECERT_ENTRY_KEYS = intrinsic.assign(intrinsic.create(null), { entryType: 1, tbsCertificate: 1, issuerKeyHash: 1 });
     function reconstructSignedData(entry, sct) {
       entry = entry || {};
+      if (typeof entry !== "object") throw new CtError("ct/bad-input", "the log entry must be an object { entryType, ... } (RFC 6962 sec. 3.1)");
       var entryType = entry.entryType;
       if (entryType !== 0 && entryType !== 1) {
         throw new CtError("ct/bad-entry-type", "entryType must be x509_entry(0) or precert_entry(1), got " + guard.text.showValue(entryType) + " (RFC 6962 sec. 3.1)");
       }
+      guard.identifier.assertKnownKeys(
+        entry,
+        entryType === 0 ? _X509_ENTRY_KEYS : _PRECERT_ENTRY_KEYS,
+        _ctErr,
+        "ct/bad-input",
+        entryType === 0 ? "unknown x509_entry field (accepted: entryType, leafCert): " : "unknown precert_entry field (accepted: entryType, tbsCertificate, issuerKeyHash): "
+      );
       if (!sct || typeof sct.timestamp !== "bigint" || sct.version !== 0) {
         throw new CtError("ct/bad-input", "reconstructSignedData expects a decoded v1 SCT from parseSctList().scts[]");
       }
@@ -9776,8 +9878,10 @@ var require_ct = __commonJS({
         throw new CtError("ct/bad-input", "the CT log private key could not be loaded", e);
       }
     }
+    var _SIGN_SCT_OPTS = intrinsic.assign(intrinsic.create(null), { timestamp: 1, extensions: 1, logId: 1 });
     async function signSct(entry, logKey, opts) {
-      opts = opts || {};
+      opts = guard.identifier.optionsObject(opts, _ctErr, "ct/bad-input", "pki.ct.signSct options");
+      guard.identifier.assertKnownKeys(opts, _SIGN_SCT_OPTS, _ctErr, "ct/bad-input", "unknown pki.ct.signSct option (accepted: timestamp, extensions, logId): ");
       var mat = _logKeyMaterial(logKey);
       var alg = _spkiAlg(mat.spki);
       var hashAlg = 4, sigAlg, imp, sign, ecdsaDer = false, coordLen;
@@ -10730,8 +10834,34 @@ var require_schema_pkix = __commonJS({
       });
     }
     var CRL_REASON_NAMES = constants.NAMES.CRL_REASON;
+    var CERT_FIXED_CRITICALITY_ROWS = [
+      ["authorityKeyIdentifier", false, "RFC 5280 sec. 4.2.1.1"],
+      ["subjectKeyIdentifier", false, "RFC 5280 sec. 4.2.1.2"],
+      ["subjectDirectoryAttributes", false, "RFC 5280 sec. 4.2.1.8"],
+      ["nameConstraints", true, "RFC 5280 sec. 4.2.1.10"],
+      ["policyConstraints", true, "RFC 5280 sec. 4.2.1.11"],
+      ["inhibitAnyPolicy", true, "RFC 5280 sec. 4.2.1.14"],
+      ["freshestCRL", false, "RFC 5280 sec. 4.2.1.15"],
+      ["authorityInfoAccess", false, "RFC 5280 sec. 4.2.2.1"],
+      ["subjectInfoAccess", false, "RFC 5280 sec. 4.2.2.2"],
+      ["precertificatePoison", true, "RFC 6962 sec. 3.1"]
+    ];
+    function certFixedCriticality(oidRegistry) {
+      var table = _create(null);
+      _forEach(CERT_FIXED_CRITICALITY_ROWS, function(r) {
+        table[oidRegistry.byName(r[0])] = { critical: r[1], citation: r[2] };
+      });
+      return table;
+    }
     var GN_CONSTRUCTED = _assign(_create(null), { 0: 1, 3: 1, 4: 1, 5: 1 });
     var GN_IA5 = _assign(_create(null), { 1: 1, 2: 1, 6: 1 });
+    var DIRECTORY_STRING_TAGS = [
+      asn1.TAGS.UTF8_STRING,
+      asn1.TAGS.PRINTABLE_STRING,
+      asn1.TAGS.TELETEX_STRING,
+      asn1.TAGS.UNIVERSAL_STRING,
+      asn1.TAGS.BMP_STRING
+    ];
     function generalName(ns, opts) {
       opts = opts || {};
       var code = opts.code || ns.prefix + "/bad-general-name";
@@ -10764,11 +10894,41 @@ var require_schema_pkix = __commonJS({
             if (n.children.length !== 1) throw ctx.E(code, "GeneralName directoryName [4] must wrap exactly one Name");
             var dnMatch = schema.walk(NAME, n.children[0], ctx);
             if (decodeValue) value = dnMatch.result;
+          } else if (t === 3) {
+            if (!schema.isUniversal(n.children[0], asn1.TAGS.SEQUENCE)) {
+              throw ctx.E(code, "GeneralName x400Address [3] must be an ORAddress opening with the BuiltInStandardAttributes SEQUENCE (X.411)");
+            }
+          } else if (t === 5) {
+            var ediKids = n.children;
+            if (ediKids.length > 2) throw ctx.E(code, "GeneralName ediPartyName [5] holds at most nameAssigner [0] and partyName [1] (RFC 5280 sec. 4.2.1.6)");
+            for (var ei = 0; ei < ediKids.length; ei++) {
+              var ediArm = ediKids[ei];
+              if (!schema.isContextInRange(ediArm, 0, 1) || !ediArm.children || ediArm.children.length !== 1) {
+                throw ctx.E(code, "GeneralName ediPartyName [5] arms must be [0] or [1] wrapping exactly one DirectoryString");
+              }
+              if (!schema.isUniversalOneOf(ediArm.children[0], DIRECTORY_STRING_TAGS)) {
+                throw ctx.E(code, "GeneralName ediPartyName [5] arm must hold a DirectoryString");
+              }
+              var ediText;
+              try {
+                ediText = asn1.read.string(ediArm.children[0]);
+              } catch (e) {
+                throw ctx.E(code, "GeneralName ediPartyName [5] arm is not the string its tag claims", e);
+              }
+              if (ediText.length === 0) throw ctx.E(code, "GeneralName ediPartyName [5] DirectoryString must be SIZE (1..MAX)");
+            }
+            if (ediKids.length === 2) {
+              if (ediKids[0].tagNumber !== 0 || ediKids[1].tagNumber !== 1) {
+                throw ctx.E(code, "GeneralName ediPartyName [5] must order nameAssigner [0] before partyName [1]");
+              }
+            } else if (ediKids[0].tagNumber !== 1) {
+              throw ctx.E(code, "GeneralName ediPartyName [5] requires partyName [1]; nameAssigner [0] alone is not a name");
+            }
           }
         } else {
           if (constructed) throw ctx.E(code, "GeneralName [" + t + "] must be primitive (X.690 sec. 10.2)");
           if (GN_IA5[t]) {
-            if (n.content.length === 0) throw ctx.E(code, "GeneralName [" + t + "] must be a non-empty IA5String");
+            if (!subtreeBase && n.content.length === 0) throw ctx.E(code, "GeneralName [" + t + "] must be a non-empty IA5String");
             guard.name.assertPrintableIa5(n.content, ctx.E, code, "GeneralName [" + t + "]");
             if (decodeValue) value = _bufToString(n.content, "latin1");
           } else if (t === 7) {
@@ -10883,6 +11043,64 @@ var require_schema_pkix = __commonJS({
           { tag: 5, name: "onlyContainsAttributeCerts", schema: schema.implicitBoolean(5) }
         ], { minTag: 0, maxTag: 5, unexpectedCode: code, orderCode: code })
       ], { assert: "sequence", code, what: "IssuingDistributionPoint" });
+    }
+    function decodeIssuingDistributionPointValue(ns, bytes, code) {
+      var out = {
+        malformed: false,
+        hasDistributionPoint: false,
+        distributionPoint: null,
+        onlyUser: false,
+        onlyCa: false,
+        onlySomeReasonsPresent: false,
+        onlySomeReasonsValue: null,
+        indirect: false,
+        onlyAttr: false,
+        fields: null
+      };
+      var m;
+      try {
+        m = schema.walk(issuingDistributionPoint(code), asn1.decode(bytes), ns);
+        if (m.fields.distributionPoint.present) {
+          var wrap = m.fields.distributionPoint.node;
+          if (!wrap.children || wrap.children.length !== 1) {
+            throw ns.E(code, "IssuingDistributionPoint distributionPoint [0] must wrap exactly one DistributionPointName");
+          }
+          out.distributionPoint = distributionPointName(ns, wrap.children[0], code);
+        }
+      } catch (_e) {
+        out.malformed = true;
+        return out;
+      }
+      function flag(f) {
+        if (!f.present) return false;
+        if (f.value !== true) {
+          out.malformed = true;
+          return false;
+        }
+        return true;
+      }
+      out.fields = m.fields;
+      out.hasDistributionPoint = m.fields.distributionPoint.present;
+      out.onlyUser = flag(m.fields.onlyContainsUserCerts);
+      out.onlyCa = flag(m.fields.onlyContainsCACerts);
+      out.onlySomeReasonsPresent = m.fields.onlySomeReasons.present;
+      out.onlySomeReasonsValue = m.fields.onlySomeReasons.present ? m.fields.onlySomeReasons.value : null;
+      if (out.onlySomeReasonsPresent) {
+        var bs = out.onlySomeReasonsValue;
+        if (!bs || !bs.bytes) out.malformed = true;
+        else {
+          try {
+            schema.assertMinimalNamedBits(bs.unusedBits, bs.bytes, function(msg) {
+              throw ns.E(code, msg);
+            });
+          } catch (_e) {
+            out.malformed = true;
+          }
+        }
+      }
+      out.indirect = flag(m.fields.indirectCRL);
+      out.onlyAttr = flag(m.fields.onlyContainsAttributeCerts);
+      return out;
     }
     var _T = asn1.TAGS;
     function assertPolicyQualifiers(qNode, fail) {
@@ -11175,14 +11393,14 @@ var require_schema_pkix = __commonJS({
         var n = decodeTop(buf, C, "GeneralNames");
         return schema.walk(generalNames(ns, { decodeValue: true, code: C }), n, ns).result;
       }
-      function authorityInfoAccess(buf) {
+      function accessDescriptions(buf, what, clause) {
         var C = ns.prefix + "/bad-extension-value";
-        var descs = seqChildren(buf, C, "AuthorityInfoAccessSyntax");
-        if (descs.length < 1) throw ns.E(C, "AuthorityInfoAccessSyntax must contain at least one AccessDescription (RFC 5280 sec. 4.2.2.1, SIZE(1..MAX))");
+        var descs = seqChildren(buf, C, what);
+        if (descs.length < 1) throw ns.E(C, what + " must contain at least one AccessDescription (" + clause + ", SIZE(1..MAX))");
         var GN = generalName(ns, { decodeValue: true, code: C });
         return _map(descs, function(d) {
           if (d.tagClass !== "universal" || d.tagNumber !== _T.SEQUENCE || !d.children || d.children.length !== 2) {
-            throw ns.E(C, "AccessDescription must be a SEQUENCE { accessMethod, accessLocation } (RFC 5280 sec. 4.2.2.1)");
+            throw ns.E(C, "AccessDescription must be a SEQUENCE { accessMethod, accessLocation } (" + clause + ")");
           }
           var method;
           try {
@@ -11193,6 +11411,33 @@ var require_schema_pkix = __commonJS({
           var loc = schema.walk(GN, d.children[1], ns);
           return { accessMethod: method, accessLocation: { tag: loc.tagNumber, value: loc.value } };
         });
+      }
+      function authorityInfoAccess(buf) {
+        return accessDescriptions(buf, "AuthorityInfoAccessSyntax", "RFC 5280 sec. 4.2.2.1");
+      }
+      function subjectInfoAccess(buf) {
+        return accessDescriptions(buf, "SubjectInfoAccessSyntax", "RFC 5280 sec. 4.2.2.2");
+      }
+      function subjectDirectoryAttributes(buf) {
+        var C = ns.prefix + "/bad-extension-value";
+        var kids = seqChildren(buf, C, "SubjectDirectoryAttributes");
+        if (kids.length < 1) throw ns.E(C, "SubjectDirectoryAttributes must contain at least one Attribute (RFC 5280 sec. 4.2.1.8, SIZE(1..MAX))");
+        var A = attribute(ns);
+        return _map(kids, function(k) {
+          try {
+            return schema.walk(A, k, ns).result;
+          } catch (e) {
+            throw ns.E(C, "SubjectDirectoryAttributes member must be an Attribute SEQUENCE { type, values } (RFC 5280 sec. 4.2.1.8)", e);
+          }
+        });
+      }
+      function ocspNoCheck(buf) {
+        var C = ns.prefix + "/bad-extension-value";
+        var n = decodeTop(buf, C, "OCSPNoCheck");
+        if (n.tagClass !== "universal" || n.tagNumber !== _T.NULL || n.length !== 0) {
+          throw ns.E(C, "the ocspNoCheck extension value SHALL be NULL (RFC 6960 sec. 4.2.2.2.1)");
+        }
+        return null;
       }
       function extKeyUsage(buf) {
         var C = ns.prefix + "/bad-extension-value";
@@ -11497,6 +11742,9 @@ var require_schema_pkix = __commonJS({
       byOid[O("cRLDistributionPoints")] = crlDistributionPoints;
       byOid[O("freshestCRL")] = crlDistributionPoints;
       byOid[O("authorityInfoAccess")] = authorityInfoAccess;
+      byOid[O("subjectInfoAccess")] = subjectInfoAccess;
+      byOid[O("subjectDirectoryAttributes")] = subjectDirectoryAttributes;
+      byOid[O("ocspNoCheck")] = ocspNoCheck;
       byOid[O("msCertificateTemplate")] = msCertificateTemplate;
       byOid[O("msEnrollCertType")] = msEnrollCertType;
       byOid[O("msCaVersion")] = msCaVersion;
@@ -11711,6 +11959,7 @@ var require_schema_pkix = __commonJS({
       generalNames,
       distributionPointName,
       issuingDistributionPoint,
+      decodeIssuingDistributionPointValue,
       keyUsageOf,
       extKeyUsageOf,
       assertsPurpose,
@@ -11718,6 +11967,7 @@ var require_schema_pkix = __commonJS({
       utf8Text,
       rawNonEmptySequence,
       CRL_REASON_NAMES,
+      certFixedCriticality,
       certExtensionDecoders,
       _decodeHelpers,
       attribute,
@@ -13912,11 +14162,42 @@ var require_schema_crl = __commonJS({
       var pos = tbs.children[i];
       return schema.isUniversalOneOf(pos, [TAGS.UTC_TIME, TAGS.GENERALIZED_TIME]);
     }
+    var ENTRY_EXTENSION_CRITICALITY_ROWS = [
+      ["reasonCode", false, "RFC 5280 sec. 5.3.1"],
+      ["invalidityDate", false, "RFC 5280 sec. 5.3.2"],
+      ["certificateIssuer", true, "RFC 5280 sec. 5.3.3"]
+    ];
+    function entryExtensionCriticality(oidRegistry) {
+      var table = intrinsic.create(null);
+      intrinsic.forEach(ENTRY_EXTENSION_CRITICALITY_ROWS, function(r) {
+        table[oidRegistry.byName(r[0])] = { critical: r[1], citation: r[2] };
+      });
+      return table;
+    }
+    var OID_CERTIFICATE_ISSUER = oid.byName("certificateIssuer");
+    var CERTIFICATE_ISSUER_NAMES = pkix.generalNames(NS, { code: "crl/bad-extension-value" });
+    function readEntryExtension(ext) {
+      if (ext.oid !== OID_CERTIFICATE_ISSUER) return decodeExt(ext);
+      var names;
+      try {
+        names = schema.walk(CERTIFICATE_ISSUER_NAMES, asn1.decode(ext.value), NS).result;
+      } catch (e) {
+        throw NS.E("crl/bad-extension-value", "malformed certificateIssuer extension value: " + (e && e.message || intrinsic.String(e)), e);
+      }
+      return { oid: ext.oid, name: ext.name, critical: ext.critical, value: names };
+    }
     module2.exports = {
       parse,
       pemDecode,
       pemEncode,
-      matches
+      matches,
+      /** @internal The reader this parser applies to a CRL entry extension (reasonCode, invalidityDate),
+       *  for a consumer that meets the same extension elsewhere: RFC 6960 sec. 4.4.5 carries every CRL
+       *  entry extension into an OCSP SingleResponse, and the linter reads it with this rather than a
+       *  second one. Not on the curated `pki.schema.crl` surface. */
+      decodeExtension: decodeExt,
+      entryExtensionCriticality,
+      readEntryExtension
     };
   }
 });
@@ -15657,6 +15938,7 @@ var require_schema_ocsp = __commonJS({
     var frameworkError = require_framework_error();
     var intrinsic = require_guard_intrinsic();
     var _hasOwn = intrinsic.hasOwn;
+    var _String = intrinsic.String;
     var OcspError = frameworkError.OcspError;
     var PemError = frameworkError.PemError;
     var NS = pkix.makeNS("ocsp", OcspError, oid);
@@ -15666,6 +15948,8 @@ var require_schema_ocsp = __commonJS({
     var VERSION = pkix.versionReader(NS, {});
     var OID_OCSP_BASIC = oid.byName("ocspBasic");
     var OID_OCSP_NONCE = oid.byName("ocspNonce");
+    var OID_OCSP_ARCHIVE_CUTOFF = oid.byName("ocspArchiveCutoff");
+    var OID_OCSP_CRL = oid.byName("ocspCrl");
     var STATUS_NAMES = constants.NAMES.OCSP_STATUS;
     var CRL_REASONS = pkix.CRL_REASON_NAMES;
     var GENERALIZED_TIME = pkix.generalizedTime(NS, { code: "ocsp/bad-time", message: "OCSP time must be a GeneralizedTime (RFC 6960)" });
@@ -15684,17 +15968,82 @@ var require_schema_ocsp = __commonJS({
     function certificateBytes() {
       return pkix.rawNonEmptySequence(NS, { code: "ocsp/bad-certs", message: "each certs element must be a non-empty Certificate SEQUENCE (RFC 6960 sec. 4.1.1/sec. 4.2.1)" });
     }
-    var GENERAL_NAME_RAW = pkix.generalName(NS, { code: "ocsp/bad-requestor-name" });
+    var GENERAL_NAME_RAW = pkix.generalName(NS, { code: "ocsp/bad-requestor-name", decodeValue: true });
     function _rawSignature(field) {
       var sig = field.value;
       if (sig.unusedBits !== 0) throw NS.E("ocsp/bad-signature", "an OCSP signature BIT STRING must be octet-aligned (0 unused bits)");
       return sig.bytes;
     }
     var CERTS = schema.seqOf(certificateBytes(), { assert: "sequence", code: "ocsp/bad-certs", what: "certs", max: constants.LIMITS.OCSP_MAX_CERTS, maxCode: "ocsp/too-many-certs" });
+    function _readArchiveCutoff(ext) {
+      var node;
+      try {
+        node = asn1.decode(ext.value);
+      } catch (e) {
+        throw NS.E("ocsp/bad-archive-cutoff", "the archiveCutoff extension value did not decode: " + (e && e.message || _String(e)), e);
+      }
+      if (!(node.tagClass === "universal" && node.tagNumber === asn1.TAGS.GENERALIZED_TIME)) {
+        throw NS.E("ocsp/bad-archive-cutoff", "the archiveCutoff extension value must be a GeneralizedTime (RFC 6960 sec. 4.4.4)");
+      }
+      try {
+        return asn1.read.time(node);
+      } catch (e) {
+        throw NS.E("ocsp/bad-archive-cutoff", "the archiveCutoff GeneralizedTime is malformed", e);
+      }
+    }
+    function _readCrlId(ext) {
+      var C = "ocsp/bad-crl-id";
+      var node;
+      try {
+        node = asn1.decode(ext.value);
+      } catch (e) {
+        throw NS.E(C, "the CRL references extension value did not decode: " + (e && e.message || _String(e)), e);
+      }
+      if (!(node.tagClass === "universal" && node.tagNumber === asn1.TAGS.SEQUENCE && node.children)) {
+        throw NS.E(C, "CrlID must be a SEQUENCE (RFC 6960 sec. 4.4.2)");
+      }
+      var out = { crlUrl: null, crlNum: null, crlTime: null }, last = -1;
+      for (var i = 0; i < node.children.length; i++) {
+        var k = node.children[i];
+        if (k.tagClass !== "context" || !k.constructed || !k.children || k.children.length !== 1) {
+          throw NS.E(C, "each CrlID member must be one EXPLICIT [0], [1] or [2] tag (RFC 6960 sec. 4.4.2)");
+        }
+        if (k.tagNumber <= last) throw NS.E(C, "CrlID members must appear at most once, in tag order");
+        last = k.tagNumber;
+        var inner = k.children[0];
+        try {
+          if (k.tagNumber === 0) {
+            if (inner.tagClass !== "universal" || inner.tagNumber !== asn1.TAGS.IA5_STRING) throw NS.E(C, "crlUrl must be an IA5String");
+            out.crlUrl = asn1.read.string(inner);
+          } else if (k.tagNumber === 1) {
+            if (inner.tagClass !== "universal" || inner.tagNumber !== asn1.TAGS.INTEGER) throw NS.E(C, "crlNum must be an INTEGER");
+            out.crlNum = asn1.read.integer(inner);
+            if (out.crlNum < 0n) throw NS.E(C, "crlNum must be non-negative (it is a cRLNumber, RFC 5280 sec. 5.2.3)");
+          } else if (k.tagNumber === 2) {
+            if (inner.tagClass !== "universal" || inner.tagNumber !== asn1.TAGS.GENERALIZED_TIME) throw NS.E(C, "crlTime must be a GeneralizedTime");
+            out.crlTime = asn1.read.time(inner);
+          } else {
+            throw NS.E(C, "CrlID has no member tagged [" + k.tagNumber + "] (RFC 6960 sec. 4.4.2)");
+          }
+        } catch (e) {
+          if (e && e.code === C) throw e;
+          throw NS.E(C, "CrlID member [" + k.tagNumber + "] is malformed", e);
+        }
+      }
+      return out;
+    }
     function _validateOcspExtensions(list) {
       if (!list) return list;
       for (var i = 0; i < list.length; i++) {
         var ext = list[i];
+        if (ext.oid === OID_OCSP_ARCHIVE_CUTOFF) {
+          ext.archiveCutoff = _readArchiveCutoff(ext);
+          continue;
+        }
+        if (ext.oid === OID_OCSP_CRL) {
+          ext.crlReferences = _readCrlId(ext);
+          continue;
+        }
         if (ext.oid !== OID_OCSP_NONCE) continue;
         var node;
         try {
@@ -15840,7 +16189,8 @@ var require_schema_ocsp = __commonJS({
           signature: _rawSignature(m.fields.signature),
           certs: m.fields.certs.present ? m.fields.certs.value.items.map(function(it) {
             return it.value;
-          }) : []
+          }) : [],
+          certsPresent: m.fields.certs.present
         };
       }
     });
@@ -15943,7 +16293,7 @@ var require_schema_ocsp = __commonJS({
         var rn = m.fields.requestorName;
         return {
           version: m.fields.version.value,
-          requestorName: rn.present ? { bytes: rn.value.bytes, tagClass: rn.value.tagClass, tagNumber: rn.value.tagNumber } : null,
+          requestorName: rn.present ? { bytes: rn.value.bytes, tagClass: rn.value.tagClass, tagNumber: rn.value.tagNumber, value: rn.value.value } : null,
           requestList: m.fields.requestList.value.items.map(function(it) {
             return it.value.result;
           }),
@@ -16005,8 +16355,35 @@ var require_schema_ocsp = __commonJS({
       pemDecode,
       pemEncode,
       matchesRequest,
-      matchesResponse
+      matchesResponse,
+      /** @internal Reads a list of pre-encoded Extension DER the way this parser reads a SingleResponse's
+       *  singleExtensions, shared with pki.ocsp.sign so an entry the signer emits is one the parser
+       *  reads. Throws the parser's own ocsp/* code for a malformed entry. */
+      readSingleExtensionsDer: function(derList) {
+        var node;
+        try {
+          node = asn1.decode(asn1.build.sequence(intrinsic.map(derList, function(d) {
+            return asn1.build.raw(d);
+          })));
+        } catch (e) {
+          throw NS.E("ocsp/bad-single-response", "a pre-encoded singleExtension is not DER", e);
+        }
+        return _validateOcspExtensions(schema.walk(EXTENSIONS, node, NS).result);
+      },
+      extensionPlacement
     };
+    var REQUEST_ONLY_EXTENSION_ROWS = [["ocspResponse", "RFC 6960 4.4.3"], ["ocspServiceLocator", "RFC 6960 4.4.6"], ["ocspPrefSigAlgs", "RFC 6960 4.4.7"]];
+    var RESPONSE_ONLY_EXTENSION_ROWS = [["ocspExtendedRevoke", "RFC 6960 4.4.8"], ["ocspNonce", "RFC 9654 2.1"]];
+    function extensionPlacement(oidRegistry) {
+      var out = { requestOnly: intrinsic.create(null), responseOnly: intrinsic.create(null) };
+      intrinsic.forEach(REQUEST_ONLY_EXTENSION_ROWS, function(r) {
+        out.requestOnly[oidRegistry.byName(r[0])] = r[1];
+      });
+      intrinsic.forEach(RESPONSE_ONLY_EXTENSION_ROWS, function(r) {
+        out.responseOnly[oidRegistry.byName(r[0])] = r[1];
+      });
+      return out;
+    }
   }
 });
 
@@ -18420,6 +18797,10 @@ var require_schema_attrcert = __commonJS({
     _AC_EXT_DECODERS[_Oav("noRevAvail")] = _noRevAvail;
     _AC_EXT_DECODERS[_Oav("aaControls")] = _aaControls;
     _AC_EXT_DECODERS[_Oav("acProxying")] = _acProxying;
+    var _CERT_EXT_DECODERS = pkix.certExtensionDecoders(NS).byOid;
+    _AC_EXT_DECODERS[_Oav("authorityKeyIdentifier")] = _CERT_EXT_DECODERS[_Oav("authorityKeyIdentifier")];
+    _AC_EXT_DECODERS[_Oav("authorityInfoAccess")] = _CERT_EXT_DECODERS[_Oav("authorityInfoAccess")];
+    _AC_EXT_DECODERS[_Oav("cRLDistributionPoints")] = _CERT_EXT_DECODERS[_Oav("cRLDistributionPoints")];
     function validateAttributeValue(type, valueDer) {
       var dec = _ATTR_VALUE_DECODERS[type];
       return dec ? dec(valueDer) : null;
@@ -19809,7 +20190,6 @@ var require_ocsp_verify = __commonJS({
     function makeOcspVerify(deps) {
       var verifyWithSpki = deps.verifyWithSpki;
       var decodeExt = deps.decodeExt;
-      var findExt = deps.findExt;
       var unrecognizedCriticalExtension = deps.unrecognizedCriticalExtension;
       var validateCriticalExtensionStructure = deps.validateCriticalExtensionStructure;
       var compositeKeyUsageCheck = deps.compositeKeyUsageCheck;
@@ -19899,7 +20279,13 @@ var require_ocsp_verify = __commonJS({
           if (ku && ku.value.digitalSignature !== true) continue;
           if (unrecognizedCriticalExtension(rc, false)) continue;
           if (validateCriticalExtensionStructure(rc)) continue;
-          if (!findExt(rc, OID_OCSP_NOCHECK)) continue;
+          var noCheck;
+          try {
+            noCheck = decodeExt(rc, OID_OCSP_NOCHECK);
+          } catch (_e) {
+            continue;
+          }
+          if (!noCheck) continue;
           if (compositeSig.COMPOSITE_ALGS[rc.subjectPublicKeyInfo.algorithm.oid] && !compositeKeyUsageCheck(rc).ok) continue;
           return ocspResponderSpki(rc, issuer);
         }
@@ -20348,6 +20734,8 @@ var require_pki_build = __commonJS({
     var _bufferFrom = intrinsic.bufferFrom;
     var _bufferEquals = intrinsic.bufferEquals;
     var oid = require_oid();
+    var C = require_constants();
+    var pkix = require_schema_pkix();
     var ipUtils = require_ip_utils();
     var _packIpLiteral = ipUtils.packIpLiteral;
     var nodeCrypto = require("crypto");
@@ -20360,6 +20748,9 @@ var require_pki_build = __commonJS({
     var _objectKeys = intrinsic.keys;
     var _isBufferChk = intrinsic.isBuffer;
     var _stringify = intrinsic.stringify;
+    var _mapIntrinsic = intrinsic.map;
+    var _bufferConcatIntrinsic = intrinsic.bufferConcat;
+    var OID_SKI = oid.byName("subjectKeyIdentifier");
     function _isAlphaCode(c) {
       return c >= 65 && c <= 90 || c >= 97 && c <= 122;
     }
@@ -20451,14 +20842,14 @@ var require_pki_build = __commonJS({
       }
       return true;
     }
-    function _validUriHost(s, from, to) {
+    function _validUriHost(s, from, to, singleLabel) {
       if (to <= from) return false;
       var host = _sliceStr(s, from, to), len = host.length;
       if (_looksLikeIPv4Shape(host)) return _packIpLiteral(host) !== null;
       var end = _charCodeAt(host, len - 1) === 46 ? len - 1 : len;
       if (end > 253) return false;
       var firstDot = _stringIndexOf(host, ".", 0);
-      if (firstDot === -1 || firstDot >= end) return false;
+      if (!singleLabel && (firstDot === -1 || firstDot >= end)) return false;
       return _labelsValid(host, 0, len, _isHostLabelRange, true);
     }
     function _validUriIp6Host(s, from, to) {
@@ -20466,12 +20857,12 @@ var require_pki_build = __commonJS({
       var packed = _packIpLiteral(_sliceStr(s, from, to));
       return packed !== null && intrinsic.sizeOf(packed) === 16;
     }
-    function _validUriAuthority(s, from, to) {
+    function _validUriAuthority(s, from, to, shape) {
       var i, c, at = -1;
       for (i = from; i < to; i += 1) {
         c = _charCodeAt(s, i);
         if (c === 64) {
-          if (at !== -1) return false;
+          if (at !== -1 || !shape.userinfo) return false;
           at = i;
         }
       }
@@ -20503,7 +20894,8 @@ var require_pki_build = __commonJS({
         }
       }
       var hostEnd = colon === -1 ? to : colon;
-      if (!_validUriHost(s, hostStart, hostEnd)) return false;
+      var portAlone = hostEnd === hostStart && colon !== -1 && shape.emptyHost;
+      if (!portAlone && !_validUriHost(s, hostStart, hostEnd, shape.singleLabel)) return false;
       if (colon !== -1) {
         for (i = colon + 1; i < to; i += 1) {
           if (!_isDigitCode(_charCodeAt(s, i))) return false;
@@ -20511,7 +20903,19 @@ var require_pki_build = __commonJS({
       }
       return true;
     }
+    var _URI_SHAPE = intrinsic.assign(intrinsic.create(null), { singleLabel: false, userinfo: true, emptyAuthority: false, emptyHost: false, queryNeedsPath: false, fragment: true });
+    var _HTTP_URL_SHAPE = intrinsic.assign(intrinsic.create(null), { singleLabel: true, userinfo: false, emptyAuthority: false, emptyHost: false, queryNeedsPath: true, fragment: false });
+    var _LDAP_URL_SHAPE = intrinsic.assign(intrinsic.create(null), { singleLabel: true, userinfo: false, emptyAuthority: true, emptyHost: true, queryNeedsPath: false, fragment: false });
     function _looksLikeUri(s) {
+      return _uriShape(s, _URI_SHAPE);
+    }
+    function isHttpUrl(s) {
+      return typeof s === "string" && guard.name.uriSchemeIs(s, "http") && _uriShape(s, _HTTP_URL_SHAPE);
+    }
+    function isLdapUrl(s) {
+      return typeof s === "string" && guard.name.uriSchemeIs(s, "ldap") && _uriShape(s, _LDAP_URL_SHAPE);
+    }
+    function _uriShape(s, shape) {
       var n = s.length, i, c;
       if (n === 0 || !_isAlphaCode(_charCodeAt(s, 0))) return false;
       i = 1;
@@ -20530,8 +20934,10 @@ var require_pki_build = __commonJS({
           break;
         }
       }
-      if (authEnd === authStart) return false;
-      if (!_validUriAuthority(s, authStart, authEnd)) return false;
+      if (authEnd === authStart) {
+        if (!shape.emptyAuthority) return false;
+      } else if (!_validUriAuthority(s, authStart, authEnd, shape)) return false;
+      if (authEnd < n && shape.queryNeedsPath && _charCodeAt(s, authEnd) === 63) return false;
       var sawHash = false;
       i = authEnd;
       while (i < n) {
@@ -20542,7 +20948,7 @@ var require_pki_build = __commonJS({
           continue;
         }
         if (c === 35) {
-          if (sawHash) return false;
+          if (sawHash || !shape.fragment) return false;
           sawHash = true;
         }
         if (!_isUriByte(c)) return false;
@@ -20651,6 +21057,50 @@ var require_pki_build = __commonJS({
       encipherOnly: 7,
       decipherOnly: 8
     });
+    var REASON_FLAG_BIT = intrinsic.assign(intrinsic.create(null), {
+      keyCompromise: 1,
+      cACompromise: 2,
+      affiliationChanged: 3,
+      superseded: 4,
+      cessationOfOperation: 5,
+      certificateHold: 6,
+      privilegeWithdrawn: 7,
+      aACompromise: 8
+    });
+    var AIA_KEYS = intrinsic.assign(intrinsic.create(null), { accessMethod: 1, accessLocation: 1 });
+    var PC_KEYS = intrinsic.assign(intrinsic.create(null), { requireExplicitPolicy: 1, inhibitPolicyMapping: 1 });
+    var PM_KEYS = intrinsic.assign(intrinsic.create(null), { issuerDomainPolicy: 1, subjectDomainPolicy: 1 });
+    var QC_STATEMENT_KEYS = intrinsic.assign(intrinsic.create(null), { statementId: 1, info: 1 });
+    var POLICY_ENTRY_KEYS = intrinsic.assign(intrinsic.create(null), { oid: 1, cps: 1, userNotice: 1 });
+    var USER_NOTICE_KEYS = intrinsic.assign(intrinsic.create(null), { noticeRef: 1, explicitText: 1 });
+    var NOTICE_REF_KEYS = intrinsic.assign(intrinsic.create(null), { organization: 1, noticeNumbers: 1 });
+    var AKI_KEYS = intrinsic.assign(intrinsic.create(null), { keyIdentifier: 1, authorityCertIssuer: 1, authorityCertSerialNumber: 1 });
+    var MS_TEMPLATE_KEYS = intrinsic.assign(intrinsic.create(null), { templateID: 1, templateMajorVersion: 1, templateMinorVersion: 1 });
+    var MS_CA_VERSION_KEYS = intrinsic.assign(intrinsic.create(null), { caKeyIndex: 1, certIndex: 1 });
+    var SDA_ATTR_KEYS = intrinsic.assign(intrinsic.create(null), { type: 1, values: 1 });
+    var QC_INFO_KEYS = intrinsic.create(null);
+    [
+      ["qcType", { types: 1 }],
+      ["qcIdentMethod", { methods: 1 }],
+      ["qcCClegislation", { countries: 1 }],
+      ["qcQSCDlegislation", { countries: 1 }],
+      ["qcRetentionPeriod", { years: 1 }],
+      ["qcLimitValue", { currency: 1, amount: 1, exponent: 1 }],
+      ["qcPDS", { locations: 1 }],
+      ["qcsPkixQCSyntaxV1", { semanticsIdentifier: 1, nameRegistrationAuthorities: 1 }],
+      ["qcsPkixQCSyntaxV2", { semanticsIdentifier: 1, nameRegistrationAuthorities: 1 }]
+    ].forEach(function(r) {
+      QC_INFO_KEYS[oid.byName(r[0])] = intrinsic.assign(intrinsic.create(null), r[1]);
+    });
+    var QC_PDS_LOCATION_KEYS = intrinsic.assign(intrinsic.create(null), { url: 1, language: 1 });
+    var DP_KEYS = intrinsic.assign(intrinsic.create(null), { fullName: 1, reasons: 1, cRLIssuer: 1 });
+    function randomSerial() {
+      for (; ; ) {
+        var rnd = nodeCrypto.randomBytes(20);
+        rnd[0] &= 127;
+        if (rnd[0] !== 0) return BigInt("0x" + rnd.toString("hex"));
+      }
+    }
     function reqDenseArrayImpl(list, what, E, code) {
       if (!_isArray(list)) throw E(code, what + " must be an array");
       var n = list.length;
@@ -20662,6 +21112,20 @@ var require_pki_build = __commonJS({
         intrinsic.defineProperty(out, i, { value: v, writable: true, enumerable: true, configurable: true });
       }
       return out;
+    }
+    var CERT_FIXED_CRITICALITY = pkix.certFixedCriticality(oid);
+    var NC_KEYS = intrinsic.assign(intrinsic.create(null), { permitted: 1, excluded: 1 });
+    var NC_FORM_TAG = intrinsic.assign(intrinsic.create(null), {
+      rfc822Name: 1,
+      dNSName: 2,
+      directoryName: 4,
+      uniformResourceIdentifier: 6,
+      uri: 6,
+      iPAddress: 7
+    });
+    function _forEachNcSide(fn) {
+      fn("permitted", 0);
+      fn("excluded", 1);
     }
     function makeBuilder(ctx) {
       var ErrorClass = ctx.ErrorClass, O = ctx.O, NS = ctx.NS;
@@ -20676,7 +21140,7 @@ var require_pki_build = __commonJS({
         return new ErrorClass(fullCode, message, cause);
       }
       function timeDer(date, which) {
-        guard.time.assertValid(date, rawErr, code("bad-input"), which);
+        guard.time.assertEncodable(date, rawErr, code("bad-input"), which);
         var y = date.getUTCFullYear();
         return y >= 1950 && y <= 2049 ? b.utcTime(date) : b.generalizedTime(date);
       }
@@ -20717,7 +21181,7 @@ var require_pki_build = __commonJS({
         }
         if (typeof spec === "string") spec = [{ commonName: spec }];
         if (!_isArray(spec)) throw E("bad-name", "a name must be a string, an array of RDNs, or raw Name DER");
-        return b.sequence(spec.map(encodeRdn));
+        return b.sequence(reqDenseArray(spec, "a name's RDN array").map(encodeRdn));
       }
       function assertValidNameDer(der) {
         var node;
@@ -20810,6 +21274,9 @@ var require_pki_build = __commonJS({
         return b.namedBitString(positions);
       }
       function _resolveOid(n, label) {
+        if (typeof n !== "string" || !n.length) {
+          throw E("bad-input", "unknown " + label + " " + guard.text.showValue(n) + " (expected a registered name or a dotted-decimal OID)");
+        }
         var dotted = O(n);
         if (dotted != null) return dotted;
         if (typeof n === "string" && _isDottedOid(n)) {
@@ -20847,8 +21314,20 @@ var require_pki_build = __commonJS({
       function extSki(keyid) {
         return b.octetString(keyid);
       }
-      function extAki(keyid) {
-        return b.sequence([b.contextPrimitive(0, keyid)]);
+      function extAki(keyid, issuerNames, serial) {
+        if (issuerNames == null !== (serial == null)) {
+          throw E("bad-input", "authorityKeyIdentifier authorityCertIssuer and authorityCertSerialNumber must both be present or both absent (RFC 5280 sec. 4.2.1.1)");
+        }
+        var fields = [];
+        if (keyid != null) guard.list.append(fields, b.contextPrimitive(0, keyid));
+        if (issuerNames != null) {
+          guard.list.append(fields, encodeGeneralNames(reqDenseArray(issuerNames, "authorityKeyIdentifier authorityCertIssuer"), 1));
+          guard.list.append(fields, b.contextPrimitive(2, asn1.decode(serialInteger(serial)).content));
+        }
+        if (!fields.length) {
+          throw E("bad-input", "authorityKeyIdentifier must name a keyIdentifier, or an authorityCertIssuer with its authorityCertSerialNumber");
+        }
+        return b.sequence(fields);
       }
       function encodeGeneralNames(entries, implicitTag) {
         if (!_isArray(entries) || !entries.length) throw E("bad-input", "a GeneralNames must carry at least one GeneralName");
@@ -20859,15 +21338,484 @@ var require_pki_build = __commonJS({
       function extSan(entries) {
         return encodeGeneralNames(entries);
       }
+      function _alphaCode(s, n, at, what) {
+        var ok = typeof s === "string" && s.length === n;
+        for (var i = 0; ok && i < n; i++) {
+          var c = _charCodeAt(s, i);
+          ok = c >= 65 && c <= 90 || c >= 97 && c <= 122;
+        }
+        if (!ok) throw E("bad-input", at + " " + guard.text.showValue(s) + " must be " + what);
+        return b.printable(s);
+      }
+      function _qcCountrySeq(info, who) {
+        if (!info || !_isArray(info.countries) || !info.countries.length) {
+          throw E("bad-input", who + " requires a non-empty countries array of 2-letter ISO 3166-1 codes");
+        }
+        return b.sequence(_mapIntrinsic(reqDenseArray(info.countries, who + " countries"), function(c) {
+          return _alphaCode(c, 2, who + " country", "a 2-letter ISO 3166-1 code");
+        }));
+      }
+      function _qcOidSeqOf(list, who) {
+        if (!_isArray(list) || !list.length) throw E("bad-input", who + " requires a non-empty array of object identifiers");
+        return b.sequence(_mapIntrinsic(reqDenseArray(list, who), function(n) {
+          return b.oid(_resolveOid(n, who + " entry"));
+        }));
+      }
+      var QC_INFO = intrinsic.create(null);
+      QC_INFO[oid.byName("qcCompliance")] = null;
+      QC_INFO[oid.byName("qcSSCD")] = null;
+      QC_INFO[oid.byName("qcType")] = function(info, who) {
+        return _qcOidSeqOf(info && info.types, who + " types");
+      };
+      QC_INFO[oid.byName("qcIdentMethod")] = function(info, who) {
+        return _qcOidSeqOf(info && info.methods, who + " methods");
+      };
+      QC_INFO[oid.byName("qcCClegislation")] = _qcCountrySeq;
+      QC_INFO[oid.byName("qcQSCDlegislation")] = _qcCountrySeq;
+      QC_INFO[oid.byName("qcRetentionPeriod")] = function(info, who) {
+        if (!info || info.years == null) throw E("bad-input", who + " requires a years count");
+        return b.integer(skipCount(info.years, who + " years"));
+      };
+      QC_INFO[oid.byName("qcLimitValue")] = function(info, who) {
+        if (!info || info.amount == null || info.exponent == null || info.currency == null) {
+          throw E("bad-input", who + " requires currency, amount and exponent (a MonetaryValue)");
+        }
+        var cur;
+        if (typeof info.currency === "string") {
+          cur = _alphaCode(info.currency, 3, who + " alphabetic currency", "a 3-letter ISO 4217 code");
+        } else {
+          cur = b.integer(guard.range.int(
+            guard.range.authoredInteger(info.currency, rawErr, ctx.prefix + "/bad-input", who + " currency"),
+            1n,
+            999n,
+            rawErr,
+            ctx.prefix + "/bad-input",
+            who + " numeric currency (ISO 4217, 1..999)"
+          ));
+        }
+        var code2 = ctx.prefix + "/bad-input";
+        var amount = guard.range.int(
+          guard.range.authoredInteger(info.amount, rawErr, code2, who + " amount"),
+          0n,
+          9007199254740991n,
+          rawErr,
+          code2,
+          who + " amount"
+        );
+        var exponent = guard.range.int(
+          guard.range.authoredInteger(info.exponent, rawErr, code2, who + " exponent"),
+          -9007199254740991n,
+          9007199254740991n,
+          rawErr,
+          code2,
+          who + " exponent"
+        );
+        return b.sequence([cur, b.integer(amount), b.integer(exponent)]);
+      };
+      QC_INFO[oid.byName("qcPDS")] = function(info, who) {
+        if (!info || !_isArray(info.locations) || !info.locations.length) {
+          throw E("bad-input", who + " requires a non-empty locations array of { url, language }");
+        }
+        return b.sequence(_mapIntrinsic(reqDenseArray(info.locations, who + " locations"), function(loc, i) {
+          var at = who + " location " + i;
+          if (!loc || typeof loc !== "object" || _isArray(loc) || _isBufferChk(loc)) throw E("bad-input", at + " must be an object { url, language }");
+          guard.identifier.assertKnownKeys(loc, QC_PDS_LOCATION_KEYS, E, "bad-input", function(k) {
+            return "unknown " + at + " field " + _stringify(k) + " (accepted: url, language)";
+          });
+          if (typeof loc.url !== "string" || !loc.url.length) throw E("bad-input", at + " requires a url");
+          return b.sequence([b.ia5(loc.url), _alphaCode(loc.language, 2, at + " language", "a 2-letter ISO 639-1 code")]);
+        }));
+      };
+      function _qcSemanticsInfo(info, who) {
+        if (info == null) return null;
+        if (info.semanticsIdentifier == null && info.nameRegistrationAuthorities == null) {
+          throw E("bad-input", who + " requires a semanticsIdentifier, nameRegistrationAuthorities, or both (RFC 3739 sec. 3.2.6.1)");
+        }
+        var fields = [];
+        if (info.semanticsIdentifier != null) guard.list.append(fields, b.oid(_resolveOid(info.semanticsIdentifier, who + " semanticsIdentifier")));
+        if (info.nameRegistrationAuthorities != null) {
+          guard.list.append(fields, encodeGeneralNames(reqDenseArray(info.nameRegistrationAuthorities, who + " nameRegistrationAuthorities")));
+        }
+        return b.sequence(fields);
+      }
+      QC_INFO[oid.byName("qcsPkixQCSyntaxV1")] = _qcSemanticsInfo;
+      QC_INFO[oid.byName("qcsPkixQCSyntaxV2")] = _qcSemanticsInfo;
+      function extQcStatements(list) {
+        if (!_isArray(list) || !list.length) {
+          throw E("bad-input", "qcStatements must name at least one statement (RFC 3739 sec. 3.2.6)");
+        }
+        var dense = reqDenseArray(list, "qcStatements");
+        return b.sequence(_mapIntrinsic(dense, function(st, i) {
+          var who = "qcStatements entry " + i;
+          if (!st || typeof st !== "object" || _isArray(st) || _isBufferChk(st)) {
+            throw E("bad-input", who + " must be an object { statementId, info? }");
+          }
+          guard.identifier.assertKnownKeys(st, QC_STATEMENT_KEYS, E, "bad-input", function(k) {
+            return "unknown " + who + " field " + _stringify(k) + " (accepted: statementId, info)";
+          });
+          var id = _resolveOid(st.statementId, who + " statementId");
+          var known = intrinsic.hasOwn(QC_INFO, id);
+          if (guard.bytes.isByteSource(st.info)) {
+            if (known) {
+              throw E("bad-input", who + " statementId " + guard.text.showValue(st.statementId) + " has a known statementInfo syntax, so its info is named as fields rather than pre-encoded DER");
+            }
+            return b.sequence([b.oid(id), b.raw(guard.der.tlv(
+              guard.bytes.source(st.info, ErrorClass, ctx.prefix + "/bad-input", who + " info"),
+              rawErr,
+              ctx.prefix + "/bad-input",
+              who + " pre-encoded info"
+            ))]);
+          }
+          if (!known) {
+            if (st.info == null) return b.sequence([b.oid(id)]);
+            throw E("bad-input", who + " statementId " + guard.text.showValue(st.statementId) + " has no known statementInfo syntax; supply the info as pre-encoded DER");
+          }
+          var encode = QC_INFO[id];
+          if (encode === null) {
+            if (st.info != null) throw E("bad-input", who + " statement carries no statementInfo, so info must be omitted");
+            return b.sequence([b.oid(id)]);
+          }
+          var infoKeys = QC_INFO_KEYS[id];
+          if (infoKeys && st.info != null && typeof st.info === "object" && !_isArray(st.info) && !_isBufferChk(st.info)) {
+            guard.identifier.assertKnownKeys(st.info, infoKeys, E, "bad-input", function(k) {
+              return "unknown " + who + " info field " + _stringify(k);
+            });
+          }
+          var value;
+          try {
+            value = encode(st.info, who);
+          } catch (e) {
+            if (e instanceof ErrorClass) throw e;
+            throw E("bad-input", who + " statementInfo has characters invalid for its string type", e);
+          }
+          return value === null ? b.sequence([b.oid(id)]) : b.sequence([b.oid(id), value]);
+        }));
+      }
+      function skipCount(v, label) {
+        var code2 = ctx.prefix + "/bad-input";
+        return guard.range.uint31(guard.range.authoredInteger(v, rawErr, code2, label), rawErr, code2, label);
+      }
+      function extPolicyConstraints(spec) {
+        if (!spec || typeof spec !== "object" || _isArray(spec) || _isBufferChk(spec)) {
+          throw E("bad-input", "policyConstraints must be an object naming requireExplicitPolicy and/or inhibitPolicyMapping");
+        }
+        guard.identifier.assertKnownKeys(spec, PC_KEYS, E, "bad-input", function(k) {
+          return "unknown policyConstraints field " + _stringify(k) + " (accepted: requireExplicitPolicy, inhibitPolicyMapping)";
+        });
+        var fields = [];
+        if (spec.requireExplicitPolicy != null) {
+          guard.list.append(fields, b.implicit(0, b.integer(skipCount(spec.requireExplicitPolicy, "policyConstraints.requireExplicitPolicy"))));
+        }
+        if (spec.inhibitPolicyMapping != null) {
+          guard.list.append(fields, b.implicit(1, b.integer(skipCount(spec.inhibitPolicyMapping, "policyConstraints.inhibitPolicyMapping"))));
+        }
+        if (!fields.length) {
+          throw E("bad-input", "policyConstraints must name requireExplicitPolicy or inhibitPolicyMapping (RFC 5280 sec. 4.2.1.11 forbids an empty sequence)");
+        }
+        return b.sequence(fields);
+      }
+      function extInhibitAnyPolicy(v) {
+        return b.integer(skipCount(v, "inhibitAnyPolicy"));
+      }
+      function extPolicyMappings(list) {
+        if (!_isArray(list) || !list.length) {
+          throw E("bad-input", "policyMappings must name at least one { issuerDomainPolicy, subjectDomainPolicy } (RFC 5280 sec. 4.2.1.5)");
+        }
+        var anyPolicy = O("anyPolicy");
+        var dense = reqDenseArray(list, "policyMappings");
+        return b.sequence(_mapIntrinsic(dense, function(m, i) {
+          var who = "policyMappings entry " + i;
+          if (!m || typeof m !== "object" || _isArray(m) || _isBufferChk(m)) {
+            throw E("bad-input", who + " must be an object { issuerDomainPolicy, subjectDomainPolicy }");
+          }
+          guard.identifier.assertKnownKeys(m, PM_KEYS, E, "bad-input", function(k) {
+            return "unknown " + who + " field " + _stringify(k) + " (accepted: issuerDomainPolicy, subjectDomainPolicy)";
+          });
+          if (m.issuerDomainPolicy == null || m.subjectDomainPolicy == null) {
+            throw E("bad-input", who + " requires both issuerDomainPolicy and subjectDomainPolicy");
+          }
+          var idp = _resolveOid(m.issuerDomainPolicy, who + " issuerDomainPolicy");
+          var sdp = _resolveOid(m.subjectDomainPolicy, who + " subjectDomainPolicy");
+          if (idp === anyPolicy || sdp === anyPolicy) {
+            throw E("bad-input", who + " must not map to or from anyPolicy (RFC 5280 sec. 4.2.1.5)");
+          }
+          return b.sequence([b.oid(idp), b.oid(sdp)]);
+        }));
+      }
+      function extAccessDescriptions(list, label, clause) {
+        if (!_isArray(list) || !list.length) {
+          throw E("bad-input", label + " must name at least one { accessMethod, accessLocation } (" + clause + ")");
+        }
+        var dense = reqDenseArray(list, label);
+        return b.sequence(_mapIntrinsic(dense, function(d, i) {
+          var who = label + " entry " + i;
+          if (!d || typeof d !== "object" || _isArray(d) || _isBufferChk(d)) {
+            throw E("bad-input", who + " must be an object { accessMethod, accessLocation }");
+          }
+          guard.identifier.assertKnownKeys(d, AIA_KEYS, E, "bad-input", function(k) {
+            return "unknown " + who + " field " + _stringify(k) + " (accepted: accessMethod, accessLocation)";
+          });
+          if (d.accessLocation == null) throw E("bad-input", who + " requires an accessLocation GeneralName");
+          if (typeof d.accessMethod !== "string" || !d.accessMethod.length) {
+            throw E("bad-input", who + " requires an accessMethod naming a registered access method or a dotted-decimal OID");
+          }
+          return b.sequence([b.oid(_resolveOid(d.accessMethod, who + " accessMethod")), encodeGeneralName(d.accessLocation)]);
+        }));
+      }
+      function extAuthorityInfoAccess(list) {
+        return extAccessDescriptions(list, "authorityInfoAccess", "RFC 5280 sec. 4.2.2.1");
+      }
+      function extSubjectInfoAccess(list) {
+        return extAccessDescriptions(list, "subjectInfoAccess", "RFC 5280 sec. 4.2.2.2");
+      }
+      function extSubjectDirectoryAttributes(list) {
+        if (!_isArray(list) || !list.length) {
+          throw E("bad-input", "subjectDirectoryAttributes must name at least one { type, values } (RFC 5280 sec. 4.2.1.8)");
+        }
+        var dense = reqDenseArray(list, "subjectDirectoryAttributes");
+        return b.sequence(_mapIntrinsic(dense, function(a, i) {
+          var who = "subjectDirectoryAttributes entry " + i;
+          if (!a || typeof a !== "object" || _isArray(a) || _isBufferChk(a)) {
+            throw E("bad-input", who + " must be an object { type, values }");
+          }
+          guard.identifier.assertKnownKeys(a, SDA_ATTR_KEYS, E, "bad-input", function(k) {
+            return "unknown " + who + " field " + _stringify(k) + " (accepted: type, values)";
+          });
+          if (!_isArray(a.values) || !a.values.length) throw E("bad-input", who + " requires a non-empty values array of pre-encoded DER");
+          if (a.values.length > C.LIMITS.ATTRIBUTE_MAX_VALUES) {
+            throw E("bad-input", who + " carries " + a.values.length + " values, exceeding the " + C.LIMITS.ATTRIBUTE_MAX_VALUES + " an Attribute may hold");
+          }
+          var vals = _mapIntrinsic(reqDenseArray(a.values, who + " values"), function(v, j) {
+            return b.raw(guard.der.tlv(
+              guard.bytes.source(v, ErrorClass, ctx.prefix + "/bad-input", who + " value " + j),
+              rawErr,
+              ctx.prefix + "/bad-input",
+              who + " value " + j
+            ));
+          });
+          return b.sequence([b.oid(_resolveOid(a.type, who + " type")), b.set(vals)]);
+        }));
+      }
+      function distributionPoint(entry, what, idx) {
+        var who = what + " entry " + idx;
+        var spec = entry;
+        var isDpObject = !!entry && typeof entry === "object" && !_isArray(entry) && !_isBufferChk(entry) && guard.list.anyMatches(_objectKeys(entry), function(k) {
+          return DP_KEYS[k] === 1;
+        });
+        if (!isDpObject) spec = { fullName: [entry] };
+        guard.identifier.assertKnownKeys(spec, DP_KEYS, E, "bad-input", function(k) {
+          return "unknown " + who + " field " + _stringify(k) + " (accepted: fullName, reasons, cRLIssuer)";
+        });
+        if (spec.fullName == null && spec.cRLIssuer == null) {
+          throw E("bad-input", who + " must name a fullName or a cRLIssuer; a DistributionPoint must not consist of only the reasons field (RFC 5280 sec. 4.2.1.13)");
+        }
+        var fields = [];
+        if (spec.fullName != null) {
+          guard.list.append(fields, b.contextConstructed(0, encodeGeneralNames(reqDenseArray(spec.fullName, who + " fullName"), 0)));
+        }
+        if (spec.reasons != null) {
+          if (!_isArray(spec.reasons) || !spec.reasons.length) throw E("bad-input", who + " reasons must name at least one ReasonFlags bit");
+          var bits = _mapIntrinsic(reqDenseArray(spec.reasons, who + " reasons"), function(r) {
+            var bit = REASON_FLAG_BIT[guard.text.keyOf(r)];
+            if (bit == null) throw E("bad-input", who + " names an unknown CRL reason " + guard.text.showValue(r));
+            return bit;
+          });
+          guard.list.append(fields, b.implicit(1, b.namedBitString(bits)));
+        }
+        if (spec.cRLIssuer != null) {
+          var issuers = reqDenseArray(spec.cRLIssuer, who + " cRLIssuer");
+          var named = guard.list.anyMatches(issuers, function(e) {
+            if (!e || typeof e !== "object" || _isArray(e) || _isBufferChk(e) || e.directoryName == null) return false;
+            try {
+              return !isEmptyName(encodeName(e.directoryName));
+            } catch (_e) {
+              return false;
+            }
+          });
+          if (!named) {
+            throw E("bad-input", who + " cRLIssuer must name the CRL issuer as a non-empty directoryName (RFC 5280 sec. 4.2.1.13); a cRLIssuer carrying no usable directoryName matches no CRL issuer");
+          }
+          guard.list.append(fields, encodeGeneralNames(issuers, 2));
+        }
+        return b.sequence(fields);
+      }
+      function extCrlDistributionPoints(list, what) {
+        if (!_isArray(list) || !list.length) {
+          throw E("bad-input", what + " must name at least one distribution point (RFC 5280 sec. 4.2.1.13)");
+        }
+        var dense = reqDenseArray(list, what);
+        return b.sequence(_mapIntrinsic(dense, function(e, i) {
+          return distributionPoint(e, what, i);
+        }));
+      }
+      function constraintSubtree(entry, where, idx) {
+        var who = "nameConstraints." + where + " entry " + idx;
+        if (!entry || typeof entry !== "object" || _isArray(entry) || _isBufferChk(entry)) {
+          throw E("bad-input", who + " must be an object naming one GeneralName form; a bare string does not say which namespace is constrained");
+        }
+        var keys = _objectKeys(entry);
+        if (keys.length !== 1) throw E("bad-input", who + " must name exactly one GeneralName form, got " + keys.length);
+        var k = keys[0], v = entry[k];
+        var tag = NC_FORM_TAG[k];
+        if (tag == null) {
+          throw E("bad-input", who + " names an unsupported constraint form " + _stringify(k) + " (supported: rfc822Name, dNSName, directoryName, uniformResourceIdentifier, iPAddress)");
+        }
+        if (tag === 7) {
+          if (!guard.bytes.isByteSource(v)) throw E("bad-input", who + " iPAddress base must be a byte source");
+          var ip = guard.bytes.source(v, ErrorClass, ctx.prefix + "/bad-input", who + " iPAddress base");
+          if (ip.length !== 8 && ip.length !== 32) {
+            throw E("bad-input", who + " iPAddress base must be 8 octets (an IPv4 address and its mask) or 32 (IPv6), got " + ip.length);
+          }
+          return b.sequence([b.contextPrimitive(7, ip)]);
+        }
+        if (tag === 4) return b.sequence([b.explicit(4, encodeName(v))]);
+        if (typeof v !== "string") throw E("bad-input", who + " base must be a string for " + k);
+        var why = guard.name.constraintBaseRefusal(tag, v);
+        if (why !== null) throw E("bad-input", who + " base " + why);
+        return b.sequence([b.contextPrimitive(tag, ia5Content(v))]);
+      }
+      function extNameConstraints(spec) {
+        if (!spec || typeof spec !== "object" || _isArray(spec)) {
+          throw E("bad-input", "nameConstraints must be an object naming permitted and/or excluded subtrees");
+        }
+        guard.identifier.assertKnownKeys(spec, NC_KEYS, E, "bad-input", function(k) {
+          return "unknown nameConstraints field " + _stringify(k) + " (accepted: permitted, excluded)";
+        });
+        var kids = [];
+        _forEachNcSide(function(where, implicitTag) {
+          var list = spec[where];
+          if (list == null) return;
+          if (!_isArray(list) || !list.length) {
+            throw E("bad-input", "nameConstraints." + where + " must be a non-empty array of GeneralName-form objects");
+          }
+          var dense = reqDenseArray(list, "nameConstraints." + where);
+          var subs = _mapIntrinsic(dense, function(e, idx) {
+            return constraintSubtree(e, where, idx);
+          });
+          guard.list.append(kids, b.contextConstructed(implicitTag, _bufferConcatIntrinsic(subs)));
+        });
+        if (!kids.length) {
+          throw E("bad-input", "nameConstraints must name at least one of permitted or excluded (RFC 5280 sec. 4.2.1.10 forbids an empty sequence)");
+        }
+        return b.sequence(kids);
+      }
+      function displayText(v, who) {
+        if (typeof v !== "string") throw E("bad-input", who + " must be a string");
+        var chars = pkix.displayTextChars(v);
+        if (chars < 1 || chars > pkix.DISPLAY_TEXT_MAX) {
+          throw E("bad-input", who + " must be 1 to " + pkix.DISPLAY_TEXT_MAX + " characters (RFC 5280 sec. 4.2.1.4)");
+        }
+        for (var i = 0; i < v.length; i++) {
+          var c = _charCodeAt(v, i);
+          if (c <= 31 || c >= 127 && c <= 159) {
+            throw E("bad-input", who + " must not carry a control character (RFC 5280 sec. 4.2.1.4)");
+          }
+        }
+        try {
+          return b.utf8(v);
+        } catch (e) {
+          if (e instanceof ErrorClass) throw e;
+          throw E("bad-input", who + " must be text the UTF8String encoding can carry", e);
+        }
+      }
+      function userNoticeDer(notice, who) {
+        guard.identifier.assertKnownKeys(notice, USER_NOTICE_KEYS, E, "bad-input", function(k) {
+          return "unknown " + who + " field " + _stringify(k) + " (accepted: noticeRef, explicitText)";
+        });
+        var fields = [];
+        if (notice.noticeRef != null) {
+          var ref = notice.noticeRef;
+          if (typeof ref !== "object" || _isArray(ref) || _isBufferChk(ref)) throw E("bad-input", who + " noticeRef must be an object { organization, noticeNumbers }");
+          guard.identifier.assertKnownKeys(ref, NOTICE_REF_KEYS, E, "bad-input", function(k) {
+            return "unknown " + who + " noticeRef field " + _stringify(k) + " (accepted: organization, noticeNumbers)";
+          });
+          if (ref.organization == null) throw E("bad-input", who + " noticeRef requires an organization");
+          if (!_isArray(ref.noticeNumbers)) throw E("bad-input", who + " noticeRef requires a noticeNumbers array");
+          var nums = _mapIntrinsic(reqDenseArray(ref.noticeNumbers, who + " noticeRef noticeNumbers"), function(n, i) {
+            return b.integer(guard.range.authoredInteger(n, rawErr, ctx.prefix + "/bad-input", who + " noticeRef noticeNumber " + i));
+          });
+          guard.list.append(fields, b.sequence([displayText(ref.organization, who + " noticeRef organization"), b.sequence(nums)]));
+        }
+        if (notice.explicitText != null) guard.list.append(fields, displayText(notice.explicitText, who + " explicitText"));
+        return b.sequence(fields);
+      }
       function extCertPolicies(names) {
         if (!_isArray(names) || !names.length) throw E("bad-input", "certificatePolicies must list at least one policy OID");
         var seen = intrinsic.create(null);
-        return b.sequence(names.map(function(n) {
-          var pOid = _resolveOid(n, "certificate policy");
-          if (seen[pOid]) throw E("bad-input", "duplicate certificate policy " + guard.text.showValue(n) + " (RFC 5280 sec. 4.2.1.4)");
+        return b.sequence(_mapIntrinsic(names, function(n, i) {
+          var entry = n, quals = [];
+          if (n != null && typeof n === "object" && !_isArray(n) && !_isBufferChk(n)) {
+            guard.identifier.assertKnownKeys(n, POLICY_ENTRY_KEYS, E, "bad-input", function(k) {
+              return "unknown certificatePolicies entry " + i + " field " + _stringify(k) + " (accepted: oid, cps, userNotice)";
+            });
+            entry = n.oid;
+            if (n.cps != null) {
+              if (typeof n.cps !== "string" || !n.cps.length) throw E("bad-input", "certificatePolicies entry " + i + " cps must be a non-empty URI string");
+              ia5Content(n.cps);
+              guard.list.append(quals, b.sequence([b.oid(oid.byName("cps")), b.ia5(n.cps)]));
+            }
+            if (n.userNotice != null) {
+              if (typeof n.userNotice !== "object" || _isArray(n.userNotice) || _isBufferChk(n.userNotice)) {
+                throw E("bad-input", "certificatePolicies entry " + i + " userNotice must be an object { noticeRef?, explicitText? }");
+              }
+              guard.list.append(quals, b.sequence([
+                b.oid(oid.byName("unotice")),
+                userNoticeDer(n.userNotice, "certificatePolicies entry " + i + " userNotice")
+              ]));
+            }
+          }
+          var pOid = _resolveOid(entry, "certificate policy");
+          if (seen[pOid]) throw E("bad-input", "duplicate certificate policy " + guard.text.showValue(entry) + " (RFC 5280 sec. 4.2.1.4)");
           seen[pOid] = true;
-          return b.sequence([b.oid(pOid)]);
+          return quals.length ? b.sequence([b.oid(pOid), b.sequence(quals)]) : b.sequence([b.oid(pOid)]);
         }));
+      }
+      function msDword(v, who) {
+        var code2 = ctx.prefix + "/bad-input";
+        return guard.range.int(guard.range.authoredInteger(v, rawErr, code2, who), 0n, 4294967295n, rawErr, code2, who);
+      }
+      function extMsCertificateTemplate(spec) {
+        if (!spec || typeof spec !== "object" || _isArray(spec) || _isBufferChk(spec)) {
+          throw E("bad-input", "msCertificateTemplate must be an object { templateID, templateMajorVersion?, templateMinorVersion? }");
+        }
+        guard.identifier.assertKnownKeys(spec, MS_TEMPLATE_KEYS, E, "bad-input", function(k) {
+          return "unknown msCertificateTemplate field " + _stringify(k) + " (accepted: templateID, templateMajorVersion, templateMinorVersion)";
+        });
+        if (spec.templateID == null) throw E("bad-input", "msCertificateTemplate requires a templateID");
+        if (spec.templateMinorVersion != null && spec.templateMajorVersion == null) {
+          throw E("bad-input", "msCertificateTemplate templateMinorVersion follows templateMajorVersion, so a minor version requires a major one");
+        }
+        var fields = [b.oid(_resolveOid(spec.templateID, "msCertificateTemplate templateID"))];
+        if (spec.templateMajorVersion != null) guard.list.append(fields, b.integer(msDword(spec.templateMajorVersion, "msCertificateTemplate templateMajorVersion")));
+        if (spec.templateMinorVersion != null) guard.list.append(fields, b.integer(msDword(spec.templateMinorVersion, "msCertificateTemplate templateMinorVersion")));
+        return b.sequence(fields);
+      }
+      function extMsCaVersion(spec) {
+        if (spec != null && typeof spec === "object" && !_isArray(spec) && !_isBufferChk(spec)) {
+          guard.identifier.assertKnownKeys(spec, MS_CA_VERSION_KEYS, E, "bad-input", function(k) {
+            return "unknown msCaVersion field " + _stringify(k) + " (accepted: caKeyIndex, certIndex)";
+          });
+          if (spec.caKeyIndex == null || spec.certIndex == null) throw E("bad-input", "msCaVersion requires both caKeyIndex and certIndex, or the composed DWORD");
+          var code2 = ctx.prefix + "/bad-input";
+          var hi = guard.range.int(guard.range.authoredInteger(spec.caKeyIndex, rawErr, code2, "msCaVersion caKeyIndex"), 0n, 65535n, rawErr, code2, "msCaVersion caKeyIndex");
+          var lo = guard.range.int(guard.range.authoredInteger(spec.certIndex, rawErr, code2, "msCaVersion certIndex"), 0n, 65535n, rawErr, code2, "msCaVersion certIndex");
+          return b.integer(hi * 65536 + lo);
+        }
+        return b.integer(msDword(spec, "msCaVersion"));
+      }
+      function extMsPreviousCertHash(v) {
+        var hash = guard.bytes.snapshotSource(v, ErrorClass, ctx.prefix + "/bad-input", "msPreviousCertHash");
+        if (hash.length !== 20) throw E("bad-input", "msPreviousCertHash must be a 20-octet SHA-1 certificate thumbprint");
+        return b.octetString(hash);
+      }
+      function extMsEnrollCertType(v) {
+        if (typeof v !== "string" || !v.length) throw E("bad-input", "msEnrollCertType must be a non-empty template name");
+        try {
+          return b.bmpString(v);
+        } catch (e) {
+          if (e instanceof ErrorClass) throw e;
+          throw E("bad-input", "msEnrollCertType must be text a BMPString can carry", e);
+        }
       }
       function ext(oidStr, critical, valueDer) {
         var children = [b.oid(oidStr)];
@@ -20910,8 +21858,8 @@ var require_pki_build = __commonJS({
           throw E("bad-input", what + " is not a well-formed SubjectPublicKeyInfo", e);
         }
       }
-      function assertValidExtension(der, idx) {
-        var n;
+      function assertValidExtension(der, idx, decoders) {
+        var n, extnId;
         try {
           n = asn1.decode(der);
         } catch (e) {
@@ -20919,7 +21867,7 @@ var require_pki_build = __commonJS({
         }
         if (n.tagNumber !== asn1.TAGS.SEQUENCE || n.tagClass !== "universal" || !n.children || n.children.length < 2 || n.children.length > 3) throw E("bad-input", "pre-encoded extension [" + idx + "] must be an Extension SEQUENCE { extnID, critical?, extnValue }");
         try {
-          asn1.read.oid(n.children[0]);
+          extnId = asn1.read.oid(n.children[0]);
         } catch (e) {
           throw E("bad-input", "pre-encoded extension [" + idx + "] extnID is not an OBJECT IDENTIFIER", e);
         }
@@ -20934,6 +21882,20 @@ var require_pki_build = __commonJS({
         }
         var last = n.children[n.children.length - 1];
         if (last.tagNumber !== asn1.TAGS.OCTET_STRING || last.tagClass !== "universal") throw E("bad-input", "pre-encoded extension [" + idx + "] extnValue must be an OCTET STRING");
+        if (!(decoders && intrinsic.hasOwn(decoders, extnId))) assertExtnValueIsDer(last.content, "pre-encoded extension [" + idx + "]");
+      }
+      function assertExtnValueIsDer(content, label) {
+        try {
+          asn1.decode(content);
+        } catch (e) {
+          throw E("bad-input", label + " extnValue must hold exactly one DER-encoded value (RFC 5280 sec. 4.1)", e);
+        }
+      }
+      function assertCertCriticality(extnId, isCritical, label) {
+        if (!intrinsic.hasOwn(CERT_FIXED_CRITICALITY, extnId)) return;
+        var req = CERT_FIXED_CRITICALITY[extnId];
+        if (isCritical === req.critical) return;
+        throw E("bad-input", label + " " + (oid.name(extnId) || extnId) + " extension must be marked " + (req.critical ? "critical" : "non-critical") + " (" + req.citation + ")");
       }
       var BC_KEYS = { cA: 1, pathLen: 1, critical: 1 };
       var REQ_EXT_KEYS = {
@@ -20945,7 +21907,23 @@ var require_pki_build = __commonJS({
         basicConstraints: 1,
         certificatePolicies: 1,
         certificatePoliciesCritical: 1,
-        subjectKeyIdentifier: 1
+        subjectKeyIdentifier: 1,
+        nameConstraints: 1,
+        authorityInfoAccess: 1,
+        cRLDistributionPoints: 1,
+        freshestCRL: 1,
+        policyConstraints: 1,
+        inhibitAnyPolicy: 1,
+        policyMappings: 1,
+        policyMappingsCritical: 1,
+        issuerAltName: 1,
+        qcStatements: 1,
+        qcStatementsCritical: 1,
+        msCertificateTemplate: 1,
+        msEnrollCertType: 1,
+        msApplicationPolicies: 1,
+        subjectInfoAccess: 1,
+        subjectDirectoryAttributes: 1
       };
       function requestedExtensions(extSpec, spki) {
         var EXT_DECODERS = ctx.EXT_DECODERS;
@@ -20954,11 +21932,12 @@ var require_pki_build = __commonJS({
           var seen = intrinsic.create(null);
           return b.sequence(extSpec.map(function(e, i) {
             var der = reqDer(e, "extension");
-            assertValidExtension(der, i);
+            assertValidExtension(der, i, EXT_DECODERS);
             var n = asn1.decode(der);
             var extnId = asn1.read.oid(n.children[0]);
             if (seen[extnId]) throw E("bad-input", "duplicate requested extension " + extnId + " (RFC 5280 sec. 4.2)");
             seen[extnId] = true;
+            assertCertCriticality(extnId, n.children.length === 3, "requested");
             var dec = EXT_DECODERS && EXT_DECODERS[extnId];
             if (dec) {
               try {
@@ -20988,16 +21967,27 @@ var require_pki_build = __commonJS({
         }
         if (extSpec.subjectAltName != null) out.push(ext(O("subjectAltName"), false, extSan(extSpec.subjectAltName)));
         if (extSpec.certificatePolicies != null) out.push(ext(O("certificatePolicies"), !!extSpec.certificatePoliciesCritical, extCertPolicies(extSpec.certificatePolicies)));
+        if (extSpec.nameConstraints != null) guard.list.append(out, ext(O("nameConstraints"), true, extNameConstraints(extSpec.nameConstraints)));
+        if (extSpec.authorityInfoAccess != null) guard.list.append(out, ext(O("authorityInfoAccess"), false, extAuthorityInfoAccess(extSpec.authorityInfoAccess)));
+        if (extSpec.cRLDistributionPoints != null) guard.list.append(out, ext(O("cRLDistributionPoints"), false, extCrlDistributionPoints(extSpec.cRLDistributionPoints, "cRLDistributionPoints")));
+        if (extSpec.freshestCRL != null) guard.list.append(out, ext(O("freshestCRL"), false, extCrlDistributionPoints(extSpec.freshestCRL, "freshestCRL")));
+        if (extSpec.policyConstraints != null) guard.list.append(out, ext(O("policyConstraints"), true, extPolicyConstraints(extSpec.policyConstraints)));
+        if (extSpec.inhibitAnyPolicy != null) guard.list.append(out, ext(O("inhibitAnyPolicy"), true, extInhibitAnyPolicy(extSpec.inhibitAnyPolicy)));
+        if (extSpec.policyMappings != null) guard.list.append(out, ext(O("policyMappings"), !!extSpec.policyMappingsCritical, extPolicyMappings(extSpec.policyMappings)));
+        if (extSpec.issuerAltName != null) guard.list.append(out, ext(O("issuerAltName"), false, encodeGeneralNames(reqDenseArray(extSpec.issuerAltName, "issuerAltName"))));
+        if (extSpec.qcStatements != null) guard.list.append(out, ext(O("qcStatements"), !!extSpec.qcStatementsCritical, extQcStatements(extSpec.qcStatements)));
+        if (extSpec.msCertificateTemplate != null) guard.list.append(out, ext(O("msCertificateTemplate"), false, extMsCertificateTemplate(extSpec.msCertificateTemplate)));
+        if (extSpec.msEnrollCertType != null) guard.list.append(out, ext(O("msEnrollCertType"), false, extMsEnrollCertType(extSpec.msEnrollCertType)));
+        if (extSpec.msApplicationPolicies != null) guard.list.append(out, ext(O("msApplicationPolicies"), false, extCertPolicies(extSpec.msApplicationPolicies)));
+        if (extSpec.subjectInfoAccess != null) guard.list.append(out, ext(O("subjectInfoAccess"), false, extSubjectInfoAccess(extSpec.subjectInfoAccess)));
+        if (extSpec.subjectDirectoryAttributes != null) guard.list.append(out, ext(O("subjectDirectoryAttributes"), false, extSubjectDirectoryAttributes(extSpec.subjectDirectoryAttributes)));
         if (!out.length) throw E("bad-input", "the requested extensions object must request at least one extension");
         return b.sequence(out);
       }
       function serialInteger(serial) {
         var v;
         if (serial == null) {
-          var rnd = nodeCrypto.randomBytes(20);
-          rnd[0] &= 127;
-          if (rnd[0] === 0) rnd[0] = 1;
-          v = BigInt("0x" + rnd.toString("hex"));
+          v = randomSerial();
         } else if (typeof serial === "bigint") {
           v = serial;
         } else if (typeof serial === "number") {
@@ -21065,6 +22055,7 @@ var require_pki_build = __commonJS({
         } catch (_e) {
           return false;
         }
+        if (ka.asymmetricKeyType !== kb.asymmetricKeyType) return false;
         return _keyEquals(ka, kb) === true;
       }
       return {
@@ -21074,6 +22065,13 @@ var require_pki_build = __commonJS({
         encodeName,
         isEmptyName,
         encodeGeneralName,
+        extNameConstraints,
+        extAuthorityInfoAccess,
+        extCrlDistributionPoints,
+        extPolicyConstraints,
+        extInhibitAnyPolicy,
+        extPolicyMappings,
+        extQcStatements,
         encodeGeneralNames,
         serialInteger,
         timeDer,
@@ -21085,16 +22083,26 @@ var require_pki_build = __commonJS({
         pathLen,
         extSki,
         extAki,
+        AKI_KEYS,
         extSan,
         extCertPolicies,
         ext,
+        extSubjectInfoAccess,
+        extSubjectDirectoryAttributes,
+        extMsCertificateTemplate,
+        extMsCaVersion,
+        extMsPreviousCertHash,
+        extMsEnrollCertType,
         spkiKeyId,
         skiKeyId,
+        skiValueOf,
         reqDer,
         reqDenseArray,
         reqDerSequence,
         assertValidSpki,
         assertValidExtension,
+        assertExtnValueIsDer,
+        assertCertCriticality,
         certLikeFromSpki,
         assertSignatureVerifies,
         samePublicKey
@@ -21110,7 +22118,18 @@ var require_pki_build = __commonJS({
       var hasVersion = tbs.children[0].tagClass === "context" && tbs.children[0].tagNumber === 0;
       return asn1.read.integer(tbs.children[hasVersion ? 1 : 0]);
     }
-    module2.exports = intrinsic.freeze({ makeBuilder, reqDenseArray: reqDenseArrayImpl, KU_BIT, tbsNameField, tbsSerialNumber });
+    function skiValueOf(parsedCert) {
+      var exts = intrinsic.filter(parsedCert.extensions, function(e) {
+        return e.oid === OID_SKI;
+      });
+      if (!exts.length) return null;
+      try {
+        return asn1.read.octetString(asn1.decode(exts[0].value));
+      } catch (_e) {
+        return null;
+      }
+    }
+    module2.exports = intrinsic.freeze({ makeBuilder, reqDenseArray: reqDenseArrayImpl, KU_BIT, tbsNameField, tbsSerialNumber, randomSerial, skiValueOf, isHttpUrl, isLdapUrl });
   }
 });
 
@@ -21197,9 +22216,10 @@ var require_pbes2 = __commonJS({
       if (salt.length > C.LIMITS.PBKDF2_MAX_SALT) throw E(prefix + "/bad-input", "PBKDF2 salt exceeds the " + C.LIMITS.PBKDF2_MAX_SALT + "-octet cap");
       var iterations = guard.range.positiveInt31(asn1.read.integer(kids[1]), E, prefix + "/bad-input", "PBKDF2 iterationCount");
       var cap = C.LIMITS.PBKDF2_MAX_ITERATIONS;
-      if (opts && opts.maxIterations != null) {
-        if (typeof opts.maxIterations !== "number" || !isFinite(opts.maxIterations) || opts.maxIterations < 1 || Math.floor(opts.maxIterations) !== opts.maxIterations) throw E(prefix + "/bad-input", "maxIterations must be a positive integer");
-        cap = Math.min(opts.maxIterations, cap);
+      var wantedIter = opts ? opts.maxIterations : null;
+      if (wantedIter != null) {
+        if (typeof wantedIter !== "number" || !isFinite(wantedIter) || wantedIter < 1 || Math.floor(wantedIter) !== wantedIter) throw E(prefix + "/bad-input", "maxIterations must be a positive integer");
+        cap = Math.min(wantedIter, cap);
       }
       if (iterations > cap) throw E(prefix + "/iteration-limit", "PBKDF2 iterationCount " + iterations + " exceeds the cap " + cap);
       var prfNode = "sha1";
@@ -22404,6 +23424,16 @@ var require_key = __commonJS({
     var compositeKem = require_composite_kem();
     var frameworkError = require_framework_error();
     var guard = require_guard_all();
+    var intrinsic = require_guard_intrinsic();
+    var _assign = intrinsic.assign;
+    var _create = intrinsic.create;
+    var _isArray = intrinsic.isArray;
+    var _bufferFrom = intrinsic.bufferFrom;
+    var _floor = intrinsic.floor;
+    var _isFinite = intrinsic.isFinite;
+    var _String = intrinsic.String;
+    var _toUpperCase = intrinsic.toUpperCase;
+    var _strIndexOf = intrinsic.stringIndexOf;
     var b = asn1.build;
     var subtle = webcrypto.webcrypto.subtle;
     var KeyError = frameworkError.KeyError;
@@ -22414,8 +23444,8 @@ var require_key = __commonJS({
     function _err(code, msg, cause) {
       return new KeyError(code, msg, cause);
     }
-    var CIPHER_NAME = Object.assign(/* @__PURE__ */ Object.create(null), { "aes-128-cbc": "aes128-CBC", "aes-192-cbc": "aes192-CBC", "aes-256-cbc": "aes256-CBC" });
-    var INFER_ALG = /* @__PURE__ */ Object.create(null);
+    var CIPHER_NAME = _assign(_create(null), { "aes-128-cbc": "aes128-CBC", "aes-192-cbc": "aes192-CBC", "aes-256-cbc": "aes256-CBC" });
+    var INFER_ALG = _create(null);
     ["Ed25519", "Ed448", "X25519", "X448"].forEach(function(n) {
       INFER_ALG[O(n)] = { name: n };
     });
@@ -22443,7 +23473,7 @@ var require_key = __commonJS({
       "shake-256s",
       "shake-256f"
     ].forEach(function(s) {
-      INFER_ALG[O("id-slh-dsa-" + s)] = { name: ("SLH-DSA-" + s).toUpperCase() };
+      INFER_ALG[O("id-slh-dsa-" + s)] = { name: _toUpperCase("SLH-DSA-" + s) };
     });
     function _isCryptoKey(x) {
       return webcrypto.isCryptoKeyLike(x);
@@ -22458,7 +23488,7 @@ var require_key = __commonJS({
       }
       return pkix.coerceToDer(input, { pemLabel: "PRIVATE KEY", PemError, ErrorClass: KeyError, prefix: "key" });
     }
-    var _ENCRYPT_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { cipher: 1, iterations: 1, pem: 1, prf: 1, salt: 1 });
+    var _ENCRYPT_OPTS = _assign(_create(null), { cipher: 1, iterations: 1, pem: 1, prf: 1, salt: 1 });
     async function encrypt(privateKey, password, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "key/bad-input", "pki.key.encrypt options");
       guard.identifier.assertKnownKeys(
@@ -22499,7 +23529,7 @@ var require_key = __commonJS({
         guard.secret.zeroize(dk, KeyError, "key/bad-input", "the password-derived encryption key");
       }
     }
-    var _DECRYPT_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { maxIterations: 1, pem: 1 });
+    var _DECRYPT_OPTS = _assign(_create(null), { maxIterations: 1, pem: 1 });
     async function decrypt(encrypted, password, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "key/bad-input", "pki.key.decrypt options");
       guard.identifier.assertKnownKeys(
@@ -22509,7 +23539,7 @@ var require_key = __commonJS({
         "key/bad-input",
         "pki.key.decrypt has an unknown option (the PBKDF2 cap here is `maxIterations`; `iterations` is the encrypt-side count): "
       );
-      if (opts.maxIterations != null && (typeof opts.maxIterations !== "number" || !isFinite(opts.maxIterations) || opts.maxIterations < 1 || Math.floor(opts.maxIterations) !== opts.maxIterations)) {
+      if (opts.maxIterations != null && (typeof opts.maxIterations !== "number" || !_isFinite(opts.maxIterations) || opts.maxIterations < 1 || _floor(opts.maxIterations) !== opts.maxIterations)) {
         throw _err("key/bad-input", "maxIterations must be a positive integer");
       }
       var input = pkix.coerceToDer(encrypted, { pemLabel: "ENCRYPTED PRIVATE KEY", PemError, ErrorClass: KeyError, prefix: "key" });
@@ -22539,7 +23569,7 @@ var require_key = __commonJS({
       }
       return plaintext;
     }
-    var _EXPORT_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { format: 1, label: 1 });
+    var _EXPORT_OPTS = _assign(_create(null), { format: 1, label: 1 });
     async function export_(key, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "key/bad-input", "pki.key.export options");
       guard.identifier.assertKnownKeys(
@@ -22560,7 +23590,7 @@ var require_key = __commonJS({
       if (fmt === "pem") return pkix.pemEncode(der, opts.label || defaultLabel, PemError);
       throw _err("key/bad-input", "unsupported format " + guard.text.showValue(opts.format) + " (der / pem)");
     }
-    var _IMPORT_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { algorithm: 1, extractable: 1, password: 1, usages: 1 });
+    var _IMPORT_OPTS = _assign(_create(null), { algorithm: 1, extractable: 1, password: 1, usages: 1 });
     async function import_(input, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "key/bad-input", "pki.key.import options");
       guard.identifier.assertKnownKeys(
@@ -22577,7 +23607,7 @@ var require_key = __commonJS({
       }
       var algorithm = opts.algorithm != null ? opts.algorithm : _inferAlgorithm(detected);
       var isPublic = detected.format === "spki";
-      if (opts.usages != null && !Array.isArray(opts.usages)) throw _err("key/bad-input", "opts.usages must be an array of key-usage strings");
+      if (opts.usages != null && !_isArray(opts.usages)) throw _err("key/bad-input", "opts.usages must be an array of key-usage strings");
       var usages = opts.usages || _importUsages(_algName(algorithm), isPublic);
       var extractable = opts.extractable != null ? opts.extractable : false;
       try {
@@ -22587,7 +23617,7 @@ var require_key = __commonJS({
         throw _err("key/bad-input", "importKey failed", e);
       }
     }
-    var _GENERATE_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { extractable: 1, usages: 1 });
+    var _GENERATE_OPTS = _assign(_create(null), { extractable: 1, usages: 1 });
     async function generate(algorithm, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "key/bad-input", "pki.key.generate options");
       guard.identifier.assertKnownKeys(
@@ -22598,7 +23628,7 @@ var require_key = __commonJS({
         "pki.key.generate has an unknown option (the WebCrypto spelling is `extractable`): "
       );
       var extractable = opts.extractable != null ? opts.extractable : true;
-      if (opts.usages != null && !Array.isArray(opts.usages)) throw _err("key/bad-input", "opts.usages must be an array of key-usage strings");
+      if (opts.usages != null && !_isArray(opts.usages)) throw _err("key/bad-input", "opts.usages must be an array of key-usage strings");
       var usages = opts.usages || _generateUsages(_algName(algorithm));
       var pair;
       try {
@@ -22610,7 +23640,7 @@ var require_key = __commonJS({
       if (!pair || !pair.privateKey || !pair.publicKey) throw _err("key/bad-input", "the algorithm does not generate an asymmetric key pair");
       return { privateKey: pair.privateKey, publicKey: pair.publicKey };
     }
-    var _PUBLIC_FROM_PRIVATE_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { pem: 1 });
+    var _PUBLIC_FROM_PRIVATE_OPTS = _assign(_create(null), { pem: 1 });
     function _compositeKemOidOf(der) {
       var algOid;
       try {
@@ -22648,14 +23678,14 @@ var require_key = __commonJS({
       }
       return opts.pem ? pkix.pemEncode(spki, "PUBLIC KEY", PemError) : spki;
     }
-    var _PAIR_DIGEST = Object.assign(/* @__PURE__ */ Object.create(null), { rsa: "sha256", ec: "sha256" });
-    var _PAIR_AGREE = Object.assign(/* @__PURE__ */ Object.create(null), { x25519: 1, x448: 1 });
-    var _PAIR_KEM = Object.assign(
-      /* @__PURE__ */ Object.create(null),
+    var _PAIR_DIGEST = _assign(_create(null), { rsa: "sha256", ec: "sha256" });
+    var _PAIR_AGREE = _assign(_create(null), { x25519: 1, x448: 1 });
+    var _PAIR_KEM = _assign(
+      _create(null),
       { "ml-kem-512": 1, "ml-kem-768": 1, "ml-kem-1024": 1 }
     );
-    var _PAIR_RSA = Object.assign(/* @__PURE__ */ Object.create(null), { rsa: 1, "rsa-pss": 1 });
-    var _PAIR_PROBE = Buffer.from("pki.js key pair correspondence", "utf8");
+    var _PAIR_RSA = _assign(_create(null), { rsa: 1, "rsa-pss": 1 });
+    var _PAIR_PROBE = _bufferFrom("pki.js key pair correspondence", "utf8");
     function _sameKeyFamily(priv, pub) {
       if (priv.asymmetricKeyType === pub.asymmetricKeyType) return true;
       return !!(_PAIR_RSA[guard.text.keyOf(priv.asymmetricKeyType)] && _PAIR_RSA[guard.text.keyOf(pub.asymmetricKeyType)]);
@@ -22672,19 +23702,19 @@ var require_key = __commonJS({
       var mgf1 = privDetails.mgf1HashAlgorithm || pubDetails.mgf1HashAlgorithm;
       if (mgf1 != null && mgf1 !== digest) return null;
       var salt = _pssSalt(privDetails.saltLength, pubDetails.saltLength);
-      var options = /* @__PURE__ */ Object.create(null);
+      var options = _create(null);
       options.padding = nodeCrypto.constants.RSA_PKCS1_PSS_PADDING;
       if (salt != null) options.saltLength = salt;
       return { digest, options };
     }
     var _PSS_PINS = ["hashAlgorithm", "mgf1HashAlgorithm", "saltLength"];
     function _pssRestrictionOf(key, isPss) {
-      var out = /* @__PURE__ */ Object.create(null);
+      var out = _create(null);
       var details = isPss ? key.asymmetricKeyDetails : null;
       if (details == null) return out;
       for (var i = 0; i < _PSS_PINS.length; i++) {
         var name = _PSS_PINS[i];
-        if (Object.prototype.hasOwnProperty.call(details, name) && details[name] != null) out[name] = details[name];
+        if (intrinsic.hasOwn(details, name) && details[name] != null) out[name] = details[name];
       }
       return out;
     }
@@ -22707,7 +23737,7 @@ var require_key = __commonJS({
         throw _err("key/bad-input", "the private key could not be read", e);
       }
       try {
-        pub = nodeCrypto.createPublicKey({ key: Buffer.from(spkiDer), format: "der", type: "spki" });
+        pub = nodeCrypto.createPublicKey({ key: _bufferFrom(spkiDer), format: "der", type: "spki" });
       } catch (e) {
         throw _err("key/bad-input", "the public key could not be read", e);
       }
@@ -22733,8 +23763,8 @@ var require_key = __commonJS({
         if (how === null) {
           throw _err("key/unsupported-algorithm", "the two halves pin incompatible RSASSA-PSS parameters, so no operation exercises them together and whether they are a pair cannot be decided");
         }
-        var signKey = how.options ? Object.assign(/* @__PURE__ */ Object.create(null), { key: priv }, how.options) : priv;
-        var verifyKey = how.options ? Object.assign(/* @__PURE__ */ Object.create(null), { key: pub }, how.options) : pub;
+        var signKey = how.options ? _assign(_create(null), { key: priv }, how.options) : priv;
+        var verifyKey = how.options ? _assign(_create(null), { key: pub }, how.options) : pub;
         return nodeCrypto.verify(
           how.digest,
           _PAIR_PROBE,
@@ -22780,16 +23810,16 @@ var require_key = __commonJS({
       throw _err("key/unsupported-algorithm", "cannot infer the WebCrypto algorithm for " + (oid.name(algOid) || algOid) + " (RSA and EC are ambiguous between signing and key agreement -- pass opts.algorithm)");
     }
     function _importUsages(name, isPublic) {
-      var n = String(name == null ? "" : name).toUpperCase();
+      var n = _toUpperCase(_String(name == null ? "" : name));
       if (n === "X25519" || n === "X448" || n === "ECDH") return isPublic ? [] : ["deriveBits", "deriveKey"];
-      if (n.indexOf("ML-KEM") === 0) return isPublic ? ["encapsulateBits"] : ["decapsulateBits"];
+      if (_strIndexOf(n, "ML-KEM") === 0) return isPublic ? ["encapsulateBits"] : ["decapsulateBits"];
       if (n === "RSA-OAEP") return isPublic ? ["encrypt"] : ["decrypt"];
       return isPublic ? ["verify"] : ["sign"];
     }
     function _generateUsages(name) {
-      var n = String(name == null ? "" : name).toUpperCase();
+      var n = _toUpperCase(_String(name == null ? "" : name));
       if (n === "X25519" || n === "X448" || n === "ECDH") return ["deriveBits", "deriveKey"];
-      if (n.indexOf("ML-KEM") === 0) return ["encapsulateBits", "decapsulateBits"];
+      if (_strIndexOf(n, "ML-KEM") === 0) return ["encapsulateBits", "decapsulateBits"];
       if (n === "RSA-OAEP") return ["encrypt", "decrypt"];
       return ["sign", "verify"];
     }
@@ -23398,7 +24428,6 @@ var require_crmf_sign = __commonJS({
         var arm = node.children[i];
         if (arm.tagNumber === 3 && !_isOrAddress(arm)) return false;
         if (arm.tagNumber === 4 && !_isNonEmptyName(arm)) return false;
-        if (arm.tagNumber === 5 && !_isEdiPartyName(arm)) return false;
       }
       return true;
     }
@@ -23415,25 +24444,6 @@ var require_crmf_sign = __commonJS({
       if (!kids || kids.length !== 1) return false;
       var dn = kids[0];
       return schema.isUniversal(dn, 16) && !!dn.children && dn.children.length > 0;
-    }
-    var DIRECTORY_STRING_TAGS = [12, 19, 20, 28, 30];
-    function _isEdiPartyName(node) {
-      var kids = node.children;
-      if (!kids || kids.length < 1 || kids.length > 2) return false;
-      for (var i = 0; i < kids.length; i++) {
-        var arm = kids[i];
-        if (!schema.isContextInRange(arm, 0, 1) || !arm.children || arm.children.length !== 1) return false;
-        if (!schema.isUniversalOneOf(arm.children[0], DIRECTORY_STRING_TAGS)) return false;
-        var text;
-        try {
-          text = asn1.read.string(arm.children[0]);
-        } catch (_e) {
-          return false;
-        }
-        if (text.length === 0) return false;
-      }
-      if (kids.length === 2) return kids[0].tagNumber === 0 && kids[1].tagNumber === 1;
-      return kids[0].tagNumber === 1;
     }
     function _nameOrAlternative(parsed, nameField, altExtension) {
       var name = parsed[nameField];
@@ -23950,7 +24960,7 @@ var require_cmp_build = __commonJS({
         return b.nullValue();
       }
       if (name === "confirmWaitTime") {
-        guard.time.assertValid(itav.infoValue, _err, "cmp/bad-info-value", "confirmWaitTime infoValue");
+        guard.time.assertEncodable(itav.infoValue, _err, "cmp/bad-info-value", "confirmWaitTime infoValue");
         return b.generalizedTime(itav.infoValue);
       }
       if (name === "certProfile") {
@@ -23985,7 +24995,7 @@ var require_cmp_build = __commonJS({
         _b.encodeGeneralName(headerSpec.recipient)
       ];
       if (headerSpec.messageTime != null) {
-        guard.time.assertValid(headerSpec.messageTime, _err, "cmp/bad-input", "header.messageTime");
+        guard.time.assertEncodable(headerSpec.messageTime, _err, "cmp/bad-input", "header.messageTime");
         children.push(b.explicit(0, b.generalizedTime(headerSpec.messageTime)));
       }
       if (protectionAlgDer != null) children.push(b.explicit(1, b.raw(protectionAlgDer)));
@@ -24110,7 +25120,7 @@ var require_cmp_build = __commonJS({
       }
       var status = [source], askedInstant = null, asked = spec.thisUpdate;
       if (asked != null) {
-        guard.time.assertValid(asked, _err, "cmp/bad-input", "crlUpdate.thisUpdate");
+        guard.time.assertEncodable(asked, _err, "cmp/bad-input", "crlUpdate.thisUpdate");
         askedInstant = guard.time.instantOf(asked);
         _push(status, b.raw(_b.timeDer(new _Date(askedInstant), "crlUpdate.thisUpdate")));
       }
@@ -24528,7 +25538,7 @@ var require_cmp_build = __commonJS({
       var m = opts.mac;
       if (!m || typeof m !== "object" || Buffer.isBuffer(m)) throw _err("cmp/bad-input", "opts.mac must be an object { secret, salt?, iterationCount?, prf?, keyLength? }");
       guard.identifier.assertKnownKeys(m, KNOWN_MAC_KEYS, _err, "cmp/bad-input", "unknown opts.mac field ");
-      if (m.algorithm != null && m.algorithm !== "pbmac1") throw _err("cmp/unsupported-algorithm", "opts.mac.algorithm " + guard.text.showValue(m.algorithm) + " is not supported (v1 ships pbmac1; passwordBasedMac is deferred)");
+      if (m.algorithm != null && m.algorithm !== "pbmac1") throw _err("cmp/unsupported-algorithm", "opts.mac.algorithm " + guard.text.showValue(m.algorithm) + " is not supported; MAC protection is computed under pbmac1 (RFC 9481 sec. 6.1.2), the one password-based MAC in the RFC 9481 profile");
       var secret = m.secret;
       if (typeof secret !== "string" || !secret) {
         if (!Buffer.isBuffer(secret) || !secret.length) throw _err("cmp/bad-input", "opts.mac.secret must be a non-empty string or Buffer");
@@ -24931,8 +25941,11 @@ var require_cms_sign = __commonJS({
       wire[0] = 160;
       return { setOf, wire };
     }
+    var KNOWN_ATTRIBUTE_KEYS = intrinsic.assign(intrinsic.create(null), { type: 1, values: 1 });
     function _resolveAttrPairs(list, what) {
       return intrinsic.map(list || [], function(a) {
+        if (!a || typeof a !== "object") throw _err("cms/bad-input", "an attribute must be { type, values }");
+        guard.identifier.assertKnownKeys(a, KNOWN_ATTRIBUTE_KEYS, _err, "cms/bad-input", "unknown attribute field (an attribute is { type, values }): ");
         var vals = intrinsic.map(a.values || [], function(v) {
           return _toBuf(v, what);
         });
@@ -25134,7 +26147,7 @@ var require_cms_sign = __commonJS({
           "a key-only signer must be the ONLY SignerInfo in a Full PKI Request (RFC 5272 sec. 3.2)"
         );
       }
-      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertValid(opts.signingTime, _err, "cms/bad-input", "signingTime");
+      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertEncodable(opts.signingTime, _err, "cms/bad-input", "signingTime");
       var rcs = intrinsic.map(list, function(s) {
         return _resolveSignerContext(s, opts);
       });
@@ -25185,7 +26198,7 @@ var require_cms_sign = __commonJS({
       if (opts.signedAttributes === false && cms.looksLikeSignedAttributes(contentBuf)) {
         throw _err("cms/ambiguous-content", "this content is itself an encoded SignedAttributes block, so signing it WITHOUT signed attributes would produce a signature that could be re-presented as one over attributes (RFC 5652 sec. 5.4); sign it with signed attributes instead");
       }
-      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertValid(opts.signingTime, _err, "cms/bad-input", "signingTime");
+      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertEncodable(opts.signingTime, _err, "cms/bad-input", "signingTime");
       return Promise.all(list.map(function(s) {
         return _buildSignerInfo(s, contentBuf, eContentType, opts);
       })).then(function(built) {
@@ -25426,7 +26439,7 @@ var require_cms_sign = __commonJS({
       guard.identifier.assertKnownKeys(opts, KNOWN_COUNTERSIGN_OPTS, _err, "cms/bad-input", "unknown opts field ");
       var list = Array.isArray(signers) ? signers : [signers];
       if (!list.length) throw _err("cms/bad-input", "pki.cms.countersign requires at least one countersigner");
-      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertValid(opts.signingTime, _err, "cms/bad-input", "signingTime");
+      if (opts.signingTime != null && opts.signingTime !== false) guard.time.assertEncodable(opts.signingTime, _err, "cms/bad-input", "signingTime");
       var der = pkix.coerceToDer(cmsInput, { pemLabel: null, PemError: frameworkError.PemError, ErrorClass: CmsError, prefix: "cms" });
       var parsed = cms.parse(der);
       if (!Array.isArray(parsed.signerInfos)) throw _err("cms/bad-input", "pki.cms.countersign input is not a CMS SignedData");
@@ -27035,6 +28048,7 @@ var require_cmp_verify = __commonJS({
     var constants = require_constants();
     var ipUtils = require_ip_utils();
     var frameworkError = require_framework_error();
+    var pkiBuild = require_pki_build();
     var CmpError = frameworkError.CmpError;
     var b = asn1.build;
     function _err(code, message, cause) {
@@ -27072,9 +28086,21 @@ var require_cmp_verify = __commonJS({
     var PBMAC1_KEYLEN_MAX = 1024;
     var PRF_HLEN = intrinsic.assign(intrinsic.create(null), { "SHA-256": 32, "SHA-384": 48, "SHA-512": 64 });
     var UNSUPPORTED_MAC_OIDS = _create(null);
-    ["passwordBasedMac", "dhBasedMac"].forEach(function(n) {
-      var o = oid.byName(n);
-      if (o) UNSUPPORTED_MAC_OIDS[o] = n;
+    function _unsupportedMacs(why, bySection) {
+      intrinsic.forEach(intrinsic.keys(bySection), function(section) {
+        intrinsic.forEach(bySection[section], function(name) {
+          UNSUPPORTED_MAC_OIDS[oid.byName(name)] = { name, why: why + " (" + section + ")" };
+        });
+      });
+    }
+    _unsupportedMacs("is not in the RFC 9481 algorithm profile", {
+      "RFC 9481 sec. 6.1.1": ["passwordBasedMac"],
+      "RFC 9810 sec. 5.1.3.2": ["dhBasedMac"]
+    });
+    _unsupportedMacs("is a symmetric-key MAC applied without a key derivation", {
+      "RFC 9481 sec. 6.2.1": ["hmacWithSHA1", "hmacWithSHA224", "hmacWithSHA256", "hmacWithSHA384", "hmacWithSHA512"],
+      "RFC 9481 sec. 6.2.2": ["aes128-GMAC", "aes192-GMAC", "aes256-GMAC"],
+      "RFC 9481 sec. 6.2.3": ["kmacWithSHAKE128", "kmacWithSHAKE256"]
     });
     var _engine = null;
     function setEngine(engine) {
@@ -27132,19 +28158,7 @@ var require_cmp_verify = __commonJS({
       }
       throw _err("cmp/bad-input", what + " must be a certificate DER BufferSource or PEM string");
     }
-    function _certSki(parsed) {
-      var skiOid = oid.byName("subjectKeyIdentifier");
-      var exts = parsed.extensions;
-      for (var i = 0; i < exts.length; i++) {
-        if (exts[i].oid !== skiOid) continue;
-        try {
-          return asn1.read.octetString(asn1.decode(exts[i].value));
-        } catch (_e) {
-          return null;
-        }
-      }
-      return null;
-    }
+    var _certSki = pkiBuild.skiValueOf;
     function _subjectDn(parsed) {
       return parsed.subject.dn || null;
     }
@@ -27552,11 +28566,12 @@ var require_cmp_verify = __commonJS({
     }
     function _capWork(iterationCount, salt, keyLength, prfHash, opts) {
       var cap = PBMAC1_MAX_ITER;
-      if (opts.maxIterations != null) {
-        if (typeof opts.maxIterations !== "number" || !_isFinite(opts.maxIterations) || opts.maxIterations < 1 || _floor(opts.maxIterations) !== opts.maxIterations) {
+      var wantedIter = opts.maxIterations;
+      if (wantedIter != null) {
+        if (typeof wantedIter !== "number" || !_isFinite(wantedIter) || wantedIter < 1 || _floor(wantedIter) !== wantedIter) {
           throw _err("cmp/bad-input", "opts.maxIterations must be a positive integer");
         }
-        cap = _min(opts.maxIterations, cap);
+        cap = _min(wantedIter, cap);
       }
       if (iterationCount < PBMAC1_MIN_ITER) throw _err("cmp/bad-input", "the PBMAC1 iterationCount " + iterationCount + " is below the floor " + PBMAC1_MIN_ITER + " (RFC 8018 sec. 4.2)");
       if (iterationCount > cap) throw _err("cmp/bad-input", "the PBMAC1 iterationCount " + iterationCount + " exceeds the cap " + cap);
@@ -27808,8 +28823,9 @@ var require_cmp_verify = __commonJS({
         return _fail(m, null, protectionAlg, "cmp/no-protection", "the PKIMessage carries no protection (RFC 9810 sec. 5.1.3); an unprotected message is never verified");
       }
       var protectedPart = b.sequence([b.raw(m.headerBytes), b.raw(m.bodyBytes)]);
-      if (UNSUPPORTED_MAC_OIDS[protectionAlg.oid]) {
-        return _fail(m, "mac", protectionAlg, "cmp/unsupported-algorithm", "the " + UNSUPPORTED_MAC_OIDS[protectionAlg.oid] + " protection algorithm is not supported (v1 verifies PBMAC1 and signature protection; RFC 9481 sec. 6.1.1)");
+      var unsupportedMac = UNSUPPORTED_MAC_OIDS[protectionAlg.oid];
+      if (unsupportedMac !== void 0) {
+        return _fail(m, "mac", protectionAlg, "cmp/unsupported-algorithm", "the " + unsupportedMac.name + " protection algorithm " + unsupportedMac.why + "; this verifier computes PBMAC1, KEM-based MAC and signature protection");
       }
       var isMac = protectionAlg.oid === oid.byName("pbmac1");
       var isKem = protectionAlg.oid === oid.byName("kemBasedMac");
@@ -30168,6 +31184,8 @@ var require_path_validate = __commonJS({
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
     var _charCodeAt = intrinsic.uncurry(String.prototype.charCodeAt);
+    var _strSlice = intrinsic.uncurry(String.prototype.slice);
+    var _strIndexOf = intrinsic.uncurry(String.prototype.indexOf);
     var _resolve = intrinsic.uncurry(intrinsic.promiseResolve);
     var constants = require_constants();
     var validator = require_validator_all();
@@ -30544,11 +31562,18 @@ var require_path_validate = __commonJS({
       return host === c;
     }
     var stripTrailingDot = guard.name.stripTrailingDot;
-    function hostConstraintMatch(constraint, host) {
+    function hostConstraintMatch(constraint, host, reachIntoBase) {
       var c = stripTrailingDot(constraint.toLowerCase()), h = stripTrailingDot(host.toLowerCase());
       if (c === "") return true;
       if (c.charAt(0) === ".") return h.length > c.length && h.slice(-c.length) === c;
-      return h === c || h.length > c.length && h.slice(-(c.length + 1)) === "." + c;
+      if (h === c || h.length > c.length && h.slice(-(c.length + 1)) === "." + c) return true;
+      if (reachIntoBase === true && h.length > 2 && _charCodeAt(h, 0) === 42 && _charCodeAt(h, 1) === 46) {
+        var parent = _strSlice(h, 2);
+        if (parent.length > 0 && c.length > parent.length && _strSlice(c, -(parent.length + 1)) === "." + parent) {
+          return _strIndexOf(_strSlice(c, 0, c.length - parent.length - 1), ".") === -1;
+        }
+      }
+      return false;
     }
     function _charTable(chars) {
       var t = [];
@@ -30619,7 +31644,7 @@ var require_path_validate = __commonJS({
       }
       return true;
     }
-    function nameMatchesConstraint(gnTag, gnValue, base) {
+    function nameMatchesConstraint(gnTag, gnValue, base, reachIntoBase) {
       if (base.tagNumber !== gnTag) return null;
       if (gnTag === 1 || gnTag === 2 || gnTag === 6) {
         if (guard.name.constraintBaseUnreadable(gnTag, base.value)) return "unsupported";
@@ -30628,7 +31653,7 @@ var require_path_validate = __commonJS({
         case 1:
           return emailMatch(base.value, gnValue);
         case 2:
-          return hostConstraintMatch(base.value, gnValue);
+          return hostConstraintMatch(base.value, gnValue, reachIntoBase);
         case 6:
           return uriMatch(base.value, gnValue);
         case 7:
@@ -30671,7 +31696,7 @@ var require_path_validate = __commonJS({
       for (var e = 0; e < state.excludedSubtrees.length; e++) {
         var ex = state.excludedSubtrees[e];
         for (var i = 0; i < forms.length; i++) {
-          var m = nameMatchesConstraint(forms[i].tag, forms[i].value, { tagNumber: ex.tag, value: ex.base });
+          var m = nameMatchesConstraint(forms[i].tag, forms[i].value, { tagNumber: ex.tag, value: ex.base }, true);
           if (m === true) return { ok: false, code: "path/name-constraint-excluded" };
           if (m === "unsupported") return { ok: false, code: "path/name-constraint-unsupported" };
         }
@@ -31494,7 +32519,6 @@ var require_path_validate = __commonJS({
     var OID_AUTHORITY_KEY_ID = oid.byName("authorityKeyIdentifier");
     var OID_CRL_NUMBER = oid.byName("cRLNumber");
     var OID_FRESHEST_CRL = oid.byName("freshestCRL");
-    var IDP_SCHEMA = pkix.issuingDistributionPoint("path/bad-idp");
     var ALL_REASONS = 510;
     function reasonMaskFromBitString(bs) {
       if (!bs || !bs.bytes) return null;
@@ -31520,38 +32544,23 @@ var require_path_validate = __commonJS({
       return ALL_REASONS;
     }
     function decodeIdp(ext) {
-      var out = { hasDistributionPoint: false, distributionPoint: null, onlyUser: false, onlyCa: false, onlySomeReasons: null, indirect: false, onlyAttr: false, malformed: false };
-      var m;
-      try {
-        m = schema.walk(IDP_SCHEMA, asn1.decode(ext.value), NS);
-        if (m.fields.distributionPoint.present) {
-          var dpnWrap = m.fields.distributionPoint.node;
-          if (!dpnWrap.children || dpnWrap.children.length !== 1) {
-            throw E("path/bad-idp", "IssuingDistributionPoint distributionPoint [0] must wrap exactly one DistributionPointName");
-          }
-          out.distributionPoint = pkix.distributionPointName(NS, dpnWrap.children[0], "path/bad-idp");
-        }
-      } catch (_e) {
-        out.malformed = true;
-        return out;
-      }
-      function flag(f) {
-        if (!f.present) return false;
-        var isSet = f.value === true;
-        if (!isSet) out.malformed = true;
-        return isSet;
-      }
-      out.hasDistributionPoint = m.fields.distributionPoint.present;
-      out.onlyUser = flag(m.fields.onlyContainsUserCerts);
-      out.onlyCa = flag(m.fields.onlyContainsCACerts);
-      out.onlySomeReasons = m.fields.onlySomeReasons.present ? true : null;
-      out.onlySomeReasonsMask = null;
-      if (m.fields.onlySomeReasons.present) {
-        out.onlySomeReasonsMask = reasonMaskFromBitString(m.fields.onlySomeReasons.value);
+      var s = pkix.decodeIssuingDistributionPointValue(NS, ext.value, "path/bad-idp");
+      var out = {
+        hasDistributionPoint: s.hasDistributionPoint,
+        distributionPoint: s.distributionPoint,
+        onlyUser: s.onlyUser,
+        onlyCa: s.onlyCa,
+        onlySomeReasons: s.onlySomeReasonsPresent ? true : null,
+        indirect: s.indirect,
+        onlyAttr: s.onlyAttr,
+        malformed: s.malformed,
+        onlySomeReasonsMask: null
+      };
+      if (out.malformed) return out;
+      if (s.onlySomeReasonsPresent) {
+        out.onlySomeReasonsMask = reasonMaskFromBitString(s.onlySomeReasonsValue);
         if (out.onlySomeReasonsMask === null) out.malformed = true;
       }
-      out.indirect = flag(m.fields.indirectCRL);
-      out.onlyAttr = flag(m.fields.onlyContainsAttributeCerts);
       return out;
     }
     function correspondingCertDp(idpDpn, certDPs, issuerRdns) {
@@ -33390,6 +34399,7 @@ var require_smime = __commonJS({
       guard.identifier.assertKnownKeys(opts, known, _err, "smime/bad-input", function(k) {
         return "unknown option " + JSON.stringify(k) + " for pki.smime." + verb + " -- accepted: " + Object.keys(known).sort().join(", ");
       });
+      return guard.identifier.snapshotOptions(opts, known);
     }
     function _isPkcs7(type, kind) {
       var t = (type || "").toLowerCase();
@@ -33830,7 +34840,7 @@ var require_smime = __commonJS({
     }
     async function sign(content, signers, opts) {
       opts = opts || {};
-      _knownOpts(opts, SIGN_OPTS, "sign");
+      opts = _knownOpts(opts, SIGN_OPTS, "sign");
       var hp = opts.protectHeaders === true;
       var hpList = hp ? _hpHeaderList(opts.headers) : null;
       var outerList = hp ? _outerHeaderList(hpList, "clear", opts.hcp) : null;
@@ -33860,7 +34870,7 @@ var require_smime = __commonJS({
     }
     async function verify(message, opts) {
       opts = opts || {};
-      _knownOpts(opts, VERIFY_OPTS, "verify");
+      opts = _knownOpts(opts, VERIFY_OPTS, "verify");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       var vOpts = {};
@@ -33933,7 +34943,7 @@ var require_smime = __commonJS({
     }
     async function encrypt(content, recipients, opts) {
       opts = opts || {};
-      _knownOpts(opts, ENCRYPT_OPTS, "encrypt");
+      opts = _knownOpts(opts, ENCRYPT_OPTS, "encrypt");
       var hp = opts.protectHeaders === true;
       var hpList = hp ? _hpHeaderList(opts.headers) : null;
       var outerList = hp ? _outerHeaderList(hpList, "cipher", opts.hcp) : null;
@@ -33946,7 +34956,7 @@ var require_smime = __commonJS({
     }
     async function decrypt(message, keyMaterial, opts) {
       opts = opts || {};
-      _knownOpts(opts, DECRYPT_OPTS, "decrypt");
+      opts = _knownOpts(opts, DECRYPT_OPTS, "decrypt");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       if (!_isPkcs7(ct.type, "mime")) throw _err("smime/unsupported-type", "not an encrypted S/MIME message (Content-Type " + JSON.stringify(ct.type) + ")");
@@ -33971,7 +34981,7 @@ var require_smime = __commonJS({
     }
     async function compress(content, opts) {
       opts = opts || {};
-      _knownOpts(opts, COMPRESS_OPTS, "compress");
+      opts = _knownOpts(opts, COMPRESS_OPTS, "compress");
       var entity = _entityBytes(content, opts);
       var cOpts = {};
       if (opts.level !== void 0) cOpts.level = opts.level;
@@ -33981,7 +34991,7 @@ var require_smime = __commonJS({
     }
     async function decompress(message, opts) {
       opts = opts || {};
-      _knownOpts(opts, DECOMPRESS_OPTS, "decompress");
+      opts = _knownOpts(opts, DECOMPRESS_OPTS, "decompress");
       var ent = mime.parse(message, SmimeError, "smime/bad-mime");
       var ct = ent.contentType;
       if (!_isPkcs7(ct.type, "mime")) throw _err("smime/unsupported-type", "not a compressed S/MIME message (Content-Type " + JSON.stringify(ct.type) + ")");
@@ -34003,7 +35013,7 @@ var require_smime = __commonJS({
     var CERTS_ONLY_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { crls: 1 });
     function buildCertsOnly(certs, opts) {
       opts = opts || {};
-      _knownOpts(opts, CERTS_ONLY_OPTS, "buildCertsOnly");
+      opts = _knownOpts(opts, CERTS_ONLY_OPTS, "buildCertsOnly");
       var der = _toBuf(cms.certsOnly(certs, { crls: opts.crls }));
       return _capped(Buffer.concat([_pkcs7MimeHead("certs-only", "smime.p7c"), _base64Body(der), mime.CRLF]));
     }
@@ -34489,6 +35499,7 @@ var require_cmc_build = __commonJS({
         } catch (_e) {
           return false;
         }
+        if (requested.asymmetricKeyType !== opening.key.asymmetricKeyType) return false;
         return intrinsic.keyEquals(requested, opening.key);
       }
       if (!_isCompositeSpki(requestedSpki)) return false;
@@ -35534,13 +36545,15 @@ var require_tsp_sign = __commonJS({
       if (!opts.policy) throw _err("tsp/bad-input", "a timestamp token requires a policy identifier (opts.policy)");
       if (opts.serialNumber == null) throw _err("tsp/bad-input", "a timestamp token requires a serialNumber (opts.serialNumber)");
       var certDer = _certDer(tsa && tsa.cert);
+      var certFault = _checkTsaCertUsage(certDer);
+      if (certFault !== true) throw _err(certFault, "the TSA certificate does not satisfy RFC 3161 sec. 2.3 (" + certFault + "): a relying party would refuse every token signed under it");
       var certHashAlg = opts.certHashAlgorithm || "sha256";
       if (!NODE_DIGEST[guard.text.keyOf(certHashAlg)]) throw _err("tsp/unsupported-algorithm", "unsupported certHashAlgorithm " + guard.text.showValue(certHashAlg));
       var imprint = b.sequence([_hashAlgId(mi.hashAlgorithm), b.octetString(guard.bytes.source(mi.hashedMessage, TspError, "tsp/bad-input", "messageImprint.hashedMessage"))]);
-      if (opts.genTime != null) guard.time.assertValid(opts.genTime, _err, "tsp/bad-input", "genTime");
+      if (opts.genTime != null) guard.time.assertEncodable(opts.genTime, _err, "tsp/bad-input", "genTime");
       var genTime = guard.time.isDate(opts.genTime) ? opts.genTime : /* @__PURE__ */ new Date();
       var serial = guard.range.authoredInteger(opts.serialNumber, _err, "tsp/bad-input", "serialNumber");
-      var fields = [b.integer(1n), _policy(opts.policy), imprint, b.integer(serial), b.generalizedTime(genTime)];
+      var fields = [b.integer(1n), _policy(opts.policy), imprint, b.integer(serial), b.generalizedTime(genTime, { fractional: true })];
       if (opts.accuracy) guard.list.append(fields, _accuracy(opts.accuracy));
       if (opts.ordering === true) guard.list.append(fields, b.boolean(true));
       if (opts.nonce != null) guard.list.append(fields, b.integer(guard.range.authoredInteger(opts.nonce, _err, "tsp/bad-input", "nonce")));
@@ -35570,6 +36583,7 @@ var require_tsp_sign = __commonJS({
       }
       if (mil != null) guard.list.append(f, b.contextPrimitive(0, _subMilliBytes(mil, "millis")));
       if (mic != null) guard.list.append(f, b.contextPrimitive(1, _subMilliBytes(mic, "micros")));
+      if (!f.length) throw _err("tsp/bad-input", "accuracy must name at least one of seconds, millis, micros; omit it to make no accuracy claim (RFC 3161 sec. 2.4.2)");
       return b.sequence(f);
     }
     function _subMilliBytes(n, label) {
@@ -35843,6 +36857,7 @@ var require_tsp_sign = __commonJS({
         "tsp/bad-input",
         "pki.tsp.verify has an unknown option (the anchor option is `trustAnchors`) "
       );
+      opts = guard.identifier.snapshotOptions(opts, _VERIFY_OPTS);
       if (opts.certs != null && (!Array.isArray(opts.certs) || !guard.list.allMatch(opts.certs, function(c) {
         return guard.bytes.isByteSource(c);
       }))) {
@@ -35957,6 +36972,7 @@ var require_ocsp = __commonJS({
     var oid = require_oid();
     var x509 = require_schema_x509();
     var ocspSchema = require_schema_ocsp();
+    var crlSchema = require_schema_crl();
     var pathValidate = require_path_validate();
     var signScheme = require_sign_scheme();
     var ocspVerify = require_ocsp_verify();
@@ -35985,6 +37001,12 @@ var require_ocsp = __commonJS({
     var OID_OCSP_NONCE = O("ocspNonce");
     var OID_OCSP_BASIC = O("ocspBasic");
     var OID_EXTENDED_REVOKE = O("ocspExtendedRevoke");
+    var OID_OCSP_CRL = O("ocspCrl");
+    var EXTENSION_PLACEMENT = ocspSchema.extensionPlacement(oid);
+    var ENTRY_EXTENSION_CRITICALITY = crlSchema.entryExtensionCriticality(oid);
+    var CERTIFICATE_HOLD = REASON_CODE.certificateHold;
+    var REMOVE_FROM_CRL = REASON_CODE.removeFromCRL;
+    var OID_REASON_CODE = O("reasonCode");
     function _digest(wcHash, buf) {
       return subtle.digest(wcHash, buf).then(function(h) {
         return Buffer.from(h);
@@ -36039,11 +37061,13 @@ var require_ocsp = __commonJS({
     function _nonceExt(nonceBytes) {
       return b.sequence([b.oid(OID_OCSP_NONCE), b.octetString(b.octetString(nonceBytes))]);
     }
-    function _assertNonce(nonceBytes) {
-      if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length < 1 || nonceBytes.length > 128) {
-        throw _err("ocsp/bad-input", "a nonce must be a Buffer of 1..128 octets (RFC 9654 sec. 2.1)");
+    function _assertNonce(nonceBytes, floor) {
+      if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length < floor || nonceBytes.length > 128) {
+        throw _err("ocsp/bad-input", "a nonce must be a Buffer of " + floor + "..128 octets (RFC 9654 sec. 2.1)");
       }
     }
+    var REQUESTER_NONCE_FLOOR = 32;
+    var RESPONDER_NONCE_FLOOR = 1;
     function _buildCertID(cert, issuer, hashName) {
       var wc = HASH_WC[guard.text.keyOf(hashName)];
       if (!wc) throw _err("ocsp/bad-input", "unsupported CertID hashAlgorithm " + guard.text.showValue(hashName) + " (sha1 / sha256 / sha384 / sha512)");
@@ -36074,6 +37098,8 @@ var require_ocsp = __commonJS({
       requestorName: 1,
       signer: 1
     });
+    var _QUERY_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { cert: 1, issuer: 1, singleRequestExtensions: 1 });
+    var _REQUEST_SIGNER_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { cert: 1, key: 1 });
     function _buildRequest(query, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "ocsp/bad-input", "pki.ocsp.buildRequest options");
       guard.identifier.assertKnownKeys(
@@ -36089,9 +37115,22 @@ var require_ocsp = __commonJS({
       var queries = Array.isArray(query) ? pkiBuild.reqDenseArray(query, "queries", _err, "ocsp/bad-input") : [query];
       if (!queries.length) throw _err("ocsp/bad-input", "buildRequest needs at least one { cert, issuer } query");
       if (lightweight && queries.length !== 1) throw _err("ocsp/bad-input", "the lightweight profile permits exactly one Request (RFC 5019 sec. 2.1.1)");
-      if (opts.signer && !opts.requestorName) throw _err("ocsp/bad-input", "a signed OCSP request MUST carry requestorName (RFC 6960 sec. 4.1.2)");
+      var signerCertDer = null, signerCert = null;
+      if (opts.signer) {
+        guard.identifier.assertKnownKeys(opts.signer, _REQUEST_SIGNER_KEYS, _err, "ocsp/bad-input", "unknown request signer field (the signer is { cert, key }): ");
+        signerCertDer = _normCertDer(opts.signer.cert, "the request signer certificate");
+        signerCert = _certOf(signerCertDer, "the request signer certificate");
+      }
+      var requestorNameDer = null;
+      if (opts.requestorName != null) requestorNameDer = _nameDer(opts.requestorName);
+      else if (signerCert !== null) {
+        if (!signerCert.subject.rdns.length) throw _err("ocsp/bad-input", "the request signer certificate has an empty subject, so no requestorName can be taken from it; state requestorName (RFC 6960 sec. 4.1.2)");
+        requestorNameDer = signerCert.subject.bytes;
+      }
       return Promise.all(queries.map(function(q) {
-        if (!q || q.cert == null || q.issuer == null) throw _err("ocsp/bad-input", "each query must be { cert, issuer }");
+        if (!q || typeof q !== "object") throw _err("ocsp/bad-input", "each query must be { cert, issuer }");
+        guard.identifier.assertKnownKeys(q, _QUERY_KEYS, _err, "ocsp/bad-input", "unknown query field (a query is { cert, issuer, singleRequestExtensions? }): ");
+        if (q.cert == null || q.issuer == null) throw _err("ocsp/bad-input", "each query must be { cert, issuer }");
         var cert = _certOf(q.cert, "the query certificate");
         var issuer = _certOf(q.issuer, "the issuer certificate");
         return _buildCertID(cert, issuer, hashName).then(function(certID) {
@@ -36104,22 +37143,17 @@ var require_ocsp = __commonJS({
         });
       })).then(function(requests) {
         var tbsChildren = [];
-        if (opts.requestorName) {
-          var nameDer = _nameDer(opts.requestorName);
-          tbsChildren.push(b.explicit(1, b.contextConstructed(4, nameDer)));
-        }
+        if (requestorNameDer !== null) tbsChildren.push(b.explicit(1, b.contextConstructed(4, requestorNameDer)));
         tbsChildren.push(b.sequence(requests));
         var reqExts = [];
         if (opts.nonce) {
           var nonceBytes = opts.nonce === true ? nodeCrypto.randomBytes(32) : opts.nonce;
-          _assertNonce(nonceBytes);
+          _assertNonce(nonceBytes, REQUESTER_NONCE_FLOOR);
           reqExts.push(_nonceExt(nonceBytes));
         }
         if (reqExts.length) tbsChildren.push(b.explicit(2, b.sequence(reqExts)));
         var tbsRequest = b.sequence(tbsChildren);
-        if (!opts.signer) return _emitReq(b.sequence([tbsRequest]), opts);
-        var signerCertDer = _normCertDer(opts.signer.cert, "the request signer certificate");
-        var signerCert = _certOf(signerCertDer, "the request signer certificate");
+        if (signerCert === null) return _emitReq(b.sequence([tbsRequest]), opts);
         var scheme = signScheme.resolveSignScheme(signerCert, { combinedRsaSig: true }, true, _signE);
         return signScheme.signOverTbs(scheme, opts.signer.key, tbsRequest, _signE).then(function(sig) {
           var optionalSignature = b.sequence([scheme.sigAlgId, b.bitString(sig, 0), b.explicit(0, b.sequence([b.raw(signerCertDer)]))]);
@@ -36157,6 +37191,10 @@ var require_ocsp = __commonJS({
       ], _sign);
     }
     var _SIGN_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { embedCert: 1, extendedRevoke: 1, nonce: 1, pem: 1 });
+    var _RESPONSE_DATA_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { responderID: 1, responses: 1, producedAt: 1 });
+    var _SINGLE_RESPONSE_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { cert: 1, issuer: 1, certID: 1, hashAlgorithm: 1, status: 1, thisUpdate: 1, nextUpdate: 1, singleExtensions: 1 });
+    var _RESPONDER_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { cert: 1, key: 1 });
+    var _STATUS_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { revoked: 1, revocationReason: 1 });
     function _sign(responseData, responder, opts) {
       opts = guard.identifier.optionsObject(opts, _err, "ocsp/bad-input", "pki.ocsp.sign options");
       guard.identifier.assertKnownKeys(
@@ -36167,7 +37205,11 @@ var require_ocsp = __commonJS({
         "pki.ocsp.sign has an unknown option (the nonce to echo back is `nonce`): "
       );
       responseData = responseData || {};
-      if (!responder || responder.cert == null || responder.key == null) throw _err("ocsp/bad-input", "a responder must be { cert, key }");
+      if (typeof responseData !== "object") throw _err("ocsp/bad-input", "the responseData must be an object { responderID, responses, producedAt? }");
+      guard.identifier.assertKnownKeys(responseData, _RESPONSE_DATA_KEYS, _err, "ocsp/bad-input", "unknown responseData field (accepted: responderID, responses, producedAt): ");
+      if (!responder || typeof responder !== "object") throw _err("ocsp/bad-input", "a responder must be { cert, key }");
+      guard.identifier.assertKnownKeys(responder, _RESPONDER_KEYS, _err, "ocsp/bad-input", "unknown responder field (the responder is { cert, key }; a signing option belongs in the third argument): ");
+      if (responder.cert == null || responder.key == null) throw _err("ocsp/bad-input", "a responder must be { cert, key }");
       var respCertDer = _normCertDer(responder.cert, "the responder certificate");
       var respCert = _certOf(respCertDer, "the responder certificate");
       var ownedKeyBytes = [];
@@ -36200,14 +37242,23 @@ var require_ocsp = __commonJS({
       return _responderID(responseData.responderID, respCert).then(function(ridNode) {
         return Promise.all(responses.map(function(r) {
           return _buildSingleResponse(r, opts);
-        })).then(function(srNodes) {
-          var rdChildren = [ridNode, b.generalizedTime(_asDate(responseData.producedAt) || /* @__PURE__ */ new Date()), b.sequence(srNodes)];
+        })).then(function(built) {
+          var srNodes = built.map(function(x) {
+            return x.node;
+          });
+          var anyNonIssued = built.some(function(x) {
+            return x.nonIssued;
+          });
+          if (anyNonIssued && opts.extendedRevoke === false) {
+            throw _err("ocsp/bad-input", "a revoked response for a non-issued certificate MUST carry the extended-revoke response extension, so extendedRevoke: false is refused here (RFC 6960 sec. 2.2 / 4.4.8)");
+          }
+          var rdChildren = [ridNode, b.generalizedTime(_asEncodableDate(responseData.producedAt, "producedAt") || /* @__PURE__ */ new Date()), b.sequence(srNodes)];
           var respExts = [];
           if (opts.nonce != null) {
-            _assertNonce(opts.nonce);
+            _assertNonce(opts.nonce, RESPONDER_NONCE_FLOOR);
             respExts.push(_nonceExt(opts.nonce));
           }
-          if (opts.extendedRevoke) respExts.push(b.sequence([b.oid(OID_EXTENDED_REVOKE), b.octetString(b.nullValue())]));
+          if (opts.extendedRevoke || anyNonIssued) respExts.push(b.sequence([b.oid(OID_EXTENDED_REVOKE), b.octetString(b.nullValue())]));
           if (respExts.length) rdChildren.push(b.explicit(1, b.sequence(respExts)));
           var responseDataDer = b.sequence(rdChildren);
           var scheme = signScheme.resolveSignScheme(respCert, { combinedRsaSig: true }, true, _signE);
@@ -36226,6 +37277,10 @@ var require_ocsp = __commonJS({
       var dt = guard.time.toDate(d);
       if (isNaN(guard.time.instantOf(dt))) throw _err("ocsp/bad-input", "an invalid date value " + guard.text.showValue(d));
       return dt;
+    }
+    function _asEncodableDate(d, which) {
+      var dt = _asDate(d);
+      return dt === null ? null : guard.time.assertEncodable(dt, _err, "ocsp/bad-input", which);
     }
     function _snapshotSignerKey(key, owned) {
       if (Buffer.isBuffer(key) || key instanceof Uint8Array) {
@@ -36248,25 +37303,128 @@ var require_ocsp = __commonJS({
     function _buildSingleResponse(r, opts) {
       r = r || {};
       var certIdP;
+      if (typeof r !== "object") return Promise.reject(_err("ocsp/bad-input", "each response entry must be an object"));
+      try {
+        guard.identifier.assertKnownKeys(r, _SINGLE_RESPONSE_KEYS, _err, "ocsp/bad-input", "unknown response entry field (accepted: cert, issuer, certID, hashAlgorithm, status, thisUpdate, nextUpdate, singleExtensions): ");
+      } catch (e) {
+        return Promise.reject(e);
+      }
       if (r.certID != null) certIdP = Promise.resolve(b.raw(guard.bytes.view(r.certID, OcspError, "ocsp/bad-input", "a response entry's certID")));
       else if (r.cert != null && r.issuer != null) certIdP = _buildCertID(_certOf(r.cert, "a response certificate"), _certOf(r.issuer, "a response issuer"), r.hashAlgorithm || "sha1");
       else return Promise.reject(_err("ocsp/bad-input", "each response entry needs { certID } or { cert, issuer }"));
       return certIdP.then(function(certID) {
+        var thisUpdate = _asEncodableDate(r.thisUpdate, "thisUpdate") || /* @__PURE__ */ new Date();
+        var nextUpdate = r.nextUpdate === null ? null : _asEncodableDate(r.nextUpdate, "nextUpdate") || _defaultNextUpdate();
+        if (nextUpdate !== null && guard.time.instantOf(thisUpdate) > guard.time.instantOf(nextUpdate)) {
+          throw _err("ocsp/bad-input", "thisUpdate must not be after nextUpdate (RFC 6960 sec. 4.2.2.1)");
+        }
         var statusNode = _certStatusNode(r.status, opts);
-        var srChildren = [certID, statusNode, b.generalizedTime(_asDate(r.thisUpdate) || /* @__PURE__ */ new Date())];
-        if (r.nextUpdate !== null) srChildren.push(b.explicit(0, b.generalizedTime(_asDate(r.nextUpdate) || _defaultNextUpdate())));
-        if (r.singleExtensions && r.singleExtensions.length) srChildren.push(b.explicit(1, b.sequence(r.singleExtensions)));
-        return b.sequence(srChildren);
+        var nonIssued = _isNonIssuedStatus(r.status);
+        var srChildren = [certID, statusNode, b.generalizedTime(thisUpdate)];
+        if (nextUpdate !== null) srChildren.push(b.explicit(0, b.generalizedTime(nextUpdate)));
+        if (r.singleExtensions != null) {
+          var singleDer = _singleExtensionsDer(r.singleExtensions, nonIssued);
+          if (singleDer.length) srChildren.push(b.explicit(1, b.sequence(singleDer)));
+        }
+        return { node: b.sequence(srChildren), nonIssued };
       });
+    }
+    function _isNonIssuedStatus(status) {
+      if (!status || typeof status !== "object" || status.revoked == null || status.revocationReason == null) return false;
+      var code = typeof status.revocationReason === "number" ? status.revocationReason : REASON_CODE[guard.text.keyOf(status.revocationReason)];
+      if (code !== CERTIFICATE_HOLD) return false;
+      var instant = guard.time.instantOf(_asEncodableDate(status.revoked, "the revocation time"));
+      return instant >= 0 && instant < constants.TIME.seconds(1);
+    }
+    var NON_ISSUED_FORBIDDEN = "a revoked response for a non-issued certificate MUST NOT carry CRL references or any CRL entry extension (RFC 6960 sec. 2.2)";
+    function _assertSingleExtensionPlacement(e, nonIssued) {
+      var label = "pre-encoded singleExtension " + (e.name || e.oid);
+      var requestClause = EXTENSION_PLACEMENT.requestOnly[e.oid], responseClause = EXTENSION_PLACEMENT.responseOnly[e.oid];
+      if (requestClause !== void 0) throw _err("ocsp/bad-input", label + " is a request extension and does not belong in a response (" + requestClause + ")");
+      if (responseClause !== void 0) throw _err("ocsp/bad-input", label + " belongs in responseExtensions, not in singleExtensions (" + responseClause + ")");
+      var entry = ENTRY_EXTENSION_CRITICALITY[e.oid];
+      if (entry !== void 0 && e.critical === true !== entry.critical) {
+        throw _err("ocsp/bad-input", label + " must be marked " + (entry.critical ? "critical" : "non-critical") + " (" + entry.citation + ", carried by RFC 6960 sec. 4.4.5)");
+      }
+      if (nonIssued && (entry !== void 0 || e.oid === OID_OCSP_CRL)) throw _err("ocsp/bad-input", NON_ISSUED_FORBIDDEN);
+      if (entry !== void 0) {
+        var read;
+        try {
+          read = crlSchema.readEntryExtension(e);
+        } catch (err) {
+          throw _err("ocsp/bad-input", label + " value is malformed (" + entry.citation + ")", err);
+        }
+        if (e.oid === OID_REASON_CODE && read.value === REMOVE_FROM_CRL) {
+          throw _err("ocsp/bad-input", label + " removeFromCRL(8) appears only in a delta CRL (RFC 5280 sec. 5.3.1), never in an OCSP response");
+        }
+      }
     }
     function _defaultNextUpdate() {
       return new Date(Date.now() + constants.TIME.days(7));
+    }
+    var _SINGLE_EXT_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { archiveCutoff: 1, crlReferences: 1 });
+    var _CRL_ID_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { crlUrl: 1, crlNum: 1, crlTime: 1 });
+    function _singleExtensionsDer(spec, nonIssued) {
+      if (Array.isArray(spec)) {
+        var dense = pkiBuild.reqDenseArray(spec, "singleExtensions", _err, "ocsp/bad-input");
+        var ders = dense.map(function(d, i) {
+          return guard.bytes.snapshotSource(d, OcspError, "ocsp/bad-input", "singleExtensions[" + i + "]");
+        });
+        if (ders.length) {
+          var parsed = ocspSchema.readSingleExtensionsDer(ders);
+          parsed.forEach(function(e) {
+            _assertSingleExtensionPlacement(e, nonIssued);
+          });
+        }
+        return ders;
+      }
+      if (!spec || typeof spec !== "object" || Buffer.isBuffer(spec)) {
+        throw _err("ocsp/bad-input", "singleExtensions must be an object { archiveCutoff?, crlReferences? } or an array of pre-encoded Extension DER");
+      }
+      guard.identifier.assertKnownKeys(spec, _SINGLE_EXT_KEYS, _err, "ocsp/bad-input", function(k) {
+        return "unknown singleExtensions field " + guard.text.showValue(k) + " (accepted: archiveCutoff, crlReferences)";
+      });
+      var out = [];
+      if (spec.archiveCutoff != null) {
+        guard.time.assertEncodable(spec.archiveCutoff, _err, "ocsp/bad-input", "singleExtensions archiveCutoff");
+        out.push(b.sequence([b.oid(oid.byName("ocspArchiveCutoff")), b.octetString(b.generalizedTime(spec.archiveCutoff))]));
+      }
+      if (spec.crlReferences != null) {
+        if (nonIssued) throw _err("ocsp/bad-input", NON_ISSUED_FORBIDDEN);
+        var c = spec.crlReferences;
+        if (!c || typeof c !== "object" || Array.isArray(c) || Buffer.isBuffer(c)) {
+          throw _err("ocsp/bad-input", "singleExtensions crlReferences must be an object { crlUrl?, crlNum?, crlTime? }");
+        }
+        guard.identifier.assertKnownKeys(c, _CRL_ID_KEYS, _err, "ocsp/bad-input", function(k) {
+          return "unknown crlReferences field " + guard.text.showValue(k) + " (accepted: crlUrl, crlNum, crlTime)";
+        });
+        var fields = [];
+        if (c.crlUrl != null) {
+          if (typeof c.crlUrl !== "string" || !c.crlUrl.length) throw _err("ocsp/bad-input", "crlReferences crlUrl must be a non-empty string");
+          for (var j = 0; j < c.crlUrl.length; j++) {
+            if (c.crlUrl.charCodeAt(j) > 127) throw _err("ocsp/bad-input", "crlReferences crlUrl must be 7-bit ASCII (an IA5String, RFC 6960 sec. 4.4.2)");
+          }
+          fields.push(b.explicit(0, b.ia5(c.crlUrl)));
+        }
+        if (c.crlNum != null) {
+          var num = guard.range.authoredInteger(c.crlNum, _err, "ocsp/bad-input", "crlReferences crlNum");
+          if (num < 0n) throw _err("ocsp/bad-input", "crlReferences crlNum must be non-negative (it is a cRLNumber, RFC 5280 sec. 5.2.3)");
+          fields.push(b.explicit(1, b.integer(num)));
+        }
+        if (c.crlTime != null) {
+          guard.time.assertEncodable(c.crlTime, _err, "ocsp/bad-input", "crlReferences crlTime");
+          fields.push(b.explicit(2, b.generalizedTime(c.crlTime)));
+        }
+        out.push(b.sequence([b.oid(oid.byName("ocspCrl")), b.octetString(b.sequence(fields))]));
+      }
+      return out;
     }
     function _certStatusNode(status, opts) {
       if (status == null || status === "good") return b.contextPrimitive(0, Buffer.alloc(0));
       if (status === "unknown") return b.contextPrimitive(2, Buffer.alloc(0));
       if (typeof status === "object" && status.revoked != null) {
-        var ri = [b.generalizedTime(_asDate(status.revoked))];
+        guard.identifier.assertKnownKeys(status, _STATUS_KEYS, _err, "ocsp/bad-input", "unknown revoked status field (a revoked status is { revoked, revocationReason? }): ");
+        var ri = [b.generalizedTime(_asEncodableDate(status.revoked, "the revocation time"))];
         if (status.revocationReason != null) {
           var code = typeof status.revocationReason === "number" ? status.revocationReason : REASON_CODE[guard.text.keyOf(status.revocationReason)];
           if (code == null) throw _err("ocsp/bad-input", "unknown revocationReason " + guard.text.showValue(status.revocationReason));
@@ -36335,9 +37493,10 @@ var require_ocsp = __commonJS({
     }
     function _reqVerdict(parsed, extra) {
       return guard.verdict.of({
-        valid: extra.signed === true && extra.signatureValid === true,
+        valid: extra.signed === true && extra.signatureValid === true && extra.requestorNamed === true,
         signed: extra.signed,
         signatureValid: extra.signatureValid,
+        requestorNamed: extra.requestorNamed === true,
         signerCert: extra.signerCert != null ? extra.signerCert : null,
         signerCerts: extra.signerCerts != null ? extra.signerCerts : [],
         certs: extra.certs != null ? extra.certs : [],
@@ -36369,18 +37528,34 @@ var require_ocsp = __commonJS({
       }
       return { matches, parseable };
     }
+    function _requestorNamed(parsed, matches) {
+      var rn = parsed.requestorName;
+      if (rn.tagNumber !== 4) {
+        return { named: [], reason: "the signed OCSP request names its requestor by a GeneralName form [" + rn.tagNumber + "] this responder does not compare to a certificate subject; a directoryName is compared (RFC 6960 sec. 4.1.2)" };
+      }
+      if (!rn.value.rdns.length) return { named: [], reason: "the signed OCSP request's requestorName is an empty distinguished name, which names nobody (RFC 6960 sec. 4.1.2)" };
+      var named = [];
+      for (var i = 0; i < matches.length; i++) {
+        if (guard.name.dnEqual(matches[i].subject.rdns, rn.value.rdns, _err, "ocsp/bad-input", "the requestorName")) named.push(matches[i]);
+      }
+      if (named.length) return { named, reason: null };
+      return { named: [], reason: "the requestorName " + guard.text.showValue(rn.value.dn) + " is not the subject of a certificate that signed the request (RFC 6960 sec. 4.1.2)" };
+    }
     function _signerVerdict(parsed, found, failReason) {
       if (!found.matches.length) return _reqVerdict(parsed, { signed: true, signatureValid: false, certs: found.parseable, reason: failReason });
+      var bound = _requestorNamed(parsed, found.matches);
+      var signers = bound.named.length ? bound.named : found.matches;
       return _reqVerdict(parsed, {
         signed: true,
         signatureValid: true,
-        signerCert: found.matches[0].der,
-        signerCerts: found.matches.map(function(m) {
+        requestorNamed: bound.reason === null,
+        signerCert: signers[0].der,
+        signerCerts: signers.map(function(m) {
           return m.der;
         }),
         certs: found.parseable,
-        signerSubject: { dn: found.matches[0].subject.dn, rdns: found.matches[0].subject.rdns },
-        reason: null
+        signerSubject: { dn: signers[0].subject.dn, rdns: signers[0].subject.rdns },
+        reason: bound.reason
       });
     }
     async function verifyRequest(request, opts) {
@@ -36448,10 +37623,12 @@ var require_x509_sign = __commonJS({
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
     var _isArray = intrinsic.isArray;
+    var _bufferEquals = intrinsic.bufferEquals;
     var frameworkError = require_framework_error();
     var schema = require_schema_engine();
     var pkix = require_schema_pkix();
     var pkiBuild = require_pki_build();
+    var ct = require_ct();
     var CertificateError = frameworkError.CertificateError;
     var NS = pkix.makeNS("x509", CertificateError, oid);
     var NAME_SCHEMA = pkix.name(NS);
@@ -36467,7 +37644,6 @@ var require_x509_sign = __commonJS({
     function O(n) {
       return oid.byName(n);
     }
-    var OID_SKI = O("subjectKeyIdentifier");
     var KNOWN_SPEC_KEYS = intrinsic.assign(intrinsic.create(null), {
       subject: 1,
       subjectPublicKey: 1,
@@ -36489,7 +37665,28 @@ var require_x509_sign = __commonJS({
       basicConstraints: 1,
       subjectAltName: 1,
       certificatePolicies: 1,
-      certificatePoliciesCritical: 1
+      certificatePoliciesCritical: 1,
+      nameConstraints: 1,
+      authorityInfoAccess: 1,
+      cRLDistributionPoints: 1,
+      freshestCRL: 1,
+      policyConstraints: 1,
+      inhibitAnyPolicy: 1,
+      policyMappings: 1,
+      policyMappingsCritical: 1,
+      issuerAltName: 1,
+      qcStatements: 1,
+      qcStatementsCritical: 1,
+      precertificatePoison: 1,
+      signedCertificateTimestampList: 1,
+      msCertificateTemplate: 1,
+      msEnrollCertType: 1,
+      msCaVersion: 1,
+      msPreviousCertHash: 1,
+      msApplicationPolicies: 1,
+      subjectInfoAccess: 1,
+      subjectDirectoryAttributes: 1,
+      ocspNoCheck: 1
     });
     var _b = pkiBuild.makeBuilder({ ErrorClass: CertificateError, prefix: "x509", O, NS, NAME_SCHEMA, SPKI_SCHEMA, EXT_DECODERS });
     var _encodeName = _b.encodeName;
@@ -36497,6 +37694,7 @@ var require_x509_sign = __commonJS({
     var _reqDer = _b.reqDer;
     var _assertValidSpki = _b.assertValidSpki;
     var _assertValidExtension = _b.assertValidExtension;
+    var _assertCertCriticality = _b.assertCertCriticality;
     var _certLikeFromSpki = _b.certLikeFromSpki;
     var _assertCertVerifies = _b.assertSignatureVerifies;
     var _ext = _b.ext;
@@ -36505,47 +37703,72 @@ var require_x509_sign = __commonJS({
     var _extKeyUsage = _b.extKeyUsage;
     var _extExtKeyUsage = _b.extExtKeyUsage;
     var _extSki = _b.extSki;
+    var _extNameConstraints = _b.extNameConstraints;
+    var _extAia = _b.extAuthorityInfoAccess;
+    var _extCrlDp = _b.extCrlDistributionPoints;
+    var _extPolicyConstraints = _b.extPolicyConstraints;
+    var _extInhibitAnyPolicy = _b.extInhibitAnyPolicy;
+    var _extPolicyMappings = _b.extPolicyMappings;
+    var _encodeGeneralNames = _b.encodeGeneralNames;
+    var _reqDenseArray = _b.reqDenseArray;
+    var _extQcStatements = _b.extQcStatements;
     var _extAki = _b.extAki;
     var _extSan = _b.extSan;
     var _extCertPolicies = _b.extCertPolicies;
     var _skiKeyId = _b.skiKeyId;
     var _spkiKeyId = _b.spkiKeyId;
     var _serialInteger = _b.serialInteger;
-    function _skiValueOf(caCert) {
-      var ext = (caCert.extensions || []).filter(function(e) {
-        return e.oid === OID_SKI;
-      })[0];
-      if (ext) {
-        try {
-          return asn1.read.octetString(asn1.decode(ext.value));
-        } catch (_e) {
-        }
-      }
-      return null;
-    }
     function _akiKeyId(val, ctx) {
-      if (guard.bytes.isByteSource(val)) return guard.bytes.snapshotSource(val, CertificateError, "x509/bad-input", "the authorityKeyIdentifier keyIdentifier");
-      if (val === true) {
-        if (ctx.issuerCert) {
-          var ski = _skiValueOf(ctx.issuerCert);
-          if (ski) return ski;
+      var issuerSki = ctx.issuerCert ? _b.skiValueOf(ctx.issuerCert) : null;
+      if (guard.bytes.isByteSource(val)) {
+        var given = guard.bytes.snapshotSource(val, CertificateError, "x509/bad-input", "the authorityKeyIdentifier keyIdentifier");
+        if (issuerSki && !_bufferEquals(given, issuerSki)) {
+          throw _err("x509/bad-input", "the authorityKeyIdentifier keyIdentifier must equal the issuer certificate's subjectKeyIdentifier (RFC 5280 sec. 4.2.1.2); omit it to take that value");
         }
-        return _spkiKeyId(ctx.issuerSpki);
+        return given;
       }
+      if (val === true) return issuerSki || _spkiKeyId(ctx.issuerSpki);
       throw _err("x509/bad-input", "authorityKeyIdentifier must be true (auto-derive from the issuer) or a Buffer key id");
     }
+    function _akiFields(val, ctx) {
+      if (val === true || guard.bytes.isByteSource(val)) return [_akiKeyId(val, ctx), null, null];
+      if (typeof val !== "object" || _isArray(val)) {
+        throw _err("x509/bad-input", "authorityKeyIdentifier must be true, a Buffer key id, or an object { keyIdentifier, authorityCertIssuer, authorityCertSerialNumber }");
+      }
+      guard.identifier.assertKnownKeys(val, _b.AKI_KEYS, _err, "x509/bad-input", function(k) {
+        return "unknown authorityKeyIdentifier field " + guard.text.showValue(k) + " (accepted: keyIdentifier, authorityCertIssuer, authorityCertSerialNumber)";
+      });
+      var issuerName = val.authorityCertIssuer, serial = val.authorityCertSerialNumber;
+      if (issuerName === true || serial === true) {
+        if (!ctx.issuerCert) {
+          throw _err("x509/bad-input", "authorityCertIssuer and authorityCertSerialNumber derive from the issuing certificate, so they are named directly when the issuer is given as a name and key");
+        }
+        if (issuerName === true) issuerName = [{ directoryName: ctx.issuerCert.issuer.bytes }];
+        if (serial === true) serial = "0x" + ctx.issuerCert.serialNumberHex;
+      }
+      var keyId = val.keyIdentifier == null ? true : val.keyIdentifier;
+      if (keyId === false) {
+        if (!ctx.selfSigned) throw _err("x509/bad-input", "the authorityKeyIdentifier keyIdentifier MUST be included in every certificate a CA generates other than a self-signed one, so keyIdentifier: false is refused here (RFC 5280 sec. 4.2.1.1)");
+        keyId = null;
+      } else {
+        keyId = _akiKeyId(keyId, ctx);
+      }
+      return [keyId, issuerName == null ? null : issuerName, serial == null ? null : serial];
+    }
     function _buildExtensions(extSpec, ctx) {
-      if (extSpec == null) return [];
+      if (extSpec == null) extSpec = {};
       if (_isArray(extSpec)) {
-        var seenExt = intrinsic.create(null), arrCa = false, arrKeyCertSign = false, arrPathLen = false;
-        var oidBc = O("basicConstraints"), oidKu = O("keyUsage");
+        var seenExt = intrinsic.create(null), arrCa = false, arrKeyCertSign = false, arrPathLen = false, arrNameConstraints = false;
+        var oidBc = O("basicConstraints"), oidKu = O("keyUsage"), oidNc = O("nameConstraints");
         var arr = extSpec.map(function(e, i) {
           var der = _reqDer(e, "extension");
-          _assertValidExtension(der, i);
+          _assertValidExtension(der, i, EXT_DECODERS);
           var n = asn1.decode(der);
           var extnId = asn1.read.oid(n.children[0]);
           if (seenExt[extnId]) throw _err("x509/bad-input", "duplicate extension " + extnId + " in the extensions array (RFC 5280 sec. 4.2 -- at most one instance of an extension)");
           seenExt[extnId] = true;
+          if (extnId === oidNc) arrNameConstraints = true;
+          _assertCertCriticality(extnId, n.children.length === 3, "pre-encoded");
           var dec = EXT_DECODERS[extnId];
           if (dec) {
             var decoded;
@@ -36567,6 +37790,8 @@ var require_x509_sign = __commonJS({
         });
         if (arrKeyCertSign && !arrCa) throw _err("x509/bad-input", "keyUsage keyCertSign requires basicConstraints cA=TRUE (RFC 5280 sec. 4.2.1.3)");
         if (arrPathLen && (!arrCa || !arrKeyCertSign)) throw _err("x509/bad-input", "basicConstraints pathLenConstraint requires cA=TRUE and keyUsage keyCertSign (RFC 5280 sec. 4.2.1.9)");
+        if (arrNameConstraints && !arrCa) throw _err("x509/bad-input", "nameConstraints appears only in a CA certificate, so it requires basicConstraints cA=TRUE (RFC 5280 sec. 4.2.1.10)");
+        _assertCtStagesExclusive(!!seenExt[O("precertificatePoison")], !!seenExt[O("signedCertificateTimestampList")]);
         return arr;
       }
       if (typeof extSpec !== "object") throw _err("x509/bad-input", "extensions must be an object or an array of pre-encoded Extension DER");
@@ -36584,8 +37809,19 @@ var require_x509_sign = __commonJS({
         if (!assertsKeyCertSign) throw _err("x509/bad-input", "basicConstraints pathLenConstraint requires keyUsage keyCertSign (RFC 5280 sec. 4.2.1.9)");
       }
       var out = [];
-      if (extSpec.subjectKeyIdentifier != null) out.push(_ext(O("subjectKeyIdentifier"), false, _extSki(_skiKeyId(extSpec.subjectKeyIdentifier, ctx.spki))));
-      if (extSpec.authorityKeyIdentifier != null) out.push(_ext(O("authorityKeyIdentifier"), false, _extAki(_akiKeyId(extSpec.authorityKeyIdentifier, ctx))));
+      var skiVal = extSpec.subjectKeyIdentifier == null ? true : extSpec.subjectKeyIdentifier;
+      if (skiVal === false) {
+        if (caTrue) throw _err("x509/bad-input", "a CA certificate MUST carry a subjectKeyIdentifier, so subjectKeyIdentifier: false is refused when basicConstraints cA is TRUE (RFC 5280 sec. 4.2.1.2)");
+      } else {
+        out.push(_ext(O("subjectKeyIdentifier"), false, _extSki(_skiKeyId(skiVal, ctx.spki))));
+      }
+      var akiVal = extSpec.authorityKeyIdentifier == null ? !ctx.selfSigned : extSpec.authorityKeyIdentifier;
+      if (akiVal === false) {
+        if (!ctx.selfSigned) throw _err("x509/bad-input", "the authorityKeyIdentifier keyIdentifier MUST be included in every certificate a CA generates other than a self-signed one, so authorityKeyIdentifier: false is refused here (RFC 5280 sec. 4.2.1.1)");
+      } else {
+        var akiF = _akiFields(akiVal, ctx);
+        out.push(_ext(O("authorityKeyIdentifier"), false, _extAki(akiF[0], akiF[1], akiF[2])));
+      }
       if (ku != null) out.push(_ext(O("keyUsage"), extSpec.keyUsageCritical !== false, _extKeyUsage(ku)));
       if (extSpec.extendedKeyUsage != null) out.push(_ext(O("extKeyUsage"), !!extSpec.extendedKeyUsageCritical, _extExtKeyUsage(extSpec.extendedKeyUsage)));
       if (bc != null) {
@@ -36594,7 +37830,56 @@ var require_x509_sign = __commonJS({
       }
       if (extSpec.subjectAltName != null) out.push(_ext(O("subjectAltName"), ctx.subjectEmpty, _extSan(extSpec.subjectAltName)));
       if (extSpec.certificatePolicies != null) out.push(_ext(O("certificatePolicies"), !!extSpec.certificatePoliciesCritical, _extCertPolicies(extSpec.certificatePolicies)));
+      if (extSpec.authorityInfoAccess != null) guard.list.append(out, _ext(O("authorityInfoAccess"), false, _extAia(extSpec.authorityInfoAccess)));
+      if (extSpec.cRLDistributionPoints != null) guard.list.append(out, _ext(O("cRLDistributionPoints"), false, _extCrlDp(extSpec.cRLDistributionPoints, "cRLDistributionPoints")));
+      if (extSpec.freshestCRL != null) guard.list.append(out, _ext(O("freshestCRL"), false, _extCrlDp(extSpec.freshestCRL, "freshestCRL")));
+      if (extSpec.policyConstraints != null) guard.list.append(out, _ext(O("policyConstraints"), true, _extPolicyConstraints(extSpec.policyConstraints)));
+      if (extSpec.inhibitAnyPolicy != null) guard.list.append(out, _ext(O("inhibitAnyPolicy"), true, _extInhibitAnyPolicy(extSpec.inhibitAnyPolicy)));
+      if (extSpec.policyMappings != null) guard.list.append(out, _ext(O("policyMappings"), !!extSpec.policyMappingsCritical, _extPolicyMappings(extSpec.policyMappings)));
+      if (extSpec.issuerAltName != null) guard.list.append(out, _ext(O("issuerAltName"), false, _encodeGeneralNames(_reqDenseArray(extSpec.issuerAltName, "issuerAltName"))));
+      if (extSpec.qcStatements != null) guard.list.append(out, _ext(O("qcStatements"), !!extSpec.qcStatementsCritical, _extQcStatements(extSpec.qcStatements)));
+      if (extSpec.nameConstraints != null) {
+        if (!caTrue) throw _err("x509/bad-input", "nameConstraints appears only in a CA certificate, so it requires basicConstraints cA=TRUE (RFC 5280 sec. 4.2.1.10)");
+        guard.list.append(out, _ext(O("nameConstraints"), true, _extNameConstraints(extSpec.nameConstraints)));
+      }
+      _assertCtStagesExclusive(extSpec.precertificatePoison != null, extSpec.signedCertificateTimestampList != null);
+      if (extSpec.precertificatePoison != null) {
+        if (extSpec.precertificatePoison !== true) throw _err("x509/bad-input", "precertificatePoison is a flag, so it is true or omitted");
+        guard.list.append(out, _ext(O("precertificatePoison"), true, asn1.build.nullValue()));
+      }
+      if (extSpec.signedCertificateTimestampList != null) {
+        guard.list.append(out, _ext(
+          O("signedCertificateTimestampList"),
+          false,
+          _encodeSctList(extSpec.signedCertificateTimestampList)
+        ));
+      }
+      if (extSpec.msCertificateTemplate != null) guard.list.append(out, _ext(O("msCertificateTemplate"), false, _b.extMsCertificateTemplate(extSpec.msCertificateTemplate)));
+      if (extSpec.msEnrollCertType != null) guard.list.append(out, _ext(O("msEnrollCertType"), false, _b.extMsEnrollCertType(extSpec.msEnrollCertType)));
+      if (extSpec.msCaVersion != null) guard.list.append(out, _ext(O("msCaVersion"), false, _b.extMsCaVersion(extSpec.msCaVersion)));
+      if (extSpec.msPreviousCertHash != null) guard.list.append(out, _ext(O("msPreviousCertHash"), false, _b.extMsPreviousCertHash(extSpec.msPreviousCertHash)));
+      if (extSpec.msApplicationPolicies != null) guard.list.append(out, _ext(O("msApplicationPolicies"), false, _extCertPolicies(extSpec.msApplicationPolicies)));
+      if (extSpec.subjectInfoAccess != null) guard.list.append(out, _ext(O("subjectInfoAccess"), false, _b.extSubjectInfoAccess(extSpec.subjectInfoAccess)));
+      if (extSpec.subjectDirectoryAttributes != null) guard.list.append(out, _ext(O("subjectDirectoryAttributes"), false, _b.extSubjectDirectoryAttributes(extSpec.subjectDirectoryAttributes)));
+      if (extSpec.ocspNoCheck != null) {
+        if (extSpec.ocspNoCheck !== true) throw _err("x509/bad-input", "ocspNoCheck is a flag, so it is true or omitted");
+        guard.list.append(out, _ext(O("ocspNoCheck"), false, asn1.build.nullValue()));
+      }
       return out;
+    }
+    function _assertCtStagesExclusive(hasPoison, hasSctList) {
+      if (hasPoison && hasSctList) {
+        throw _err("x509/bad-input", "precertificatePoison names a precertificate and signedCertificateTimestampList names the certificate issued after it, so a certificate carries one or the other (RFC 6962 sec. 3.2)");
+      }
+    }
+    function _encodeSctList(scts) {
+      if (!_isArray(scts)) throw _err("x509/bad-input", "signedCertificateTimestampList must be an array of signed certificate timestamps (RFC 6962 sec. 3.3)");
+      try {
+        return ct.encodeSctList(scts);
+      } catch (e) {
+        if (e instanceof CertificateError) throw e;
+        throw _err("x509/bad-input", "signedCertificateTimestampList could not be encoded: " + (e && e.message), e);
+      }
     }
     function _timeDer(date, which) {
       return _b.timeDer(date, "certificate " + which);
@@ -36702,24 +37987,25 @@ var require_x509_sign = __commonJS({
       if (_isEmptyName(issuerDer)) throw _err("x509/bad-issuer", "issuer must be a non-empty distinguished name");
       var scheme = signScheme.resolveSignScheme(_certLikeFromSpki(issuerSpki), { combinedRsaSig: true, pss: opts.pss, digestAlgorithm: opts.digestAlgorithm }, true, _signE);
       var serialTlv = _serialInteger(spec.serialNumber);
-      guard.time.assertValid(spec.notBefore, _err, "x509/bad-input", "notBefore");
-      guard.time.assertValid(spec.notAfter, _err, "x509/bad-input", "notAfter");
+      guard.time.assertEncodable(spec.notBefore, _err, "x509/bad-input", "notBefore");
+      guard.time.assertEncodable(spec.notAfter, _err, "x509/bad-input", "notAfter");
       if (guard.time.instantOf(spec.notBefore) > guard.time.instantOf(spec.notAfter)) throw _err("x509/bad-input", "notBefore must not be after notAfter (RFC 5280 sec. 4.1.2.5)");
       var validityDer = b.sequence([_timeDer(spec.notBefore, "notBefore"), _timeDer(spec.notAfter, "notAfter")]);
+      var selfIssued = guard.name.dnEqual(
+        schema.walk(NAME_SCHEMA, asn1.decode(subjectDer), NS).result.rdns,
+        schema.walk(NAME_SCHEMA, asn1.decode(issuerDer), NS).result.rdns,
+        _err,
+        "x509/bad-input",
+        "issuer/subject DN"
+      );
+      var selfSignedCert = selfIssued && _b.samePublicKey(issuerSpki, spki);
       var extSpec = spec.extensions;
-      var exts = _buildExtensions(extSpec, { spki, issuerSpki, issuerCert, subjectEmpty });
+      var exts = _buildExtensions(extSpec, { spki, issuerSpki, issuerCert, subjectEmpty, selfSigned: selfSignedCert });
       if (subjectEmpty && !_hasCriticalSan(extSpec)) {
         throw _err("x509/bad-input", "an empty subject requires a critical subjectAltName (RFC 5280 sec. 4.1.2.6)");
       }
       if (issuerPathLen != null) {
         var issued = _issuedCaInfo(extSpec);
-        var selfIssued = guard.name.dnEqual(
-          schema.walk(NAME_SCHEMA, asn1.decode(subjectDer), NS).result.rdns,
-          schema.walk(NAME_SCHEMA, asn1.decode(issuerDer), NS).result.rdns,
-          _err,
-          "x509/bad-input",
-          "issuer/subject DN"
-        );
         if (issued.cA && !selfIssued) {
           if (issuerPathLen < 1) throw _err("x509/bad-input", "the issuer certificate pathLenConstraint (0) forbids issuing a non-self-issued CA certificate below it (RFC 5280 sec. 4.2.1.9)");
           if (issued.pathLen != null && issued.pathLen > issuerPathLen - 1) throw _err("x509/bad-input", "the issued CA certificate pathLenConstraint exceeds the issuer's remaining path length (RFC 5280 sec. 4.2.1.9)");
@@ -36746,7 +38032,169 @@ var require_x509_sign = __commonJS({
         throw _err("x509/bad-input", "signing the certificate failed -- the signing key does not match the resolved algorithm or is invalid", e);
       });
     }
-    module2.exports = { sign };
+    function randomSerial() {
+      return pkiBuild.randomSerial();
+    }
+    function _flagValue(name, v) {
+      if (v !== true) throw _err("x509/bad-input", name + " is a flag, so it is true or omitted");
+      return asn1.build.nullValue();
+    }
+    function _standaloneSki(v) {
+      if (v === true) throw _err("x509/bad-input", "subjectKeyIdentifier: true derives the key id from the subject key, which this encoder does not hold; pass the key id bytes, or name it in spec.extensions");
+      return _extSki(_skiKeyId(v, null));
+    }
+    function _standaloneAki(v) {
+      if (v === true) throw _err("x509/bad-input", "authorityKeyIdentifier: true derives the key id from the issuer, which this encoder does not hold; pass { keyIdentifier } bytes, or name it in spec.extensions");
+      if (guard.bytes.isByteSource(v)) return _extAki(_akiKeyId(v, {}), null, null);
+      if (typeof v !== "object" || _isArray(v) || v === null) throw _err("x509/bad-input", "authorityKeyIdentifier must be a Buffer key id or an object { keyIdentifier, authorityCertIssuer, authorityCertSerialNumber }");
+      if (!guard.bytes.isByteSource(v.keyIdentifier)) {
+        throw _err("x509/bad-input", "authorityKeyIdentifier keyIdentifier must be the key id bytes here (RFC 5280 sec. 4.2.1.1 requires the field, and deriving it needs the issuer); name it in spec.extensions to derive it");
+      }
+      var f = _akiFields(v, { selfSigned: false });
+      return _extAki(f[0], f[1], f[2]);
+    }
+    var EXTENSION_ROWS = [
+      ["subjectKeyIdentifier", "subjectKeyIdentifier", { fixed: false, cite: "RFC 5280 sec. 4.2.1.2" }, _standaloneSki],
+      ["authorityKeyIdentifier", "authorityKeyIdentifier", { fixed: false, cite: "RFC 5280 sec. 4.2.1.1" }, _standaloneAki],
+      ["keyUsage", "keyUsage", { knob: true, dflt: true }, function(v) {
+        return _extKeyUsage(v);
+      }],
+      ["extendedKeyUsage", "extKeyUsage", { knob: true, dflt: false }, function(v) {
+        return _extExtKeyUsage(v);
+      }],
+      ["basicConstraints", "basicConstraints", { inValue: true }, function(v) {
+        _validateBcSpec(v);
+        if (v.cA === true && v.critical === false) throw _err("x509/bad-input", "a CA certificate's basicConstraints MUST be critical (RFC 5280 sec. 4.2.1.9)");
+        if (v.pathLen != null && v.cA !== true) throw _err("x509/bad-input", "basicConstraints pathLenConstraint requires cA=TRUE (RFC 5280 sec. 4.2.1.9)");
+        return _extBasicConstraints(v);
+      }],
+      ["subjectAltName", "subjectAltName", { knob: true, dflt: false }, function(v) {
+        return _extSan(v);
+      }],
+      ["issuerAltName", "issuerAltName", { fixed: false, cite: "RFC 5280 sec. 4.2.1.7" }, function(v) {
+        return _encodeGeneralNames(_reqDenseArray(v, "issuerAltName"));
+      }],
+      ["certificatePolicies", "certificatePolicies", { knob: true, dflt: false }, function(v) {
+        return _extCertPolicies(v);
+      }],
+      ["nameConstraints", "nameConstraints", { fixed: true, cite: "RFC 5280 sec. 4.2.1.10" }, function(v) {
+        return _extNameConstraints(v);
+      }],
+      ["policyConstraints", "policyConstraints", { fixed: true, cite: "RFC 5280 sec. 4.2.1.11" }, function(v) {
+        return _extPolicyConstraints(v);
+      }],
+      ["inhibitAnyPolicy", "inhibitAnyPolicy", { fixed: true, cite: "RFC 5280 sec. 4.2.1.14" }, function(v) {
+        return _extInhibitAnyPolicy(v);
+      }],
+      ["policyMappings", "policyMappings", { knob: true, dflt: false }, function(v) {
+        return _extPolicyMappings(v);
+      }],
+      ["authorityInfoAccess", "authorityInfoAccess", { fixed: false, cite: "RFC 5280 sec. 4.2.2.1" }, function(v) {
+        return _extAia(v);
+      }],
+      ["subjectInfoAccess", "subjectInfoAccess", { fixed: false, cite: "RFC 5280 sec. 4.2.2.2" }, function(v) {
+        return _b.extSubjectInfoAccess(v);
+      }],
+      ["cRLDistributionPoints", "cRLDistributionPoints", { fixed: false, cite: "RFC 5280 sec. 4.2.1.13" }, function(v) {
+        return _extCrlDp(v, "cRLDistributionPoints");
+      }],
+      ["freshestCRL", "freshestCRL", { fixed: false, cite: "RFC 5280 sec. 4.2.1.15" }, function(v) {
+        return _extCrlDp(v, "freshestCRL");
+      }],
+      ["qcStatements", "qcStatements", { knob: true, dflt: false }, function(v) {
+        return _extQcStatements(v);
+      }],
+      ["subjectDirectoryAttributes", "subjectDirectoryAttributes", { fixed: false, cite: "RFC 5280 sec. 4.2.1.8" }, function(v) {
+        return _b.extSubjectDirectoryAttributes(v);
+      }],
+      ["msCertificateTemplate", "msCertificateTemplate", { fixed: false, cite: "the toolkit issues the form its readers accept" }, function(v) {
+        return _b.extMsCertificateTemplate(v);
+      }],
+      ["msEnrollCertType", "msEnrollCertType", { fixed: false, cite: "the toolkit issues the form its readers accept" }, function(v) {
+        return _b.extMsEnrollCertType(v);
+      }],
+      ["msCaVersion", "msCaVersion", { fixed: false, cite: "the toolkit issues the form its readers accept" }, function(v) {
+        return _b.extMsCaVersion(v);
+      }],
+      ["msPreviousCertHash", "msPreviousCertHash", { fixed: false, cite: "the toolkit issues the form its readers accept" }, function(v) {
+        return _b.extMsPreviousCertHash(v);
+      }],
+      ["msApplicationPolicies", "msApplicationPolicies", { fixed: false, cite: "the toolkit issues the form its readers accept" }, function(v) {
+        return _extCertPolicies(v);
+      }],
+      ["ocspNoCheck", "ocspNoCheck", { fixed: false, cite: "RFC 6960 sec. 4.2.2.2.1" }, function(v) {
+        return _flagValue("ocspNoCheck", v);
+      }],
+      ["precertificatePoison", "precertificatePoison", { fixed: true, cite: "RFC 6962 sec. 3.1" }, function(v) {
+        return _flagValue("precertificatePoison", v);
+      }],
+      ["signedCertificateTimestampList", "signedCertificateTimestampList", { fixed: false, cite: "RFC 6962 sec. 3.3" }, function(v) {
+        return _encodeSctList(v);
+      }]
+    ];
+    var EXTENSION_BY_NAME = intrinsic.create(null);
+    var EXTENSION_BY_OID = intrinsic.create(null);
+    intrinsic.forEach(EXTENSION_ROWS, function(r) {
+      var row = { name: r[0], oid: O(r[1]), rule: r[2], encode: r[3] };
+      EXTENSION_BY_NAME[r[0]] = row;
+      EXTENSION_BY_OID[row.oid] = row;
+    });
+    var KNOWN_EXTENSION_OPTS = intrinsic.assign(intrinsic.create(null), { critical: 1 });
+    function _extensionRow(name) {
+      if (typeof name !== "string") throw _err("x509/bad-input", "the extension name must be a registered extension name or a dotted OID string, got " + guard.text.showValue(name));
+      if (intrinsic.hasOwn(EXTENSION_BY_NAME, name)) return EXTENSION_BY_NAME[name];
+      if (oid.isDottedDecimal(name)) return intrinsic.hasOwn(EXTENSION_BY_OID, name) ? EXTENSION_BY_OID[name] : null;
+      throw _err("x509/bad-input", "unknown extension " + guard.text.showValue(name) + "; the names spec.extensions takes are accepted, and any other extension is named by its dotted OID with its extnValue pre-encoded");
+    }
+    function _extensionCritical(row, opts) {
+      var rule = row.rule, stated = opts.critical;
+      if (rule.inValue) {
+        if (stated !== void 0) throw _err("x509/bad-input", row.name + " carries its criticality in the value ({ cA, pathLen, critical }), so opts.critical does not apply");
+        return null;
+      }
+      if (rule.knob) return stated === void 0 ? rule.dflt : stated;
+      if (stated !== void 0 && stated !== rule.fixed) {
+        throw _err("x509/bad-input", row.name + " is emitted " + (rule.fixed ? "critical" : "non-critical") + " (" + rule.cite + "), so opts.critical cannot say otherwise");
+      }
+      return rule.fixed;
+    }
+    function extension(name, value, opts) {
+      var fixed = guard.bytes.fixArguments(CertificateError, "x509/bad-input", [
+        [value, "the extension value"],
+        [opts, "pki.x509.extension options"]
+      ]);
+      try {
+        return _extension(name, fixed.values[0], fixed.values[1]);
+      } finally {
+        fixed.release();
+      }
+    }
+    function _extension(name, value, opts) {
+      opts = guard.identifier.optionsObject(opts, _err, "x509/bad-input", "pki.x509.extension options");
+      guard.identifier.assertKnownKeys(opts, KNOWN_EXTENSION_OPTS, _err, "x509/bad-input", "pki.x509.extension has an unknown option ");
+      if (opts.critical !== void 0 && typeof opts.critical !== "boolean") throw _err("x509/bad-input", "opts.critical must be a boolean");
+      if (value === void 0 || value === null) throw _err("x509/bad-input", "the extension value is required");
+      var row = _extensionRow(name);
+      if (row === null) {
+        if (!guard.bytes.isByteSource(value)) throw _err("x509/bad-input", "an extension named by a dotted OID takes its extnValue as pre-encoded bytes");
+        var raw = guard.bytes.snapshotSource(value, CertificateError, "x509/bad-input", "the pre-encoded extnValue");
+        _b.assertExtnValueIsDer(raw, "the " + name + " extension");
+        try {
+          return _ext(name, opts.critical === true, raw);
+        } catch (e) {
+          if (e instanceof CertificateError) throw e;
+          throw _err("x509/bad-input", "the extension name " + guard.text.showValue(name) + " is not a valid OBJECT IDENTIFIER", e);
+        }
+      }
+      if (guard.bytes.isByteSource(value) && !(row.name === "subjectKeyIdentifier" || row.name === "authorityKeyIdentifier" || row.name === "msPreviousCertHash")) {
+        throw _err("x509/bad-input", row.name + " takes the plain form spec.extensions takes, not pre-encoded bytes; name the extension by a dotted OID that is not registered to pass raw bytes");
+      }
+      var critical = _extensionCritical(row, opts);
+      var valueDer = row.encode(value);
+      if (critical === null) critical = value.critical !== false;
+      return _ext(row.oid, critical, valueDer);
+    }
+    module2.exports = { sign, randomSerial, extension };
   }
 });
 
@@ -36766,6 +38214,8 @@ var require_csr_sign = __commonJS({
     var csrVerify = require_csr_verify();
     var CsrError = frameworkError.CsrError;
     var KNOWN_SPEC_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { subject: 1, subjectPublicKey: 1, extensionRequest: 1, challengePassword: 1, attributes: 1 });
+    var KNOWN_SIGN_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { digestAlgorithm: 1, pem: 1, pss: 1 });
+    var KNOWN_KEY_WRAPPER_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { key: 1 });
     var b = asn1.build;
     function _err(code, message, cause) {
       return new CsrError(code, message, cause);
@@ -36808,7 +38258,10 @@ var require_csr_sign = __commonJS({
       opts = opts || {};
       if (!spec || typeof spec !== "object" || Buffer.isBuffer(spec)) throw _err("csr/bad-input", "the certification-request spec must be an object");
       guard.identifier.assertKnownKeys(spec, KNOWN_SPEC_KEYS, _err, "csr/bad-input", "unknown spec field ");
-      var signingKey = key && typeof key === "object" && !Buffer.isBuffer(key) && !(key instanceof Uint8Array) && key.type == null && "key" in key ? key.key : key;
+      guard.identifier.assertKnownKeys(opts, KNOWN_SIGN_OPTS, _err, "csr/bad-input", "pki.csr.sign has an unknown option ");
+      var wrapped = key && typeof key === "object" && !Buffer.isBuffer(key) && !(key instanceof Uint8Array) && key.type == null && "key" in key;
+      if (wrapped) guard.identifier.assertKnownKeys(key, KNOWN_KEY_WRAPPER_KEYS, _err, "csr/bad-input", "unknown field in the { key } wrapper (a signing option belongs in the third argument): ");
+      var signingKey = wrapped ? key.key : key;
       if (signingKey == null) throw _err("csr/bad-input", "a signing key (the subject's private key) is required");
       var subjectSpki = _b.reqDer(spec.subjectPublicKey, "spec.subjectPublicKey (the SPKI DER of the requested key)");
       _b.assertValidSpki(subjectSpki, "spec.subjectPublicKey");
@@ -36895,6 +38348,7 @@ var require_attrcert_sign = __commonJS({
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
     var _hasOwn = intrinsic.hasOwn;
+    var _bufferEquals = intrinsic.bufferEquals;
     var pkix = require_schema_pkix();
     var schema = require_schema_engine();
     require_path_validate();
@@ -36925,6 +38379,22 @@ var require_attrcert_sign = __commonJS({
     });
     var KNOWN_SPEC_KEYS = intrinsic.assign(intrinsic.create(null), { holder: 1, notBeforeTime: 1, notAfterTime: 1, serialNumber: 1, attributes: 1, extensions: 1 });
     var KNOWN_HOLDER_KEYS = intrinsic.assign(intrinsic.create(null), { entityName: 1, baseCertificateID: 1, fromCertificate: 1, objectDigestInfo: 1 });
+    var KNOWN_SIGN_OPTS = intrinsic.assign(intrinsic.create(null), { pem: 1, pss: 1, digestAlgorithm: 1 });
+    var KNOWN_ISSUER_SERIAL_KEYS = intrinsic.assign(intrinsic.create(null), { issuer: 1, serial: 1, issuerUID: 1 });
+    var KNOWN_ODI_KEYS = intrinsic.assign(intrinsic.create(null), { digestedObjectType: 1, digestAlgorithm: 1, objectDigest: 1 });
+    var KNOWN_ROLE_KEYS = intrinsic.assign(intrinsic.create(null), { roleAuthority: 1, roleName: 1 });
+    var KNOWN_CLEARANCE_KEYS = intrinsic.assign(intrinsic.create(null), { policyId: 1, classList: 1, securityCategories: 1 });
+    var KNOWN_SECURITY_CATEGORY_KEYS = intrinsic.assign(intrinsic.create(null), { type: 1, value: 1 });
+    var KNOWN_IETF_ATTR_KEYS = intrinsic.assign(intrinsic.create(null), { policyAuthority: 1, values: 1 });
+    var KNOWN_IETF_ATTR_VALUE_KEYS = intrinsic.assign(intrinsic.create(null), { octets: 1, oid: 1, string: 1 });
+    var KNOWN_SVCE_AUTH_INFO_KEYS = intrinsic.assign(intrinsic.create(null), { service: 1, ident: 1, authInfo: 1 });
+    var KNOWN_TARGET_KEYS = intrinsic.assign(intrinsic.create(null), { targetName: 1, targetGroup: 1 });
+    var KNOWN_AA_CONTROLS_KEYS = intrinsic.assign(intrinsic.create(null), { pathLenConstraint: 1, permittedAttrs: 1, excludedAttrs: 1, permitUnSpecified: 1 });
+    function _assertFields(obj, known, what) {
+      guard.identifier.assertKnownKeys(obj, known, _err, "attrcert/bad-input", function(k) {
+        return "unknown " + what + " field " + guard.text.showValue(k) + " (accepted: " + intrinsic.join(intrinsic.keys(known), ", ") + ")";
+      });
+    }
     var ATTR_OID_NAME = intrinsic.assign(intrinsic.create(null), {
       role: "role",
       clearance: "clearance",
@@ -36939,12 +38409,75 @@ var require_attrcert_sign = __commonJS({
       noRevAvail: { name: "noRevAvail", critical: false },
       aaControls: { name: "aaControls", critical: true },
       acProxying: { name: "acProxying", critical: true },
-      authorityKeyIdentifier: { name: "authorityKeyIdentifier", critical: false }
+      authorityKeyIdentifier: { name: "authorityKeyIdentifier", critical: false },
+      cRLDistributionPoints: { name: "cRLDistributionPoints", critical: false },
+      authorityInfoAccess: { name: "authorityInfoAccess", critical: false }
     });
     var REQUIRED_CRITICALITY = intrinsic.create(null);
     Object.keys(EXT_META).forEach(function(k) {
       REQUIRED_CRITICALITY[O(EXT_META[k].name)] = EXT_META[k].critical;
     });
+    var OID_AKI = O("authorityKeyIdentifier");
+    var OID_OCSP = O("ocsp");
+    var EXT_PROFILE = intrinsic.create(null);
+    EXT_PROFILE[O("acAuditIdentity")] = function(id) {
+      if (id.length < 1 || id.length > 20) throw _err("attrcert/bad-input", "auditIdentity must be 1 to 20 octets, got " + id.length + " (RFC 5755 sec. 4.3.1)");
+    };
+    EXT_PROFILE[O("targetInformation")] = function(groups) {
+      if (groups.length !== 1) throw _err("attrcert/bad-input", "targetInformation must carry exactly one Targets element, got " + groups.length + "; a conforming issuer lists every target in one (RFC 5755 sec. 4.3.2)");
+      for (var i = 0; i < groups[0].length; i++) {
+        if (groups[0][i].kind === "targetCert") throw _err("attrcert/bad-input", "targetInformation target " + i + " is a targetCert, which RFC 5755 sec. 4.3.2 says MUST NOT be used; name the target as a targetName or a targetGroup");
+      }
+    };
+    EXT_PROFILE[OID_AKI] = function(aki, ctx) {
+      if (aki.keyIdentifier !== null && ctx.aaSki !== null && !_bufferEquals(aki.keyIdentifier, ctx.aaSki)) {
+        throw _err("attrcert/bad-input", "the authorityKeyIdentifier keyIdentifier must equal the AA certificate's subjectKeyIdentifier (RFC 5755 sec. 4.3.3, RFC 5280 sec. 4.2.1.1); omit it to take that value");
+      }
+    };
+    EXT_PROFILE[O("authorityInfoAccess")] = function(descs) {
+      for (var i = 0; i < descs.length; i++) {
+        var d = descs[i];
+        if (d.accessMethod !== OID_OCSP) continue;
+        if (d.accessLocation.tag !== 6 || !pkiBuild.isHttpUrl(d.accessLocation.value)) {
+          throw _err("attrcert/bad-input", "authorityInfoAccess entry " + i + ": an id-ad-ocsp accessLocation must be a uniformResourceIdentifier carrying an HTTP URL (RFC 5755 sec. 4.3.4, RFC 2585)");
+        }
+      }
+    };
+    EXT_PROFILE[O("cRLDistributionPoints")] = function(points) {
+      if (points.length !== 1) throw _err("attrcert/bad-input", "cRLDistributionPoints must carry exactly one distribution point, got " + points.length + " (RFC 5755 sec. 4.3.5)");
+      var dp = points[0].distributionPoint;
+      if (dp === null || dp.kind !== "fullName") throw _err("attrcert/bad-input", "the cRLDistributionPoints entry must name its point as a fullName (RFC 5755 sec. 4.3.5)");
+      if (dp.names.length !== 1) throw _err("attrcert/bad-input", "the cRLDistributionPoints fullName must contain a single name, got " + dp.names.length + " (RFC 5755 sec. 4.3.5)");
+      var gn = attrcert.readGeneralName(dp.names[0], "attrcert/bad-input");
+      if (gn.tagNumber !== 4 && (gn.tagNumber !== 6 || !(pkiBuild.isHttpUrl(gn.value) || pkiBuild.isLdapUrl(gn.value)))) {
+        throw _err("attrcert/bad-input", "the cRLDistributionPoints name must be a directoryName or a uniformResourceIdentifier carrying an HTTP or LDAP URL (RFC 5755 sec. 4.3.5, RFC 2585, RFC 4516)");
+      }
+      var issuer = points[0].cRLIssuer;
+      if (issuer !== null && !_namesAnIssuer(issuer.names)) {
+        throw _err("attrcert/bad-input", "the cRLDistributionPoints cRLIssuer must name the CRL issuer as a non-empty directoryName (RFC 5280 sec. 4.2.1.13)");
+      }
+    };
+    function _namesAnIssuer(names) {
+      for (var i = 0; i < names.length; i++) {
+        if (names[i].tagNumber === 4 && names[i].value.rdns.length > 0) return true;
+      }
+      return false;
+    }
+    var ATTR_PROFILE = intrinsic.create(null);
+    ATTR_PROFILE[O("role")] = function(role) {
+      if (role.roleName.tagNumber !== 6) throw _err("attrcert/bad-input", "role.roleName must be a uniformResourceIdentifier (RFC 5755 sec. 4.4.5)");
+    };
+    function _decodeExtensionValue(extnId, valueDer) {
+      return EXT_DECODERS[extnId] ? EXT_DECODERS[extnId](valueDer) : attrcert.validateExtensionValue(extnId, valueDer);
+    }
+    function _assertExtensionProfile(extnId, decoded, ctx) {
+      var rule = EXT_PROFILE[extnId];
+      if (rule !== void 0) rule(decoded, ctx);
+    }
+    function _assertAttributeProfile(type, decoded) {
+      var rule = ATTR_PROFILE[type];
+      if (rule !== void 0) rule(decoded);
+    }
     var CLASSLIST_BIT = intrinsic.assign(intrinsic.create(null), { unmarked: 0, unclassified: 1, restricted: 2, confidential: 3, secret: 4, topSecret: 5 });
     var _tbsNameBytes = pkiBuild.tbsNameField;
     function _parseCert(cert, what) {
@@ -36973,6 +38506,7 @@ var require_attrcert_sign = __commonJS({
     }
     function _issuerSerialContent(is) {
       if (!is || typeof is !== "object" || Buffer.isBuffer(is)) throw _err("attrcert/bad-input", "baseCertificateID must be an object { issuer, serial, issuerUID? }");
+      _assertFields(is, KNOWN_ISSUER_SERIAL_KEYS, "baseCertificateID");
       if (is.issuer == null) throw _err("attrcert/bad-input", "baseCertificateID.issuer (a GeneralNames) is required");
       var parts = [_b.encodeGeneralNames(_gnList(is.issuer)), _b.serialInteger(is.serial)];
       if (is.issuerUID != null) {
@@ -36984,6 +38518,7 @@ var require_attrcert_sign = __commonJS({
     var ODT_CODE = intrinsic.assign(intrinsic.create(null), { publicKey: 0, publicKeyCert: 1 });
     function _objectDigestInfoContent(odi) {
       if (!odi || typeof odi !== "object" || Buffer.isBuffer(odi)) throw _err("attrcert/bad-input", "objectDigestInfo must be an object");
+      _assertFields(odi, KNOWN_ODI_KEYS, "objectDigestInfo");
       var code = ODT_CODE[guard.text.keyOf(odi.digestedObjectType)];
       if (code == null) throw _err("attrcert/bad-input", "objectDigestInfo.digestedObjectType must be 'publicKey' or 'publicKeyCert' (otherObjectTypes is forbidden, RFC 5755 sec. 7.3)");
       if (!Buffer.isBuffer(odi.objectDigest)) throw _err("attrcert/bad-input", "objectDigestInfo.objectDigest must be a Buffer (the whole-octet digest)");
@@ -37024,20 +38559,24 @@ var require_attrcert_sign = __commonJS({
       return b.contextConstructed(0, issuerNameGns);
     }
     function _encodeValidity(notBefore, notAfter) {
-      guard.time.assertValid(notBefore, _err, "attrcert/bad-input", "notBeforeTime");
-      guard.time.assertValid(notAfter, _err, "attrcert/bad-input", "notAfterTime");
+      guard.time.assertEncodable(notBefore, _err, "attrcert/bad-input", "notBeforeTime");
+      guard.time.assertEncodable(notAfter, _err, "attrcert/bad-input", "notAfterTime");
       if (guard.time.instantOf(notBefore) > guard.time.instantOf(notAfter)) throw _err("attrcert/bad-input", "notBeforeTime must not be after notAfterTime (RFC 5755 sec. 4.2.6)");
       return b.sequence([b.generalizedTime(notBefore), b.generalizedTime(notAfter)]);
     }
     function _encodeRole(role) {
-      if (!role || typeof role !== "object" || role.roleName == null) throw _err("attrcert/bad-input", "role must be an object with a roleName GeneralName");
+      if (!role || typeof role !== "object") throw _err("attrcert/bad-input", "role must be an object with a roleName GeneralName");
+      _assertFields(role, KNOWN_ROLE_KEYS, "role");
+      if (role.roleName == null) throw _err("attrcert/bad-input", "role must be an object with a roleName GeneralName");
       var parts = [];
       if (role.roleAuthority != null) parts.push(_b.encodeGeneralNames(_gnList(role.roleAuthority), 0));
       parts.push(b.explicit(1, _b.encodeGeneralName(role.roleName)));
       return b.sequence(parts);
     }
     function _encodeClearance(cl) {
-      if (!cl || typeof cl !== "object" || cl.policyId == null) throw _err("attrcert/bad-input", "clearance must be an object with a policyId OID");
+      if (!cl || typeof cl !== "object") throw _err("attrcert/bad-input", "clearance must be an object with a policyId OID");
+      _assertFields(cl, KNOWN_CLEARANCE_KEYS, "clearance");
+      if (cl.policyId == null) throw _err("attrcert/bad-input", "clearance must be an object with a policyId OID");
       var parts;
       try {
         parts = [b.oid(O(cl.policyId) || cl.policyId)];
@@ -37061,7 +38600,9 @@ var require_attrcert_sign = __commonJS({
       return b.sequence(parts);
     }
     function _encodeSecurityCategory(sc) {
-      if (!sc || typeof sc !== "object" || sc.type == null || !Buffer.isBuffer(sc.value)) throw _err("attrcert/bad-input", "each securityCategory must be { type: OID, value: DER Buffer }");
+      if (!sc || typeof sc !== "object") throw _err("attrcert/bad-input", "each securityCategory must be { type: OID, value: DER Buffer }");
+      _assertFields(sc, KNOWN_SECURITY_CATEGORY_KEYS, "securityCategory");
+      if (sc.type == null || !Buffer.isBuffer(sc.value)) throw _err("attrcert/bad-input", "each securityCategory must be { type: OID, value: DER Buffer }");
       var node;
       try {
         node = asn1.decode(sc.value);
@@ -37072,11 +38613,14 @@ var require_attrcert_sign = __commonJS({
       return b.sequence([b.contextPrimitive(0, _oidContent(sc.type)), b.explicit(1, sc.value)]);
     }
     function _encodeIetfAttrSyntax(ia) {
-      if (!ia || typeof ia !== "object" || !Array.isArray(ia.values) || !ia.values.length) throw _err("attrcert/bad-input", "an IetfAttrSyntax attribute must be an object with a non-empty values array");
+      if (!ia || typeof ia !== "object") throw _err("attrcert/bad-input", "an IetfAttrSyntax attribute must be an object with a non-empty values array");
+      _assertFields(ia, KNOWN_IETF_ATTR_KEYS, "IetfAttrSyntax");
+      if (!Array.isArray(ia.values) || !ia.values.length) throw _err("attrcert/bad-input", "an IetfAttrSyntax attribute must be an object with a non-empty values array");
       var parts = [];
       if (ia.policyAuthority != null) parts.push(_b.encodeGeneralNames(_gnList(ia.policyAuthority), 0));
       parts.push(b.sequence(ia.values.map(function(v) {
         if (v == null || typeof v !== "object") throw _err("attrcert/bad-input", "each IetfAttrSyntax value must be { octets }, { oid }, or { string }");
+        _assertFields(v, KNOWN_IETF_ATTR_VALUE_KEYS, "IetfAttrSyntax value");
         if (v.octets != null) {
           if (!Buffer.isBuffer(v.octets)) throw _err("attrcert/bad-input", "IetfAttrSyntax octets must be a Buffer");
           return b.octetString(v.octets);
@@ -37094,7 +38638,9 @@ var require_attrcert_sign = __commonJS({
       return b.sequence(parts);
     }
     function _encodeSvceAuthInfo(sai, authInfoAllowed, label) {
-      if (!sai || typeof sai !== "object" || sai.service == null || sai.ident == null) throw _err("attrcert/bad-input", label + " must be an object with a service and an ident GeneralName");
+      if (!sai || typeof sai !== "object") throw _err("attrcert/bad-input", label + " must be an object with a service and an ident GeneralName");
+      _assertFields(sai, KNOWN_SVCE_AUTH_INFO_KEYS, label);
+      if (sai.service == null || sai.ident == null) throw _err("attrcert/bad-input", label + " must be an object with a service and an ident GeneralName");
       var parts = [_b.encodeGeneralName(sai.service), _b.encodeGeneralName(sai.ident)];
       if (sai.authInfo != null) {
         if (!authInfoAllowed) throw _err("attrcert/bad-input", "accessIdentity must not carry authInfo (RFC 5755 sec. 4.4.2)");
@@ -37125,6 +38671,7 @@ var require_attrcert_sign = __commonJS({
     });
     function _encodeTarget(t) {
       if (!t || typeof t !== "object") throw _err("attrcert/bad-input", "each target must be { targetName } or { targetGroup }");
+      _assertFields(t, KNOWN_TARGET_KEYS, "target");
       if (t.targetName != null) return b.explicit(0, _b.encodeGeneralName(t.targetName));
       if (t.targetGroup != null) return b.explicit(1, _b.encodeGeneralName(t.targetGroup));
       throw _err("attrcert/bad-input", "each target must be { targetName } or { targetGroup }");
@@ -37146,6 +38693,7 @@ var require_attrcert_sign = __commonJS({
     }
     function _encodeAAControls(aac) {
       if (!aac || typeof aac !== "object" || Buffer.isBuffer(aac)) throw _err("attrcert/bad-input", "aaControls must be an object");
+      _assertFields(aac, KNOWN_AA_CONTROLS_KEYS, "aaControls");
       var parts = [];
       if (aac.pathLenConstraint != null) {
         if (typeof aac.pathLenConstraint !== "number" || !Number.isInteger(aac.pathLenConstraint) || aac.pathLenConstraint < 0 || aac.pathLenConstraint > 2147483647) throw _err("attrcert/bad-input", "aaControls.pathLenConstraint must be an integer in 0..2147483647 (RFC 5755 sec. 7.4)");
@@ -37157,7 +38705,12 @@ var require_attrcert_sign = __commonJS({
       else if (aac.permitUnSpecified != null && aac.permitUnSpecified !== true) throw _err("attrcert/bad-input", "aaControls.permitUnSpecified must be a boolean");
       return b.sequence(parts);
     }
-    function _extensionValue(key, val, aaSpki) {
+    function _akiKeyId(val, ctx) {
+      if (guard.bytes.isByteSource(val)) return guard.bytes.snapshotSource(val, AttrCertError, "attrcert/bad-input", "the authorityKeyIdentifier keyIdentifier");
+      if (val === true) return ctx.aaSki !== null ? ctx.aaSki : _b.spkiKeyId(ctx.aaSpki);
+      throw _err("attrcert/bad-input", "authorityKeyIdentifier must be true (derive from the AA), false (omit), or a Buffer key id");
+    }
+    function _extensionValue(key, val, ctx) {
       switch (key) {
         case "auditIdentity":
           if (!Buffer.isBuffer(val)) throw _err("attrcert/bad-input", "auditIdentity must be a Buffer (an OCTET STRING audit tag)");
@@ -37171,7 +38724,11 @@ var require_attrcert_sign = __commonJS({
         case "aaControls":
           return _encodeAAControls(val);
         case "authorityKeyIdentifier":
-          return _b.extAki(_b.skiKeyId(val, aaSpki));
+          return _b.extAki(_akiKeyId(val, ctx));
+        case "cRLDistributionPoints":
+          return _b.extCrlDistributionPoints(val, "cRLDistributionPoints");
+        case "authorityInfoAccess":
+          return _b.extAuthorityInfoAccess(val);
         default:
           throw _err("attrcert/bad-input", "unknown extension " + JSON.stringify(key));
       }
@@ -37181,6 +38738,7 @@ var require_attrcert_sign = __commonJS({
       function add(type, valueTlv) {
         if (seen[type]) throw _err("attrcert/duplicate-attribute", "duplicate " + (oid.name(type) || type) + " attribute (RFC 5755 sec. 4.2.7)");
         seen[type] = true;
+        _assertAttributeProfile(type, attrcert.validateAttributeValue(type, valueTlv));
         attrs.push(b.sequence([b.oid(type), b.set([valueTlv])]));
       }
       if (Array.isArray(attrSpec)) {
@@ -37203,12 +38761,14 @@ var require_attrcert_sign = __commonJS({
           if (seen[at]) throw _err("attrcert/duplicate-attribute", "duplicate " + (oid.name(at) || at) + " attribute (RFC 5755 sec. 4.2.7)");
           seen[at] = true;
           n.children[1].children.forEach(function(valNode) {
+            var decoded;
             try {
-              attrcert.validateAttributeValue(at, valNode.bytes);
+              decoded = attrcert.validateAttributeValue(at, valNode.bytes);
             } catch (err) {
               if (err instanceof AttrCertError) throw err;
               throw _err("attrcert/bad-input", "pre-encoded " + (oid.name(at) || at) + " attribute value is malformed", err);
             }
+            _assertAttributeProfile(at, decoded);
           });
           attrs.push(b.raw(der));
         });
@@ -37234,14 +38794,22 @@ var require_attrcert_sign = __commonJS({
         }
       }
     }
-    function _buildExtensions(extSpec, aaSpki) {
-      if (extSpec == null) return null;
+    function _emitNamedExtension(out, seen, k, val, ctx) {
+      var meta = EXT_META[k], eOid = O(meta.name);
+      if (seen[eOid]) throw _err("attrcert/bad-input", "duplicate extension " + JSON.stringify(k) + " (RFC 5755 sec. 4.2.9)");
+      seen[eOid] = true;
+      var valueDer = _extensionValue(k, val, ctx);
+      _assertExtensionProfile(eOid, _decodeExtensionValue(eOid, valueDer), ctx);
+      out.push(_b.ext(eOid, meta.critical, valueDer));
+    }
+    function _buildExtensions(extSpec, ctx) {
+      if (extSpec == null) extSpec = {};
       if (Array.isArray(extSpec)) {
         if (!extSpec.length) return null;
         var seenA = intrinsic.create(null);
         var exts = extSpec.map(function(e, i) {
           var der = _b.reqDer(e, "extension");
-          _b.assertValidExtension(der, i);
+          _b.assertValidExtension(der, i, EXT_DECODERS);
           var n = asn1.decode(der);
           var extnId = asn1.read.oid(n.children[0]);
           if (seenA[extnId]) throw _err("attrcert/bad-input", "duplicate extension " + extnId + " (RFC 5755 sec. 4.2.9)");
@@ -37251,13 +38819,14 @@ var require_attrcert_sign = __commonJS({
             throw _err("attrcert/bad-input", "pre-encoded " + (oid.name(extnId) || extnId) + " extension must be marked " + (required ? "critical" : "non-critical") + " (RFC 5755)");
           }
           var extnValue = asn1.read.octetString(n.children[n.children.length - 1]);
+          var decoded;
           try {
-            if (EXT_DECODERS[extnId]) EXT_DECODERS[extnId](extnValue);
-            else attrcert.validateExtensionValue(extnId, extnValue);
+            decoded = _decodeExtensionValue(extnId, extnValue);
           } catch (err) {
             if (err instanceof AttrCertError) throw err;
             throw _err("attrcert/bad-input", "pre-encoded " + (oid.name(extnId) || extnId) + " extension value is malformed", err);
           }
+          _assertExtensionProfile(extnId, decoded, ctx);
           return b.raw(der);
         });
         _assertRevocationSchemesExclusive(seenA);
@@ -37265,16 +38834,21 @@ var require_attrcert_sign = __commonJS({
       }
       if (typeof extSpec !== "object") throw _err("attrcert/bad-input", "extensions must be an object or an array of pre-encoded Extension DER");
       guard.identifier.assertKnownKeys(extSpec, EXT_META, _err, "attrcert/bad-input", function(k) {
+        if (k === "crlDistributionPoints") return "the extension key is cRLDistributionPoints, spelled as pki.x509.sign spells it";
         return "unknown extension " + JSON.stringify(k) + "; pass a pre-encoded Extension DER via the array form for a custom extension";
       });
       var out = [], seen = intrinsic.create(null);
+      var akiDeclined = false;
       Object.keys(extSpec).forEach(function(k) {
-        if (extSpec[k] == null) return;
-        var meta = EXT_META[k], eOid = O(meta.name);
-        if (seen[eOid]) throw _err("attrcert/bad-input", "duplicate extension " + JSON.stringify(k) + " (RFC 5755 sec. 4.2.9)");
-        seen[eOid] = true;
-        out.push(_b.ext(eOid, meta.critical, _extensionValue(k, extSpec[k], aaSpki)));
+        var val = extSpec[k];
+        if (val == null) return;
+        if (k === "authorityKeyIdentifier" && val === false) {
+          akiDeclined = true;
+          return;
+        }
+        _emitNamedExtension(out, seen, k, val, ctx);
       });
+      if (!seen[OID_AKI] && !akiDeclined) _emitNamedExtension(out, seen, "authorityKeyIdentifier", true, ctx);
       _assertRevocationSchemesExclusive(seen);
       if (!out.length) return null;
       return b.sequence(out);
@@ -37287,16 +38861,18 @@ var require_attrcert_sign = __commonJS({
       ], _sign);
     }
     function _sign(spec, issuer, opts) {
-      opts = opts || {};
+      opts = guard.identifier.optionsObject(opts, _err, "attrcert/bad-input", "pki.attrcert.sign options");
+      guard.identifier.assertKnownKeys(opts, KNOWN_SIGN_OPTS, _err, "attrcert/bad-input", "unknown pki.attrcert.sign option (accepted: pem, pss, digestAlgorithm): ");
       if (!spec || typeof spec !== "object" || Buffer.isBuffer(spec)) throw _err("attrcert/bad-input", "the attribute-certificate spec must be an object");
       guard.identifier.assertKnownKeys(spec, KNOWN_SPEC_KEYS, _err, "attrcert/bad-input", "unknown spec field ");
       issuer = issuer || {};
       if (issuer.key == null) throw _err("attrcert/bad-input", "a signing key (issuer.key, the AA's WebCrypto CryptoKey or PKCS#8 private key DER/PEM) is required");
-      var issuerDnSpec, aaSpki;
+      var issuerDnSpec, aaSpki, aaSki = null;
       if (issuer.cert != null) {
         var aaCert = _parseCert(issuer.cert, "issuer.cert");
         issuerDnSpec = _tbsNameBytes(aaCert, "subject");
         aaSpki = aaCert.subjectPublicKeyInfo.bytes;
+        aaSki = pkiBuild.skiValueOf(aaCert);
       } else if (issuer.name != null && issuer.publicKey != null) {
         issuerDnSpec = issuer.name;
         aaSpki = _b.reqDer(issuer.publicKey, "issuer.publicKey (the AA SPKI DER)");
@@ -37308,7 +38884,7 @@ var require_attrcert_sign = __commonJS({
       var holderDer = _encodeHolder(spec.holder);
       var validityDer = _encodeValidity(spec.notBeforeTime, spec.notAfterTime);
       var attributesDer = _buildAttributes(spec.attributes);
-      var extsDer = _buildExtensions(spec.extensions, aaSpki);
+      var extsDer = _buildExtensions(spec.extensions, { aaSpki, aaSki });
       var scheme = signScheme.resolveSignScheme(_b.certLikeFromSpki(aaSpki), { combinedRsaSig: true, pss: opts.pss, digestAlgorithm: opts.digestAlgorithm }, true, _signE);
       var acinfoChildren = [
         b.integer(1n),
@@ -37507,7 +39083,7 @@ var require_attrcert_sign = __commonJS({
       };
     }
     var REVOCATION_POINTERS = /* @__PURE__ */ Object.create(null);
-    REVOCATION_POINTERS[O("cRLDistributionPoints")] = "crlDistributionPoints";
+    REVOCATION_POINTERS[O("cRLDistributionPoints")] = "cRLDistributionPoints";
     REVOCATION_POINTERS[O("authorityInfoAccess")] = "authorityInfoAccess";
     function _revocationScheme(ac) {
       var out = { noRevAvail: false, pointer: null };
@@ -37607,6 +39183,7 @@ var require_crl_sign = __commonJS({
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
     var _hasOwn = intrinsic.hasOwn;
+    var _bufferEquals = intrinsic.bufferEquals;
     var frameworkError = require_framework_error();
     var pkix = require_schema_pkix();
     var schema = require_schema_engine();
@@ -37644,13 +39221,22 @@ var require_crl_sign = __commonJS({
     var _certLikeFromSpki = _b.certLikeFromSpki;
     var _assertSignatureVerifies = _b.assertSignatureVerifies;
     var EXT_DECODERS = pkix.certExtensionDecoders(NS).byOid;
-    var OID_SKI = O("subjectKeyIdentifier");
+    function _assertExtensionValueDecodes(node, extnId, what) {
+      var dec = EXT_DECODERS[extnId];
+      if (!dec) return;
+      try {
+        dec(asn1.read.octetString(node.children[node.children.length - 1]));
+      } catch (err) {
+        if (err instanceof CrlError) throw err;
+        throw _err("crl/bad-input", "pre-encoded " + what + " " + (oid.name(extnId) || extnId) + " value is malformed", err);
+      }
+    }
     var CRL_REASON = constants.NAMES.CRL_REASON;
     var REASON_BY_NAME = intrinsic.create(null);
     Object.keys(CRL_REASON).forEach(function(v) {
       REASON_BY_NAME[CRL_REASON[v]] = Number(v);
     });
-    var KNOWN_CRL_EXT_KEYS = intrinsic.assign(intrinsic.create(null), { authorityKeyIdentifier: 1, issuingDistributionPoint: 1, deltaCRLIndicator: 1, freshestCRL: 1, authorityInfoAccess: 1 });
+    var KNOWN_CRL_EXT_KEYS = intrinsic.assign(intrinsic.create(null), { authorityKeyIdentifier: 1, issuerAltName: 1, issuingDistributionPoint: 1, deltaCRLIndicator: 1, freshestCRL: 1, authorityInfoAccess: 1 });
     var KNOWN_SPEC_KEYS = intrinsic.assign(intrinsic.create(null), {
       issuer: 1,
       thisUpdate: 1,
@@ -37690,9 +39276,12 @@ var require_crl_sign = __commonJS({
       REQUIRED_CRITICALITY[O(r[0])] = r[1];
     });
     var REQUIRED_ENTRY_CRITICALITY = intrinsic.create(null);
-    [["reasonCode", false], ["invalidityDate", false]].forEach(function(r) {
-      REQUIRED_ENTRY_CRITICALITY[O(r[0])] = r[1];
-    });
+    (function() {
+      var shared = crlSchema.entryExtensionCriticality(oid);
+      intrinsic.forEach(intrinsic.keys(shared), function(k) {
+        REQUIRED_ENTRY_CRITICALITY[k] = shared[k].critical;
+      });
+    })();
     var _CERT_ISSUER_DEFERRED = "certificateIssuer (indirect CRLs) is not yet supported -- pki.path.crlChecker skips a CRL carrying any critical entry extension other than reasonCode, so an indirect CRL would never be authoritative for revocation. Re-enabled once the checker processes certificateIssuer / indirect CRLs.";
     var _INDIRECT_IDP_DEFERRED = "issuingDistributionPoint indirectCRL (indirect CRLs) is not yet supported -- pki.path.crlChecker skips a CRL whose IDP marks it indirect, so it would never be authoritative for revocation. Re-enabled once the checker processes indirect CRLs.";
     function _boundedInteger(v, label) {
@@ -37741,21 +39330,15 @@ var require_crl_sign = __commonJS({
       return codeNum;
     }
     function _akiKeyId(val, ctx) {
-      if (guard.bytes.isByteSource(val)) return guard.bytes.snapshotSource(val, CrlError, "crl/bad-input", "the authorityKeyIdentifier keyIdentifier");
-      if (val === true) {
-        if (ctx.issuerCert) {
-          var ski = (ctx.issuerCert.extensions || []).filter(function(e) {
-            return e.oid === OID_SKI;
-          })[0];
-          if (ski) {
-            try {
-              return asn1.read.octetString(asn1.decode(ski.value));
-            } catch (_e) {
-            }
-          }
+      var issuerSki = ctx.issuerCert ? _b.skiValueOf(ctx.issuerCert) : null;
+      if (guard.bytes.isByteSource(val)) {
+        var given = guard.bytes.snapshotSource(val, CrlError, "crl/bad-input", "the authorityKeyIdentifier keyIdentifier");
+        if (issuerSki && !_bufferEquals(given, issuerSki)) {
+          throw _err("crl/bad-input", "the authorityKeyIdentifier keyIdentifier must equal the issuer certificate's subjectKeyIdentifier (RFC 5280 sec. 5.2.1); omit it to take that value");
         }
-        return _spkiKeyId(ctx.issuerSpki);
+        return given;
       }
+      if (val === true) return issuerSki || _spkiKeyId(ctx.issuerSpki);
       throw _err("crl/bad-input", "authorityKeyIdentifier must be true (auto-derive from the issuer) or a Buffer key id");
     }
     function _idpValue(idp) {
@@ -37831,12 +39414,12 @@ var require_crl_sign = __commonJS({
         push("cRLNumber", false, cn.tlv);
       }
       var ext = spec.extensions;
-      if (ext == null) return { exts: out, isDelta };
+      if (ext == null) ext = {};
       if (Array.isArray(ext)) {
         var arrBase = null, arrCrlNum = null;
         ext.forEach(function(e, i) {
           var der = _reqDer(e, "extension");
-          _assertValidExtension(der, i);
+          _assertValidExtension(der, i, EXT_DECODERS);
           var node = asn1.decode(der);
           var extnId = asn1.read.oid(node.children[0]);
           if (seen[extnId]) throw _err("crl/bad-input", "duplicate extension " + extnId + " (RFC 5280 sec. 5.2)");
@@ -37853,6 +39436,7 @@ var require_crl_sign = __commonJS({
               if (extnId === O("issuingDistributionPoint")) _validatePreEncodedIdp(inner);
             }
           }
+          _assertExtensionValueDecodes(node, extnId, "extension");
           if (extnId === O("deltaCRLIndicator")) isDelta = true;
           out.push(b.raw(der));
         });
@@ -37869,7 +39453,10 @@ var require_crl_sign = __commonJS({
         return "unknown CRL extension " + JSON.stringify(k) + " in the extensions spec; pass a pre-encoded Extension DER via the array form";
       });
       isDelta = ext.deltaCRLIndicator != null;
-      if (ext.authorityKeyIdentifier != null) push("authorityKeyIdentifier", false, _extAki(_akiKeyId(ext.authorityKeyIdentifier, ctx)));
+      var akiVal = ext.authorityKeyIdentifier == null ? true : ext.authorityKeyIdentifier;
+      if (akiVal === false) throw _err("crl/bad-input", "a conforming CRL issuer MUST include the authorityKeyIdentifier in every CRL it issues, so authorityKeyIdentifier: false is refused (RFC 5280 sec. 5.2.1)");
+      push("authorityKeyIdentifier", false, _extAki(_akiKeyId(akiVal, ctx)));
+      if (ext.issuerAltName != null) push("issuerAltName", false, _b.encodeGeneralNames(_b.reqDenseArray(ext.issuerAltName, "issuerAltName")));
       if (ext.issuingDistributionPoint != null) push("issuingDistributionPoint", true, _idpValue(ext.issuingDistributionPoint));
       if (ext.deltaCRLIndicator != null) {
         var base = _boundedInteger(ext.deltaCRLIndicator, "deltaCRLIndicator baseCRLNumber");
@@ -37910,7 +39497,7 @@ var require_crl_sign = __commonJS({
           if (codeNum !== 0) pushE("reasonCode", false, b.enumerated(BigInt(codeNum)));
         }
         if (e.invalidityDate != null) {
-          guard.time.assertValid(e.invalidityDate, _err, "crl/bad-input", "invalidityDate");
+          guard.time.assertEncodable(e.invalidityDate, _err, "crl/bad-input", "invalidityDate");
           pushE("invalidityDate", false, b.generalizedTime(e.invalidityDate));
         }
         if (e.certificateIssuer != null) throw _err("crl/bad-input", _CERT_ISSUER_DEFERRED);
@@ -37918,7 +39505,7 @@ var require_crl_sign = __commonJS({
           if (!Array.isArray(e.extensions)) throw _err("crl/bad-input", "revoked entry [" + idx + "] extensions must be an array of pre-encoded Extension DER");
           e.extensions.forEach(function(x, j) {
             var der = _reqDer(x, "entry extension");
-            _assertValidExtension(der, j);
+            _assertValidExtension(der, j, EXT_DECODERS);
             var xnode = asn1.decode(der);
             var extnId = asn1.read.oid(xnode.children[0]);
             if (seen[extnId]) throw _err("crl/bad-input", "duplicate entry extension " + extnId + " in revoked entry [" + idx + "]");
@@ -37941,6 +39528,7 @@ var require_crl_sign = __commonJS({
                 }
               }
             }
+            _assertExtensionValueDecodes(xnode, extnId, "entry extension");
             entryExts.push(b.raw(der));
           });
         }
@@ -39051,6 +40639,7 @@ var require_pkcs12_build = __commonJS({
     async function verifyMac(pfx, password, opts) {
       if (opts != null && typeof opts === "object" && !Buffer.isBuffer(opts)) {
         guard.identifier.assertKnownKeys(opts, _VERIFY_MAC_OPTS, _err, "pkcs12/bad-input", "pki.pkcs12.verifyMac has an unknown option ");
+        opts = guard.identifier.snapshotOptions(opts, _VERIFY_MAC_OPTS);
       }
       var m = _storeFromBytes(pfx);
       var valid = await _verifyMacOfStore(m, password, opts);
@@ -39098,9 +40687,10 @@ var require_pkcs12_build = __commonJS({
     }
     function _capWork(iterations, salt, opts, keyLength, hardCap) {
       var cap = hardCap;
-      if (opts.maxIterations != null) {
-        if (typeof opts.maxIterations !== "number" || !isFinite(opts.maxIterations) || opts.maxIterations < 1 || Math.floor(opts.maxIterations) !== opts.maxIterations) throw _err("pkcs12/bad-input", "maxIterations must be a positive integer");
-        cap = Math.min(opts.maxIterations, cap);
+      var wanted = opts.maxIterations;
+      if (wanted != null) {
+        if (typeof wanted !== "number" || !isFinite(wanted) || wanted < 1 || Math.floor(wanted) !== wanted) throw _err("pkcs12/bad-input", "maxIterations must be a positive integer");
+        cap = Math.min(wanted, cap);
       }
       if (iterations > cap) throw _err("pkcs12/iteration-limit", "the MAC iteration count " + iterations + " exceeds the cap " + cap);
       if (salt && salt.length > C.LIMITS.PBKDF2_MAX_SALT) throw _err("pkcs12/bad-input", "the MAC salt exceeds the " + C.LIMITS.PBKDF2_MAX_SALT + "-octet cap");
@@ -39109,6 +40699,7 @@ var require_pkcs12_build = __commonJS({
     async function open(pfx, password, opts) {
       opts = opts || {};
       guard.identifier.assertKnownKeys(opts, _OPEN_OPTS, _err, "pkcs12/bad-input", "pki.pkcs12.open has an unknown option ");
+      opts = guard.identifier.snapshotOptions(opts, _OPEN_OPTS);
       if (opts.maxIterations != null && (typeof opts.maxIterations !== "number" || !isFinite(opts.maxIterations) || opts.maxIterations < 1 || Math.floor(opts.maxIterations) !== opts.maxIterations)) {
         throw _err("pkcs12/bad-input", "maxIterations must be a positive integer");
       }
@@ -39188,7 +40779,8 @@ var require_pkcs12_build = __commonJS({
         if (e && e.isPkcs12Error) throw e;
         throw _err("pkcs12/bad-algorithm-parameters", "malformed pkcs-12PbeParams (RFC 7292 App. C)", e);
       }
-      var cap = opts.maxIterations != null ? Math.min(opts.maxIterations, CLASSIC_MAC_MAX_ITERATIONS) : CLASSIC_MAC_MAX_ITERATIONS;
+      var wantedLegacy = opts.maxIterations;
+      var cap = wantedLegacy != null ? Math.min(wantedLegacy, CLASSIC_MAC_MAX_ITERATIONS) : CLASSIC_MAC_MAX_ITERATIONS;
       if (iterations > cap) throw _err("pkcs12/iteration-limit", "the legacy PBE iteration count " + iterations + " exceeds the cap " + cap);
       if (salt.length > C.LIMITS.PBKDF2_MAX_SALT) throw _err("pkcs12/bad-input", "the legacy PBE salt exceeds the " + C.LIMITS.PBKDF2_MAX_SALT + "-octet cap");
       var u = P12_KDF_UV[scheme.hash].u;
@@ -39455,7 +41047,15 @@ var require_hpke = __commonJS({
     var frameworkError = require_framework_error();
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
+    var oid = require_oid();
     var _hasOwn = intrinsic.hasOwn;
+    var _isBuffer = intrinsic.isBuffer;
+    var _bufferFrom = intrinsic.bufferFrom;
+    var _bufferAlloc = intrinsic.bufferAlloc;
+    var _bufferConcat = intrinsic.bufferConcat;
+    var _bufferEquals = intrinsic.bufferEquals;
+    var _compare = intrinsic.compare;
+    var _subarray = intrinsic.subarray;
     var HpkeError = frameworkError.HpkeError;
     function _err(code, message, cause) {
       return new HpkeError(code, message, cause);
@@ -39483,6 +41083,7 @@ var require_hpke = __commonJS({
     }
     var KDFS = intrinsic.assign(intrinsic.create(null), {
       1: { hash: "sha256", Nh: 32 },
+      2: { hash: "sha384", Nh: 48 },
       3: { hash: "sha512", Nh: 64 }
     });
     var AEADS = intrinsic.assign(intrinsic.create(null), {
@@ -39491,11 +41092,18 @@ var require_hpke = __commonJS({
       3: { cipher: "chacha20-poly1305", Nk: 32, Nn: 12, Nt: 16 },
       65535: { exportOnly: true, Nn: 12 }
     });
+    function _mlKemRow(name, oidName, node) {
+      var p = oid.kemParams(oidName);
+      return { kind: "mlkem", name, node, Nsecret: p.ss, Npub: p.ek, Nenc: p.ct, Nsk: 64 };
+    }
     var KEMS = intrinsic.assign(intrinsic.create(null), {
-      16: { kind: "ec", curve: "P-256", nodeCurve: "prime256v1", kdf: 1, Nsecret: 32, Npub: 65 },
-      18: { kind: "ec", curve: "P-521", nodeCurve: "secp521r1", kdf: 3, Nsecret: 64, Npub: 133 },
-      32: { kind: "okp", curve: "X25519", oid: "2b656e", kdf: 1, Nsecret: 32, Npub: 32 },
-      33: { kind: "okp", curve: "X448", oid: "2b656f", kdf: 3, Nsecret: 64, Npub: 56 }
+      16: { kind: "ec", name: "P-256", curve: "P-256", nodeCurve: "prime256v1", kdf: 1, Nsecret: 32, Npub: 65, Nsk: 32 },
+      18: { kind: "ec", name: "P-521", curve: "P-521", nodeCurve: "secp521r1", kdf: 3, Nsecret: 64, Npub: 133, Nsk: 66 },
+      32: { kind: "okp", name: "X25519", curve: "X25519", kdf: 1, Nsecret: 32, Npub: 32, Nsk: 32 },
+      33: { kind: "okp", name: "X448", curve: "X448", kdf: 3, Nsecret: 64, Npub: 56, Nsk: 56 },
+      64: _mlKemRow("ML-KEM-512", "id-ml-kem-512", "ml-kem-512"),
+      65: _mlKemRow("ML-KEM-768", "id-ml-kem-768", "ml-kem-768"),
+      66: _mlKemRow("ML-KEM-1024", "id-ml-kem-1024", "ml-kem-1024")
     });
     var MODE_BASE = 0;
     var MODE_PSK = 1;
@@ -39525,19 +41133,24 @@ var require_hpke = __commonJS({
     }
     function _expand(hash, Nh, prk, info, len) {
       if (len > 255 * Nh) throw _err("hpke/export-length", "requested length " + len + " exceeds 255*Nh");
-      var out = [], t = Buffer.alloc(0), n = Math.ceil(len / Nh);
-      for (var i = 1; i <= n; i++) {
-        var fed = concat([t, info, Buffer.from([i])]);
-        t = nodeCrypto.createHmac(hash, prk).update(fed).digest();
+      var out = [], t = Buffer.alloc(0), n = Math.ceil(len / Nh), fed = null, joined = null;
+      try {
+        for (var i = 1; i <= n; i++) {
+          fed = concat([t, info, Buffer.from([i])]);
+          t = nodeCrypto.createHmac(hash, prk).update(fed).digest();
+          guard.secret.zeroize(fed, HpkeError, "hpke/bad-input", "an expand feedback input");
+          fed = null;
+          out.push(t);
+        }
+        joined = concat(out);
+        var exact = Buffer.alloc(len);
+        joined.copy(exact, 0, 0, len);
+        return exact;
+      } finally {
         guard.secret.zeroize(fed, HpkeError, "hpke/bad-input", "an expand feedback input");
-        out.push(t);
+        guard.secret.zeroize(joined, HpkeError, "hpke/bad-input", "the KDF accumulator");
+        for (var oi = 0; oi < out.length; oi++) guard.secret.zeroize(out[oi], HpkeError, "hpke/bad-input", "a KDF block");
       }
-      var joined = concat(out);
-      var exact = Buffer.alloc(len);
-      joined.copy(exact, 0, 0, len);
-      guard.secret.zeroize(joined, HpkeError, "hpke/bad-input", "the KDF accumulator");
-      for (var oi = 0; oi < out.length; oi++) guard.secret.zeroize(out[oi], HpkeError, "hpke/bad-input", "a KDF block");
-      return exact;
     }
     function _labeledExtract(kdf, suiteId, salt, label, ikm) {
       var labeled = concat([HPKE_V1, suiteId, L(label), ikm]);
@@ -39552,9 +41165,34 @@ var require_hpke = __commonJS({
     }
     var OKP_SPKI = intrinsic.assign(intrinsic.create(null), { X25519: "302a300506032b656e032100", X448: "3042300506032b656f033900" });
     var OKP_PKCS8 = intrinsic.assign(intrinsic.create(null), { X25519: "302e020100300506032b656e04220420", X448: "3046020100300506032b656f043a0438" });
+    var EC_SEC1 = intrinsic.assign(intrinsic.create(null), {
+      "P-256": {
+        head: "30310201010420",
+        tail: "a00a06082a8648ce3d030107",
+        order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"
+      },
+      "P-521": {
+        head: "30500201010442",
+        tail: "a00706052b81040023",
+        order: "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409"
+      }
+    });
+    var ML_KEM_SPKI = intrinsic.assign(intrinsic.create(null), {
+      "ML-KEM-512": "30820332300b06096086480165030404010382032100",
+      "ML-KEM-768": "308204b2300b0609608648016503040402038204a100",
+      "ML-KEM-1024": "30820632300b06096086480165030404030382062100"
+    });
+    var ML_KEM_PKCS8 = intrinsic.assign(intrinsic.create(null), {
+      "ML-KEM-512": "3054020100300b060960864801650304040104428040",
+      "ML-KEM-768": "3054020100300b060960864801650304040204428040",
+      "ML-KEM-1024": "3054020100300b060960864801650304040304428040"
+    });
+    function _hex(h) {
+      return _bufferFrom(h, "hex");
+    }
     function _importPublic(kem, raw) {
-      if (!Buffer.isBuffer(raw) || raw.length !== kem.Npub) {
-        throw _err("hpke/bad-key", kem.curve + " public key must be " + kem.Npub + " bytes");
+      if (!_isBuffer(raw) || raw.length !== kem.Npub) {
+        throw _err("hpke/bad-key", kem.name + " public key must be " + kem.Npub + " bytes");
       }
       try {
         if (kem.kind === "ec") {
@@ -39563,34 +41201,60 @@ var require_hpke = __commonJS({
           var jwk = { kty: "EC", crv: kem.curve, x: raw.subarray(1, 1 + half).toString("base64url"), y: raw.subarray(1 + half).toString("base64url") };
           return nodeCrypto.createPublicKey({ key: jwk, format: "jwk" });
         }
-        return nodeCrypto.createPublicKey({ key: Buffer.from(OKP_SPKI[kem.curve] + raw.toString("hex"), "hex"), format: "der", type: "spki" });
+        var prefix = kem.kind === "mlkem" ? ML_KEM_SPKI[kem.name] : OKP_SPKI[kem.curve];
+        return nodeCrypto.createPublicKey({ key: _bufferConcat([_hex(prefix), raw]), format: "der", type: "spki" });
       } catch (e) {
         if (e instanceof HpkeError) throw e;
-        throw _err("hpke/bad-key", "invalid " + kem.curve + " public key", e);
+        throw _err("hpke/bad-key", "invalid " + kem.name + " public key" + (kem.kind === "mlkem" ? " (FIPS 203 sec. 7.2 encapsulation key check)" : ""), e);
       }
     }
     function _exportPublic(kem, keyObject) {
-      var jwk = keyObject.export({ format: "jwk" });
+      var pub = keyObject.type === "public" ? keyObject : nodeCrypto.createPublicKey(keyObject);
+      if (kem.kind === "mlkem") {
+        var der = pub.export({ format: "der", type: "spki" }), prefix = _hex(ML_KEM_SPKI[kem.name]);
+        if (der.length !== prefix.length + kem.Npub || !_bufferEquals(_subarray(der, 0, prefix.length), prefix)) {
+          throw _err("hpke/bad-key", "the KeyObject is not an " + kem.name + " key");
+        }
+        return _subarray(der, prefix.length);
+      }
+      var jwk = pub.export({ format: "jwk" });
+      if (jwk.crv !== kem.curve) throw _err("hpke/bad-key", "the KeyObject is not a " + kem.name + " key");
       if (kem.kind === "ec") return concat([Buffer.from([4]), _b64u(jwk.x), _b64u(jwk.y)]);
       return _b64u(jwk.x);
     }
     function _b64u(s) {
       return guard.encoding.base64url(s, null, _err, "hpke/bad-key", "JWK coordinate");
     }
-    function _importPrivate(kem, rawSk, rawPk) {
-      try {
-        if (kem.kind === "ec") {
-          var jwk = { kty: "EC", crv: kem.curve, d: rawSk.toString("base64url") };
-          if (rawPk) {
-            jwk.x = rawPk.subarray(1, 1 + (rawPk.length - 1) / 2).toString("base64url");
-            jwk.y = rawPk.subarray(1 + (rawPk.length - 1) / 2).toString("base64url");
-          }
-          return nodeCrypto.createPrivateKey({ key: jwk, format: "jwk" });
-        }
-        return nodeCrypto.createPrivateKey({ key: Buffer.from(OKP_PKCS8[kem.curve] + rawSk.toString("hex"), "hex"), format: "der", type: "pkcs8" });
-      } catch (e) {
-        throw _err("hpke/bad-key", "invalid " + kem.curve + " private key", e);
+    function _scalarInRange(d, order) {
+      return _compare(d, _bufferAlloc(d.length)) > 0 && _compare(d, order) < 0;
+    }
+    function _importPrivate(kem, rawSk) {
+      if (!_isBuffer(rawSk) || rawSk.length !== kem.Nsk) {
+        throw _err("hpke/bad-key", kem.name + " private key must be " + (kem.kind === "mlkem" ? "the 64-byte seed" : "the " + kem.Nsk + "-byte scalar") + " as a Buffer");
       }
+      var der;
+      if (kem.kind === "ec") {
+        var sec1 = EC_SEC1[kem.curve];
+        if (!_scalarInRange(rawSk, _hex(sec1.order))) throw _err("hpke/bad-key", kem.name + " private scalar is outside [1, n-1]");
+        der = _bufferConcat([_hex(sec1.head), rawSk, _hex(sec1.tail)]);
+      } else {
+        der = _bufferConcat([_hex(kem.kind === "mlkem" ? ML_KEM_PKCS8[kem.name] : OKP_PKCS8[kem.curve]), rawSk]);
+      }
+      try {
+        return nodeCrypto.createPrivateKey({ key: der, format: "der", type: kem.kind === "ec" ? "sec1" : "pkcs8" });
+      } catch (e) {
+        throw _err("hpke/bad-key", "invalid " + kem.name + " private key", e);
+      } finally {
+        guard.secret.zeroize(der, HpkeError, "hpke/bad-input", "the private key envelope");
+      }
+    }
+    function _boundPublic(kem, privateKey, pkm) {
+      var derived = _exportPublic(kem, nodeCrypto.createPublicKey(privateKey));
+      if (pkm === void 0) return derived;
+      if (!_isBuffer(pkm) || !_bufferEquals(derived, pkm)) {
+        throw _err("hpke/bad-key", "pkm is not the " + kem.name + " public key derived from skm");
+      }
+      return derived;
     }
     function _dh(privateKey, publicKey) {
       try {
@@ -39620,14 +41284,41 @@ var require_hpke = __commonJS({
       return 0;
     }
     function _ephemeral(kem, eph) {
-      if (eph) return { skE: _importPrivate(kem, eph.skm, eph.pkm), enc: _buf(eph.pkm) };
+      if (eph != null) {
+        if (typeof eph !== "object") throw _err("hpke/bad-input", "eph must be { skm, pkm } (a fixed ephemeral key pair), got " + guard.text.showValue(eph));
+        var skE = _importPrivate(kem, eph.skm);
+        return { skE, enc: _boundPublic(kem, skE, eph.pkm) };
+      }
       var kp = _generate(kem);
       return { skE: kp.privateKey, enc: _exportPublic(kem, kp.publicKey) };
     }
     function _wipeDh(dh) {
       guard.secret.zeroize(dh, HpkeError, "hpke/bad-input", "the KEM shared secret");
     }
+    function _mlKemEncap(kem, pkR, eph) {
+      if (eph != null) {
+        throw _err("hpke/bad-input", "eph (a fixed ephemeral key pair) applies to a DHKEM suite; " + kem.name + " encapsulation takes its randomness from the runtime");
+      }
+      var r;
+      try {
+        r = nodeCrypto.encapsulate(pkR);
+      } catch (e) {
+        throw _err("hpke/bad-key", kem.name + " encapsulation failed", e);
+      }
+      return { sharedSecret: r.sharedKey, enc: r.ciphertext };
+    }
+    function _mlKemDecap(kem, enc, skR) {
+      if (enc.length !== kem.Nenc) {
+        throw _err("hpke/bad-key", kem.name + " encapsulated key must be " + kem.Nenc + " bytes (FIPS 203 sec. 7.3 ciphertext check)");
+      }
+      try {
+        return nodeCrypto.decapsulate(skR, enc);
+      } catch (e) {
+        throw _err("hpke/bad-key", kem.name + " decapsulation failed", e);
+      }
+    }
     function _encap(kem, pkR, pkRm, eph) {
+      if (kem.kind === "mlkem") return _mlKemEncap(kem, pkR, eph);
       var e = _ephemeral(kem, eph);
       var dh = null;
       try {
@@ -39638,6 +41329,7 @@ var require_hpke = __commonJS({
       }
     }
     function _decap(kem, enc, skR, pkRm) {
+      if (kem.kind === "mlkem") return _mlKemDecap(kem, enc, skR);
       var pkE = _importPublic(kem, enc);
       var dh = null;
       try {
@@ -39779,14 +41471,31 @@ var require_hpke = __commonJS({
       }
     }
     function _recipPrivate(suite, sk) {
-      if (sk && sk.skm) return { key: _importPrivate(suite.kem, sk.skm, sk.pkm), pkm: sk.pkm };
-      if (Buffer.isBuffer(sk)) throw _err("hpke/bad-key", "a serialized private key must be provided as { skm, pkm } (raw scalar + public point), not a bare buffer");
+      var kem = suite.kem;
+      if (sk && sk.skm != null) {
+        var key = _importPrivate(kem, sk.skm);
+        return { key, pkm: _boundPublic(kem, key, sk.pkm) };
+      }
+      if (_isBuffer(sk)) {
+        throw _err("hpke/bad-key", "a serialized " + kem.name + " private key must be provided as { skm" + (kem.kind === "mlkem" ? " } holding the 64-byte seed" : ", pkm } (the raw scalar, and optionally its public key)") + ", not a bare buffer");
+      }
       try {
-        var pkm = _exportPublic(suite.kem, nodeCrypto.createPublicKey(sk));
+        if (sk.type !== "private") throw _err("hpke/bad-key", "the private key must be a private KeyObject or { skm, pkm }, got a " + guard.text.showValue(sk.type) + " KeyObject");
+        var pkm = _exportPublic(kem, nodeCrypto.createPublicKey(sk));
         return { key: sk, pkm };
       } catch (e) {
         if (e instanceof HpkeError) throw e;
-        throw _err("hpke/bad-key", "invalid recipient private key (expected a node KeyObject or { skm, pkm })", e);
+        throw _err("hpke/bad-key", "invalid private key (expected a node KeyObject or { skm, pkm })", e);
+      }
+    }
+    function _requireAuthCapable(kem) {
+      if (kem.kind === "mlkem") {
+        throw _err("hpke/auth-unsupported", kem.name + " defines no AuthEncap / AuthDecap (draft-ietf-hpke-pq sec. 7.2); use the psk mode or a signature");
+      }
+    }
+    function _refuseUnusedAuthKey(value, name, mode) {
+      if (value != null) {
+        throw _err("hpke/bad-input", name + " applies to the auth and auth-psk modes; mode " + mode + " would leave it unused, so the exchange it was meant to authenticate would not be");
       }
     }
     var _COMMON_KEYS = intrinsic.assign(intrinsic.create(null), { mode: 1, info: 1, psk: 1, pskId: 1 });
@@ -39807,51 +41516,63 @@ var require_hpke = __commonJS({
     var _SETUP_R_KEYS = _withCommon({
       senderPublicKey: 1
     });
-    function _mode(opts, keys, who) {
+    function _options(opts, keys, who) {
       guard.identifier.assertKnownKeys(opts, keys, _err, "hpke/bad-input", function(k) {
         var other = keys === _SETUP_S_KEYS ? _SETUP_R_KEYS : _SETUP_S_KEYS;
         return "unknown HPKE " + who + " option " + JSON.stringify(k) + (_hasOwn(other, k) ? " -- that option belongs to the other end of the exchange, where it would authenticate or seed; here it would do nothing" : "") + " -- accepted: " + Object.keys(keys).sort().join(", ");
       });
-      var mode = opts.mode == null ? MODE_BASE : opts.mode;
-      if (mode !== MODE_BASE && mode !== MODE_PSK && mode !== MODE_AUTH && mode !== MODE_AUTH_PSK) {
-        throw _err("hpke/unknown-mode", "unsupported HPKE mode " + guard.text.showValue(mode) + " (RFC 9180 sec. 5.1 defines base / psk / auth / auth-psk)");
+      var o = guard.identifier.snapshotOptions(opts, keys);
+      if (o.mode == null) o.mode = MODE_BASE;
+      if (o.mode !== MODE_BASE && o.mode !== MODE_PSK && o.mode !== MODE_AUTH && o.mode !== MODE_AUTH_PSK) {
+        throw _err("hpke/unknown-mode", "unsupported HPKE mode " + guard.text.showValue(o.mode) + " (RFC 9180 sec. 5.1 defines base / psk / auth / auth-psk)");
       }
-      return mode;
+      return o;
     }
     var suites = intrinsic.assign(intrinsic.create(null), {
-      KEM: intrinsic.assign(intrinsic.create(null), { DHKEM_P256_HKDF_SHA256: 16, DHKEM_P521_HKDF_SHA512: 18, DHKEM_X25519_HKDF_SHA256: 32, DHKEM_X448_HKDF_SHA512: 33 }),
-      KDF: intrinsic.assign(intrinsic.create(null), { HKDF_SHA256: 1, HKDF_SHA512: 3 }),
+      KEM: intrinsic.assign(intrinsic.create(null), {
+        DHKEM_P256_HKDF_SHA256: 16,
+        DHKEM_P521_HKDF_SHA512: 18,
+        DHKEM_X25519_HKDF_SHA256: 32,
+        DHKEM_X448_HKDF_SHA512: 33,
+        ML_KEM_512: 64,
+        ML_KEM_768: 65,
+        ML_KEM_1024: 66
+      }),
+      KDF: intrinsic.assign(intrinsic.create(null), { HKDF_SHA256: 1, HKDF_SHA384: 2, HKDF_SHA512: 3 }),
       AEAD: intrinsic.assign(intrinsic.create(null), { AES_128_GCM: 1, AES_256_GCM: 2, CHACHA20_POLY1305: 3, EXPORT_ONLY: 65535 }),
       MODE: intrinsic.assign(intrinsic.create(null), { BASE: MODE_BASE, PSK: MODE_PSK, AUTH: MODE_AUTH, AUTH_PSK: MODE_AUTH_PSK })
     });
     function _setupS(ids, pkR, opts) {
-      opts = opts || {};
       var suite = _suite(ids);
-      var mode = _mode(opts, _SETUP_S_KEYS, "sender setup");
+      opts = _options(opts || {}, _SETUP_S_KEYS, "sender setup");
+      var mode = opts.mode;
       var r = _recipPublic(suite, pkR);
       var kem = suite.kem, k;
       if (mode === MODE_AUTH || mode === MODE_AUTH_PSK) {
-        if (kem.kind !== "ec" && kem.kind !== "okp") throw _err("hpke/auth-unsupported", "the KEM does not support authenticated modes");
+        _requireAuthCapable(kem);
         if (opts.senderKey == null) throw _err("hpke/auth-key-required", "an authenticated mode requires opts.senderKey (the sender's KEM private key, RFC 9180 sec. 5.1.3)");
         var s = _recipPrivate(suite, opts.senderKey);
         k = _authEncap(kem, r.key, r.pkm, s.key, s.pkm, opts.eph);
       } else {
+        _refuseUnusedAuthKey(opts.senderKey, "senderKey", mode);
         k = _encap(kem, r.key, r.pkm, opts.eph);
       }
       var ctx = _keySchedule(suite, mode, k.sharedSecret, _buf(opts.info), _buf(opts.psk), _buf(opts.pskId), "S");
       return { enc: k.enc, context: ctx, sharedSecret: k.sharedSecret };
     }
     function _setupR(ids, enc, skR, opts) {
-      opts = opts || {};
       var suite = _suite(ids);
-      var mode = _mode(opts, _SETUP_R_KEYS, "recipient setup");
+      opts = _options(opts || {}, _SETUP_R_KEYS, "recipient setup");
+      var mode = opts.mode;
       var r = _recipPrivate(suite, skR);
       var kem = suite.kem, ss;
       if (mode === MODE_AUTH || mode === MODE_AUTH_PSK) {
+        _requireAuthCapable(kem);
         if (opts.senderPublicKey == null) throw _err("hpke/auth-key-required", "an authenticated mode requires opts.senderPublicKey (the sender's KEM public key, RFC 9180 sec. 5.1.3)");
         var pkS = _recipPublic(suite, opts.senderPublicKey);
         ss = _authDecap(kem, _buf(enc), r.key, r.pkm, pkS.key, pkS.pkm);
       } else {
+        _refuseUnusedAuthKey(opts.senderPublicKey, "senderPublicKey", mode);
         ss = _decap(kem, _buf(enc), r.key, r.pkm);
       }
       try {
@@ -39899,6 +41620,7 @@ var require_sigstore = __commonJS({
     var constants = require_constants();
     var asn1 = require_asn1_der();
     var guard = require_guard_all();
+    var intrinsic = require_guard_intrinsic();
     var x509 = require_schema_x509();
     var pkix = require_schema_pkix();
     var pathValidate = require_path_validate();
@@ -39906,41 +41628,104 @@ var require_sigstore = __commonJS({
     var oid = require_oid();
     var ct = require_ct();
     var edwardsPoint = require_edwards_point();
+    var _ownNames = intrinsic.getOwnPropertyNames;
+    var _ownDescriptor = intrinsic.getOwnPropertyDescriptor;
+    var _isArray = intrinsic.isArray;
+    var _create = intrinsic.create;
+    var _assign = intrinsic.assign;
+    var _freeze = intrinsic.freeze;
+    var _stringOf = intrinsic.String;
+    var _numberOf = intrinsic.Number;
+    var _bigIntOf = intrinsic.BigInt;
+    var _Date = intrinsic.Date;
+    var _dateParse = intrinsic.dateParse;
+    var _isNaN = intrinsic.numberIsNaN;
+    var _hasOwn = intrinsic.hasOwn;
+    var _isFiniteNumber = intrinsic.numberIsFinite;
+    var _isSafeInt = intrinsic.isSafeInteger;
+    var _isBuffer = intrinsic.isBuffer;
+    var _bufferFrom = intrinsic.bufferFrom;
+    var _bufferConcat = intrinsic.bufferConcat;
+    var _bufToString = intrinsic.bufToString;
+    var _bufferEquals = intrinsic.bufferEquals;
+    var _subarray = intrinsic.subarray;
+    var _bufIndexOf = intrinsic.uncurry(Buffer.prototype.indexOf);
+    var _jsonStringify = intrinsic.stringify;
+    var _defineProp = intrinsic.defineProperty;
+    var _isFiniteNum = intrinsic.isFinite;
+    var _charCodeAt = intrinsic.uncurry(String.prototype.charCodeAt);
+    var _charAt = intrinsic.uncurry(String.prototype.charAt);
+    var _strSlice = intrinsic.uncurry(String.prototype.slice);
+    var _strIndexOf = intrinsic.stringIndexOf;
+    var _split = intrinsic.uncurry(String.prototype.split);
+    var _join = intrinsic.join;
+    var _map = intrinsic.map;
+    var _forEach = intrinsic.forEach;
+    var _filter = intrinsic.filter;
+    var _arraySlice = intrinsic.arraySlice;
+    var _fromCharCode = intrinsic.fromCharCode;
     var C = constants;
     var SigstoreError = frameworkError.SigstoreError;
     function _err(code, message, cause) {
       return new SigstoreError(code, message, cause);
     }
     function _armPresent(obj, name) {
-      return !!obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, name) && obj[name] !== void 0 && obj[name] !== null;
+      return !!obj && typeof obj === "object" && _hasOwn(obj, name) && obj[name] !== void 0 && obj[name] !== null;
     }
+    var _HASH_BY_ENUM = _freeze(_assign(_create(null), {
+      SHA2_256: { node: "sha256", bytes: 32 },
+      SHA2_384: { node: "sha384", bytes: 48 },
+      SHA2_512: { node: "sha512", bytes: 64 },
+      SHA3_256: { node: "sha3-256", bytes: 32 },
+      SHA3_384: { node: "sha3-384", bytes: 48 }
+    }));
+    var _HASH_BY_NUMBER = _freeze(_assign(_create(null), {
+      1: _HASH_BY_ENUM.SHA2_256,
+      2: _HASH_BY_ENUM.SHA2_384,
+      3: _HASH_BY_ENUM.SHA2_512,
+      4: _HASH_BY_ENUM.SHA3_256,
+      5: _HASH_BY_ENUM.SHA3_384
+    }));
+    function _hashOf(algorithm) {
+      if (typeof algorithm === "string") return _HASH_BY_ENUM[algorithm] || null;
+      if (typeof algorithm === "number" && _isSafeInt(algorithm)) {
+        return _HASH_BY_NUMBER[algorithm] || null;
+      }
+      return null;
+    }
+    var _HASH_BY_REKOR = _freeze(_assign(_create(null), {
+      sha256: { node: "sha256", bytes: 32 },
+      sha384: { node: "sha384", bytes: 48 },
+      sha512: { node: "sha512", bytes: 64 }
+    }));
     var JSON_MAX = C.LIMITS.JSON_MAX_BYTES;
-    var SP = Buffer.from(" ", "ascii");
-    var DSSEV1 = Buffer.from("DSSEv1", "ascii");
-    var _EM_DASH = String.fromCharCode(8212);
+    var BUNDLE_MAX_DEPTH = 64;
+    var SP = _bufferFrom(" ", "ascii");
+    var DSSEV1 = _bufferFrom("DSSEv1", "ascii");
+    var _EM_DASH = _fromCharCode(8212);
     function _parseNoteSig(line) {
       var prefix = _EM_DASH + " ";
-      if (line.slice(0, prefix.length) !== prefix) return null;
+      if (_strSlice(line, 0, prefix.length) !== prefix) return null;
       var p = prefix.length, n = line.length;
       var t1s = p;
-      while (p < n && !pkix.isJsWhitespace(line.charCodeAt(p))) p += 1;
+      while (p < n && !pkix.isJsWhitespace(_charCodeAt(line, p))) p += 1;
       if (p === t1s) return null;
-      var keyId = line.slice(t1s, p);
-      if (line.charAt(p) !== " ") return null;
+      var keyId = _strSlice(line, t1s, p);
+      if (_charAt(line, p) !== " ") return null;
       p += 1;
       var t2s = p;
-      while (p < n && !pkix.isJsWhitespace(line.charCodeAt(p))) p += 1;
+      while (p < n && !pkix.isJsWhitespace(_charCodeAt(line, p))) p += 1;
       if (p === t2s) return null;
-      var sig = line.slice(t2s, p);
+      var sig = _strSlice(line, t2s, p);
       if (p !== n) return null;
       return { keyId, sig };
     }
     function _stripTrailingEquals(s) {
       var i = s.length;
-      while (i > 0 && s.charAt(i - 1) === "=") i -= 1;
-      return s.slice(0, i);
+      while (i > 0 && _charAt(s, i - 1) === "=") i -= 1;
+      return _strSlice(s, 0, i);
     }
-    var _BUNDLE_MEDIA_TYPES = Object.assign(/* @__PURE__ */ Object.create(null), {
+    var _BUNDLE_MEDIA_TYPES = _assign(_create(null), {
       "application/vnd.dev.sigstore.bundle.v0.1+json": 1,
       "application/vnd.dev.sigstore.bundle.v0.2+json": 1,
       "application/vnd.dev.sigstore.bundle.v0.3+json": 1,
@@ -39949,12 +41734,12 @@ var require_sigstore = __commonJS({
       "application/vnd.dev.sigstore.bundle+json;version=0.3": 1
     });
     function _isBundleMediaType(mt) {
-      return typeof mt === "string" && Object.prototype.hasOwnProperty.call(_BUNDLE_MEDIA_TYPES, mt);
+      return typeof mt === "string" && _hasOwn(_BUNDLE_MEDIA_TYPES, mt);
     }
     function _jsonParse(input, code, label) {
       return guard.json.parse(input, _err, {
         maxBytes: JSON_MAX,
-        maxDepth: 64,
+        maxDepth: BUNDLE_MAX_DEPTH,
         badJson: code,
         tooDeep: code,
         duplicateMember: code,
@@ -39965,40 +41750,40 @@ var require_sigstore = __commonJS({
     }
     function pae(payloadType, payloadBytes) {
       if (typeof payloadType !== "string") throw new TypeError("pae: payloadType must be a string");
-      var type = Buffer.from(payloadType, "utf8");
-      var body = Buffer.isBuffer(payloadBytes) ? payloadBytes : Buffer.from(payloadBytes || []);
-      return Buffer.concat([
+      var type = _bufferFrom(payloadType, "utf8");
+      var body = _isBuffer(payloadBytes) ? payloadBytes : _bufferFrom(payloadBytes || []);
+      return _bufferConcat([
         DSSEV1,
         SP,
-        Buffer.from(String(type.length), "ascii"),
+        _bufferFrom(_stringOf(type.length), "ascii"),
         SP,
         type,
         SP,
-        Buffer.from(String(body.length), "ascii"),
+        _bufferFrom(_stringOf(body.length), "ascii"),
         SP,
         body
       ]);
     }
     function _b64(s, label) {
       if (typeof s !== "string") throw _err("sigstore/bad-bundle", label + " must be a base64 string");
-      var urlSafe = s.indexOf("-") !== -1 || s.indexOf("_") !== -1;
+      var urlSafe = _strIndexOf(s, "-") !== -1 || _strIndexOf(s, "_") !== -1;
       var enc = urlSafe ? "base64url" : "base64";
-      var buf = Buffer.from(s, enc);
-      if (_stripTrailingEquals(buf.toString(enc)) !== _stripTrailingEquals(s)) {
+      var buf = _bufferFrom(s, enc);
+      if (_stripTrailingEquals(_bufToString(buf, enc)) !== _stripTrailingEquals(s)) {
         throw _err("sigstore/bad-bundle", label + " is not canonical base64");
       }
       return buf;
     }
     function parseBundle(input) {
       var obj;
-      if (Buffer.isBuffer(input) || typeof input === "string") {
+      if (_isBuffer(input) || typeof input === "string") {
         obj = _jsonParse(input, "sigstore/bad-bundle", "bundle");
       } else if (input && typeof input === "object") {
-        obj = input;
+        obj = _snapshotBundle(input);
       } else {
         throw _err("sigstore/bad-bundle", "bundle must be a JSON object, string, or Buffer");
       }
-      if (!obj || typeof obj !== "object" || Array.isArray(obj)) throw _err("sigstore/bad-bundle", "bundle must be a JSON object");
+      if (!obj || typeof obj !== "object" || _isArray(obj)) throw _err("sigstore/bad-bundle", "bundle must be a JSON object");
       var mt = obj.mediaType;
       if (!_isBundleMediaType(mt)) {
         throw _err("sigstore/bad-bundle-version", "unsupported or unknown bundle media type: " + (mt === void 0 ? "(none)" : guard.text.showValue(mt)));
@@ -40006,27 +41791,180 @@ var require_sigstore = __commonJS({
       if (!obj.verificationMaterial || typeof obj.verificationMaterial !== "object") {
         throw _err("sigstore/bad-bundle", "bundle is missing verificationMaterial");
       }
-      var vmArms = 0;
-      if (_armPresent(obj.verificationMaterial, "certificate")) vmArms++;
-      if (_armPresent(obj.verificationMaterial, "x509CertificateChain")) vmArms++;
-      if (_armPresent(obj.verificationMaterial, "publicKey")) vmArms++;
-      if (vmArms > 1) {
-        throw _err("sigstore/bad-bundle", "verificationMaterial carries more than one of certificate, x509CertificateChain and publicKey; it is a oneof and exactly one arm may be present");
-      }
-      if (_armPresent(obj, "messageSignature") && _armPresent(obj, "dsseEnvelope")) {
-        throw _err("sigstore/bad-bundle", "bundle carries both dsse_envelope and message_signature; the bundle content is a oneof and exactly one arm may be present");
-      }
+      _assertMaterialOneOf(obj.verificationMaterial);
+      _assertContentOneOf(obj);
       if (_armPresent(obj, "messageSignature")) {
-        throw _err("sigstore/unsupported-content", "a message_signature bundle is not supported (only dsse_envelope)");
+        _parseMessageSignature(obj.messageSignature);
+        return obj;
       }
       if (!obj.dsseEnvelope || typeof obj.dsseEnvelope !== "object") {
         throw _err("sigstore/bad-bundle", "bundle is missing a dsseEnvelope");
       }
       var d = obj.dsseEnvelope;
-      if (typeof d.payload !== "string" || typeof d.payloadType !== "string" || !Array.isArray(d.signatures) || !d.signatures.length || !d.signatures[0] || typeof d.signatures[0] !== "object" || typeof d.signatures[0].sig !== "string") {
+      if (typeof d.payload !== "string" || typeof d.payloadType !== "string" || !_isArray(d.signatures) || !d.signatures.length || !d.signatures[0] || typeof d.signatures[0] !== "object" || typeof d.signatures[0].sig !== "string") {
         throw _err("sigstore/bad-dsse", "the DSSE envelope is missing a required field (payload / payloadType / signatures[].sig)");
       }
+      if (d.signatures.length !== 1) {
+        throw _err("sigstore/bad-dsse", "a bundle's DSSE envelope carries exactly one signature; this one carries " + d.signatures.length);
+      }
       return obj;
+    }
+    function _assertContentOneOf(obj) {
+      if (_armPresent(obj, "messageSignature") && _armPresent(obj, "dsseEnvelope")) {
+        throw _err("sigstore/bad-bundle", "bundle carries both dsse_envelope and message_signature; the bundle content is a oneof and exactly one arm may be present");
+      }
+    }
+    function _assertMaterialOneOf(vm) {
+      var arms = 0;
+      if (_armPresent(vm, "certificate")) arms++;
+      if (_armPresent(vm, "x509CertificateChain")) arms++;
+      if (_armPresent(vm, "publicKey")) arms++;
+      if (arms > 1) {
+        throw _err("sigstore/bad-bundle", "verificationMaterial carries more than one of certificate, x509CertificateChain and publicKey; it is a oneof and exactly one arm may be present");
+      }
+    }
+    function _chargeString(budget, s) {
+      _charge(budget, 2);
+      for (var i = 0; i < s.length; i++) {
+        var c = _charCodeAt(s, i);
+        var cost;
+        if (c === 34 || c === 92) cost = 2;
+        else if (c === 8 || c === 9 || c === 10 || c === 12 || c === 13) cost = 2;
+        else if (c < 32) cost = 6;
+        else if (c < 128) cost = 1;
+        else if (c < 2048) cost = 2;
+        else if (c >= 55296 && c <= 56319) {
+          var next = i + 1 < s.length ? _charCodeAt(s, i + 1) : 0;
+          if (next >= 56320 && next <= 57343) {
+            cost = 4;
+            i++;
+          } else {
+            cost = 6;
+          }
+        } else if (c >= 56320 && c <= 57343) {
+          cost = 6;
+        } else {
+          cost = 3;
+        }
+        _charge(budget, cost);
+      }
+    }
+    function _numOf(v) {
+      var t = typeof v;
+      if (t === "number") return v;
+      if (t === "string" || t === "boolean") return _numberOf(v);
+      return NaN;
+    }
+    function _charge(budget, cost) {
+      budget.n += cost;
+      if (budget.n > JSON_MAX) {
+        throw _err("sigstore/bad-bundle", "the bundle is larger than the " + JSON_MAX + " byte limit");
+      }
+    }
+    function _step(budget) {
+      budget.steps++;
+      if (budget.steps > JSON_MAX) {
+        throw _err("sigstore/bad-bundle", "the bundle holds more values than a bundle of the maximum size can");
+      }
+    }
+    function _valueOf(obj, key, depth, budget) {
+      var d = _ownDescriptor(obj, key);
+      if (d === void 0) return void 0;
+      if (typeof d.get === "function" || typeof d.set === "function") {
+        throw _err("sigstore/bad-bundle", "the bundle reaches " + guard.text.showValue(key) + " through an accessor rather than holding a value; a bundle is data");
+      }
+      if (d.value === void 0) return void 0;
+      return _plainCopy(d.value, depth + 1, budget);
+    }
+    function _plainCopy(v, depth, budget) {
+      _step(budget);
+      if (depth > BUNDLE_MAX_DEPTH) {
+        throw _err("sigstore/bad-bundle", "the bundle nests deeper than " + BUNDLE_MAX_DEPTH + " levels");
+      }
+      if (v === null) {
+        _charge(budget, 4);
+        return null;
+      }
+      var t = typeof v;
+      if (t === "string") {
+        _chargeString(budget, v);
+        return v;
+      }
+      if (t === "boolean") {
+        _charge(budget, v ? 4 : 5);
+        return v;
+      }
+      if (t === "number") {
+        if (!_isFiniteNum(v)) throw _err("sigstore/bad-bundle", "the bundle carries a number JSON cannot represent");
+        _charge(budget, _stringOf(v).length);
+        return v;
+      }
+      if (t !== "object") {
+        throw _err("sigstore/bad-bundle", "the bundle carries a " + t + " where JSON carries only objects, arrays, strings, numbers, booleans and null");
+      }
+      _charge(budget, 2);
+      var out, i;
+      if (_isArray(v)) {
+        out = [];
+        for (i = 0; i < v.length; i++) {
+          if (i > 0) _charge(budget, 1);
+          var el = _valueOf(v, _stringOf(i), depth, budget);
+          if (el === void 0) _charge(budget, 4);
+          _defineProp(out, _stringOf(out.length), { value: el, writable: true, enumerable: true, configurable: true });
+        }
+        return out;
+      }
+      out = _create(null);
+      var keys = _ownNames(v);
+      var kept = 0;
+      for (i = 0; i < keys.length; i++) {
+        _step(budget);
+        var val = _valueOf(v, keys[i], depth, budget);
+        if (val === void 0) continue;
+        if (kept > 0) _charge(budget, 1);
+        _chargeString(budget, keys[i]);
+        _charge(budget, 1);
+        kept++;
+        _defineProp(out, keys[i], { value: val, writable: true, enumerable: true, configurable: true });
+      }
+      return out;
+    }
+    function _snapshotBundle(bundle) {
+      try {
+        return _plainCopy(bundle, 0, { n: 0, steps: 0 });
+      } catch (e) {
+        if (e instanceof SigstoreError) throw e;
+        throw _err("sigstore/bad-bundle", "the bundle object could not be read", e);
+      }
+    }
+    function _contentTypeOf(obj) {
+      return _armPresent(obj, "messageSignature") ? "messageSignature" : "dsseEnvelope";
+    }
+    function _parseMessageSignature(ms) {
+      if (!ms || typeof ms !== "object" || _isArray(ms)) {
+        throw _err("sigstore/bad-message-signature", "messageSignature is not an object");
+      }
+      var sig = ms.signature;
+      if (typeof sig !== "string" || sig === "") {
+        throw _err("sigstore/bad-message-signature", "messageSignature is missing its signature");
+      }
+      if (!_armPresent(ms, "messageDigest")) return { signature: sig, digestAlg: null, digest: null };
+      var md = ms.messageDigest;
+      if (typeof md !== "object" || _isArray(md)) {
+        throw _err("sigstore/bad-message-signature", "messageSignature.messageDigest is not an object");
+      }
+      var alg = _hashOf(md.algorithm);
+      if (!alg) {
+        throw _err("sigstore/bad-message-signature", "messageSignature.messageDigest names a hash algorithm this build does not verify under: " + (md.algorithm === void 0 ? "(none)" : guard.text.showValue(md.algorithm)));
+      }
+      if (typeof md.digest !== "string") {
+        throw _err("sigstore/bad-message-signature", "messageSignature.messageDigest is missing its digest");
+      }
+      var raw = _b64(md.digest, "messageSignature.messageDigest.digest");
+      if (raw.length !== alg.bytes) {
+        throw _err("sigstore/bad-message-signature", "messageSignature.messageDigest states " + md.algorithm + " and carries " + raw.length + " bytes, which that algorithm does not produce");
+      }
+      return { signature: sig, digestAlg: alg, digest: raw };
     }
     function _certBytes(c, label) {
       if (!c || typeof c !== "object" || typeof c.rawBytes !== "string") throw _err("sigstore/bad-bundle", label + " is not a { rawBytes } certificate");
@@ -40034,14 +41972,14 @@ var require_sigstore = __commonJS({
     }
     function _leafCertDer(vm) {
       if (vm.certificate) return _certBytes(vm.certificate, "verificationMaterial.certificate");
-      if (vm.x509CertificateChain && Array.isArray(vm.x509CertificateChain.certificates) && vm.x509CertificateChain.certificates.length) {
+      if (vm.x509CertificateChain && _isArray(vm.x509CertificateChain.certificates) && vm.x509CertificateChain.certificates.length) {
         return _certBytes(vm.x509CertificateChain.certificates[0], "verificationMaterial.x509CertificateChain[0]");
       }
       throw _err("sigstore/bad-bundle", "bundle has no Fulcio certificate (public_key bundles are not supported)");
     }
     function _chainDers(vm) {
-      if (vm.x509CertificateChain && Array.isArray(vm.x509CertificateChain.certificates)) {
-        return vm.x509CertificateChain.certificates.map(function(c, i) {
+      if (vm.x509CertificateChain && _isArray(vm.x509CertificateChain.certificates)) {
+        return _map(vm.x509CertificateChain.certificates, function(c, i) {
           return _certBytes(c, "x509CertificateChain[" + i + "]");
         });
       }
@@ -40082,14 +42020,14 @@ var require_sigstore = __commonJS({
     }
     function _toMs(x) {
       if (x == null) return null;
-      if (typeof x === "number") return Number.isFinite(x) ? x : null;
+      if (typeof x === "number") return _isFiniteNumber(x) ? x : null;
       if (guard.time.isDate(x)) {
         var d = guard.time.instantOf(x);
-        return isNaN(d) ? null : d;
+        return _isNaN(d) ? null : d;
       }
       if (typeof x === "string") {
-        var t = Date.parse(x);
-        return isNaN(t) ? null : t;
+        var t = _dateParse(x);
+        return _isNaN(t) ? null : t;
       }
       return null;
     }
@@ -40108,88 +42046,190 @@ var require_sigstore = __commonJS({
     function _rekorKey(rekorKeys, keyIdBuf, hint, timeMs) {
       for (var i = 0; i < rekorKeys.length; i++) {
         var k = rekorKeys[i];
-        var match = keyIdBuf && k.keyId && k.keyId.equals(keyIdBuf) || hint && k.keyId && k.keyId.length >= 4 && k.keyId.subarray(0, 4).equals(hint);
+        var match = keyIdBuf && k.keyId && _bufferEquals(k.keyId, keyIdBuf) || hint && k.keyId && k.keyId.length >= 4 && _bufferEquals(_subarray(k.keyId, 0, 4), hint);
         if (match && _inWindow(timeMs, k.validFor)) return k;
       }
       return null;
     }
     function _verifyCheckpoint(envelope, ip, rekorKeys, timeMs) {
-      var buf = Buffer.from(envelope, "utf8");
-      var sep = buf.indexOf("\n\n");
+      var buf = _bufferFrom(envelope, "utf8");
+      var sep = _bufIndexOf(buf, "\n\n");
       if (sep < 0) throw _err("sigstore/bad-checkpoint", "the checkpoint has no note/signature separator");
-      var body = buf.subarray(0, sep + 1);
-      var lines = body.toString("utf8").split("\n");
-      if (_b64(lines[2], "checkpoint root").toString("hex") !== _b64(ip.rootHash, "inclusionProof.rootHash").toString("hex")) {
+      var body = _subarray(buf, 0, sep + 1);
+      var lines = _split(_bufToString(body, "utf8"), "\n");
+      if (_bufToString(_b64(lines[2], "checkpoint root"), "hex") !== _bufToString(_b64(ip.rootHash, "inclusionProof.rootHash"), "hex")) {
         throw _err("sigstore/inclusion-proof-mismatch", "the checkpoint root does not match the inclusion-proof root");
       }
-      var sigBlock = buf.subarray(sep + 2).toString("utf8").split("\n");
+      var sigBlock = _split(_bufToString(_subarray(buf, sep + 2), "utf8"), "\n");
       for (var i = 0; i < sigBlock.length; i++) {
         var note = _parseNoteSig(sigBlock[i]);
         if (!note) continue;
         var blob = _b64(note.sig, "checkpoint signature");
         if (blob.length < 5) continue;
-        var hint = blob.subarray(0, 4), derSig = blob.subarray(4);
+        var hint = _subarray(blob, 0, 4), derSig = _subarray(blob, 4);
         var k = _rekorKey(rekorKeys, null, hint, timeMs);
         if (!k) continue;
         if (_rawVerify(_pubFromSpki(k.spki, "Rekor log"), body, derSig)) return true;
       }
       return false;
     }
-    function _verifySet(te, rekorKeys, timeMs) {
+    function _verifySet(te, rekorKeys, timeMs, canonBody) {
       var promise = te.inclusionPromise;
       if (!promise || typeof promise.signedEntryTimestamp !== "string") return false;
       var keyId = te.logId && te.logId.keyId ? _b64(te.logId.keyId, "logId.keyId") : null;
       var k = _rekorKey(rekorKeys, keyId, null, timeMs);
       if (!k) return false;
-      var canonical = JSON.stringify({
-        body: te.canonicalizedBody,
-        integratedTime: Number(te.integratedTime),
-        logID: keyId.toString("hex"),
-        logIndex: Number(te.logIndex)
+      var canonical = _jsonStringify({
+        body: canonBody,
+        integratedTime: _numOf(te.integratedTime),
+        logID: _bufToString(keyId, "hex"),
+        logIndex: _numOf(te.logIndex)
       });
       var sig = _b64(promise.signedEntryTimestamp, "signedEntryTimestamp");
-      return _rawVerify(_pubFromSpki(k.spki, "Rekor log"), Buffer.from(canonical, "utf8"), sig);
+      return _rawVerify(_pubFromSpki(k.spki, "Rekor log"), _bufferFrom(canonical, "utf8"), sig);
     }
-    function _bindEntry(te, envelope, leafDer) {
-      var body = _jsonParse(_b64(te.canonicalizedBody, "canonicalizedBody"), "sigstore/bad-tlog-entry", "Rekor entry body");
-      if (!body || typeof body !== "object" || Array.isArray(body)) throw _err("sigstore/bad-tlog-entry", "the Rekor entry body is not a JSON object");
+    var _ENTRY_ROWS = _freeze(_assign(_create(null), {
+      "dsse@0.0.1": { content: "dsseEnvelope", bind: _bindDsseEntry },
+      "hashedrekord@0.0.1": { content: "messageSignature", bind: _bindHashedRekordEntry }
+    }));
+    function _entryBody(canonBytes) {
+      var body = _jsonParse(canonBytes, "sigstore/bad-tlog-entry", "Rekor entry body");
+      if (!body || typeof body !== "object" || _isArray(body)) throw _err("sigstore/bad-tlog-entry", "the Rekor entry body is not a JSON object");
+      return body;
+    }
+    function _entryRow(body, contentType) {
+      if (typeof body.kind !== "string" || typeof body.apiVersion !== "string") {
+        throw _err("sigstore/unsupported-content", "the Rekor entry does not name its kind and apiVersion as strings");
+      }
+      var key = body.kind + "@" + body.apiVersion;
+      var row = _ENTRY_ROWS[key];
+      if (!row) {
+        throw _err("sigstore/unsupported-content", "unsupported Rekor entry kind and version: " + guard.text.showValue(key));
+      }
+      if (row.content !== contentType) {
+        throw _err("sigstore/unsupported-content", "the Rekor entry is a " + guard.text.showValue(key) + " while the bundle carries a " + contentType + "; the entry and the content arm must describe the same signature");
+      }
+      return row;
+    }
+    function _bindDsseEntry(body, envelope, leafDer) {
       var spec = body.spec;
-      if (body.kind !== "dsse" || !spec || typeof spec !== "object" || !Array.isArray(spec.signatures) || !spec.signatures.length || !spec.signatures[0] || typeof spec.signatures[0] !== "object" || typeof spec.signatures[0].signature !== "string") {
-        throw _err("sigstore/unsupported-content", "unsupported or malformed Rekor entry: " + body.kind);
+      if (!spec || typeof spec !== "object" || !_isArray(spec.signatures) || !spec.signatures.length || !spec.signatures[0] || typeof spec.signatures[0] !== "object" || typeof spec.signatures[0].signature !== "string") {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor dsse entry is missing its signature");
       }
       var envSig = _b64(envelope.signatures[0].sig, "dsseEnvelope.signatures[0].sig");
       var bodySig = _b64(spec.signatures[0].signature, "Rekor entry signature");
-      if (!envSig.equals(bodySig)) throw _err("sigstore/entry-mismatch", "the Rekor entry signature does not match the bundle signature");
+      if (!_bufferEquals(envSig, bodySig)) throw _err("sigstore/entry-mismatch", "the Rekor entry signature does not match the bundle signature");
       var payload = _b64(envelope.payload, "dsseEnvelope.payload");
       if (!spec.payloadHash || typeof spec.payloadHash.value !== "string") throw _err("sigstore/bad-tlog-entry", "the Rekor dsse entry is missing its payloadHash");
-      if (spec.payloadHash.value !== _sha256(payload).toString("hex")) {
+      if (spec.payloadHash.value !== _bufToString(_sha256(payload), "hex")) {
         throw _err("sigstore/entry-mismatch", "the Rekor entry payloadHash does not match the bundle payload");
       }
       var vf = spec.signatures[0].verifier;
       if (typeof vf !== "string") throw _err("sigstore/bad-tlog-entry", "the Rekor dsse entry is missing its verifier certificate");
       var vDer;
       try {
-        vDer = x509.pemDecode(_b64(vf, "Rekor entry verifier").toString("utf8"), "CERTIFICATE");
+        vDer = x509.pemDecode(_bufToString(_b64(vf, "Rekor entry verifier"), "utf8"), "CERTIFICATE");
       } catch (e) {
         throw _err("sigstore/bad-tlog-entry", "the Rekor entry verifier is not a valid certificate", e);
       }
-      if (!vDer.equals(leafDer)) throw _err("sigstore/entry-mismatch", "the Rekor entry verifier certificate does not match the bundle leaf certificate");
+      if (!_bufferEquals(vDer, leafDer)) throw _err("sigstore/entry-mismatch", "the Rekor entry verifier certificate does not match the bundle leaf certificate");
+    }
+    function _bindVerifier(content, leafDer) {
+      var text = _bufToString(_b64(content, "Rekor entry verifier"), "utf8");
+      var vDer;
+      try {
+        vDer = x509.pemDecode(text, "CERTIFICATE");
+      } catch (_e) {
+        vDer = null;
+      }
+      if (vDer !== null) {
+        if (!_bufferEquals(vDer, leafDer)) {
+          throw _err("sigstore/entry-mismatch", "the Rekor entry verifier certificate does not match the bundle leaf certificate");
+        }
+        return;
+      }
+      var spki;
+      try {
+        spki = x509.pemDecode(text, "PUBLIC KEY");
+      } catch (e) {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor entry verifier is neither a certificate nor a public key", e);
+      }
+      var leafSpki = _parseCert(leafDer, "Fulcio leaf certificate").subjectPublicKeyInfo.bytes;
+      if (!_bufferEquals(spki, _bufferFrom(leafSpki))) {
+        throw _err("sigstore/entry-mismatch", "the Rekor entry verifier public key does not match the bundle leaf certificate's key");
+      }
+    }
+    function _isLowerHex(s) {
+      for (var i = 0; i < s.length; i++) {
+        var c = _charCodeAt(s, i);
+        if (!(c >= 48 && c <= 57 || c >= 97 && c <= 102)) return false;
+      }
+      return s.length > 0;
+    }
+    function _bindHashedRekordEntry(body, ms, leafDer) {
+      var spec = body.spec;
+      if (!spec || typeof spec !== "object" || !spec.signature || typeof spec.signature !== "object") {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor hashedrekord entry has no signature object");
+      }
+      if (typeof spec.signature.content !== "string") {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor hashedrekord entry is missing its signature content");
+      }
+      var bodySig = _b64(spec.signature.content, "Rekor entry signature");
+      var armSig = _b64(ms.signature, "messageSignature.signature");
+      if (!_bufferEquals(armSig, bodySig)) {
+        throw _err("sigstore/entry-mismatch", "the Rekor entry signature does not match the bundle signature");
+      }
+      var pk = spec.signature.publicKey;
+      if (!pk || typeof pk !== "object" || typeof pk.content !== "string") {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor hashedrekord entry is missing its verifier public key");
+      }
+      _bindVerifier(pk.content, leafDer);
+      var data = spec.data;
+      if (!data || typeof data !== "object" || !data.hash || typeof data.hash !== "object") {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor hashedrekord entry has no data hash");
+      }
+      var alg = typeof data.hash.algorithm === "string" ? _HASH_BY_REKOR[data.hash.algorithm] : null;
+      if (!alg) {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor entry names a hash algorithm outside the schema's own three: " + (data.hash.algorithm === void 0 ? "(none)" : guard.text.showValue(data.hash.algorithm)));
+      }
+      if (typeof data.hash.value !== "string" || data.hash.value.length !== alg.bytes * 2 || !_isLowerHex(data.hash.value)) {
+        throw _err("sigstore/bad-tlog-entry", "the Rekor entry's artifact hash is not a lowercase hex digest of its own algorithm");
+      }
+      return { algorithm: data.hash.algorithm, node: alg.node, value: data.hash.value };
     }
     function _verifyRekor(te, envelope, rekorKeys, leafDer) {
+      return _verifyRekorEntry(te, rekorKeys, leafDer, "dsseEnvelope", function(body) {
+        _bindDsseEntry(body, envelope, leafDer);
+        return null;
+      });
+    }
+    function _verifyRekorMessage(te, ms, rekorKeys, leafDer) {
+      return _verifyRekorEntry(te, rekorKeys, leafDer, "messageSignature", function(body) {
+        return _bindHashedRekordEntry(body, ms, leafDer);
+      });
+    }
+    function _verifyRekorEntry(te, rekorKeys, leafDer, contentType, bind) {
       var ip = te.inclusionProof;
-      if (!ip || typeof ip.rootHash !== "string" || !Array.isArray(ip.hashes)) {
+      if (!ip || typeof ip.rootHash !== "string" || !_isArray(ip.hashes)) {
         throw _err("sigstore/bad-inclusion-proof", "the transparency-log entry has no inclusion proof");
       }
-      var claimedSec = Number(te.integratedTime);
-      var claimedMs = Number.isFinite(claimedSec) ? C.TIME.seconds(claimedSec) : NaN;
-      _bindEntry(te, envelope, leafDer);
+      var claimedSec = _numOf(te.integratedTime);
+      var claimedMs = _isFiniteNumber(claimedSec) ? C.TIME.seconds(claimedSec) : NaN;
+      var canonB64 = te.canonicalizedBody;
+      if (typeof canonB64 !== "string") {
+        throw _err("sigstore/bad-tlog-entry", "the transparency-log entry has no canonicalizedBody");
+      }
+      var canonBytes = _b64(canonB64, "canonicalizedBody");
+      var body = _entryBody(canonBytes);
+      _entryRow(body, contentType);
+      var artifactHash = bind(body);
       var included;
       try {
         included = merkle.verifyInclusion({
-          leafIndex: BigInt(ip.logIndex),
-          treeSize: BigInt(ip.treeSize),
-          leafHash: merkle.leafHash(_b64(te.canonicalizedBody, "canonicalizedBody")),
-          proof: ip.hashes.map(function(h, i) {
+          leafIndex: _bigIntOf(ip.logIndex),
+          treeSize: _bigIntOf(ip.treeSize),
+          leafHash: merkle.leafHash(canonBytes),
+          proof: _map(ip.hashes, function(h, i) {
             return _b64(h, "inclusionProof.hashes[" + i + "]");
           }),
           rootHash: _b64(ip.rootHash, "inclusionProof.rootHash")
@@ -40200,26 +42240,31 @@ var require_sigstore = __commonJS({
       if (!included) throw _err("sigstore/inclusion-proof-mismatch", "the inclusion proof does not reconstruct the tree root");
       var checkpointOk = ip.checkpoint && typeof ip.checkpoint.envelope === "string" && _verifyCheckpoint(ip.checkpoint.envelope, ip, rekorKeys, claimedMs);
       if (!checkpointOk) throw _err("sigstore/unsigned-root", "the Rekor checkpoint (the signed tree root) did not verify under the caller Rekor key -- the inclusion-proof root is not attested");
-      var setOk = _verifySet(te, rekorKeys, claimedMs);
+      var setOk = _verifySet(te, rekorKeys, claimedMs, canonB64);
       if (!setOk) throw _err("sigstore/unattested-time", "the Rekor SET (the signed source of integratedTime) did not verify -- the log time is not attested and cannot date the Fulcio certificate");
-      var t = Number(te.integratedTime);
-      if (!Number.isFinite(t) || t < 0) throw _err("sigstore/bad-tlog-entry", "the transparency-log entry has a malformed integratedTime");
-      var li = Number(te.logIndex);
-      return { integratedTime: t, logIndex: Number.isFinite(li) ? li : null, logId: te.logId && te.logId.keyId ? _b64(te.logId.keyId, "logId.keyId").toString("hex") : null };
+      var t = _numOf(te.integratedTime);
+      if (!_isFiniteNumber(t) || t < 0) throw _err("sigstore/bad-tlog-entry", "the transparency-log entry has a malformed integratedTime");
+      var li = _numOf(te.logIndex);
+      return {
+        integratedTime: t,
+        logIndex: _isFiniteNumber(li) ? li : null,
+        logId: te.logId && te.logId.keyId ? _bufToString(_b64(te.logId.keyId, "logId.keyId"), "hex") : null,
+        artifactHash
+      };
     }
     function _dn(cert, which) {
       return cert[which] && cert[which].dn;
     }
     function _normRoots(fulcioRoots) {
-      return fulcioRoots.map(function(r, i) {
-        var der = Buffer.isBuffer(r) ? r : r && (r.der || r.rawBytes);
-        if (!Buffer.isBuffer(der)) throw _err("sigstore/bad-input", "fulcioRoots[" + i + "] must be a DER Buffer or { der, validFor }");
+      return _map(fulcioRoots, function(r, i) {
+        var der = _isBuffer(r) ? r : r && (r.der || r.rawBytes);
+        if (!_isBuffer(der)) throw _err("sigstore/bad-input", "fulcioRoots[" + i + "] must be a DER Buffer or { der, validFor }");
         return { cert: _parseCert(der, "Fulcio CA root [" + i + "]"), validFor: r && r.validFor || null };
       });
     }
     function _pathToAnchor(leaf, anchor, intBySubject) {
       var anchorSubj = _dn(anchor, "subject");
-      var above = [], cur = leaf, seen = /* @__PURE__ */ Object.create(null), guardN = 0;
+      var above = [], cur = leaf, seen = _create(null), guardN = 0;
       function assemble() {
         var path = [];
         for (var k = above.length - 1; k >= 0; k--) guard.list.append(path, above[k]);
@@ -40245,12 +42290,12 @@ var require_sigstore = __commonJS({
     }
     var OID_SCT_LIST = oid.byName("signedCertificateTimestampList");
     function _normCtLogs(ctLogs) {
-      if (!Array.isArray(ctLogs)) throw _err("sigstore/bad-input", "ctLogs must be an array of { keyId, spki, validFor? }");
+      if (!_isArray(ctLogs)) throw _err("sigstore/bad-input", "ctLogs must be an array of { keyId, spki, validFor? }");
       if (ctLogs.length === 0) throw _err("sigstore/bad-input", "ctLogs is empty; omit the option to skip the certificate-transparency check rather than supplying no logs");
-      return ctLogs.map(function(l, i) {
+      return _map(ctLogs, function(l, i) {
         if (l === null || typeof l !== "object") throw _err("sigstore/bad-input", "ctLogs[" + i + "] must be { keyId, spki, validFor? }");
-        if (!Buffer.isBuffer(l.keyId)) throw _err("sigstore/bad-input", "ctLogs[" + i + "].keyId must be the log id as a Buffer");
-        if (!Buffer.isBuffer(l.spki)) throw _err("sigstore/bad-input", "ctLogs[" + i + "].spki must be the log's SubjectPublicKeyInfo DER");
+        if (!_isBuffer(l.keyId)) throw _err("sigstore/bad-input", "ctLogs[" + i + "].keyId must be the log id as a Buffer");
+        if (!_isBuffer(l.spki)) throw _err("sigstore/bad-input", "ctLogs[" + i + "].spki must be the log's SubjectPublicKeyInfo DER");
         return { keyId: l.keyId, spki: l.spki, validFor: l.validFor || null };
       });
     }
@@ -40296,29 +42341,29 @@ var require_sigstore = __commonJS({
       });
     }
     function _sctMs(sct) {
-      return Number(sct.timestamp || 0);
+      return _numberOf(sct.timestamp || 0);
     }
     function _ctLogFor(logs, logIdBytes, timeMs) {
-      var want = Buffer.isBuffer(logIdBytes) ? logIdBytes : Buffer.from(logIdBytes || []);
+      var want = _isBuffer(logIdBytes) ? logIdBytes : _bufferFrom(logIdBytes || []);
       for (var i = 0; i < logs.length; i++) {
-        if (logs[i].keyId.equals(want) && _inWindow(timeMs, logs[i].validFor)) return logs[i];
+        if (_bufferEquals(logs[i].keyId, want) && _inWindow(timeMs, logs[i].validFor)) return logs[i];
       }
       return null;
     }
     async function _verifyChain(leaf, chainDers, fulcioRoots, timeMs) {
       var roots = _normRoots(fulcioRoots);
-      var bundleLinks = chainDers.slice(1).map(function(d, i2) {
+      var bundleLinks = _map(_arraySlice(chainDers, 1), function(d, i2) {
         return _parseCert(d, "bundle intermediate [" + i2 + "]");
       });
-      var intBySubject = /* @__PURE__ */ Object.create(null);
+      var intBySubject = _create(null);
       function addInt(c) {
         guard.list.append(intBySubject[_dn(c, "subject")] = intBySubject[_dn(c, "subject")] || [], c);
       }
-      roots.forEach(function(r) {
+      _forEach(roots, function(r) {
         addInt(r.cert);
       });
-      bundleLinks.forEach(addInt);
-      var candidates = roots.filter(function(r) {
+      _forEach(bundleLinks, addInt);
+      var candidates = _filter(roots, function(r) {
         return _inWindow(timeMs, r.validFor);
       });
       var lastErr = _err("sigstore/chain-incomplete", "no caller-supplied Fulcio anchor (within its validity window) issues the chain");
@@ -40329,7 +42374,7 @@ var require_sigstore = __commonJS({
         var spki = anchor.subjectPublicKeyInfo;
         try {
           var res = await pathValidate.validate(path, {
-            time: new Date(timeMs),
+            time: new _Date(timeMs),
             historicalMode: true,
             trustAnchors: { name: anchor.subject, publicKey: spki.bytes, algorithm: spki.algorithm.oid, parameters: spki.algorithm.parameters },
             requiredEku: ["codeSigning"]
@@ -40343,17 +42388,17 @@ var require_sigstore = __commonJS({
       throw lastErr;
     }
     var SAN_OID = oid.byName("subjectAltName");
-    var FULCIO_PREFIX = oid.byName("otherName").split(".").slice(0, -1).join(".") + ".";
+    var FULCIO_PREFIX = _join(_arraySlice(_split(oid.byName("otherName"), "."), 0, -1), ".") + ".";
     function _identity(leaf) {
-      var out = { san: null, extensions: /* @__PURE__ */ Object.create(null) };
+      var out = { san: null, extensions: _create(null) };
       try {
-        (leaf.extensions || []).forEach(function(ext) {
+        _forEach(leaf.extensions || [], function(ext) {
           if (ext.oid === SAN_OID) {
             out.san = _sanValue(ext);
             return;
           }
-          if (ext.oid.indexOf(FULCIO_PREFIX) === 0) {
-            out.extensions[ext.name || ext.oid] = _fulcioExtValue(ext, Number(ext.oid.slice(FULCIO_PREFIX.length)));
+          if (_strIndexOf(ext.oid, FULCIO_PREFIX) === 0) {
+            out.extensions[ext.name || ext.oid] = _fulcioExtValue(ext, _numberOf(_strSlice(ext.oid, FULCIO_PREFIX.length)));
           }
         });
       } catch (e) {
@@ -40362,7 +42407,7 @@ var require_sigstore = __commonJS({
       }
       return out;
     }
-    var GN_TYPE = Object.assign(/* @__PURE__ */ Object.create(null), { 1: "rfc822Name", 2: "dNSName", 6: "uri" });
+    var GN_TYPE = _assign(_create(null), { 1: "rfc822Name", 2: "dNSName", 6: "uri" });
     function _sanValue(ext) {
       var seq = asn1.decode(ext.value);
       var names = [];
@@ -40371,7 +42416,7 @@ var require_sigstore = __commonJS({
         if (n.tagClass !== "context") continue;
         var val = null;
         if (!n.constructed && GN_TYPE[n.tagNumber]) {
-          val = { type: GN_TYPE[n.tagNumber], value: asn1.read.octetStringImplicit(n, n.tagNumber).toString("utf8") };
+          val = { type: GN_TYPE[n.tagNumber], value: _bufToString(asn1.read.octetStringImplicit(n, n.tagNumber), "utf8") };
         } else if (n.constructed && n.tagNumber === 0 && (n.children || []).length >= 2) {
           var inner = (n.children[1].children || [])[0] || n.children[1];
           var v;
@@ -40388,34 +42433,40 @@ var require_sigstore = __commonJS({
       return names[0] || null;
     }
     function _fulcioExtValue(ext, leafArc) {
-      if (!Buffer.isBuffer(ext.value)) throw _err("sigstore/bad-certificate", "Fulcio extension " + ext.oid + " has no value");
-      if (leafArc >= 1 && leafArc <= 6) return ext.value.toString("utf8");
+      if (!_isBuffer(ext.value)) throw _err("sigstore/bad-certificate", "Fulcio extension " + ext.oid + " has no value");
+      if (leafArc >= 1 && leafArc <= 6) return _bufToString(ext.value, "utf8");
       return asn1.read.string(asn1.decode(ext.value));
     }
     var IDENTITY_FIELDS = ["san", "issuer", "sourceRepositoryURI"];
-    var IDENTITY_KEYS = Object.assign(/* @__PURE__ */ Object.create(null), { san: 1, issuer: 1, sourceRepositoryURI: 1 });
-    var _VERIFY_BUNDLE_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { fulcioRoots: 1, rekorKeys: 1, ctLogs: 1, identity: 1, predicateType: 1, time: 1 });
+    var IDENTITY_KEYS = _assign(_create(null), { san: 1, issuer: 1, sourceRepositoryURI: 1 });
+    var _VERIFY_BUNDLE_OPTS = _assign(_create(null), { fulcioRoots: 1, rekorKeys: 1, ctLogs: 1, identity: 1, predicateType: 1, time: 1, artifact: 1 });
+    function _artifactBytes(v) {
+      if (!guard.bytes.isByteSource(v)) {
+        throw _err("sigstore/bad-input", "opts.artifact must be the artifact's bytes (a Buffer, TypedArray, DataView or ArrayBuffer); a digest is not accepted in its place, since the signature covers the artifact itself");
+      }
+      return guard.bytes.snapshotSource(v, SigstoreError, "sigstore/bad-input", "opts.artifact");
+    }
     function _checkIdentity(id, policy) {
       var ran = { san: false, issuer: false, sourceRepositoryURI: false };
       if (policy === void 0 || policy === null) return ran;
-      if (typeof policy !== "object" || Array.isArray(policy)) {
-        throw _err("sigstore/bad-input", "opts.identity must be an object naming the identity fields to pin (" + IDENTITY_FIELDS.join(", ") + ")");
+      if (typeof policy !== "object" || _isArray(policy)) {
+        throw _err("sigstore/bad-input", "opts.identity must be an object naming the identity fields to pin (" + _join(IDENTITY_FIELDS, ", ") + ")");
       }
       guard.identifier.assertKnownKeys(policy, IDENTITY_KEYS, _err, "sigstore/bad-input", "opts.identity has an unknown key ");
-      var asked = IDENTITY_FIELDS.filter(function(f) {
+      var asked = _filter(IDENTITY_FIELDS, function(f) {
         return policy[f] !== void 0;
       });
       if (!asked.length) {
-        throw _err("sigstore/bad-input", "opts.identity constrains nothing -- name at least one of " + IDENTITY_FIELDS.join(", ") + ", or omit it to state that the signer is not being checked");
+        throw _err("sigstore/bad-input", "opts.identity constrains nothing -- name at least one of " + _join(IDENTITY_FIELDS, ", ") + ", or omit it to state that the signer is not being checked");
       }
-      asked.forEach(function(f) {
+      _forEach(asked, function(f) {
         if (typeof policy[f] !== "string" || policy[f] === "") {
           throw _err("sigstore/bad-input", "opts.identity." + f + " must be a non-empty string -- a value that cannot be compared would leave the signer unchecked under a policy that names it");
         }
         ran[f] = true;
       });
       var sanValue = id.san && id.san.value;
-      if (policy.san && sanValue !== policy.san) throw _err("sigstore/identity-mismatch", "the certificate SAN " + JSON.stringify(sanValue) + " does not match the expected identity");
+      if (policy.san && sanValue !== policy.san) throw _err("sigstore/identity-mismatch", "the certificate SAN " + _jsonStringify(sanValue) + " does not match the expected identity");
       if (policy.issuer && policy.issuer !== id.extensions.issuer && policy.issuer !== id.extensions.issuerLegacy) throw _err("sigstore/identity-mismatch", "the certificate OIDC issuer does not match the expected issuer");
       if (policy.sourceRepositoryURI && id.extensions.sourceRepositoryURI !== policy.sourceRepositoryURI) throw _err("sigstore/identity-mismatch", "the certificate source-repository URI does not match");
       return ran;
@@ -40426,40 +42477,83 @@ var require_sigstore = __commonJS({
       }
       var st = _jsonParse(payload, "sigstore/bad-statement", "in-toto statement");
       if (!st || typeof st !== "object" || st._type !== "https://in-toto.io/Statement/v1") throw _err("sigstore/bad-statement", "the payload is not an in-toto Statement v1");
-      if (!Array.isArray(st.subject) || !st.subject.length) throw _err("sigstore/bad-statement", "the in-toto statement has no subject");
+      if (!_isArray(st.subject) || !st.subject.length) throw _err("sigstore/bad-statement", "the in-toto statement has no subject");
       if (expectedPredicate && st.predicateType !== expectedPredicate) {
-        throw _err("sigstore/predicate-mismatch", "the statement predicateType " + JSON.stringify(st.predicateType) + " does not match the expected " + JSON.stringify(expectedPredicate));
+        throw _err("sigstore/predicate-mismatch", "the statement predicateType " + _jsonStringify(st.predicateType) + " does not match the expected " + _jsonStringify(expectedPredicate));
       }
       return st;
     }
     async function verifyBundle(bundle, opts) {
-      if (bundle === null || typeof bundle !== "object" && typeof bundle !== "string" && !Buffer.isBuffer(bundle)) {
+      if (bundle === null || typeof bundle !== "object" && typeof bundle !== "string" && !_isBuffer(bundle)) {
         throw new TypeError("verifyBundle: bundle must be an object, JSON string, or Buffer");
       }
       opts = opts || {};
       guard.identifier.assertKnownKeys(opts, _VERIFY_BUNDLE_OPTS, _err, "sigstore/bad-input", "pki.sigstore.verifyBundle has an unknown option ");
       var b = parseBundle(bundle);
       var vm = b.verificationMaterial;
+      var contentType = _contentTypeOf(b);
+      var isMsg = contentType === "messageSignature";
       var env = b.dsseEnvelope;
-      var rekorKeys = opts.rekorKeys || [];
-      var fulcioRoots = opts.fulcioRoots || [];
+      var o = guard.identifier.snapshotOptions(opts, _VERIFY_BUNDLE_OPTS);
+      var rekorKeys = o.rekorKeys || [];
+      var fulcioRoots = o.fulcioRoots || [];
+      if (!isMsg && o.artifact != null) {
+        throw _err("sigstore/bad-input", "opts.artifact is only read for a message_signature bundle; this bundle carries a dsse_envelope, whose artifact binding is the statement's own subject digest");
+      }
+      if (isMsg && o.predicateType != null) {
+        throw _err("sigstore/bad-input", "opts.predicateType is only read for a dsse_envelope bundle; a message_signature carries no statement to pin a predicate type on");
+      }
+      var artifact = null;
+      if (isMsg) {
+        if (o.artifact == null) {
+          throw _err("sigstore/artifact-required", "verifying a message_signature bundle requires opts.artifact, the bytes the signature covers; the bundle's own messageDigest is unauthenticated and is not a substitute");
+        }
+        artifact = _artifactBytes(o.artifact);
+      }
       var leafDer = _leafCertDer(vm);
       var leaf = _parseCert(leafDer, "Fulcio leaf certificate");
-      var payload = _b64(env.payload, "dsseEnvelope.payload");
-      var preimage = pae(env.payloadType, payload);
-      var derSig = _b64(env.signatures[0].sig, "dsseEnvelope.signatures[0].sig");
       var leafKey = _pubFromSpki(leaf.subjectPublicKeyInfo.bytes, "Fulcio leaf");
-      if (!_rawVerify(leafKey, preimage, derSig)) throw _err("sigstore/dsse-verify-failed", "the DSSE signature does not verify under the Fulcio leaf key");
-      var tlogs = Array.isArray(vm.tlogEntries) ? vm.tlogEntries : [];
+      var msParsed = isMsg ? _parseMessageSignature(b.messageSignature) : null;
+      var payload = null, derSig;
+      if (isMsg) {
+        derSig = _b64(msParsed.signature, "messageSignature.signature");
+      } else {
+        payload = _b64(env.payload, "dsseEnvelope.payload");
+        derSig = _b64(env.signatures[0].sig, "dsseEnvelope.signatures[0].sig");
+        if (!_rawVerify(leafKey, pae(env.payloadType, payload), derSig)) throw _err("sigstore/dsse-verify-failed", "the DSSE signature does not verify under the Fulcio leaf key");
+      }
+      var tlogs = _isArray(vm.tlogEntries) ? vm.tlogEntries : [];
       if (!tlogs.length) throw _err("sigstore/bad-bundle", "a keyless bundle requires at least one transparency-log entry");
-      var rekor = null, lastErr = null;
+      if (tlogs.length > C.LIMITS.TLOG_MAX_COUNT) {
+        throw _err("sigstore/bad-bundle", "a bundle offers at most " + C.LIMITS.TLOG_MAX_COUNT + " transparency-log entries; this one offers " + tlogs.length);
+      }
+      var haveCallerTime = guard.time.isDate(o.time);
+      var callerTime = haveCallerTime ? guard.time.instantOf(o.time) : null;
+      var chainDers = _chainDers(vm);
+      var pinnedChain = null;
+      var rekor = null, lastErr = null, artifactComputed = null, sctResult = null;
       for (var ti = 0; ti < tlogs.length; ti++) {
         if (!tlogs[ti] || typeof tlogs[ti] !== "object") {
           lastErr = _err("sigstore/bad-bundle", "a transparency-log entry is not an object");
           continue;
         }
         try {
-          rekor = _verifyRekor(tlogs[ti], env, rekorKeys, leafDer);
+          var candidate = isMsg ? _verifyRekorMessage(tlogs[ti], msParsed, rekorKeys, leafDer) : _verifyRekor(tlogs[ti], env, rekorKeys, leafDer);
+          var candidateDigest = null;
+          if (isMsg) {
+            candidateDigest = nodeCrypto.createHash(candidate.artifactHash.node).update(artifact).digest();
+            if (!guard.crypto.constantTimeEqual(candidateDigest, _bufferFrom(candidate.artifactHash.value, "hex"))) {
+              throw _err("sigstore/artifact-mismatch", "the artifact does not match the one the transparency-log entry records; its " + candidate.artifactHash.algorithm + " digest is " + _bufToString(candidateDigest, "hex") + " and the entry names " + candidate.artifactHash.value);
+            }
+          }
+          var candidateTime = haveCallerTime ? callerTime : C.TIME.seconds(candidate.integratedTime);
+          var candidateChain = pinnedChain !== null ? pinnedChain : await _verifyChain(leaf, chainDers, fulcioRoots, candidateTime);
+          if (haveCallerTime) pinnedChain = candidateChain;
+          var candidateBound = haveCallerTime ? candidateTime : C.TIME.seconds(candidate.integratedTime) + 999;
+          var candidateScts = await _verifyEmbeddedScts(leaf, leafDer, candidateChain.issuer, o.ctLogs, candidateTime, candidateBound);
+          rekor = candidate;
+          artifactComputed = candidateDigest;
+          sctResult = candidateScts;
           break;
         } catch (e) {
           lastErr = e;
@@ -40467,24 +42561,40 @@ var require_sigstore = __commonJS({
       }
       if (rekor === null) throw lastErr;
       var integratedTime = rekor.integratedTime;
-      var checkTime = guard.time.isDate(opts.time) ? guard.time.instantOf(opts.time) : C.TIME.seconds(integratedTime);
-      var chain = await _verifyChain(leaf, _chainDers(vm), fulcioRoots, checkTime);
-      var sctBound = guard.time.isDate(opts.time) ? checkTime : C.TIME.seconds(integratedTime) + 999;
-      var sctResult = await _verifyEmbeddedScts(leaf, leafDer, chain.issuer, opts.ctLogs, checkTime, sctBound);
+      var artifactDigest = null, digestAlgorithm = null, messageDigestChecked = false;
+      if (isMsg) {
+        digestAlgorithm = rekor.artifactHash.algorithm;
+        var computed = artifactComputed;
+        artifactDigest = _bufToString(computed, "hex");
+        if (msParsed.digest !== null) {
+          var againstClaim = msParsed.digestAlg.node === rekor.artifactHash.node ? computed : nodeCrypto.createHash(msParsed.digestAlg.node).update(artifact).digest();
+          if (!guard.crypto.constantTimeEqual(againstClaim, msParsed.digest)) {
+            throw _err("sigstore/artifact-mismatch", "the artifact does not match the messageDigest the bundle carries");
+          }
+          messageDigestChecked = true;
+        }
+        if (!_rawVerify(leafKey, artifact, derSig)) {
+          throw _err("sigstore/signature-verify-failed", "the message signature does not verify over the artifact under the Fulcio leaf key");
+        }
+      }
       var identity = _identity(leaf);
-      var identityChecked = _checkIdentity(identity, opts.identity);
-      var st = _statement(payload, env.payloadType, opts.predicateType);
+      var identityChecked = _checkIdentity(identity, o.identity);
+      var st = isMsg ? null : _statement(payload, env.payloadType, o.predicateType);
       return guard.verdict.of({
         valid: true,
         verified: true,
+        contentType,
         payload,
         statement: st,
-        subjects: st.subject,
-        predicateType: st.predicateType,
-        predicate: st.predicate,
+        subjects: st === null ? null : st.subject,
+        predicateType: st === null ? null : st.predicateType,
+        predicate: st === null ? null : st.predicate,
+        artifactDigest,
+        digestAlgorithm,
+        messageDigestChecked,
         identity,
         identityChecked,
-        predicateTypeChecked: opts.predicateType != null,
+        predicateTypeChecked: o.predicateType != null,
         sctChecked: sctResult.checked,
         validScts: sctResult.validScts,
         integratedTime,
@@ -43401,6 +45511,7 @@ var require_jose = __commonJS({
     async function verify(jws, opts) {
       opts = opts || {};
       guard.identifier.assertKnownKeys(opts, _VERIFY_KEYS, E, "jose/bad-input", "unknown pki.jose.verify option ");
+      opts = guard.identifier.snapshotOptions(opts, _VERIFY_KEYS);
       if (!jws || typeof jws !== "object" || _isArray(jws)) throw E("jose/bad-jws", "a flattened JWS object is required");
       if (_hasOwn(jws, "signatures")) throw E("jose/bad-jws", "the multi-signature signatures member is forbidden");
       if (_hasOwn(jws, "header")) throw E("jose/bad-jws", "the unprotected header member is forbidden");
@@ -46980,7 +49091,12 @@ var require_inspect = __commonJS({
       cRLDistributionPoints: _renderCrlDp,
       freshestCRL: _renderCrlDp,
       authorityInfoAccess: function(decoded, inner) {
-        var LABEL = Object.assign(/* @__PURE__ */ Object.create(null), { caIssuers: "CA Issuers", ocsp: "OCSP" });
+        var LABEL = Object.assign(/* @__PURE__ */ Object.create(null), {
+          caIssuers: "CA Issuers",
+          ocsp: "OCSP",
+          "id-ad-caRepository": "CA Repository",
+          "id-ad-timeStamping": "Time Stamping"
+        });
         return (decoded || []).map(function(ad) {
           var m = null;
           try {
@@ -47037,6 +49153,24 @@ var require_inspect = __commonJS({
       },
       precertificatePoison: function(decoded, inner) {
         return inner + "Precertificate Poison (this is a precertificate, not a certificate)";
+      },
+      /** @internal RFC 5280 sec. 4.2.2.2 gives subjectInfoAccess sec. 4.2.2.1's AccessDescription
+       *  syntax, so it renders through the same rows; only the access methods it names differ. */
+      subjectInfoAccess: function(decoded, inner) {
+        return EXT_RENDERERS.authorityInfoAccess(decoded, inner);
+      },
+      /** @internal Each Attribute value is raw DER, so it renders through the same best-effort value
+       *  fallback every other opaque value uses rather than a second reading of the same bytes. */
+      subjectDirectoryAttributes: function(decoded, inner) {
+        return (decoded || []).map(function(a) {
+          var lines = (a.values || []).map(function(v) {
+            return _fallback(v, inner + "    ");
+          });
+          return inner + (a.name || a.type) + ":" + (lines.length ? "\n" + lines.join("\n") : "");
+        }).join("\n");
+      },
+      ocspNoCheck: function(decoded, inner) {
+        return inner + "OCSP No Check (this is an OCSP responder certificate; do not check its revocation)";
       },
       subjectKeyIdentifier: function(decoded, inner) {
         return inner + _hexColon(Buffer.isBuffer(decoded) ? decoded : decoded.bytes || Buffer.alloc(0), { upper: true });
@@ -47460,7 +49594,10 @@ var require_lint = __commonJS({
     var guard = require_guard_all();
     var oid = require_oid();
     var x509 = require_schema_x509();
+    var crlSchema = require_schema_crl();
+    var ocspSchema = require_schema_ocsp();
     var pkix = require_schema_pkix();
+    var schema = require_schema_engine();
     var path = require_path_validate();
     var C = require_constants();
     var ipUtils = require_ip_utils();
@@ -47589,12 +49726,14 @@ var require_lint = __commonJS({
       });
       return { findings, counts, ran };
     }
+    function _magnitudeOctets(buf) {
+      if (buf.length > 1 && buf[0] === 0 && buf[1] & 128) return buf.length - 1;
+      return buf.length;
+    }
     function _serialOctets(cert) {
       var hex = cert.serialNumberHex || "";
       if (hex.length % 2) hex = "0" + hex;
-      var buf = Buffer.from(hex, "hex");
-      if (buf.length > 1 && buf[0] === 0 && buf[1] & 128) buf = buf.subarray(1);
-      return buf.length;
+      return _magnitudeOctets(Buffer.from(hex, "hex"));
     }
     function _dnsNameProblem(s) {
       return pkix.dnsNameProblem(s);
@@ -47620,9 +49759,11 @@ var require_lint = __commonJS({
       });
       return out;
     }
+    var CERT_FIXED_CRITICALITY = pkix.certFixedCriticality(oid);
     var _CRITICAL_LEGIT = /* @__PURE__ */ Object.create(null);
     _CRITICAL_LEGIT[oid.byName("precertificatePoison")] = true;
     function _isUnknownExtension(extOid) {
+      if (CERT_FIXED_CRITICALITY[extOid] !== void 0) return false;
       if (path.PROCESSED_EXTENSIONS[extOid] !== true) return _CRITICAL_LEGIT[extOid] !== true;
       return path.TARGET_UNPROCESSED_IF_CRITICAL[extOid] === true;
     }
@@ -47707,6 +49848,37 @@ var require_lint = __commonJS({
       };
     }
     var RFC5280_RULES = [
+      {
+        id: "lint/rfc5280/signature-empty",
+        severity: "error",
+        source: "rfc5280",
+        citation: "RFC 5280 4.1.1.3",
+        /** @internal The strict parser admits an empty BIT STRING, since one is well-formed DER; a
+         * signatureValue that contains no signature is not the field section 4.1.1.3 defines. */
+        message: "the signatureValue contains no signature",
+        check: function(cert) {
+          return cert.signatureValue.bytes.length === 0 ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280/extension-criticality",
+        severity: "error",
+        source: "rfc5280",
+        citation: "RFC 5280 4.2.1.1 / 4.2.1.2 / 4.2.1.8 / 4.2.1.15 / 4.2.2.1 / 4.2.2.2",
+        message: "an extension a conforming CA must mark non-critical is marked critical",
+        /** @internal Keyed by the extension's OID throughout. The display name the parser attaches can
+         * be re-pointed through the registry, so a lookup by name would answer for a different
+         * extension, or for none. */
+        check: function(cert) {
+          var rows = [];
+          (cert.extensions || []).forEach(function(e) {
+            var fixed = CERT_FIXED_CRITICALITY[e.oid];
+            if (fixed === void 0 || fixed.critical !== false || e.critical !== true) return;
+            rows.push({ context: { extension: e.name || e.oid, oid: e.oid, required: "non-critical", was: "critical", scope: "extensions", citation: fixed.citation } });
+          });
+          return rows.length ? rows : null;
+        }
+      },
       {
         id: "lint/rfc5280/serial-not-positive",
         severity: "error",
@@ -48141,15 +50313,1293 @@ var require_lint = __commonJS({
         }
       }
     ];
+    function _spkiAlgName(cert) {
+      var spki = cert.subjectPublicKeyInfo;
+      var n = spki && spki.algorithm && spki.algorithm.name;
+      return typeof n === "string" ? n : "";
+    }
+    function _isMlDsa(cert) {
+      return _spkiAlgName(cert).indexOf("id-ml-dsa-") === 0;
+    }
+    function _isSlhDsa(cert) {
+      var n = _spkiAlgName(cert);
+      return n.indexOf("id-slh-dsa-") === 0 || n.indexOf("id-hash-slh-dsa-") === 0;
+    }
+    var PQC_SIG_ESTABLISHMENT_BITS = ["keyEncipherment", "dataEncipherment", "keyAgreement", "encipherOnly", "decipherOnly"];
+    var PQC_SIG_SIGNING_BITS = ["digitalSignature", "nonRepudiation", "keyCertSign", "cRLSign"];
+    function _pqcSigKeyUsage(cert, ctx) {
+      var ku = ctx.decode("keyUsage");
+      if (!ku || !ku.value) return null;
+      var v = ku.value;
+      var establishment = PQC_SIG_ESTABLISHMENT_BITS.filter(function(bit) {
+        return v[bit] === true;
+      });
+      var signing = PQC_SIG_SIGNING_BITS.some(function(bit) {
+        return v[bit] === true;
+      });
+      if (establishment.length === 0 && signing) return null;
+      return { context: { keyEstablishmentBitsSet: establishment, signingBitSet: signing } };
+    }
+    function _pqcSigKeyUsageRule(id, source, citation, family, appliesTo) {
+      return {
+        id,
+        severity: "error",
+        source,
+        citation,
+        message: "an " + family + " certificate's keyUsage, if present, must set at least one signing bit (digitalSignature, nonRepudiation, keyCertSign, cRLSign) and no key-establishment bit (keyEncipherment, dataEncipherment, keyAgreement, encipherOnly, decipherOnly)",
+        appliesTo,
+        check: _pqcSigKeyUsage
+      };
+    }
+    var RFC9881_RULES = [
+      _pqcSigKeyUsageRule("lint/rfc9881/mldsa-key-usage", "rfc9881", "RFC 9881 5", "ML-DSA", _isMlDsa)
+    ];
+    var RFC9909_RULES = [
+      _pqcSigKeyUsageRule("lint/rfc9909/slhdsa-key-usage", "rfc9909", "RFC 9909 6", "SLH-DSA", _isSlhDsa)
+    ];
+    var CRL_KNOWN_EXTENSIONS = /* @__PURE__ */ Object.create(null);
+    [
+      "authorityKeyIdentifier",
+      "issuerAltName",
+      "cRLNumber",
+      "deltaCRLIndicator",
+      "issuingDistributionPoint",
+      "freshestCRL",
+      "authorityInfoAccess"
+    ].forEach(function(n) {
+      CRL_KNOWN_EXTENSIONS[oid.byName(n)] = true;
+    });
+    var CRL_CRITICALITY = /* @__PURE__ */ Object.create(null);
+    [
+      ["cRLNumber", false],
+      ["authorityKeyIdentifier", false],
+      ["freshestCRL", false],
+      ["authorityInfoAccess", false],
+      ["issuingDistributionPoint", true],
+      ["deltaCRLIndicator", true]
+    ].forEach(function(r) {
+      CRL_CRITICALITY[oid.byName(r[0])] = r[1];
+    });
+    var CRL_ENTRY_CRITICALITY = /* @__PURE__ */ Object.create(null);
+    (function() {
+      var shared = crlSchema.entryExtensionCriticality(oid);
+      Object.keys(shared).forEach(function(k) {
+        CRL_ENTRY_CRITICALITY[k] = shared[k].critical;
+      });
+    })();
+    function _crlExtList(crl2) {
+      return crl2.crlExtensions || [];
+    }
+    function _crlExtByName(crl2, name) {
+      var dotted = oid.byName(name), list = _crlExtList(crl2);
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].oid === dotted) return list[i];
+      }
+      return null;
+    }
+    function _akiValue(bytes) {
+      var dec = EXT_DECODERS[oid.byName("authorityKeyIdentifier")];
+      if (!dec) return null;
+      try {
+        return dec(bytes) || null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function _generalNamesOf(bytes) {
+      try {
+        var m = schema.walk(pkix.generalNames(NS, { decodeValue: true, code: _LINT_VALUE_CODE }), asn1.decode(bytes), NS);
+        return m.result && m.result.names || null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    var REASON_TO_FLAG_BIT = /* @__PURE__ */ Object.create(null);
+    [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6], [9, 7], [10, 8]].forEach(function(p) {
+      REASON_TO_FLAG_BIT[p[0]] = p[1];
+    });
+    function _reasonBitSet(bs, bit) {
+      if (!bs || !bs.bytes) return false;
+      var byteI = bit >> 3;
+      if (byteI >= bs.bytes.length) return false;
+      return (bs.bytes[byteI] & 128 >> (bit & 7)) !== 0;
+    }
+    function _scopeNamesAnyReason(bs) {
+      for (var bit = 1; bit <= 8; bit++) {
+        if (_reasonBitSet(bs, bit)) return true;
+      }
+      return false;
+    }
+    function _crlReasonScope(crl2) {
+      var e = _crlExtByName(crl2, "issuingDistributionPoint");
+      if (!e || !Buffer.isBuffer(e.value)) return null;
+      var idp = pkix.decodeIssuingDistributionPointValue(NS, e.value, _LINT_VALUE_CODE);
+      if (idp.malformed || !idp.onlySomeReasonsPresent) return null;
+      if (!_scopeNamesAnyReason(idp.onlySomeReasonsValue)) return null;
+      return idp.onlySomeReasonsValue || null;
+    }
+    function _crlHasReasonScope(crl2) {
+      return _crlReasonScope(crl2) !== null;
+    }
+    function _crlDeclaresDirect(crl2) {
+      var e = _crlExtByName(crl2, "issuingDistributionPoint");
+      if (!e) return true;
+      if (!Buffer.isBuffer(e.value)) return false;
+      var idp = pkix.decodeIssuingDistributionPointValue(NS, e.value, _LINT_VALUE_CODE);
+      if (idp.malformed) return false;
+      return idp.indirect !== true;
+    }
+    var CA_ISSUERS_OID = oid.byName("caIssuers");
+    function _crlDecodedExtension(crl2, name) {
+      var e = _crlExtByName(crl2, name);
+      if (!e || !Buffer.isBuffer(e.value)) return null;
+      var dec = EXT_DECODERS[oid.byName(name)];
+      if (!dec) return null;
+      try {
+        return dec(e.value);
+      } catch (_e) {
+        return null;
+      }
+    }
+    var AIA_RECOMMENDED_SCHEMES = ["http", "https", "ldap", "ldaps"];
+    function _integerOctets(v) {
+      if (typeof v !== "bigint") return null;
+      try {
+        return _magnitudeOctets(asn1.decode(asn1.build.integer(v)).content);
+      } catch (_e) {
+        return null;
+      }
+    }
+    var CRL_NUMBER_CARRIERS = [
+      { name: "cRLNumber", read: function(e) {
+        return e.value;
+      } },
+      { name: "deltaCRLIndicator", read: function(e) {
+        return _crlIntegerValue(e.value);
+      } }
+    ];
+    function _crlIntegerValue(bytes) {
+      if (!Buffer.isBuffer(bytes)) return null;
+      try {
+        var n = asn1.decode(bytes);
+        if (n.tagClass !== "universal" || n.tagNumber !== asn1.TAGS.INTEGER) return null;
+        return asn1.read.integer(n);
+      } catch (_e) {
+        return null;
+      }
+    }
+    var _LINT_VALUE_CODE = "lint/bad-extension-value";
+    var CRL_VALUE_READER = /* @__PURE__ */ Object.create(null);
+    CRL_VALUE_READER[oid.byName("deltaCRLIndicator")] = function(bytes) {
+      var n = asn1.decode(bytes);
+      if (n.tagClass !== "universal" || n.tagNumber !== asn1.TAGS.INTEGER) throw _cfg(_LINT_VALUE_CODE, "not an INTEGER");
+      if (asn1.read.integer(n) < 0n) throw _cfg(_LINT_VALUE_CODE, "a negative BaseCRLNumber");
+    };
+    CRL_VALUE_READER[oid.byName("issuingDistributionPoint")] = function(bytes) {
+      if (pkix.decodeIssuingDistributionPointValue(NS, bytes, _LINT_VALUE_CODE).malformed) {
+        throw _cfg(_LINT_VALUE_CODE, "malformed IssuingDistributionPoint");
+      }
+    };
+    var CRL_ENTRY_VALUE_READER = /* @__PURE__ */ Object.create(null);
+    CRL_ENTRY_VALUE_READER[oid.byName("certificateIssuer")] = function(bytes) {
+      schema.walk(pkix.generalNames(NS, { code: _LINT_VALUE_CODE }), asn1.decode(bytes), NS);
+    };
+    function _valueSyntaxFault(e, knownTable, readerTable) {
+      if (knownTable[e.oid] === void 0) return null;
+      var dec = EXT_DECODERS[e.oid];
+      if (dec && Buffer.isBuffer(e.value)) {
+        try {
+          dec(e.value);
+          return null;
+        } catch (_e) {
+          return "does not decode as the structure its extension identifier names";
+        }
+      }
+      var read = readerTable[e.oid];
+      if (read === void 0 || !Buffer.isBuffer(e.value)) return null;
+      try {
+        read(e.value);
+        return null;
+      } catch (_e) {
+        return "does not decode as the structure its extension identifier names";
+      }
+    }
+    function _criticalityRows(list, table, what) {
+      var out = [];
+      (list || []).forEach(function(e) {
+        var want = table[e.oid];
+        if (want === void 0) return;
+        if (e.critical === true !== want) {
+          out.push({ context: { extension: e.name || e.oid, required: want ? "critical" : "non-critical", was: e.critical === true ? "critical" : "non-critical", scope: what } });
+        }
+      });
+      return out;
+    }
+    var RFC5280_CRL_RULES = [
+      {
+        id: "lint/rfc5280-crl/signature-empty",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.1.1.3",
+        message: "the signatureValue contains no signature",
+        check: function(crl2) {
+          return crl2.signatureValue.bytes.length === 0 ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/next-update-missing",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.1.2.5",
+        message: "a conforming CRL issuer includes the nextUpdate field in every CRL",
+        check: function(crl2) {
+          return crl2.nextUpdate == null ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/update-times-inverted",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.1.2.4 / 5.1.2.5",
+        message: "a CRL's thisUpdate must not follow its nextUpdate",
+        check: function(crl2) {
+          if (!guard.time.isDate(crl2.thisUpdate) || !guard.time.isDate(crl2.nextUpdate)) return null;
+          return guard.time.instantOf(crl2.thisUpdate) > guard.time.instantOf(crl2.nextUpdate) ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/crl-number-missing",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.3",
+        message: "a conforming CRL issuer includes the cRLNumber extension in every CRL",
+        check: function(crl2) {
+          return _crlExtByName(crl2, "cRLNumber") ? null : true;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/crl-number-too-long",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.3 / 5.2.4",
+        /** @internal One requirement over two carriers, so one row measures both and the context names
+         * which one it measured. A value that is not an INTEGER sizes as null here and is reported by
+         * the value-syntax row instead. */
+        message: "a CRL number must not be longer than 20 octets",
+        check: function(crl2) {
+          var out = [];
+          CRL_NUMBER_CARRIERS.forEach(function(carrier) {
+            var e = _crlExtByName(crl2, carrier.name);
+            if (!e) return;
+            var octets = _integerOctets(carrier.read(e));
+            if (octets !== null && octets > 20) out.push({ context: { extension: carrier.name, octets } });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/aki-missing",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.1",
+        /** @internal Section 5.2.1 states this in the same terms section 5.2.3 states cRLNumber:
+         * conforming CRL issuers MUST include the extension in all CRLs. Two clauses of the same
+         * strength are graded the same, so a caller filtering at `error` sees both or neither. The
+         * certificate profile grades its own authorityKeyIdentifier row differently, and that is
+         * shipped surface left as it is rather than re-graded from here. */
+        message: "a conforming CRL issuer includes an authorityKeyIdentifier in every CRL",
+        check: function(crl2) {
+          return _crlExtByName(crl2, "authorityKeyIdentifier") ? null : true;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/aki-without-key-identifier",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.1",
+        message: "a CRL's authorityKeyIdentifier must be well formed and use the key identifier method",
+        /** @internal Section 5.2.1 states two requirements: include the extension, and use the key
+         * identifier method. The row above answers the first. This answers the second, and it also
+         * answers for the value being an AuthorityKeyIdentifier at all, since the CRL parser leaves
+         * this extension as opaque bytes and nothing else reads it. */
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "authorityKeyIdentifier");
+        },
+        check: function(crl2) {
+          var e = _crlExtByName(crl2, "authorityKeyIdentifier");
+          if (!Buffer.isBuffer(e.value)) return null;
+          var v = _akiValue(e.value);
+          if (v === null) return { context: { undecodable: true } };
+          return v.keyIdentifier ? null : true;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/extension-criticality",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2",
+        message: "a CRL extension is marked with a criticality the profile does not allow",
+        check: function(crl2) {
+          var rows = _criticalityRows(_crlExtList(crl2), CRL_CRITICALITY, "crlExtensions");
+          return rows.length ? rows : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/entry-extension-criticality",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.3",
+        message: "a CRL entry extension is marked with a criticality the profile does not allow",
+        check: function(crl2) {
+          var rows = [];
+          (crl2.revokedCertificates || []).forEach(function(r, i) {
+            _criticalityRows(r.crlEntryExtensions, CRL_ENTRY_CRITICALITY, "crlEntryExtensions").forEach(function(row) {
+              row.context.entry = i;
+              rows.push(row);
+            });
+          });
+          return rows.length ? rows : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/issuer-alt-name-critical",
+        severity: "warn",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.2",
+        message: "a conforming CRL issuer should mark the issuerAltName extension as non-critical",
+        check: function(crl2) {
+          var e = _crlExtByName(crl2, "issuerAltName");
+          return e && e.critical === true ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/duplicate-entry-serial",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.1.2.6",
+        /** @internal On a direct CRL a serial identifies one certificate, so listing it twice states
+         * two revocations of the same certificate and a reader cannot tell which entry governs. An
+         * INDIRECT CRL is excluded: there a serial is unique per issuer rather than per list, and the
+         * effective issuer is carried forward by certificateIssuer, which is a different computation
+         * from the one here. */
+        appliesTo: function(crl2) {
+          return _crlDeclaresDirect(crl2);
+        },
+        message: "a direct CRL lists the same certificate serial number more than once",
+        check: function(crl2) {
+          var seen = /* @__PURE__ */ Object.create(null), out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            if (typeof row.serialNumber !== "bigint") return;
+            var key = row.serialNumber.toString(16);
+            if (seen[key] !== void 0) out.push({ context: { entry: i, firstSeenAt: seen[key], serialNumber: String(row.serialNumber) } });
+            else seen[key] = i;
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/certificate-issuer-on-direct-crl",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.3.3",
+        /** @internal certificateIssuer names the issuer an entry belongs to, which only means something
+         * on a CRL that declares itself indirect through the issuingDistributionPoint indirectCRL flag.
+         * On a direct CRL the entry and the list disagree about whose certificates are covered, and no
+         * revocation status follows from it. */
+        appliesTo: function(crl2) {
+          return _crlDeclaresDirect(crl2);
+        },
+        message: "a revoked entry carries certificateIssuer on a CRL that does not declare itself indirect",
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid === oid.byName("certificateIssuer")) out.push({ context: { entry: i } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/certificate-issuer-without-dn",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.3.3",
+        message: "a certificateIssuer must carry the issuer distinguished name of the certificate its entry names",
+        /** @internal Section 5.3.3: a conforming issuer MUST include in this extension the distinguished
+         * name from the issuer field of the certificate the entry names. In a GeneralNames that is the
+         * directoryName [4] arm, so a certificateIssuer carrying only some other name form does not
+         * attribute the entry to an issuer at all. Separate from whether the value decodes. */
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid !== oid.byName("certificateIssuer") || !Buffer.isBuffer(e.value)) return;
+              var names = _generalNamesOf(e.value);
+              if (names === null) return;
+              var hasDn = false;
+              names.forEach(function(n) {
+                if (n.tagNumber === 4 && n.value && (n.value.rdns || []).length > 0) hasDn = true;
+              });
+              if (!hasDn) out.push({ context: { entry: i } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/unspecified-reason-in-reason-scoped-crl",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.5",
+        /** @internal Section 5.2.5: where the issuingDistributionPoint carries onlySomeReasons, every
+         * revoked certificate in scope MUST be assigned a reason other than unspecified, because the
+         * reason is what decides which partition the entry belongs in. That is a MUST here, where the
+         * same encoding is only a SHOULD under section 5.3.1, so it is reported as an error and the
+         * SHOULD row stands aside. An entry carrying NO reasonCode is untouched: the clause says the
+         * extension need not be present. */
+        appliesTo: function(crl2) {
+          return _crlHasReasonScope(crl2);
+        },
+        message: "a CRL scoped to some reason codes lists an entry whose reasonCode is unspecified(0)",
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid === oid.byName("reasonCode") && Number(e.value) === 0) out.push({ context: { entry: i } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/reason-outside-crl-scope",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.5",
+        /** @internal Section 5.2.5: the reason codes associated with a distribution point MUST be
+         * specified in onlySomeReasons, and the section's own partitioning example shows a CRL carrying
+         * only the reasons it declares. An entry whose reason is not among them is a revocation this
+         * CRL says it does not carry, so a reader partitioning by reason would miss it. */
+        appliesTo: function(crl2) {
+          return _crlReasonScope(crl2) !== null;
+        },
+        message: "a revoked entry states a reason the CRL's issuingDistributionPoint does not declare",
+        check: function(crl2) {
+          var scope = _crlReasonScope(crl2), out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid !== oid.byName("reasonCode")) return;
+              var bit = REASON_TO_FLAG_BIT[Number(e.value)];
+              if (bit === void 0) return;
+              if (!_reasonBitSet(scope, bit)) out.push({ context: { entry: i, reasonCode: Number(e.value) } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/reason-code-unspecified",
+        severity: "warn",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.3.1",
+        /** @internal Section 5.3.1 states this as a SHOULD, so it is a warning rather than an error:
+         * the reason code extension should be absent instead of encoding unspecified(0), which says
+         * nothing a reader can act on while costing an extension slot. Where the CRL is scoped to some
+         * reason codes the row above answers instead, at the strength section 5.2.5 states. */
+        message: "a reasonCode extension encoding unspecified(0) should be absent instead",
+        appliesTo: function(crl2) {
+          return !_crlHasReasonScope(crl2);
+        },
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid === oid.byName("reasonCode") && Number(e.value) === 0) out.push({ context: { entry: i } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/entry-serial-not-positive",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 4.1.2.2",
+        message: "a revoked entry's certificate serial number must be a positive integer",
+        /** @internal userCertificate is a CertificateSerialNumber, so it carries the sec. 4.1.2.2
+         * profile the certificate rows already apply to a certificate's own serial. */
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            if (typeof row.serialNumber === "bigint" && row.serialNumber <= 0n) {
+              out.push({ context: { entry: i, serialNumber: String(row.serialNumber) } });
+            }
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/entry-serial-too-long",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 4.1.2.2",
+        message: "a revoked entry's certificate serial number must not be longer than 20 octets",
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            var octets = _integerOctets(row.serialNumber);
+            if (octets !== null && octets > 20) out.push({ context: { entry: i, octets } });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/idp-profile",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.5",
+        message: "an issuingDistributionPoint states a scope the profile does not permit",
+        /** @internal A separate decision from whether the value DECODES, which the value-syntax row
+         * answers. These are the constraints section 5.2.5 places on a well-formed one, read from the
+         * same decoder certification-path validation uses. */
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "issuingDistributionPoint");
+        },
+        check: function(crl2) {
+          var idp = pkix.decodeIssuingDistributionPointValue(NS, _crlExtByName(crl2, "issuingDistributionPoint").value, _LINT_VALUE_CODE);
+          if (idp.malformed) return null;
+          var out = [];
+          if (!idp.hasDistributionPoint && !idp.onlyUser && !idp.onlyCa && !idp.onlySomeReasonsPresent && !idp.indirect && !idp.onlyAttr) {
+            out.push({ context: { reason: "states no scope at all" } });
+          }
+          if (idp.onlyUser && idp.onlyCa) out.push({ context: { reason: "sets both onlyContainsUserCerts and onlyContainsCACerts" } });
+          if (idp.onlyAttr) out.push({ context: { reason: "sets onlyContainsAttributeCerts" } });
+          if (idp.onlySomeReasonsPresent && !_scopeNamesAnyReason(idp.onlySomeReasonsValue)) {
+            out.push({ context: { reason: "sets onlySomeReasons to a mask naming no reason code" } });
+          }
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/freshest-crl-forbidden-field",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.6",
+        /** @internal Section 5.2.6 reuses the cRLDistributionPoints syntax but states that only the
+         * distribution point field is meaningful on a CRL, and that reasons and cRLIssuer are omitted.
+         * The shared decoder accepts both because the certificate extension permits them, so this row
+         * carries the restriction the certificate profile does not have. */
+        message: "a CRL's freshestCRL must omit the reasons and cRLIssuer fields",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "freshestCRL");
+        },
+        check: function(crl2) {
+          var dps = _crlDecodedExtension(crl2, "freshestCRL");
+          if (dps === null) return null;
+          var out = [];
+          dps.forEach(function(dp, i) {
+            if (dp.reasons) out.push({ context: { index: i, field: "reasons" } });
+            if (dp.cRLIssuer) out.push({ context: { index: i, field: "cRLIssuer" } });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/aia-without-ca-issuers",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.7",
+        /** @internal caIssuers is what this extension is for on a CRL: it names where to fetch the
+         * certificates a reader verifies the CRL's signature with. Present without one, it gives a
+         * reader nothing to fetch. */
+        message: "a CRL's authorityInfoAccess must include an AccessDescription whose method is caIssuers",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "authorityInfoAccess");
+        },
+        check: function(crl2) {
+          var descs = _crlDecodedExtension(crl2, "authorityInfoAccess");
+          if (descs === null) return null;
+          var found = descs.some(function(d) {
+            return d.accessMethod === CA_ISSUERS_OID;
+          });
+          if (found) return null;
+          return { context: { methods: descs.map(function(d) {
+            return oid.name(d.accessMethod) || d.accessMethod;
+          }) } };
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/aia-forbidden-access-method",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.7",
+        message: "a CRL's authorityInfoAccess must not carry an access method other than caIssuers",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "authorityInfoAccess");
+        },
+        check: function(crl2) {
+          var descs = _crlDecodedExtension(crl2, "authorityInfoAccess");
+          if (descs === null) return null;
+          var out = [];
+          descs.forEach(function(d, i) {
+            if (d.accessMethod === CA_ISSUERS_OID) return;
+            out.push({ context: { index: i, method: oid.name(d.accessMethod) || d.accessMethod } });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/aia-location-not-http-or-ldap",
+        severity: "warn",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.7",
+        /** @internal Section 5.2.7 states this one as a SHOULD, so it is a warning where the two rules
+         * above are errors. */
+        message: "at least one authorityInfoAccess location should be an HTTP or LDAP URI",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "authorityInfoAccess");
+        },
+        check: function(crl2) {
+          var descs = _crlDecodedExtension(crl2, "authorityInfoAccess");
+          if (descs === null || descs.length === 0) return null;
+          var reachable = descs.some(function(d) {
+            var loc = d.accessLocation;
+            if (!loc || loc.tag !== 6) return false;
+            return AIA_RECOMMENDED_SCHEMES.some(function(s) {
+              return guard.name.uriSchemeIs(loc.value, s);
+            });
+          });
+          return reachable ? null : true;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/distribution-point-name-relative",
+        severity: "warn",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.5 / 5.2.6 / 4.2.1.13",
+        /** @internal Sections 5.2.5 and 5.2.6 both give their distribution point the syntax and
+         * encoding conventions section 4.2.1.13 states, and there naming a distribution point relative
+         * to the CRL issuer is a SHOULD NOT, so this is a warning rather than an error. One requirement
+         * over two carriers, so one row reads both and the context names which it read. The MUST NOT
+         * stated beside it is conditioned on cRLIssuer carrying more than one name; an
+         * IssuingDistributionPoint has no cRLIssuer field, and section 5.2.6 requires freshestCRL to
+         * omit its own, so that sentence cannot reach a CRL either way. */
+        message: "a distribution point name should not be given relative to the CRL issuer",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "issuingDistributionPoint") || !!_crlExtByName(crl2, "freshestCRL");
+        },
+        check: function(crl2) {
+          var out = [];
+          var e = _crlExtByName(crl2, "issuingDistributionPoint");
+          if (e && Buffer.isBuffer(e.value)) {
+            var idp = pkix.decodeIssuingDistributionPointValue(NS, e.value, _LINT_VALUE_CODE);
+            if (!idp.malformed && idp.distributionPoint && idp.distributionPoint.kind === "rdn") {
+              out.push({ context: { extension: "issuingDistributionPoint", form: "nameRelativeToCRLIssuer" } });
+            }
+          }
+          var dps = _crlDecodedExtension(crl2, "freshestCRL");
+          if (dps) {
+            dps.forEach(function(dp, i) {
+              if (!dp.distributionPoint || dp.distributionPoint.kind !== "rdn") return;
+              out.push({ context: { extension: "freshestCRL", index: i, form: "nameRelativeToCRLIssuer" } });
+            });
+          }
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/delta-number-not-advancing",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.4",
+        message: "a delta CRL's cRLNumber must be greater than its baseCRLNumber",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "deltaCRLIndicator");
+        },
+        check: function(crl2) {
+          var num = _crlExtByName(crl2, "cRLNumber");
+          var base = _crlIntegerValue(_crlExtByName(crl2, "deltaCRLIndicator").value);
+          if (base === null || !num || typeof num.value !== "bigint") return null;
+          return num.value > base ? null : { context: { crlNumber: String(num.value), baseCRLNumber: String(base) } };
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/remove-from-crl-outside-delta",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.3.1",
+        message: "the removeFromCRL reason code may appear only in a delta CRL",
+        appliesTo: function(crl2) {
+          return !_crlExtByName(crl2, "deltaCRLIndicator");
+        },
+        check: function(crl2) {
+          var out = [];
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.oid === oid.byName("reasonCode") && Number(e.value) === 8) out.push({ context: { entry: i } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/freshest-in-delta",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2.6",
+        message: "the freshestCRL extension must not appear in a delta CRL",
+        appliesTo: function(crl2) {
+          return !!_crlExtByName(crl2, "deltaCRLIndicator");
+        },
+        check: function(crl2) {
+          return _crlExtByName(crl2, "freshestCRL") ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/extension-value-syntax",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2 / 5.3",
+        message: "a recognized extension's value does not read as the structure its identifier names",
+        /** @internal Recognizing an extension by its identifier says only that the profile names it.
+         * Without this, a critical extension the profile recognizes but whose value no consumer can
+         * process reports clean: the criticality row is satisfied and the unknown-critical row does not
+         * fire, because the identifier IS known. Both scopes are walked. */
+        check: function(crl2) {
+          var out = [];
+          _crlExtList(crl2).forEach(function(e) {
+            var why = _valueSyntaxFault(e, CRL_KNOWN_EXTENSIONS, CRL_VALUE_READER);
+            if (why) out.push({ context: { extension: e.name || e.oid, scope: "crlExtensions", reason: why } });
+          });
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              var why = _valueSyntaxFault(e, CRL_ENTRY_CRITICALITY, CRL_ENTRY_VALUE_READER);
+              if (why) out.push({ context: { extension: e.name || e.oid, scope: "crlEntryExtensions", entry: i, reason: why } });
+            });
+          });
+          return out.length ? out : null;
+        }
+      },
+      {
+        id: "lint/rfc5280-crl/unknown-critical-extension",
+        severity: "error",
+        source: "rfc5280-crl",
+        citation: "RFC 5280 5.2 / 5.3",
+        message: "a critical extension is not recognized by the profile -- a conforming consumer must not use the CRL",
+        /** @internal Sections 5.2 and 5.3 state the same obligation, once for the CRL's extensions and
+         * once for a revoked entry's, so both lists are walked. The recognized set for each scope is
+         * the extensions that section profiles, which is exactly the table its criticality rule keys
+         * on. The certificate registry cannot answer here: it does not recognize deltaCRLIndicator or
+         * issuingDistributionPoint, which section 5.2 REQUIRES to be critical, and it does recognize
+         * certificate-only extensions that have no meaning on a CRL. */
+        check: function(crl2) {
+          var out = [];
+          _crlExtList(crl2).forEach(function(e) {
+            if (e.critical === true && CRL_KNOWN_EXTENSIONS[e.oid] === void 0) {
+              out.push({ context: { oid: e.oid, name: e.name || null, scope: "crlExtensions" } });
+            }
+          });
+          (crl2.revokedCertificates || []).forEach(function(row, i) {
+            (row.crlEntryExtensions || []).forEach(function(e) {
+              if (e.critical === true && CRL_ENTRY_CRITICALITY[e.oid] === void 0) {
+                out.push({ context: { oid: e.oid, name: e.name || null, scope: "crlEntryExtensions", entry: i } });
+              }
+            });
+          });
+          return out.length ? out : null;
+        }
+      }
+    ];
+    var CRL_PROFILES = Object.assign(/* @__PURE__ */ Object.create(null), { "rfc5280-crl": RFC5280_CRL_RULES });
+    var ALL_CRL_RULES = RFC5280_CRL_RULES;
+    var OCSP_RESPONSE_KNOWN = /* @__PURE__ */ Object.create(null);
+    ["ocspNonce", "ocspExtendedRevoke"].forEach(function(n) {
+      OCSP_RESPONSE_KNOWN[oid.byName(n)] = true;
+    });
+    var OCSP_SINGLE_KNOWN = /* @__PURE__ */ Object.create(null);
+    ["ocspArchiveCutoff", "ocspCrl", "reasonCode", "invalidityDate", "certificateIssuer"].forEach(function(n) {
+      OCSP_SINGLE_KNOWN[oid.byName(n)] = true;
+    });
+    var OCSP_REQUEST_ONLY = ocspSchema.extensionPlacement(oid).requestOnly;
+    var OCSP_RESPONSE_CRITICALITY = /* @__PURE__ */ Object.create(null);
+    OCSP_RESPONSE_CRITICALITY[oid.byName("ocspExtendedRevoke")] = false;
+    var OCSP_SINGLE_CRITICALITY = CRL_ENTRY_CRITICALITY;
+    var OID_OCSP_NONCE = oid.byName("ocspNonce");
+    var OID_OCSP_EXTENDED_REVOKE = oid.byName("ocspExtendedRevoke");
+    var OID_OCSP_ARCHIVE_CUTOFF = oid.byName("ocspArchiveCutoff");
+    var OID_OCSP_CRL = oid.byName("ocspCrl");
+    var OID_REASON_CODE = oid.byName("reasonCode");
+    var OCSP_SINGLE_VALUE_READER = /* @__PURE__ */ Object.create(null);
+    OCSP_SINGLE_VALUE_READER[OID_REASON_CODE] = function(bytes) {
+      crlSchema.decodeExtension({ oid: OID_REASON_CODE, name: "reasonCode", critical: false, value: bytes });
+    };
+    OCSP_SINGLE_VALUE_READER[oid.byName("invalidityDate")] = function(bytes) {
+      crlSchema.decodeExtension({ oid: oid.byName("invalidityDate"), name: "invalidityDate", critical: false, value: bytes });
+    };
+    OCSP_SINGLE_VALUE_READER[oid.byName("certificateIssuer")] = CRL_ENTRY_VALUE_READER[oid.byName("certificateIssuer")];
+    var OCSP_RESPONSE_VALUE_READER = /* @__PURE__ */ Object.create(null);
+    OCSP_RESPONSE_VALUE_READER[OID_OCSP_EXTENDED_REVOKE] = function(bytes) {
+      asn1.read.nullValue(asn1.decode(bytes));
+    };
+    function _ocspBasic(resp) {
+      return resp.basicResponse;
+    }
+    function _ocspResponses(resp) {
+      return _ocspBasic(resp).responses;
+    }
+    function _ocspResponseExts(resp) {
+      return _ocspBasic(resp).responseExtensions || [];
+    }
+    function _ocspSingleExts(sr) {
+      return sr.singleExtensions || [];
+    }
+    function _extIn(list, dotted) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].oid === dotted) return list[i];
+      }
+      return null;
+    }
+    function _singleReasonCode(sr) {
+      var e = _extIn(_ocspSingleExts(sr), OID_REASON_CODE);
+      if (!e || !Buffer.isBuffer(e.value)) return null;
+      try {
+        return crlSchema.decodeExtension(e).value;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function _isNonIssuedShape(sr) {
+      var st = sr.certStatus;
+      return !!st && st.type === "revoked" && st.revocationReason === "certificateHold" && guard.time.isDate(st.revocationTime) && guard.time.instantOf(st.revocationTime) === 0;
+    }
+    function _perResponse(resp, fn) {
+      var rows = [];
+      _ocspResponses(resp).forEach(function(sr, i) {
+        var out = fn(sr, i);
+        if (out == null) return;
+        (Array.isArray(out) ? out : [out]).forEach(function(row) {
+          row.context.response = i;
+          rows.push(row);
+        });
+      });
+      return rows.length ? rows : null;
+    }
+    function _certIdKey(c) {
+      return c.hashAlgorithm.algorithm + "|" + c.issuerNameHash.toString("hex") + "|" + c.issuerKeyHash.toString("hex") + "|" + c.serialNumberHex;
+    }
+    function _statusKey(st) {
+      return st.type + (st.type === "revoked" ? ":" + guard.time.instantOf(st.revocationTime) + ":" + (st.revocationReason || "") : "");
+    }
+    function _placementRow(name, placed, where) {
+      return { context: { extension: name, placed, was: where } };
+    }
+    var RFC6960_OCSP_RULES = [
+      {
+        id: "lint/rfc6960/signature-empty",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 2.2",
+        message: "a definitive response shall be digitally signed; the signature BIT STRING is empty",
+        check: function(resp) {
+          return _ocspBasic(resp).signature.length === 0 ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/update-times-inverted",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 2.4 / 4.2.2.1",
+        /** @internal Sec. 4.2.2.1 defines the two as a validity interval and says it corresponds to the
+         * CRL's, whose inversion the CRL profile grades the same way; an interval whose end precedes
+         * its start is a fault of definition, like an extension on the wrong list, rather than a
+         * reading, and pki.ocsp.sign refuses to write one. */
+        message: "a SingleResponse's thisUpdate must not follow its nextUpdate",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            if (sr.nextUpdate === null) return null;
+            return guard.time.instantOf(sr.thisUpdate) > guard.time.instantOf(sr.nextUpdate) ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/produced-before-this-update",
+        severity: "notice",
+        source: "rfc6960",
+        citation: "RFC 6960 2.4 / 2.5",
+        /** @internal producedAt is the time the responder signed, thisUpdate the most recent time the
+         * status was known to be correct; a response signed before that time certifies status it did
+         * not yet know. No clause forbids it, so this is advisory. */
+        message: "producedAt is earlier than a SingleResponse's thisUpdate, so the response was signed before the status it certifies was known",
+        check: function(resp) {
+          var produced = _ocspBasic(resp).producedAt;
+          return _perResponse(resp, function(sr) {
+            return guard.time.instantOf(produced) < guard.time.instantOf(sr.thisUpdate) ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/certs-present-but-empty",
+        severity: "warn",
+        source: "rfc6960",
+        citation: "RFC 6960 4.2.1",
+        message: "certs should be absent when no certificates are included",
+        check: function(resp) {
+          var bs = _ocspBasic(resp);
+          return bs.certsPresent === true && bs.certs.length === 0 ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/response-extension-criticality",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.8",
+        message: "a response extension is marked with a criticality the profile does not allow",
+        check: function(resp) {
+          var rows = _criticalityRows(_ocspResponseExts(resp), OCSP_RESPONSE_CRITICALITY, "responseExtensions");
+          return rows.length ? rows : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/single-extension-criticality",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.5 / RFC 5280 5.3.1 / 5.3.2 / 5.3.3",
+        message: "a single extension is marked with a criticality the profile does not allow",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return _criticalityRows(_ocspSingleExts(sr), OCSP_SINGLE_CRITICALITY, "singleExtensions");
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/extended-revoke-value-not-null",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.8",
+        message: "the value of the extended revoked definition extension shall be NULL",
+        check: function(resp) {
+          var e = _extIn(_ocspResponseExts(resp), OID_OCSP_EXTENDED_REVOKE);
+          return e && _valueSyntaxFault(e, OCSP_RESPONSE_KNOWN, OCSP_RESPONSE_VALUE_READER) !== null ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/extended-revoke-in-single-extensions",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.8",
+        message: "the extended revoked definition extension must be placed in responseExtensions and must not appear in singleExtensions",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return _extIn(_ocspSingleExts(sr), OID_OCSP_EXTENDED_REVOKE) ? _placementRow("ocspExtendedRevoke", "responseExtensions", "singleExtensions") : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/non-issued-without-extended-revoke",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 2.2",
+        message: "a revoked answer for a non-issued certificate (certificateHold at January 1, 1970) must be accompanied by the extended revoked definition response extension",
+        check: function(resp) {
+          if (_extIn(_ocspResponseExts(resp), OID_OCSP_EXTENDED_REVOKE)) return null;
+          return _perResponse(resp, function(sr) {
+            return _isNonIssuedShape(sr) ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/non-issued-with-crl-extensions",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 2.2",
+        message: "a revoked answer for a non-issued certificate must not include a CRL references extension or any CRL entry extension",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            if (!_isNonIssuedShape(sr)) return null;
+            var rows = [];
+            _ocspSingleExts(sr).forEach(function(e) {
+              if (e.oid === OID_OCSP_CRL || CRL_ENTRY_CRITICALITY[e.oid] !== void 0) rows.push({ context: { extension: e.name } });
+            });
+            return rows.length ? rows : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/archive-cutoff-in-response-extensions",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.4",
+        message: "an archive cutoff shall be provided as a singleExtensions extension",
+        check: function(resp) {
+          return _extIn(_ocspResponseExts(resp), OID_OCSP_ARCHIVE_CUTOFF) ? _placementRow("ocspArchiveCutoff", "singleExtensions", "responseExtensions") : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/crl-references-in-response-extensions",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.2",
+        message: "the CRL references extension is specified as a singleExtensions extension",
+        check: function(resp) {
+          return _extIn(_ocspResponseExts(resp), OID_OCSP_CRL) ? _placementRow("ocspCrl", "singleExtensions", "responseExtensions") : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/nonce-in-single-extensions",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 9654 2.1",
+        message: "in a response the nonce is included as one of the responseExtensions",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return _extIn(_ocspSingleExts(sr), OID_OCSP_NONCE) ? _placementRow("ocspNonce", "responseExtensions", "singleExtensions") : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/request-extension-in-response",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.3 / 4.4.6 / 4.4.7",
+        message: "an extension defined for OCSP requests only is carried on a response",
+        check: function(resp) {
+          var rows = [];
+          _ocspResponseExts(resp).forEach(function(e) {
+            if (OCSP_REQUEST_ONLY[e.oid] !== void 0) rows.push({ context: { extension: e.name, defined: OCSP_REQUEST_ONLY[e.oid], was: "responseExtensions" } });
+          });
+          var per = _perResponse(resp, function(sr) {
+            var out = [];
+            _ocspSingleExts(sr).forEach(function(e) {
+              if (OCSP_REQUEST_ONLY[e.oid] !== void 0) out.push({ context: { extension: e.name, defined: OCSP_REQUEST_ONLY[e.oid], was: "singleExtensions" } });
+            });
+            return out.length ? out : null;
+          });
+          if (per) per.forEach(function(row) {
+            rows.push(row);
+          });
+          return rows.length ? rows : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/archive-cutoff-after-produced-at",
+        severity: "notice",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.4",
+        /** @internal The archive cutoff is defined as producedAt minus the responder's retention
+         * interval, so a cutoff after producedAt states a negative interval. Stated by definition
+         * rather than as a requirement, so advisory. */
+        message: "an archive cutoff later than producedAt implies a negative retention interval",
+        check: function(resp) {
+          var produced = _ocspBasic(resp).producedAt;
+          return _perResponse(resp, function(sr) {
+            var e = _extIn(_ocspSingleExts(sr), OID_OCSP_ARCHIVE_CUTOFF);
+            if (!e) return null;
+            return guard.time.instantOf(e.archiveCutoff) > guard.time.instantOf(produced) ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/extension-value-syntax",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.5 / 4.4.8",
+        message: "a recognized extension's value does not decode as the structure its identifier names",
+        check: function(resp) {
+          var rows = [];
+          _ocspResponseExts(resp).forEach(function(e) {
+            var why = _valueSyntaxFault(e, OCSP_RESPONSE_KNOWN, OCSP_RESPONSE_VALUE_READER);
+            if (why !== null) rows.push({ context: { extension: e.name, scope: "responseExtensions", problem: why } });
+          });
+          var per = _perResponse(resp, function(sr) {
+            var out = [];
+            _ocspSingleExts(sr).forEach(function(e) {
+              var why = _valueSyntaxFault(e, OCSP_SINGLE_KNOWN, OCSP_SINGLE_VALUE_READER);
+              if (why !== null) out.push({ context: { extension: e.name, scope: "singleExtensions", problem: why } });
+            });
+            return out.length ? out : null;
+          });
+          if (per) per.forEach(function(row) {
+            rows.push(row);
+          });
+          return rows.length ? rows : null;
+        }
+      },
+      {
+        id: "lint/rfc6960/unknown-critical-extension",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4 / RFC 5019 2.2.1",
+        /** @internal RFC 6960 adopts the RFC 5280 extension model, under which a consumer that cannot
+         * process a critical extension must not use the structure, and RFC 5019 lets a client ignore
+         * only an unrecognized NON-critical response extension. The recognized set is the one this
+         * profile reads, per list. */
+        message: "a critical extension the profile does not recognize is present",
+        check: function(resp) {
+          var rows = [];
+          _ocspResponseExts(resp).forEach(function(e) {
+            if (e.critical === true && OCSP_RESPONSE_KNOWN[e.oid] === void 0) rows.push({ context: { extension: e.name || e.oid, scope: "responseExtensions" } });
+          });
+          var per = _perResponse(resp, function(sr) {
+            var out = [];
+            _ocspSingleExts(sr).forEach(function(e) {
+              if (e.critical === true && OCSP_SINGLE_KNOWN[e.oid] === void 0) out.push({ context: { extension: e.name || e.oid, scope: "singleExtensions" } });
+            });
+            return out.length ? out : null;
+          });
+          if (per) per.forEach(function(row) {
+            rows.push(row);
+          });
+          return rows.length ? rows : null;
+        }
+      },
+      /** @internal The two reason rules each have two carriers graded apart. The reasonCode single
+       * extension IS the RFC 5280 sec. 5.3.1 extension, carried into a SingleResponse by sec. 4.4.5, so
+       * its rows grade at that clause's strength. RevokedInfo's own revocationReason is a separate field
+       * of the same CRLReason type, and the clause is applied to it by reading, so its rows are advisory. */
+      {
+        id: "lint/rfc6960/reason-code-unspecified",
+        severity: "warn",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.5 / RFC 5280 5.3.1",
+        message: "a reasonCode single extension of unspecified(0) should be absent instead",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return _singleReasonCode(sr) === 0 ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/remove-from-crl-reason",
+        severity: "error",
+        source: "rfc6960",
+        citation: "RFC 6960 4.4.5 / RFC 5280 5.3.1",
+        message: "a reasonCode of removeFromCRL may only appear in a delta CRL; a status response is not one",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return _singleReasonCode(sr) === 8 ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/revocation-reason-unspecified",
+        severity: "notice",
+        source: "rfc6960",
+        citation: "RFC 6960 4.2.1 / RFC 5280 5.3.1",
+        message: "a revocationReason of unspecified(0) states no reason; the reasonCode extension it mirrors should be absent instead",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return sr.certStatus.type === "revoked" && sr.certStatus.revocationReason === "unspecified" ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/revocation-reason-remove-from-crl",
+        severity: "notice",
+        source: "rfc6960",
+        citation: "RFC 6960 4.2.1 / RFC 5280 5.3.1",
+        message: "a revocationReason of removeFromCRL names a delta-CRL action, which a status response cannot state",
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return sr.certStatus.type === "revoked" && sr.certStatus.revocationReason === "removeFromCRL" ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc6960/duplicate-cert-id",
+        severity: "notice",
+        source: "rfc6960",
+        citation: "RFC 6960 4.2.2.3",
+        /** @internal A response carries a SingleResponse per certificate. Two for the same CertID
+         * answer one certificate twice, and when the two statuses differ a relying party cannot tell
+         * which governs; the context says which case it is. No clause forbids the repeat, so advisory. */
+        message: "two SingleResponses answer for the same CertID",
+        check: function(resp) {
+          var rows = [], first = /* @__PURE__ */ Object.create(null);
+          _ocspResponses(resp).forEach(function(sr, i) {
+            var key = _certIdKey(sr.certID), seen = first[key];
+            if (seen === void 0) {
+              first[key] = { index: i, status: _statusKey(sr.certStatus) };
+              return;
+            }
+            rows.push({ context: { response: i, first: seen.index, conflicting: seen.status !== _statusKey(sr.certStatus) } });
+          });
+          return rows.length ? rows : null;
+        }
+      }
+    ];
+    function _isLightweight(resp, ctx) {
+      return ctx.profile === "rfc5019";
+    }
+    var RFC5019_OCSP_RULES = [
+      {
+        id: "lint/rfc5019/next-update-missing",
+        severity: "error",
+        source: "rfc5019",
+        citation: "RFC 5019 2.2.4",
+        message: "a lightweight-profile responder must always include nextUpdate",
+        appliesTo: _isLightweight,
+        check: function(resp) {
+          return _perResponse(resp, function(sr) {
+            return sr.nextUpdate == null ? { context: {} } : null;
+          });
+        }
+      },
+      {
+        id: "lint/rfc5019/multiple-single-responses",
+        severity: "warn",
+        source: "rfc5019",
+        citation: "RFC 5019 2.2.1",
+        message: "a lightweight-profile response should include only one SingleResponse",
+        appliesTo: _isLightweight,
+        check: function(resp) {
+          var n = _ocspResponses(resp).length;
+          return n > 1 ? { context: { responses: n } } : null;
+        }
+      },
+      {
+        id: "lint/rfc5019/response-extensions-present",
+        severity: "warn",
+        source: "rfc5019",
+        citation: "RFC 5019 2.2.1",
+        message: "a lightweight-profile responder should not include responseExtensions",
+        appliesTo: _isLightweight,
+        check: function(resp) {
+          return _ocspBasic(resp).responseExtensions ? true : null;
+        }
+      },
+      {
+        id: "lint/rfc5019/responder-id-by-name",
+        severity: "notice",
+        source: "rfc5019",
+        citation: "RFC 5019 2.2.2",
+        /** @internal A SHOULD conditioned on bandwidth being at issue, which the response cannot show,
+         * so it grades as advisory rather than as the warning an unconditional SHOULD would draw. */
+        message: "a lightweight-profile responder should use the byKey ResponderID where reducing bandwidth matters",
+        appliesTo: _isLightweight,
+        check: function(resp) {
+          var rid = _ocspBasic(resp).responderID;
+          return rid && rid.byName !== void 0 ? true : null;
+        }
+      }
+    ];
+    var OCSP_PROFILES = Object.assign(/* @__PURE__ */ Object.create(null), { "rfc6960": RFC6960_OCSP_RULES, "rfc5019": RFC5019_OCSP_RULES });
+    var ALL_OCSP_RULES = RFC6960_OCSP_RULES.concat(RFC5019_OCSP_RULES);
     var PROFILES = Object.assign(/* @__PURE__ */ Object.create(null), {
       "rfc5280": RFC5280_RULES,
+      "rfc9881": RFC9881_RULES,
+      "rfc9909": RFC9909_RULES,
       "rfc9935": RFC9935_RULES,
       "cabf-tls": CABF_TLS_RULES
     });
-    var ALL_RULES = RFC5280_RULES.concat(RFC9935_RULES).concat(CABF_TLS_RULES);
+    var ALL_RULES = RFC5280_RULES.concat(RFC9881_RULES).concat(RFC9909_RULES).concat(RFC9935_RULES).concat(CABF_TLS_RULES);
     function _selectRules(profile) {
       if (profile == null || profile === "all" || profile === "default") return ALL_RULES;
-      if (!PROFILES[profile]) throw _cfg("lint/unknown-profile", 'unknown lint profile "' + profile + '" (known: ' + Object.keys(PROFILES).join(", ") + ")");
+      if (!PROFILES[profile]) {
+        if (CRL_PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is a CRL profile; lint a CRL with pki.lint.crl');
+        if (OCSP_PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is an OCSP profile; lint a response with pki.lint.ocsp');
+        throw _cfg("lint/unknown-profile", 'unknown lint profile "' + profile + '" (known: ' + Object.keys(PROFILES).join(", ") + ")");
+      }
       return PROFILES[profile];
     }
     function _applyThreshold(report, severity) {
@@ -48188,8 +51638,153 @@ var require_lint = __commonJS({
       report.findings = _applyThreshold(report, opts.severity);
       return report;
     }
+    var _CRL_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { profile: 1, severity: 1 });
+    function _derivedCrl(o) {
+      if (!o || typeof o !== "object" || guard.bytes.isByteSource(o)) return null;
+      try {
+        var p = guard.parsed.acceptDerived(o, "crl", crlSchema.parse, _cfg, "lint/bad-input", "the CRL");
+        return guard.parsed.isCrl(p) ? p : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+    function _ingestCrl(input) {
+      var derived = _derivedCrl(input);
+      if (derived) return { crl: derived };
+      var der;
+      if (Buffer.isBuffer(input)) der = input;
+      else if (typeof input === "string") {
+        try {
+          der = crlSchema.pemDecode(input);
+        } catch (e) {
+          return { fatal: { id: "lint/unparseable", severity: "fatal", source: "engine", citation: "pki.lint", message: "input is not a decodable PEM/DER CRL", context: { code: e.code } } };
+        }
+      } else {
+        throw _cfg("lint/bad-input", "pki.lint.crl input must be a parsed CRL, a DER Buffer, or a PEM string");
+      }
+      try {
+        return { crl: crlSchema.parse(der) };
+      } catch (e) {
+        return { fatal: { id: "lint/unparseable", severity: "fatal", source: "engine", citation: "RFC 5280", message: "input is not a well-formed X.509 CRL", context: { code: e.code } } };
+      }
+    }
+    function crl(input, opts) {
+      opts = guard.identifier.optionsObject(opts, _cfg, "lint/bad-input", "pki.lint options");
+      guard.identifier.assertKnownKeys(
+        opts,
+        _CRL_OPTS,
+        _cfg,
+        "lint/bad-input",
+        "pki.lint.crl has an unknown option: "
+      );
+      if (opts.severity != null && VALID_SEVERITY.indexOf(opts.severity) === -1) {
+        throw _cfg("lint/bad-severity", 'unknown severity threshold "' + opts.severity + '" (known: ' + VALID_SEVERITY.join(", ") + ")");
+      }
+      var profile = opts.profile;
+      var rules_;
+      if (profile == null || profile === "all" || profile === "default") rules_ = ALL_CRL_RULES;
+      else if (CRL_PROFILES[profile]) rules_ = CRL_PROFILES[profile];
+      else if (PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is a certificate profile; lint a certificate with pki.lint.certificate');
+      else if (OCSP_PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is an OCSP profile; lint a response with pki.lint.ocsp');
+      else throw _cfg("lint/unknown-profile", 'unknown CRL lint profile "' + profile + '" (known: ' + Object.keys(CRL_PROFILES).join(", ") + ")");
+      var ingested = _ingestCrl(input);
+      var report;
+      if (ingested.fatal) {
+        report = {
+          findings: [ingested.fatal],
+          ran: [],
+          counts: Object.assign(/* @__PURE__ */ Object.create(null), { fatal: 1, error: 0, warn: 0, notice: 0, pass: 0, na: 0, ne: 0 })
+        };
+      } else {
+        report = _runLints(rules_, ingested.crl, { profile, decode: function() {
+          return null;
+        }, raw: function() {
+          return null;
+        } });
+      }
+      report.worst = _worst(report.findings);
+      report.findings = _applyThreshold(report, opts.severity);
+      return report;
+    }
+    var _OCSP_OPTS = Object.assign(/* @__PURE__ */ Object.create(null), { profile: 1, severity: 1 });
+    var _OCSP_CLAIM = ["responseStatus", "basicResponse", "tbsResponseDataBytes"];
+    function _ingestOcsp(input) {
+      var der;
+      if (Buffer.isBuffer(input)) der = input;
+      else if (typeof input === "string") {
+        try {
+          der = ocspSchema.pemDecode(input);
+        } catch (e) {
+          return { fatal: { id: "lint/unparseable", severity: "fatal", source: "engine", citation: "pki.lint", message: "input is not a decodable PEM/DER OCSP response", context: { code: e.code } } };
+        }
+      } else if (input !== null && typeof input === "object" && !guard.bytes.isByteSource(input)) {
+        return { response: guard.parsed.fromTrustedSource(
+          input,
+          "ocspResponse",
+          _OCSP_CLAIM,
+          function(src) {
+            if (!Buffer.isBuffer(src) && typeof src !== "string") throw _cfg("lint/bad-input", "pki.lint.ocsp input must be a parsed OCSP response, a DER Buffer, or a PEM string");
+            return ocspSchema.parseResponse(src);
+          },
+          _cfg,
+          "lint/bad-input",
+          "pki.lint.ocsp input must be its DER bytes, a PEM string, or an unmodified pki.schema.ocsp.parseResponse result: the signed byte range, the signature and the fields that range encodes are separate properties of a parsed object, so a rebuilt response could have them describe different responses"
+        ) };
+      } else {
+        throw _cfg("lint/bad-input", "pki.lint.ocsp input must be a parsed OCSP response, a DER Buffer, or a PEM string");
+      }
+      try {
+        return { response: ocspSchema.parseResponse(der) };
+      } catch (e) {
+        return { fatal: { id: "lint/unparseable", severity: "fatal", source: "engine", citation: "RFC 6960", message: "input is not a well-formed OCSP response", context: { code: e.code } } };
+      }
+    }
+    function ocsp(input, opts) {
+      opts = guard.identifier.optionsObject(opts, _cfg, "lint/bad-input", "pki.lint options");
+      guard.identifier.assertKnownKeys(
+        opts,
+        _OCSP_OPTS,
+        _cfg,
+        "lint/bad-input",
+        "pki.lint.ocsp has an unknown option: "
+      );
+      if (opts.severity != null && VALID_SEVERITY.indexOf(opts.severity) === -1) {
+        throw _cfg("lint/bad-severity", 'unknown severity threshold "' + opts.severity + '" (known: ' + VALID_SEVERITY.join(", ") + ")");
+      }
+      var profile = opts.profile;
+      var rules_;
+      if (profile == null || profile === "all" || profile === "default") rules_ = ALL_OCSP_RULES;
+      else if (OCSP_PROFILES[profile]) rules_ = OCSP_PROFILES[profile];
+      else if (PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is a certificate profile; lint a certificate with pki.lint.certificate');
+      else if (CRL_PROFILES[profile]) throw _cfg("lint/unknown-profile", '"' + profile + '" is a CRL profile; lint a CRL with pki.lint.crl');
+      else throw _cfg("lint/unknown-profile", 'unknown OCSP lint profile "' + profile + '" (known: ' + Object.keys(OCSP_PROFILES).join(", ") + ")");
+      var ingested = _ingestOcsp(input);
+      var report;
+      if (ingested.fatal) {
+        report = {
+          findings: [ingested.fatal],
+          ran: [],
+          counts: Object.assign(/* @__PURE__ */ Object.create(null), { fatal: 1, error: 0, warn: 0, notice: 0, pass: 0, na: 0, ne: 0 })
+        };
+      } else if (!ingested.response.basicResponse) {
+        report = {
+          findings: [],
+          ran: [],
+          counts: Object.assign(/* @__PURE__ */ Object.create(null), { fatal: 0, error: 0, warn: 0, notice: 0, pass: 0, na: rules_.length, ne: 0 })
+        };
+      } else {
+        report = _runLints(rules_, ingested.response, { profile, decode: function() {
+          return null;
+        }, raw: function() {
+          return null;
+        } });
+      }
+      report.worst = _worst(report.findings);
+      report.findings = _applyThreshold(report, opts.severity);
+      return report;
+    }
     function rules(profile) {
-      var set = profile == null ? ALL_RULES : PROFILES[profile] || (function() {
+      var set = profile == null ? ALL_RULES.concat(ALL_CRL_RULES).concat(ALL_OCSP_RULES) : PROFILES[profile] || CRL_PROFILES[profile] || OCSP_PROFILES[profile] || (function() {
         throw _cfg("lint/unknown-profile", 'unknown lint profile "' + profile + '"');
       })();
       return set.map(function(r) {
@@ -48197,10 +51792,12 @@ var require_lint = __commonJS({
       });
     }
     function profiles() {
-      return Object.keys(PROFILES);
+      return Object.keys(PROFILES).concat(Object.keys(CRL_PROFILES)).concat(Object.keys(OCSP_PROFILES));
     }
     module2.exports = {
       certificate,
+      crl,
+      ocsp,
       rules,
       profiles
     };
@@ -48375,26 +51972,28 @@ var require_webauthn_mds = __commonJS({
       opts = opts || {};
       if (!_isPlainObject(opts)) throw _err("webauthn/bad-input", "opts must be an object");
       guard.identifier.assertKnownKeys(opts, _BLOB_OPTS, _err, "webauthn/bad-input", "opts has an unknown key ");
-      var roots = opts.rootCertificates;
+      var o = guard.identifier.snapshotOptions(opts, _BLOB_OPTS);
+      var roots = o.rootCertificates;
       if (!Array.isArray(roots) || roots.length === 0) {
         throw _err("webauthn/metadata-no-root", "verifying a metadata BLOB requires opts.rootCertificates -- the FIDO root(s) to anchor it to; this library bundles none");
       }
-      if (opts.time !== void 0) guard.time.assertValid(opts.time, _err, "webauthn/bad-input", "opts.time");
-      var at = opts.time === void 0 ? /* @__PURE__ */ new Date() : opts.time;
-      if (opts.previousNo !== void 0 && (!Number.isSafeInteger(opts.previousNo) || opts.previousNo < 0)) {
+      if (o.time !== void 0) guard.time.assertValid(o.time, _err, "webauthn/bad-input", "opts.time");
+      var at = o.time === void 0 ? /* @__PURE__ */ new Date() : o.time;
+      if (o.previousNo !== void 0 && (!Number.isSafeInteger(o.previousNo) || o.previousNo < 0)) {
         throw _err("webauthn/bad-input", "opts.previousNo must be a non-negative safe integer");
       }
       ["requireRollbackCheck", "allowStale", "rejectUnknownStatus"].forEach(function(k) {
-        if (opts[k] !== void 0 && typeof opts[k] !== "boolean") {
+        if (o[k] !== void 0 && typeof o[k] !== "boolean") {
           throw _err("webauthn/bad-input", "opts." + k + " must be a boolean");
         }
       });
-      if (opts.statusPolicy !== void 0 && typeof opts.statusPolicy !== "function" && opts.statusPolicy !== "any" && opts.statusPolicy !== "latest-by-date") {
+      if (o.statusPolicy !== void 0 && typeof o.statusPolicy !== "function" && o.statusPolicy !== "any" && o.statusPolicy !== "latest-by-date") {
         throw _err("webauthn/bad-input", 'opts.statusPolicy must be "any", "latest-by-date", or a function');
       }
-      if (opts.requireRollbackCheck === true && opts.previousNo === void 0) {
+      if (o.requireRollbackCheck === true && o.previousNo === void 0) {
         throw _err("webauthn/metadata-no-baseline", "opts.requireRollbackCheck was set without opts.previousNo, so there is no baseline to compare against");
       }
+      opts = o;
       var anchors = roots.map(function(r, i) {
         return _asCert(r, "opts.rootCertificates[" + i + "]");
       });
@@ -49882,6 +53481,7 @@ var require_webauthn = __commonJS({
       opts = opts || {};
       if (!_isPlainObject(opts)) throw _err("webauthn/bad-input", "opts must be an object");
       guard.identifier.assertKnownKeys(opts, _CLIENT_DATA_OPTS, _err, "webauthn/bad-input", "opts has an unknown key ");
+      opts = guard.identifier.snapshotOptions(opts, _CLIENT_DATA_OPTS);
       bytes = _bytesArg(bytes, "clientDataJSON");
       var doc = guard.json.parse(Buffer.from(bytes), _err, {
         maxBytes: constants.LIMITS.JSON_MAX_BYTES,

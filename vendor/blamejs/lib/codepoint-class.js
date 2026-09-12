@@ -1245,6 +1245,26 @@ function isAsciiHexDigit(cc) {
 }
 
 /**
+ * @primitive b.codepointClass.isAsciiWhitespace
+ * @signature b.codepointClass.isAsciiWhitespace(cc)
+ * @since     0.20.1
+ * @status    stable
+ * @related   b.codepointClass.isAsciiLetter, b.markupTokenizer.isMarkupSpace
+ *
+ * Is this code unit one of the five ASCII whitespace characters: tab, line
+ * feed, form feed, carriage return or space? This is the set the HTML
+ * tokenizer and the CSS tokenizer separate tokens on. A no-break space or any
+ * other Unicode space is not in it.
+ *
+ * @example
+ *   b.codepointClass.isAsciiWhitespace(0x0C);                        // → true
+ *   b.codepointClass.isAsciiWhitespace(0xA0);                        // → false
+ */
+function isAsciiWhitespace(cc) {
+  return cc === 0x20 || cc === 0x09 || cc === 0x0A || cc === 0x0C || cc === 0x0D;
+}
+
+/**
  * @primitive b.codepointClass.isIdentifierChar
  * @signature b.codepointClass.isIdentifierChar(cc)
  * @since     0.18.30
@@ -1581,9 +1601,12 @@ var NAMED_ENTITY_ASCII = {
   lsqb: "[", rsqb: "]", lcub: "{", rcub: "}",
   quot: "\"", apos: "'", lt: "<", gt: ">",
   amp: "&", commat: "@", dollar: "$", percnt: "%",
-  ast: "*", plus: "+", lowbar: "_", hyphen: "-",
-  nbsp: " ",
+  ast: "*", plus: "+", lowbar: "_",
 };
+
+NAMED_ENTITY_ASCII.hyphen = String.fromCharCode(0x2010);
+NAMED_ENTITY_ASCII.nbsp = String.fromCharCode(0x00A0);
+
 function _decodeNamedEntityAt(s, at) {
   var start = at + 1;
   if (!_isAsciiAlpha(s.charCodeAt(start))) return null;
@@ -1627,6 +1650,161 @@ function decodeMarkupEntities(value) {
 
 var URL_TAB_NEWLINE_RANGES = [0x0009, 0x000A, 0x000D];
 var URL_C0_SPACE_RANGES    = [[0x0000, 0x0020]];
+
+/**
+ * @primitive b.codepointClass.decodeEntityAt
+ * @signature b.codepointClass.decodeEntityAt(s, at)
+ * @since     0.20.0
+ * @status    stable
+ * @related   b.codepointClass.decodeReferenceAt, b.codepointClass.decodeMarkupEntities, b.codepointClass.decodeNumericEntities
+ *
+ * Decode the one entity reference that begins at index `at` of `s`, which
+ * must be an ampersand: a numeric reference, or failing that a named one.
+ * Returns `{ text, next }`: the decoded text and the index just after the
+ * reference. Returns `null` when no numeric or named reference begins there.
+ *
+ * This reads one reference in isolation. `decodeMarkupEntities` decodes
+ * numeric references in one pass and named references in a second pass over
+ * the result, so a numeric reference that yields an ampersand can complete a
+ * named reference with the text after it, and this does not model that:
+ * walking `"&#38;colon;"` with it gives `"&colon;"` where the whole-string
+ * decoder gives `":"`. Use `decodeReferenceAt` for a walk that agrees with
+ * `decodeMarkupEntities`.
+ *
+ * @example
+ *   b.codepointClass.decodeEntityAt("&#x6A;s", 0);   // → { text: "j", next: 6 }
+ *   b.codepointClass.decodeEntityAt("&Tab;", 0);     // → { text: "\t", next: 5 }
+ *   b.codepointClass.decodeEntityAt("&x", 0);        // → null
+ */
+function decodeEntityAt(s, at) {
+  var text = String(s == null ? "" : s);
+  if (text.charCodeAt(at) !== 0x26) return null;
+  return _decodeNumericEntityAt(text, at) || _decodeNamedEntityAt(text, at);
+}
+
+/**
+ * @primitive b.codepointClass.isUrlSchemeStrippable
+ * @signature b.codepointClass.isUrlSchemeStrippable(cp)
+ * @since     0.20.0
+ * @status    stable
+ * @related   b.codepointClass.stripUrlSchemeWhitespace, b.codepointClass.decodeMarkupEntities
+ *
+ * Report whether a code point is one the URL-scheme normalization removes:
+ * a C0 control or space, tab, line feed, carriage return, or a zero-width
+ * character. `decodeMarkupEntities` and `stripUrlSchemeWhitespace` together
+ * drop these before a scheme is read, so a reader locating a scheme by
+ * position skips exactly this set.
+ *
+ * @example
+ *   b.codepointClass.isUrlSchemeStrippable(0x01);   // → true
+ *   b.codepointClass.isUrlSchemeStrippable(0x200B); // → true
+ *   b.codepointClass.isUrlSchemeStrippable(0x6A);   // → false
+ */
+function isUrlSchemeStrippable(cp) {
+  return inRanges(cp, URL_C0_SPACE_RANGES) || inRanges(cp, CTRL_RANGES) ||
+         inRanges(cp, ZERO_WIDTH_RANGES);
+}
+
+/**
+ * @primitive b.codepointClass.decodeNamedEntityAt
+ * @signature b.codepointClass.decodeNamedEntityAt(s, at)
+ * @since     0.20.0
+ * @status    stable
+ * @related   b.codepointClass.decodeReferenceAt, b.codepointClass.decodeEntityAt, b.codepointClass.decodeMarkupEntities
+ *
+ * Decode the one named entity reference that begins at index `at` of `s`,
+ * which must be a literal ampersand, and nothing else: a numeric reference
+ * at `at` returns `null`, whatever it decodes to. Returns `{ text, next }` or
+ * `null`. `decodeMarkupEntities` decodes numeric references in one pass and
+ * named references in a second pass over the result, so the second pass sees
+ * a name whose letters, or whose closing semicolon, were written as numeric
+ * references: `&co&#108;on;` is `&colon;` to it. This reads the name the same
+ * way, so a caller walking by position recognizes exactly the references the
+ * whole-string decoder does. A numeric reference that produces an ampersand
+ * can likewise complete a named reference with the text after it;
+ * `decodeReferenceAt` reads that composition.
+ *
+ * @example
+ *   b.codepointClass.decodeNamedEntityAt("&colon;x", 0);  // → { text: ":", next: 7 }
+ *   b.codepointClass.decodeNamedEntityAt("&#38;", 0);     // → null
+ */
+var MAX_NAMED_ENTITY_NAME_LEN = 7;
+
+function _asciiAlnumFromNumericAt(s, at) {
+  var hit = _decodeNumericEntityAt(s, at);
+  if (hit === null || hit.text.length !== 1) return null;
+  var c = hit.text.charCodeAt(0);
+  if (!_isAsciiAlpha(c) && !_isAsciiDigit(c)) return null;
+  return { ch: hit.text, next: hit.next };
+}
+
+function decodeNamedEntityAt(s, at) {
+  var text = String(s == null ? "" : s);
+  if (text.charCodeAt(at) !== 0x26) return null;
+  if (_decodeNumericEntityAt(text, at) !== null) return null;
+  return _decodeNamedEntityFrom(text, at, at + 1);
+}
+
+/**
+ * @primitive b.codepointClass.decodeReferenceAt
+ * @signature b.codepointClass.decodeReferenceAt(s, at)
+ * @since     0.20.0
+ * @status    stable
+ * @related   b.codepointClass.decodeNamedEntityAt, b.codepointClass.decodeEntityAt, b.codepointClass.decodeMarkupEntities
+ *
+ * Decode the character reference that begins at index `at` of `s`, which
+ * must be an ampersand, the way `decodeMarkupEntities` reads it: a named
+ * reference, or a numeric reference, and when the numeric reference produces
+ * an ampersand, the named reference that ampersand completes with the text
+ * after it. Returns `{ text, next }` or `null`. `decodeNamedEntityAt` reads
+ * only a literal ampersand; this is the one call that walks by position and
+ * still sees `&#38;colon;` as `&colon;`.
+ *
+ * @example
+ *   b.codepointClass.decodeReferenceAt("&#38;colon;x", 0);  // → { text: ":", next: 11 }
+ *   b.codepointClass.decodeReferenceAt("&#38;x", 0);        // → { text: "&", next: 5 }
+ *   b.codepointClass.decodeReferenceAt("&colon;", 0);       // → { text: ":", next: 7 }
+ */
+function decodeReferenceAt(s, at) {
+  var text = String(s == null ? "" : s);
+  if (text.charCodeAt(at) !== 0x26) return null;
+  var lead = _decodeNumericEntityAt(text, at);
+  if (lead === null) return _decodeNamedEntityFrom(text, at, at + 1);
+  if (lead.text !== "&") return lead;
+  return _decodeNamedEntityFrom(text, at, lead.next) || lead;
+}
+
+function _decodeNamedEntityFrom(text, at, i) {
+  var name = "";
+  while (name.length < MAX_NAMED_ENTITY_NAME_LEN + 1 && i < text.length) {
+    var c = text.charCodeAt(i);
+    if (_isAsciiAlpha(c) || _isAsciiDigit(c)) { name += text.charAt(i); i += 1; continue; }
+    if (c === 0x26) {
+      var piece = _asciiAlnumFromNumericAt(text, i);
+      if (piece === null) break;
+      name += piece.ch;
+      i = piece.next;
+      continue;
+    }
+    break;
+  }
+  if (name.length < 2 || name.length > MAX_NAMED_ENTITY_NAME_LEN) return null;
+  if (!_isAsciiAlpha(name.charCodeAt(0))) return null;
+  var end;
+  if (text.charCodeAt(i) === 0x3B) {
+    end = i + 1;
+  } else if (text.charCodeAt(i) === 0x26) {
+    var term = _decodeNumericEntityAt(text, i);
+    if (term === null || term.text !== ";") return null;
+    end = term.next;
+  } else {
+    return null;
+  }
+  if (!Object.prototype.hasOwnProperty.call(NAMED_ENTITY_ASCII, name)) {
+    return { text: "&" + name + ";", next: end };
+  }
+  return { text: NAMED_ENTITY_ASCII[name], next: end };
+}
 /**
  * @primitive b.codepointClass.stripUrlSchemeWhitespace
  * @signature b.codepointClass.stripUrlSchemeWhitespace(s)
@@ -1776,6 +1954,10 @@ module.exports = {
   decodeMarkupEntities:    decodeMarkupEntities,
   NAMED_ENTITY_ASCII:      NAMED_ENTITY_ASCII,
   stripUrlSchemeWhitespace: stripUrlSchemeWhitespace,
+  decodeEntityAt:          decodeEntityAt,
+  isUrlSchemeStrippable:   isUrlSchemeStrippable,
+  decodeNamedEntityAt:     decodeNamedEntityAt,
+  decodeReferenceAt:       decodeReferenceAt,
   isAsciiAlnum:      isAsciiAlnum,
   isUnreserved:      isUnreserved,
   hex4:              hex4,
@@ -1797,6 +1979,7 @@ module.exports = {
   isAsciiLetter:     isAsciiLetter,
   isAsciiDigit:      isAsciiDigit,
   isAsciiHexDigit:   isAsciiHexDigit,
+  isAsciiWhitespace: isAsciiWhitespace,
   isIdentifierChar:  isIdentifierChar,
   hasPairWhere:      hasPairWhere,
   splitLines:        splitLines,

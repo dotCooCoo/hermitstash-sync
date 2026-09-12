@@ -1,0 +1,17 @@
+{
+  "version": "1.1.3",
+  "date": "2026-09-12",
+  "headline": "Framework refresh to 0.20.1, tested end to end against the matching server release",
+  "summary": "The vendored framework moves from 0.19.7 to 0.20.1. Nothing the sync client reaches changes behavior, and the full end-to-end suite ran against HermitStash server v1.15.7, which carries the same framework version, before either was tagged. Pre-built binaries embed their own runtime and are unaffected by the Node.js installed on the machine. There is no migration.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Vendored blamejs moves to 0.20.1",
+          "body": "0.20.0 raises the framework's own Node.js requirement to 24.21.0, which this client has stated since v1.1.0, so the two now name one runtime. It also refuses an `xn--` hostname label that carries no Punycode payload, identically on every Node release, where the answer previously depended on the runtime; a well-formed internationalized hostname is unaffected. 0.20.1 tightens the content guards, of which this client uses only the filename guard, whose change is to its documentation. The nested certificate toolkit moves from 0.7.9 to 0.7.37. Its signers now refuse an option they do not read rather than ignoring it, and its HPKE suites bind to the ML-KEM public keys they encrypt to. The enrollment, certificate-renewal, CA-regeneration and CA-rotation tests in the end-to-end suite all pass against it."
+        }
+      ]
+    }
+  ]
+}

@@ -119,136 +119,1564 @@ function _leadingSchemeOf(s, schemes) {
   return null;
 }
 
+var SPAN_INDEX_MIN_ROOM = 16;
+
+function _makeSpanIndex() {
+  var starts = [];
+  var ends   = [];
+  var values = [];
+  var head = 0;
+  function locate(i) {
+    var lo = head;
+    var hi = starts.length - 1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (starts[mid] > i) hi = mid - 1;
+      else if (ends[mid] < i) lo = mid + 1;
+      else return mid;
+    }
+    return -(lo + 1);
+  }
+  function insertAt(slot, start, end, value) {
+    if (slot === starts.length) {
+      starts.push(start);
+      ends.push(end);
+      values.push(value);
+      return;
+    }
+    if (slot === head) {
+      if (head === 0) {
+        var room = Math.max(SPAN_INDEX_MIN_ROOM, starts.length);
+        starts = new Array(room).fill(0).concat(starts);
+        ends = new Array(room).fill(0).concat(ends);
+        values = new Array(room).fill(0).concat(values);
+        head = room;
+      }
+      head -= 1;
+      starts[head] = start;
+      ends[head] = end;
+      values[head] = value;
+      return;
+    }
+    starts.splice(slot, 0, start);
+    ends.splice(slot, 0, end);
+    values.splice(slot, 0, value);
+  }
+  return {
+    find: function (i) {
+      var at = locate(i);
+      return at >= 0 ? values[at] : undefined;
+    },
+    add: function (start, end, value) {
+      if (end < start) return;
+      var at = locate(start);
+      if (at >= 0) return;
+      var slot = -(at + 1);
+      if (slot < starts.length && starts[slot] <= end + 1 && values[slot] === value) {
+        starts[slot] = start;
+        return;
+      }
+      if (slot < starts.length && starts[slot] <= end) end = starts[slot] - 1;
+      if (end < start) return;
+      if (slot > head && ends[slot - 1] === start - 1 && values[slot - 1] === value) {
+        ends[slot - 1] = end;
+        return;
+      }
+      insertAt(slot, start, end, value);
+    },
+  };
+}
+
 function _makeUrlRunScanner(input) {
-  var spanStart = -1;
-  var spanStop = -1;
+  var stopAt = _makeSpanIndex();
   return function (from) {
-    if (from >= spanStart && from <= spanStop) return spanStop;
+    var known = stopAt.find(from);
+    if (known !== undefined) return known;
     var p = from;
     while (p < input.length && input.charAt(p) !== ")" &&
-           !markupTokenizer.isMarkupSpace(input.charCodeAt(p))) p += 1;
-    spanStart = from;
-    spanStop = p;
+           !markupTokenizer.isMarkupSpace(input.charCodeAt(p))) {
+      var ahead = stopAt.find(p);
+      if (ahead !== undefined) { p = ahead; break; }
+      p += 1;
+    }
+    stopAt.add(from, p, p);
     return p;
   };
 }
 
-function _inlineLinks(input) {
+var MAX_VALIDATE_OPENERS = 65536;
+
+function _countOpeners(input) {
+  var openers = 0;
+  for (var c = 0; c < input.length; c += 1) {
+    if (input.charCodeAt(c) === 0x5B) openers += 1;
+  }
+  return openers;
+}
+
+function _squareMates(input, openers, spans) {
+  var n = input.length;
+  if (openers === undefined) openers = _countOpeners(input);
+  if (openers === 0 || openers > MAX_VALIDATE_OPENERS) return null;
+  if (spans === undefined) spans = _codeSpans(input);
+  var mate = new Map();
+  var stack = new Int32Array(openers);
+  var top = 0;
+  var sp = 0;
+  var spanCount = spans === null ? 0 : spans.count;
+  for (var i = 0; i < n; i += 1) {
+    if (sp < spanCount && spans.list[sp] === i) { i = spans.list[sp + 1] - 1; sp += 2; continue; }
+    var code = input.charCodeAt(i);
+    if (code === 0x0A) { if (_blankLineAfter(input, i)) top = 0; continue; }
+    if (code === 0x60) {
+      while (i + 1 < n && input.charCodeAt(i + 1) === 0x60) i += 1;
+      continue;
+    }
+    if (code === 0x5C) { i += 1; continue; }
+    if (code === 0x5B) { stack[top] = i; top += 1; continue; }
+    if (code === 0x5D && top > 0) { top -= 1; mate.set(stack[top], i); }
+  }
+  return mate;
+}
+
+function _backtickRuns(input) {
+  var runs = 0;
+  var lts = 0;
+  var escaped = false;
+  var inRun = false;
+  for (var c = 0; c < input.length; c += 1) {
+    var code = input.charCodeAt(c);
+    if (code === 0x5C) {
+      if (input.charCodeAt(c + 1) === 0x60) escaped = true;
+      else c += 1;
+      inRun = false;
+      continue;
+    }
+    if (code === 0x3C) lts += 1;
+    var isTick = code === 0x60;
+    if (isTick && !inRun) runs += 1;
+    inRun = isTick;
+  }
+  return { count: runs, escaped: escaped, lts: lts };
+}
+
+function _runStartsIn(input, from, to) {
+  var runs = 0;
+  var inRun = false;
+  for (var j = from; j < to; j += 1) {
+    var isTick = input.charCodeAt(j) === 0x60;
+    if (isTick && !inRun) runs += 1;
+    inRun = isTick;
+  }
+  return runs;
+}
+
+function _blankLineBefore(input, at) {
+  for (var j = at - 1; j >= 0; j -= 1) {
+    var c = input.charCodeAt(j);
+    if (c === 0x0A) return true;
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0D) return false;
+  }
+  return true;
+}
+
+function _blankLineAfter(input, at) {
+  for (var j = at + 1; j < input.length; j += 1) {
+    var c = input.charCodeAt(j);
+    if (c === 0x0A) return true;
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0D) return false;
+  }
+  return true;
+}
+
+function _codeSpans(input) {
+  var n = input.length;
+  var runs = _backtickRuns(input);
+  var closeEnd = new Int32Array(runs.count);
+  var closeEndShort = runs.escaped ? new Int32Array(runs.count) : null;
+  var lastByLen = new Map();
+  var k = runs.count;
+  for (var i = n - 1; i >= 0; i -= 1) {
+    var code = input.charCodeAt(i);
+    if (code === 0x0A) { if (_blankLineBefore(input, i)) lastByLen.clear(); continue; }
+    if (code !== 0x60) continue;
+    var end = i + 1;
+    while (i > 0 && input.charCodeAt(i - 1) === 0x60) i -= 1;
+    var len = end - i;
+    k -= 1;
+    var next = lastByLen.get(len);
+    closeEnd[k] = next === undefined ? -1 : next;
+    if (closeEndShort !== null) {
+      var nextShort = len > 1 ? lastByLen.get(len - 1) : undefined;
+      closeEndShort[k] = nextShort === undefined ? -1 : nextShort;
+    }
+    lastByLen.set(len, end);
+  }
+  return _inertSpans(input, closeEnd, closeEndShort, runs.lts);
+}
+
+function _makeNextFinder(input, term) {
+  var from = -1;
+  var found = -1;
+  return function (at) {
+    if (from !== -1 && at >= from && (found === -1 || at <= found)) return found;
+    from = at;
+    found = input.indexOf(term, at);
+    return found;
+  };
+}
+
+function _skipHtmlSpace(input, j) {
+  while (j < input.length && codepointClass.isAsciiWhitespace(input.charCodeAt(j))) j += 1;
+  return j;
+}
+
+function _isAsciiDigitCode(c) {
+  return c >= 0x30 && c <= 0x39;
+}
+
+function _isAsciiUpperCode(c) {
+  return c >= 0x41 && c <= 0x5A;
+}
+
+function _isTagNameChar(c) {
+  return codepointClass.isAsciiLetter(c) || _isAsciiDigitCode(c) || c === 0x2D;
+}
+
+function _isAttrNameStart(c) {
+  return codepointClass.isAsciiLetter(c) || c === 0x5F || c === 0x3A;
+}
+
+function _isAttrNameChar(c) {
+  return _isAttrNameStart(c) || _isAsciiDigitCode(c) || c === 0x2E || c === 0x2D;
+}
+
+function _isUnquotedValueChar(c) {
+  return !codepointClass.isAsciiWhitespace(c) && c !== 0x22 && c !== 0x27 && c !== 0x3D &&
+         c !== 0x3C && c !== 0x3E && c !== 0x60;
+}
+
+function _htmlTagEndAt(input, i, find) {
+  if (input.charCodeAt(i) !== 0x3C) return -1;
+  var n = input.length;
+  var c = input.charCodeAt(i + 1);
+  var at;
+  if (c === 0x21) {
+    if (input.startsWith("<!--", i)) { at = find.comment(i + 4); return at === -1 ? -1 : at + 3; }
+    if (input.startsWith("<![CDATA[", i)) { at = find.cdata(i + 9); return at === -1 ? -1 : at + 3; }
+    if (!codepointClass.isAsciiLetter(input.charCodeAt(i + 2))) return -1;
+    at = find.gt(i + 2);
+    return at === -1 ? -1 : at + 1;
+  }
+  if (c === 0x3F) { at = find.pi(i + 2); return at === -1 ? -1 : at + 2; }
+  var j = i + 1;
+  var closing = c === 0x2F;
+  if (closing) j += 1;
+  if (!codepointClass.isAsciiLetter(input.charCodeAt(j))) return -1;
+  j += 1;
+  while (j < n && _isTagNameChar(input.charCodeAt(j))) j += 1;
+  if (closing) {
+    j = _skipHtmlSpace(input, j);
+    return input.charCodeAt(j) === 0x3E ? j + 1 : -1;
+  }
+  for (;;) {
+    var k = _skipHtmlSpace(input, j);
+    var d = input.charCodeAt(k);
+    if (d === 0x3E) return k + 1;
+    if (d === 0x2F) return input.charCodeAt(k + 1) === 0x3E ? k + 2 : -1;
+    if (k === j || !_isAttrNameStart(d)) return -1;
+    k += 1;
+    while (k < n && _isAttrNameChar(input.charCodeAt(k))) k += 1;
+    var e = _skipHtmlSpace(input, k);
+    if (input.charCodeAt(e) !== 0x3D) { j = k; continue; }
+    var v = _skipHtmlSpace(input, e + 1);
+    var q = input.charCodeAt(v);
+    if (q === 0x22 || q === 0x27) {
+      var close = q === 0x22 ? find.dq(v + 1) : find.sq(v + 1);
+      if (close === -1) return -1;
+      j = close + 1;
+      continue;
+    }
+    var u = v;
+    while (u < n && _isUnquotedValueChar(input.charCodeAt(u))) u += 1;
+    if (u === v) return -1;
+    j = u;
+  }
+}
+
+function _inertSpans(input, closeEnd, closeEndShort, lts) {
+  var n = input.length;
+  var list = new Int32Array(closeEnd.length + 2 * lts);
+  var count = 0;
+  var quoted = false;
+  var k = 0;
+  var find = {
+    comment: _makeNextFinder(input, "-->"),
+    cdata:   _makeNextFinder(input, "]]>"),
+    pi:      _makeNextFinder(input, "?>"),
+    gt:      _makeNextFinder(input, ">"),
+    dq:      _makeNextFinder(input, "\""),
+    sq:      _makeNextFinder(input, "'"),
+  };
+  function emit(start, end) {
+    list[count] = start;
+    list[count + 1] = end;
+    count += 2;
+    if (!quoted) quoted = _hasSquare(input, start, end);
+  }
+  for (var i = 0; i < n; i += 1) {
+    var code = input.charCodeAt(i);
+    if (code === 0x5C) {
+      if (input.charCodeAt(i + 1) !== 0x60) { i += 1; continue; }
+      var s = i + 2;
+      var shortEnd = closeEndShort !== null && input.charCodeAt(s) === 0x60 ? closeEndShort[k] : -1;
+      if (shortEnd >= 0) {
+        emit(s, shortEnd);
+        k += _runStartsIn(input, i + 1, shortEnd);
+        i = shortEnd - 1;
+        continue;
+      }
+      i += 1;
+      while (i + 1 < n && input.charCodeAt(i + 1) === 0x60) i += 1;
+      k += 1;
+      continue;
+    }
+    if (code === 0x3C) {
+      var tagEnd = _autolinkEndAt(input, i);
+      if (tagEnd < 0) tagEnd = _htmlTagEndAt(input, i, find);
+      if (tagEnd < 0) continue;
+      emit(i, tagEnd);
+      k += _runStartsIn(input, i, tagEnd);
+      i = tagEnd - 1;
+      continue;
+    }
+    if (code !== 0x60) continue;
+    var end = closeEnd[k];
+    if (end >= 0) {
+      emit(i, end);
+      k += _runStartsIn(input, i, end);
+      i = end - 1;
+      continue;
+    }
+    while (i + 1 < n && input.charCodeAt(i + 1) === 0x60) i += 1;
+    k += 1;
+  }
+  return { list: list, count: count, quoted: quoted };
+}
+
+function _hasSquare(input, from, to) {
+  for (var i = from; i < to; i += 1) {
+    var c = input.charCodeAt(i);
+    if (c === 0x5B || c === 0x5D) return true;
+  }
+  return false;
+}
+
+function _unionMatches(first, second) {
+  if (second.length === 0) return first;
+  var seen = new Set();
+  var openers = new Set();
+  var out = [];
+  for (var i = 0; i < first.length; i += 1) {
+    seen.add(first[i].index + ":" + first[i].urlStart);
+    openers.add(first[i].index);
+    out.push(first[i]);
+  }
+  for (var j = 0; j < second.length; j += 1) {
+    var m = second[j];
+    var key = m.index + ":" + m.urlStart;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (openers.has(m.index)) m = _sameConstructAs(m);
+    else openers.add(m.index);
+    out.push(m);
+  }
+  out.sort(function (a, c) {
+    return a.urlStart !== c.urlStart ? a.urlStart - c.urlStart : a.index - c.index;
+  });
+  return out;
+}
+
+function _sameConstructAs(match) {
+  var copy = { counted: false };
+  Object.keys(match).forEach(function (k) {
+    var d = Object.getOwnPropertyDescriptor(match, k);
+    if (d.get) Object.defineProperty(copy, k, { enumerable: true, get: d.get });
+    else copy[k] = match[k];
+  });
+  copy.counted = false;
+  return copy;
+}
+
+function _mateOf(mates, i) {
+  if (mates === null) return -1;
+  var close = mates.get(i);
+  return close === undefined ? -1 : close;
+}
+
+function _inlineMatch(input, bang, urlStart, urlEnd, index) {
+  var m = { bang: bang, urlStart: urlStart, urlEnd: urlEnd, index: index };
+  Object.defineProperty(m, "url", {
+    enumerable: true,
+    get: function () { return input.slice(urlStart, urlEnd); },
+  });
+  return m;
+}
+
+function _inlineLinks(input, limit, mates) {
   var out = [];
   var urlRunEnd = _makeUrlRunScanner(input);
+  if (mates === undefined) mates = _squareMates(input);
   var failedStop = -1;
+  var closes = null;
+  var nextSpans = new Map();
+  function nextOf(ch, from) {
+    var span = nextSpans.get(ch);
+    if (span === undefined) {
+      span = { lo: -1, answer: -1 };
+      nextSpans.set(ch, span);
+    }
+    return _nextIndexOf(input, ch, from, span);
+  }
+  var spaceSpan = { lo: -1, answer: -1 };
+  function skipSpace(from) {
+    if (from >= input.length ||
+        !markupTokenizer.isMarkupSpace(input.charCodeAt(from))) return from;
+    return _nextNonSpace(input, from, spaceSpan);
+  }
+  function closesAt(at) {
+    if (closes === null) closes = new Uint8Array(input.length + 1);
+    var known = closes[at];
+    if (known !== 0) return known === 2;
+    var v = _linkCloses(input, at, nextOf, skipSpace);
+    closes[at] = v ? 2 : 1;
+    return v;
+  }
+  var backoff = new Map();
+  function backOffMemo(from, to) {
+    var state = backoff.get(to);
+    if (state === undefined) { state = { scannedDownTo: to, best: -1 }; backoff.set(to, state); }
+    if (state.best > from) return state.best;
+    for (var k = state.scannedDownTo - 1; k > from; k -= 1) {
+      if (TITLE_OPENERS.indexOf(input.charAt(k)) !== -1 && closesAt(k)) {
+        state.best = k;
+        break;
+      }
+    }
+    state.scannedDownTo = from + 1;
+    return state.best > from ? state.best : -1;
+  }
   for (var i = 0; i < input.length; i += 1) {
     if (input.charAt(i) !== "[") continue;
     var bang = i > 0 && input.charAt(i - 1) === "!" ? "!" : "";
-    var close = -1;
-    var t = i + 1;
-    for (; t < input.length; t += 1) {
-      var tc = input.charCodeAt(t);
-      if (tc === 0x0A) break;
-      if (input.charAt(t) === "]") { close = t; break; }
-    }
-    if (close === -1) { i = t; continue; }
+    var close = _mateOf(mates, i);
+    if (close === -1) continue;
     if (input.charAt(close + 1) !== "(") continue;
     var urlStart = markupTokenizer.skipMarkupSpace(input, close + 2);
+    if (input.charAt(urlStart) === "<") {
+      var gt = _angleDestEnd(input, urlStart);
+      if (gt !== -1 && closesAt(gt + 1)) {
+        out.push(_inlineMatch(input, bang, urlStart + 1, gt, i));
+        if (limit !== undefined && out.length >= limit) break;
+        continue;
+      }
+    }
     var u = urlRunEnd(urlStart);
     if (u === urlStart) continue;
     if (u === failedStop) continue;
-    var urlEnd = _linkCloses(input, u) ? u : _backOffToTitle(input, urlStart, u);
+    var urlEnd = closesAt(u) ? u : backOffMemo(urlStart, u);
     if (urlEnd === -1) { failedStop = u; continue; }
-    var url = input.slice(urlStart, urlEnd);
-    out.push({ bang: bang, text: input.slice(i + 1, close), url: url, index: i });
+    out.push(_inlineMatch(input, bang, urlStart, urlEnd, i));
+    if (limit !== undefined && out.length >= limit) break;
   }
   return out;
 }
 
-function _linkCloses(s, at) {
-  var p = markupTokenizer.skipMarkupSpace(s, at);
-  if (s.charAt(p) === "\"") {
-    var q = s.indexOf("\"", p + 1);
-    if (q === -1) return false;
-    p = markupTokenizer.skipMarkupSpace(s, q + 1);
-  }
-  return s.charAt(p) === ")";
-}
-
-function _backOffToTitle(s, from, to) {
-  for (var k = to - 1; k > from; k -= 1) {
-    if (s.charAt(k) !== "\"") continue;
-    if (_linkCloses(s, k)) return k;
+function _angleDestEnd(input, at) {
+  for (var i = at + 1; i < input.length; i += 1) {
+    var c = input.charCodeAt(i);
+    if (c === 0x0A) return -1;
+    if (c === 0x5C) { i += 1; continue; }
+    if (c === 0x3C) return -1;
+    if (c === 0x3E) return i;
   }
   return -1;
 }
 
+var TITLE_OPENERS = "\"'(";
+
+function _titleCloserFor(ch) {
+  if (ch === "\"") return "\"";
+  if (ch === "'") return "'";
+  if (ch === "(") return ")";
+  return "";
+}
+
+function _nextWhere(s, from, span, matches) {
+  if (from >= s.length) return -1;
+  if (span.lo !== -1 && from >= span.lo &&
+      (span.answer === -1 ? true : from <= span.answer)) {
+    return span.answer;
+  }
+  var stop = span.lo !== -1 && from < span.lo ? span.lo : s.length;
+  var i = from;
+  while (i < stop && !matches(i)) i += 1;
+  if (i < stop) {
+    span.lo = from;
+    span.answer = i;
+    return i;
+  }
+  if (stop === s.length) {
+    span.lo = from;
+    span.answer = -1;
+    return -1;
+  }
+  span.lo = from;
+  return span.answer;
+}
+
+function _isBackslashEscaped(s, i) {
+  var n = 0;
+  while (i - 1 - n >= 0 && s.charCodeAt(i - 1 - n) === 0x5C) n += 1;
+  return (n % 2) === 1;
+}
+
+function _nextIndexOf(s, ch, from, span) {
+  return _nextWhere(s, from, span, function (i) {
+    return s.charAt(i) === ch && !_isBackslashEscaped(s, i);
+  });
+}
+
+function _nextNonSpace(s, from, span) {
+  var at = _nextWhere(s, from, span, function (i) {
+    return !markupTokenizer.isMarkupSpace(s.charCodeAt(i));
+  });
+  return at === -1 ? s.length : at;
+}
+
+function _linkCloses(s, at, nextOf, skipSpace) {
+  var p = skipSpace(at);
+  var closer = _titleCloserFor(s.charAt(p));
+  if (closer !== "") {
+    var q = nextOf(closer, p + 1);
+    if (q === -1) return false;
+    p = skipSpace(q + 1);
+  }
+  return s.charAt(p) === ")";
+}
+
 var AUTOLINK_SCHEME_TAIL_MAX = 32;
+
+function _autolinkEndAt(input, i) {
+  if (input.charAt(i) !== "<") return -1;
+  if (!codepointClass.isAsciiLetter(input.charCodeAt(i + 1))) return -1;
+  var j = i + 2;
+  var tail = 0;
+  while (j < input.length && tail < AUTOLINK_SCHEME_TAIL_MAX &&
+         SCHEME_TAIL_CHARS.indexOf(input.charAt(j)) !== -1) { j += 1; tail += 1; }
+  if (input.charAt(j) !== ":") return -1;
+  var b = j + 1;
+  while (b < input.length && input.charAt(b) !== ">" && input.charAt(b) !== "<" &&
+         !markupTokenizer.isMarkupSpace(input.charCodeAt(b))) b += 1;
+  if (b === j + 1 || input.charAt(b) !== ">") return -1 - b;
+  return b + 1;
+}
 
 function _autolinks(input) {
   var out = [];
   for (var i = 0; i < input.length; i += 1) {
     if (input.charAt(i) !== "<") continue;
-    if (!codepointClass.isAsciiLetter(input.charCodeAt(i + 1))) continue;
-    var j = i + 2;
-    var tail = 0;
-    while (j < input.length && tail < AUTOLINK_SCHEME_TAIL_MAX &&
-           SCHEME_TAIL_CHARS.indexOf(input.charAt(j)) !== -1) { j += 1; tail += 1; }
-    if (input.charAt(j) !== ":") continue;
-    var b = j + 1;
-    while (b < input.length && input.charAt(b) !== ">" && input.charAt(b) !== "<" &&
-           !markupTokenizer.isMarkupSpace(input.charCodeAt(b))) b += 1;
-    if (b === j + 1 || input.charAt(b) !== ">") { i = b - 1; continue; }
-    out.push({ url: input.slice(i + 1, b), index: i });
-    i = b;
+    var end = _autolinkEndAt(input, i);
+    if (end === -1) continue;
+    if (end < 0) { i = -end - 2; continue; }
+    out.push({ url: input.slice(i + 1, end - 1), index: i });
+    i = end - 1;
   }
   return out;
 }
 
 var SCHEME_TAIL_CHARS = codepointClass.ASCII_ALNUM + "+-.";
 
-var REF_DEF_MAX_INDENT = 3;
+var TITLE_OPEN = 1;
+var TITLE_CLOSED = 2;
+var TITLE_TEXT = 3;
 
-function _refDefs(input) {
-  var out = [];
-  for (var at = 0; at < input.length; at += 1) {
-    if (at > 0 && !_isLineStart(input, at)) continue;
-    var i = at;
-    var indent = 0;
-    while (i < input.length && indent < REF_DEF_MAX_INDENT &&
-           markupTokenizer.isMarkupSpace(input.charCodeAt(i))) { i += 1; indent += 1; }
-    if (input.charAt(i) !== "[") continue;
-    var close = -1;
-    for (var c = i + 1; c < input.length; c += 1) {
-      if (input.charCodeAt(c) === 0x0A) break;
-      if (input.charAt(c) === "]") { close = c; break; }
-    }
-    if (close === -1 || close === i + 1) continue;
-    if (input.charAt(close + 1) !== ":") continue;
-    var u = markupTokenizer.skipMarkupSpace(input, close + 2);
-    var urlStart = u;
-    while (u < input.length && !markupTokenizer.isMarkupSpace(input.charCodeAt(u))) u += 1;
-    if (u === urlStart) continue;
-    out.push({ label: input.slice(i + 1, close), url: input.slice(urlStart, u) });
-    at = u - 1;
+function _titleRunIn(s, from, end, closer) {
+  var c = from;
+  while (c < end && (s.charAt(c) !== closer || _isBackslashEscaped(s, c))) {
+    if (closer === ")" && s.charAt(c) === "(" && !_isBackslashEscaped(s, c)) return TITLE_TEXT;
+    c += 1;
+  }
+  if (c >= end) return TITLE_OPEN;
+  var rest = c + 1;
+  while (rest < end && _isSpaceOrTab(s.charAt(rest))) rest += 1;
+  return rest >= end ? TITLE_CLOSED : TITLE_TEXT;
+}
+
+var READING_MODES = [
+  { commonmark: true, html: true, tables: false },
+  { commonmark: false, html: true, tables: true },
+  { commonmark: false, html: false, tables: true },
+  { commonmark: false, html: true, tables: false },
+  { commonmark: false, html: false, tables: false },
+];
+
+function _readingsWith(unicodeBreaks) {
+  return Object.freeze(READING_MODES.map(function (mode) {
+    return Object.freeze({
+      commonmark: mode.commonmark, html: mode.html, tables: mode.tables, unicodeBreaks: unicodeBreaks,
+    });
+  }));
+}
+
+var READINGS = _readingsWith(false);
+var UNICODE_BREAK_READINGS = _readingsWith(true);
+
+function _readingsFor(input) {
+  return codepointClass.firstInRanges(input, UNICODE_LINE_BREAK_RANGES) === -1
+    ? READINGS : READINGS.concat(UNICODE_BREAK_READINGS);
+}
+
+function _refDefs(input, mates) {
+  if (mates === undefined) mates = _squareMates(input);
+  var readings = _readingsFor(input);
+  var out = _readBlocks(input, mates, readings[0]).definitions;
+  for (var r = 1; r < readings.length; r += 1) {
+    out = _unionMatches(out, _readBlocks(input, mates, readings[r]).definitions);
   }
   return out;
+}
+
+var SCAN_LABEL = 1;
+var SCAN_DESTINATION = 2;
+var SCAN_TITLE = 3;
+
+var SCAN_CONTINUES = 1;
+var SCAN_TITLE_STARTS = 2;
+var SCAN_DEFINED = 3;
+var SCAN_NO_TITLE = 4;
+var SCAN_FAILS = 5;
+
+function _readBlocks(input, mates, reading) {
+  var out = [];
+  var fences = [];
+  var blocks = _blockTracker(reading);
+  var at = 0;
+  var previous = null;
+  var defined = false;
+  var scan = null;
+  while (at < input.length || scan !== null) {
+    var verdict = 0;
+    var end = 0;
+    var next = 0;
+    var leaf = null;
+    if (at >= input.length) {
+      verdict = _scanFailure(scan);
+    } else {
+      end = _lineEndAt(input, at, reading.unicodeBreaks);
+      next = _nextLineStart(input, end);
+      blocks.scanning(scan !== null);
+      leaf = _leafStart(input.slice(at, end), blocks);
+      leaf.at = at;
+      leaf.end = end;
+      var state = blocks.leafLine(input.slice(at, end), leaf);
+      if (state === LEAF_FENCE_OPENS) fences.push({ at: at, info: blocks.fenceInfo() });
+      var tableStarts = reading.tables && state === 0 && !blocks.table() &&
+        _tableStartsAt(input, previous, leaf);
+      if (scan !== null) {
+        verdict = tableStarts ? _scanFailure(scan) : _scanLine(scan, input, at, end, leaf, state);
+        if (verdict === SCAN_CONTINUES || verdict === SCAN_TITLE_STARTS || verdict === SCAN_DEFINED) {
+          _inheritDepth(leaf, previous);
+        }
+      } else {
+        var joins = previous !== null && !leaf.blank && !leaf.opens &&
+          (leaf.depth === previous.depth || (leaf.depth < previous.depth && previous.lazyOk !== false));
+        var continues = joins && previous.paragraph && leaf.text && leaf.html === null;
+        var chained = joins && defined && reading.commonmark;
+        if (tableStarts) {
+          blocks.table(true);
+          continues = true;
+        }
+        var tabled = tableStarts || (reading.tables && blocks.table());
+        if (tabled) {
+          leaf.lazyOk = false;
+          continues = true;
+        }
+        if (continues) leaf.paragraph = true;
+        if (continues || chained) _inheritDepth(leaf, previous);
+        previous = leaf;
+        defined = false;
+        if (state !== 0 || leaf.blank || continues || (leaf.code && !chained)) { at = next; continue; }
+        var i = at + leaf.index;
+        var close = input.charAt(i) === "[" ? _mateOf(mates, i) : -1;
+        if (close === -1 || input.charAt(close + 1) !== ":" || !_isLinkLabel(input, i + 1, close)) {
+          if (!leaf.code && input.charAt(i) === "[") leaf.paragraph = true;
+          if (close !== -1 && close !== i + 1 && close < end && input.charAt(close + 1) === ":") {
+            _readDestinationAfter(input, i, close, end, out);
+          }
+          at = next;
+          continue;
+        }
+        scan = { phase: SCAN_LABEL, i: i, close: close, closer: "", textBefore: blocks.textBefore(),
+                 definition: null, titleOnDestinationLine: false, resume: null, titleResume: null };
+        verdict = close < end ? _scanDestination(scan, input, close + 2, end) : SCAN_CONTINUES;
+      }
+    }
+    if (scan.definition !== null) {
+      out.push(scan.definition);
+      scan.definition = null;
+    }
+    if (verdict === SCAN_DEFINED) {
+      blocks.commit();
+      blocks.definition(scan.textBefore);
+      defined = true;
+      leaf.paragraph = false;
+      previous = leaf;
+      scan = null;
+      at = next;
+      continue;
+    }
+    if (verdict === SCAN_CONTINUES || verdict === SCAN_TITLE_STARTS) {
+      var point = { at: next, previous: leaf, fences: fences.length, mark: blocks.mark() };
+      if (scan.resume === null) scan.resume = point;
+      if (verdict === SCAN_TITLE_STARTS) {
+        scan.titleResume = point;
+        scan.phase = SCAN_TITLE;
+      }
+      previous = leaf;
+      at = next;
+      continue;
+    }
+    if (scan.resume === null) {
+      leaf.paragraph = true;
+      at = next;
+    } else {
+      var resume = verdict === SCAN_NO_TITLE ? scan.titleResume : scan.resume;
+      blocks.rollback(resume.mark);
+      at = resume.at;
+      previous = resume.previous;
+      fences.length = resume.fences;
+      if (verdict === SCAN_NO_TITLE) {
+        blocks.definition(scan.textBefore);
+        previous.paragraph = false;
+      } else {
+        previous.paragraph = true;
+      }
+    }
+    defined = verdict === SCAN_NO_TITLE;
+    scan = null;
+  }
+  return { definitions: out, fences: fences };
+}
+
+function _scanFailure(scan) {
+  return scan.phase === SCAN_TITLE && !scan.titleOnDestinationLine ? SCAN_NO_TITLE : SCAN_FAILS;
+}
+
+function _scanLine(scan, input, at, end, leaf, state) {
+  if (state !== 0 || leaf.blank || leaf.opens || !leaf.text) return _scanFailure(scan);
+  if (scan.phase === SCAN_LABEL) {
+    return scan.close < end ? _scanDestination(scan, input, scan.close + 2, end) : SCAN_CONTINUES;
+  }
+  var from = at + leaf.index;
+  if (scan.phase === SCAN_DESTINATION) return _scanDestination(scan, input, from, end);
+  var run;
+  if (scan.closer === "") {
+    scan.closer = _titleCloserFor(input.charAt(from));
+    if (scan.closer === "") return SCAN_NO_TITLE;
+    run = _titleRunIn(input, from + 1, end, scan.closer);
+  } else {
+    run = _titleRunIn(input, from, end, scan.closer);
+  }
+  if (run === TITLE_CLOSED) return SCAN_DEFINED;
+  return run === TITLE_OPEN ? SCAN_CONTINUES : _scanFailure(scan);
+}
+
+function _scanDestination(scan, input, from, end) {
+  var urlStart = _skipSpaceOrTab(input, from);
+  if (urlStart >= end) {
+    if (scan.phase === SCAN_DESTINATION) return SCAN_FAILS;
+    scan.phase = SCAN_DESTINATION;
+    return SCAN_CONTINUES;
+  }
+  var target = _destinationEnd(input, urlStart, end);
+  if (!target.valid) return SCAN_FAILS;
+  scan.definition = { label: input.slice(scan.i + 1, scan.close), url: target.url,
+                      index: scan.i, urlStart: target.urlStart };
+  var run = _titleOnLine(input, target.end, end);
+  if (run === TITLE_CLOSED) return SCAN_DEFINED;
+  if (run === TITLE_TEXT) return SCAN_FAILS;
+  scan.titleOnDestinationLine = run === TITLE_OPEN;
+  scan.closer = run === TITLE_OPEN ? _titleCloserFor(input.charAt(_skipSpaceOrTab(input, target.end))) : "";
+  return SCAN_TITLE_STARTS;
+}
+
+function _readDestinationAfter(input, i, close, end, out) {
+  var urlStart = _skipSpaceOrTab(input, close + 2);
+  if (urlStart >= end) return;
+  var target = _destinationEnd(input, urlStart, end);
+  if (!target.valid) return;
+  out.push({ label: input.slice(i + 1, close), url: target.url, index: i, urlStart: target.urlStart });
+}
+
+function _isLinkLabel(s, from, to) {
+  var content = false;
+  for (var i = from; i < to; i += 1) {
+    var ch = s.charAt(i);
+    if (ch === "\\") { i += 1; content = true; continue; }
+    if (ch === "[" || ch === "]") return false;
+    if (!content && !markupTokenizer.isMarkupSpace(s.charCodeAt(i))) content = true;
+  }
+  return content;
+}
+
+function _inheritDepth(leaf, previous) {
+  if (previous === null || leaf.depth >= previous.depth) return;
+  leaf.ownDepth = leaf.depth;
+  leaf.depth = previous.depth;
+}
+
+var TABLE_DELIMITER_CHARS = "|-: \t";
+
+function _tableStartsAt(input, previous, leaf) {
+  if (previous === null || previous.blank || leaf.blank || leaf.opens || leaf.code || previous.code ||
+      !previous.text || previous.lazyOk === false || previous.ownDepth !== undefined ||
+      leaf.depth !== previous.depth) {
+    return false;
+  }
+  var cells = _tableDelimiterCells(input, leaf.at + leaf.index, leaf.end);
+  return cells > 0 && cells === _tableHeaderCells(input, previous.at + previous.index, previous.end);
+}
+
+function _tableDelimiterCells(s, from, end) {
+  while (end > from && _isSpaceOrTab(s.charAt(end - 1))) end -= 1;
+  if (end - from < 2) return -1;
+  var first = s.charAt(from);
+  var second = s.charAt(from + 1);
+  if (first !== "|" && first !== "-" && first !== ":") return -1;
+  if (TABLE_DELIMITER_CHARS.indexOf(second) === -1 || (first === "-" && _isSpaceOrTab(second))) return -1;
+  var cells = 0;
+  var cellStart = from;
+  for (var i = from; i <= end; i += 1) {
+    if (i < end && s.charAt(i) !== "|") {
+      if (TABLE_DELIMITER_CHARS.indexOf(s.charAt(i)) === -1) return -1;
+      continue;
+    }
+    var a = cellStart;
+    var z = i;
+    while (a < z && _isSpaceOrTab(s.charAt(a))) a += 1;
+    while (z > a && _isSpaceOrTab(s.charAt(z - 1))) z -= 1;
+    if (a === z) {
+      if (cellStart !== from && i !== end) return -1;
+    } else {
+      if (s.charAt(a) === ":") a += 1;
+      if (z > a && s.charAt(z - 1) === ":") z -= 1;
+      if (a === z) return -1;
+      for (var d = a; d < z; d += 1) if (s.charAt(d) !== "-") return -1;
+      cells += 1;
+    }
+    cellStart = i + 1;
+  }
+  return cells;
+}
+
+function _tableHeaderCells(s, from, end) {
+  while (end > from && _isSpaceOrTab(s.charAt(end - 1))) end -= 1;
+  var cells = [];
+  var cellStart = from;
+  var escaped = false;
+  var sawPipe = false;
+  for (var i = from; i < end; i += 1) {
+    var ch = s.charAt(i);
+    if (ch === "|") {
+      sawPipe = true;
+      if (!escaped) {
+        cells.push(i > cellStart);
+        cellStart = i + 1;
+      }
+    }
+    escaped = ch === "\\";
+  }
+  if (!sawPipe) return -1;
+  cells.push(end > cellStart);
+  if (cells.length > 0 && cells[0] === false) cells.shift();
+  if (cells.length > 0 && cells[cells.length - 1] === false) cells.pop();
+  return cells.length;
+}
+
+var TITLE_PENDING = 4;
+
+function _destinationEnd(s, from, end) {
+  if (s.charAt(from) === "<") {
+    var c = from + 1;
+    while (c < end && s.charAt(c) !== ">" && s.charAt(c) !== "<") {
+      c += s.charAt(c) === "\\" ? 2 : 1;
+    }
+    if (c < end && s.charAt(c) === ">") {
+      return { end: c + 1, url: s.slice(from + 1, c), urlStart: from + 1, valid: true };
+    }
+    return { end: from, url: "", urlStart: from, valid: false };
+  }
+  var u = from;
+  var depth = 0;
+  while (u < end && !markupTokenizer.isMarkupSpace(s.charCodeAt(u))) {
+    var ch = s.charAt(u);
+    if (ch === "\\" && u + 1 < end) { u += 2; continue; }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") { if (depth === 0) break; depth -= 1; }
+    u += 1;
+  }
+  return { end: u, url: s.slice(from, u), urlStart: from, valid: depth === 0 && u > from };
+}
+
+function _titleOnLine(s, from, end) {
+  var rest = _skipSpaceOrTab(s, from);
+  if (rest >= end) return TITLE_PENDING;
+  var opener = _titleCloserFor(s.charAt(rest));
+  return opener === "" ? TITLE_TEXT : _titleRunIn(s, rest + 1, end, opener);
 }
 
 var ATTR_BREAKING_CHARS = "<>\"'`";
 
-function _codeFenceLangs(input) {
-  var out = [];
-  var lines = _markdownLines(input);
-  for (var li = 0; li < lines.length; li += 1) {
-    var line = lines[li];
-    var fence = line.slice(0, 3);
-    if (fence !== "```" && fence !== "~~~") continue;
-    out.push(line.slice(3));
-  }
-  return out;
+var CONTAINER_MAX_INDENT = 3;
+var LIST_MARKER_MAX_SPACES = 4;
+var ORDERED_MARKER_MAX_DIGITS = 9;
+var LIST_BULLET_CHARS = "-+*";
+var TAB_STOP = 4;
+
+function _columnAfter(column, ch) {
+  return ch === "\t" ? column + TAB_STOP - (column % TAB_STOP) : column + 1;
 }
 
-function _isLineStart(s, at) {
-  return at === 0 ||
-         codepointClass.inRanges(s.charCodeAt(at - 1),
-                                 codepointClass.LINE_TERMINATOR_RANGES);
+function _isSpaceOrTab(ch) { return ch === " " || ch === "\t"; }
+
+function _markerEnd(line, at) {
+  var ch = line.charAt(at);
+  if (ch === "") return -1;
+  if (ch === ">") return at + 1;
+  var d = at;
+  if (LIST_BULLET_CHARS.indexOf(ch) !== -1) {
+    d = at + 1;
+  } else {
+    while (d < line.length && d - at < ORDERED_MARKER_MAX_DIGITS &&
+           _isAsciiDigitCode(line.charCodeAt(d))) d += 1;
+    if (d === at || (line.charAt(d) !== "." && line.charAt(d) !== ")")) return -1;
+    d += 1;
+  }
+  return d >= line.length || _isSpaceOrTab(line.charAt(d)) ? d : -1;
+}
+
+var HEADING_MAX_LEVEL = 6;
+var THEMATIC_BREAK_MIN = 3;
+var FENCE_MIN_RUN = 3;
+
+function _markerAt(line, at, memo) {
+  return _isThematicBreakAt(line, at, memo) ? -1 : _markerEnd(line, at);
+}
+
+function _markerInterrupts(line, at, markerEnd) {
+  var rest = markerEnd;
+  while (rest < line.length && _isSpaceOrTab(line.charAt(rest))) rest += 1;
+  if (rest >= line.length) return false;
+  if (LIST_BULLET_CHARS.indexOf(line.charAt(at)) !== -1) return true;
+  return line.charAt(at) === "1" && !_isAsciiDigitCode(line.charCodeAt(at + 1));
+}
+
+function _isRunLine(line, at, ch) {
+  var end = at;
+  while (end < line.length && line.charAt(end) === ch) end += 1;
+  if (end === at) return false;
+  while (end < line.length && _isSpaceOrTab(line.charAt(end))) end += 1;
+  return end >= line.length;
+}
+
+function _breakMemo() {
+  return { ch: "", from: 0, bad: -1, count: 0 };
+}
+
+function _isThematicBreakAt(line, at, memo) {
+  var ch = line.charAt(at);
+  if (ch !== "*" && ch !== "_" && ch !== "-") return false;
+  var t;
+  if (memo.ch === ch && memo.from <= at && at < memo.bad) {
+    for (t = memo.from; t < at; t += 1) {
+      if (line.charAt(t) === ch) memo.count -= 1;
+    }
+    memo.from = at;
+    return memo.bad >= line.length && memo.count >= THEMATIC_BREAK_MIN;
+  }
+  var count = 0;
+  for (t = at; t < line.length; t += 1) {
+    if (line.charAt(t) === ch) count += 1;
+    else if (!_isSpaceOrTab(line.charAt(t))) break;
+  }
+  memo.ch = ch;
+  memo.from = at;
+  memo.bad = t;
+  memo.count = count;
+  return t >= line.length && count >= THEMATIC_BREAK_MIN;
+}
+
+function _leafInterrupts(line, at, memo) {
+  var ch = line.charAt(at);
+  var end = at;
+  if (ch === "#") {
+    while (end < line.length && line.charAt(end) === "#") end += 1;
+    return end - at <= HEADING_MAX_LEVEL &&
+      (end >= line.length || _isSpaceOrTab(line.charAt(end)));
+  }
+  if (ch === "`" || ch === "~") {
+    while (end < line.length && line.charAt(end) === ch) end += 1;
+    if (end - at < FENCE_MIN_RUN) return false;
+    return ch === "~" || line.indexOf("`", end) === -1;
+  }
+  return _isThematicBreakAt(line, at, memo);
+}
+
+function _fenceOpenAt(line, at) {
+  var ch = line.charAt(at);
+  if (ch !== "`" && ch !== "~") return null;
+  var end = at;
+  while (end < line.length && line.charAt(end) === ch) end += 1;
+  if (end - at < FENCE_MIN_RUN) return null;
+  if (ch === "`" && line.indexOf("`", end) !== -1) return null;
+  return { ch: ch, run: end - at, info: line.slice(end) };
+}
+
+function _fenceClosesAt(line, at, fence) {
+  var end = at;
+  while (end < line.length && line.charAt(end) === fence.ch) end += 1;
+  if (end - at < fence.run) return false;
+  while (end < line.length && _isSpaceOrTab(line.charAt(end))) end += 1;
+  return end >= line.length;
+}
+
+var LEAF_FENCE_OPENS = 1;
+var LEAF_FENCE_CONTENT = 2;
+var LEAF_FENCE_CLOSES = 3;
+var LEAF_HTML = 4;
+var LEAF_HTML_ENDS = 5;
+
+var HTML_RAW_TAGS = Object.freeze(["script", "pre", "style", "textarea"]);
+var HTML_DELIMITED_STARTS = Object.freeze([
+  { start: "<!--", end: "-->" },
+  { start: "<?", end: "?>" },
+  { start: "<![CDATA[", end: "]]>" },
+]);
+var HTML_BLOCK_TAGS = Object.freeze([
+  "address", "article", "aside", "base", "basefont", "blockquote", "body",
+  "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+  "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+  "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+  "hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem",
+  "nav", "noframes", "ol", "optgroup", "option", "p", "param", "search",
+  "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead",
+  "title", "tr", "track", "ul",
+]);
+
+function _htmlTagNameAt(line, at, names) {
+  for (var t = 0; t < names.length; t += 1) {
+    var name = names[t];
+    if (!codepointClass.matchesAtFolded(line, at, name)) continue;
+    var after = line.charAt(at + name.length);
+    if (after === "" || after === ">" || _isSpaceOrTab(after)) return name;
+    if (after === "/" && line.charAt(at + name.length + 1) === ">") return name;
+  }
+  return null;
+}
+
+var ATTR_NAME_START_CHARS = codepointClass.ASCII_ALPHA + "_:";
+var ATTR_NAME_CHARS = codepointClass.ASCII_ALNUM + "_.:-";
+var UNQUOTED_VALUE_STOP_CHARS = " \t\"'=<>`";
+
+function _skipSpaceOrTab(line, at) {
+  while (at < line.length && _isSpaceOrTab(line.charAt(at))) at += 1;
+  return at;
+}
+
+function _attributeEnd(line, at) {
+  if (ATTR_NAME_START_CHARS.indexOf(line.charAt(at)) === -1 || at >= line.length) return -1;
+  var i = at + 1;
+  while (i < line.length && ATTR_NAME_CHARS.indexOf(line.charAt(i)) !== -1) i += 1;
+  var eq = _skipSpaceOrTab(line, i);
+  if (line.charAt(eq) !== "=") return i;
+  var v = _skipSpaceOrTab(line, eq + 1);
+  var quote = line.charAt(v);
+  if (quote === "\"" || quote === "'") {
+    var close = line.indexOf(quote, v + 1);
+    return close === -1 ? -1 : close + 1;
+  }
+  var u = v;
+  while (u < line.length && UNQUOTED_VALUE_STOP_CHARS.indexOf(line.charAt(u)) === -1) u += 1;
+  return u === v ? -1 : u;
+}
+
+function _isLoneTagLine(line, at) {
+  var i = at + 1;
+  var closing = line.charAt(i) === "/";
+  if (closing) i += 1;
+  var nameStart = i;
+  if (!codepointClass.isAsciiLetter(line.charCodeAt(i))) return false;
+  while (i < line.length &&
+         (codepointClass.isAsciiAlnum(line.charCodeAt(i)) || line.charAt(i) === "-")) i += 1;
+  if (!closing && HTML_RAW_TAGS.indexOf(line.slice(nameStart, i).toLowerCase()) !== -1) return false;
+  for (;;) {
+    var s = _skipSpaceOrTab(line, i);
+    var ch = line.charAt(s);
+    if (ch === ">") { i = s + 1; break; }
+    if (!closing && ch === "/" && line.charAt(s + 1) === ">") { i = s + 2; break; }
+    if (closing || s === i) return false;
+    i = _attributeEnd(line, s);
+    if (i === -1) return false;
+  }
+  return _skipSpaceOrTab(line, i) >= line.length;
+}
+
+function _htmlBlockAt(line, at, paragraphOpen) {
+  if (line.charAt(at) !== "<") return null;
+  for (var i = 0; i < HTML_DELIMITED_STARTS.length; i += 1) {
+    if (line.startsWith(HTML_DELIMITED_STARTS[i].start, at)) {
+      return { end: HTML_DELIMITED_STARTS[i].end };
+    }
+  }
+  if (line.charAt(at + 1) === "!" && _isAsciiUpperCode(line.charCodeAt(at + 2))) {
+    return { end: ">" };
+  }
+  if (_htmlTagNameAt(line, at + 1, HTML_RAW_TAGS) !== null) return { end: HTML_RAW_END };
+  var nameAt = line.charAt(at + 1) === "/" ? at + 2 : at + 1;
+  if (_htmlTagNameAt(line, nameAt, HTML_BLOCK_TAGS) !== null) return { end: null };
+  if (!paragraphOpen && _isLoneTagLine(line, at)) return { end: null };
+  return null;
+}
+
+var HTML_RAW_END = Object.freeze(HTML_RAW_TAGS.map(function (name) { return "</" + name + ">"; }));
+
+function _htmlBlockEndsIn(line, end, from) {
+  if (typeof end === "string") return codepointClass.indexOfFolded(line, end, from) !== -1;
+  for (var i = 0; i < end.length; i += 1) {
+    if (codepointClass.indexOfFolded(line, end[i], from) !== -1) return true;
+  }
+  return false;
+}
+
+function _restorePush(cols, depth, value) {
+  return function () { cols[depth].push(value); };
+}
+
+function _restoreCounter(counters, depth, value) {
+  return function () { counters[depth] = value; };
+}
+
+function _restoreOpen(cols, depth) {
+  var created = cols[depth] === undefined;
+  var length = cols.length;
+  return function () {
+    if (!created) { cols[depth].pop(); return; }
+    if (depth >= length) cols.length = length;
+    else cols[depth] = undefined;
+  };
+}
+
+function _restoreArrays(cols, blank, prefix) {
+  var blankCopy = prefix === -1 ? blank.slice() : blank.slice(0, prefix + 1);
+  var blankLength = blank.length;
+  var colsCopy = prefix === -1
+    ? cols.map(function (list) { return list === undefined ? undefined : list.slice(); }) : null;
+  var colsLength = cols.length;
+  return function () {
+    for (var j = 0; j < blankCopy.length; j += 1) blank[j] = blankCopy[j];
+    blank.length = blankLength;
+    if (colsCopy === null) return;
+    for (var k = 0; k < colsCopy.length; k += 1) {
+      if (colsCopy[k] === undefined) { cols[k] = undefined; continue; }
+      if (cols[k] === undefined) cols[k] = [];
+      cols[k].length = 0;
+      for (var m = 0; m < colsCopy[k].length; m += 1) cols[k].push(colsCopy[k][m]);
+    }
+    cols.length = colsLength;
+  };
+}
+
+function _blockTracker(reading) {
+  var cols = [];
+  var blank = [];
+  var pops = [];
+  var armed = -1;
+  var opened = false;
+  var lazy = false;
+  var paragraph = false;
+  var paragraphText = false;
+  var textBefore = false;
+  var previousDepth = 0;
+  var leafBlock = null;
+  var html = null;
+  var openedInfo = "";
+  var scanning = false;
+  var table = false;
+  var journal = null;
+  function noteScalars() {
+    if (journal === null) return;
+    var a = armed, o = opened, l = lazy, p = paragraph, pt = paragraphText, tb = textBefore;
+    var pd = previousDepth, lb = leafBlock, h = html, oi = openedInfo, t = table;
+    journal.push(function () {
+      armed = a; opened = o; lazy = l; paragraph = p; paragraphText = pt; textBefore = tb;
+      previousDepth = pd; leafBlock = lb; html = h; openedInfo = oi; table = t;
+    });
+  }
+  return {
+    lazy: function () { return lazy; },
+    paragraph: function () { return paragraph; },
+    paragraphText: function () { return paragraphText; },
+    textBefore: function () { return textBefore; },
+    definition: function (before) {
+      noteScalars();
+      paragraphText = before === undefined ? textBefore : before;
+      paragraph = false;
+      if (!reading.commonmark) lazy = false;
+    },
+    scanning: function (open) {
+      if (open !== undefined) scanning = open;
+      return scanning;
+    },
+    table: function (open) {
+      if (open === true) {
+        noteScalars();
+        table = true;
+        lazy = false;
+        paragraph = false;
+        paragraphText = false;
+      }
+      return table;
+    },
+    mark: function () {
+      if (journal === null) journal = [];
+      return journal.length;
+    },
+    commit: function () { journal = null; },
+    rollback: function (position) {
+      var undo = journal;
+      journal = null;
+      for (var k = undo.length - 1; k >= position; k -= 1) undo[k]();
+    },
+    previousDepth: function () { return previousDepth; },
+    base: function (depth) {
+      var list = cols[depth];
+      return list === undefined || list.length === 0 ? 0 : list[list.length - 1];
+    },
+    landing: function (depth, indent) {
+      var list = cols[depth];
+      if (list === undefined || list.length === 0 || list[0] > indent) return 0;
+      var lo = 0;
+      var hi = list.length - 1;
+      while (lo < hi) {
+        var mid = (lo + hi + 1) >> 1;
+        if (list[mid] <= indent) lo = mid;
+        else hi = mid - 1;
+      }
+      return list[lo];
+    },
+    enter: function (depth, indent, interrupts) {
+      if (blank[depth] !== true && !interrupts && lazy) return false;
+      var list = cols[depth];
+      var popped = false;
+      while (list !== undefined && list.length > 0 && list[list.length - 1] > indent) {
+        var col = list.pop();
+        if (journal !== null) journal.push(_restorePush(cols, depth, col));
+        popped = true;
+      }
+      if (popped) {
+        if (journal !== null) journal.push(_restoreCounter(pops, depth, pops[depth]));
+        pops[depth] = (pops[depth] || 0) + 1;
+      }
+      return popped;
+    },
+    leafLine: function (line, leaf) {
+      noteScalars();
+      if (leafBlock !== null &&
+          (leaf.depth < leafBlock.depth || (pops[leafBlock.depth] || 0) !== leafBlock.pops)) {
+        leafBlock = null;
+      }
+      if (leafBlock !== null) {
+        if (!leaf.blank && !leaf.code && _fenceClosesAt(line, leaf.index, leafBlock)) {
+          leafBlock = null;
+          return LEAF_FENCE_CLOSES;
+        }
+        return LEAF_FENCE_CONTENT;
+      }
+      if (html !== null &&
+          (leaf.depth < html.depth || (pops[html.depth] || 0) !== html.pops)) html = null;
+      if (html !== null) {
+        var ends = html.end === null
+          ? leaf.blank : _htmlBlockEndsIn(line, html.end, leaf.blank ? 0 : leaf.index);
+        if (!ends) return LEAF_HTML;
+        html = null;
+        if (leaf.blank) return 0;
+        paragraph = false;
+        paragraphText = false;
+        leaf.paragraph = false;
+        return LEAF_HTML_ENDS;
+      }
+      if (leaf.blank || leaf.code) return 0;
+      if (leaf.html !== null) {
+        if (leaf.html.end === null || !_htmlBlockEndsIn(line, leaf.html.end, leaf.index + 1)) {
+          html = { end: leaf.html.end, depth: leaf.depth, pops: pops[leaf.depth] || 0 };
+          return LEAF_HTML;
+        }
+        paragraph = false;
+        paragraphText = false;
+        leaf.paragraph = false;
+        return LEAF_HTML_ENDS;
+      }
+      var opening = _fenceOpenAt(line, leaf.index);
+      if (opening === null) return 0;
+      openedInfo = opening.info;
+      leafBlock = {
+        ch: opening.ch, run: opening.run,
+        depth: leaf.depth, pops: pops[leaf.depth] || 0,
+      };
+      return LEAF_FENCE_OPENS;
+    },
+    fenceInfo: function () { return openedInfo; },
+    inHtml: function () { return html !== null; },
+    reading: function () { return reading; },
+    leafDepth: function () {
+      if (leafBlock !== null) return leafBlock.depth;
+      return html === null ? -1 : html.depth;
+    },
+    dropLeaf: function () { noteScalars(); leafBlock = null; html = null; },
+    open: function (depth, col) {
+      noteScalars();
+      if (journal !== null) journal.push(_restoreOpen(cols, depth));
+      if (cols[depth] === undefined) cols[depth] = [];
+      cols[depth].push(col);
+      opened = true;
+    },
+    line: function (depth, isBlank, text, startsNoDefinition, opens, lazyOk) {
+      noteScalars();
+      var isText = !isBlank && text === true;
+      var lazyLine = isText && lazy && !opens && depth < previousDepth;
+      var closes = !isBlank && !lazyLine && depth + 1 < cols.length;
+      if (journal !== null) journal.push(_restoreArrays(cols, blank, isBlank || closes ? -1 : depth));
+      if (closes) {
+        cols.length = depth + 1;
+        if (blank.length > depth + 1) blank.length = depth + 1;
+      }
+      var continuing = isText && lazy && !opens;
+      textBefore = continuing ? paragraphText : false;
+      lazy = isText && lazyOk !== false;
+      paragraph = !isBlank && startsNoDefinition === true;
+      paragraphText = isText;
+      if (table) {
+        table = isText && !opens && depth >= previousDepth;
+        if (table) { lazy = false; paragraph = false; paragraphText = false; }
+      }
+      if (!lazyLine) previousDepth = depth;
+      for (var j = 0; j < depth; j += 1) blank[j] = false;
+      blank[depth] = isBlank;
+      if (isBlank && armed === depth && !opened && cols[depth] !== undefined) cols[depth].pop();
+      armed = isBlank && opened ? depth : -1;
+      opened = false;
+      if (isBlank && cols.length > depth + 1) cols.length = depth + 1;
+      if (isBlank && blank.length > depth + 1) blank.length = depth + 1;
+    },
+  };
+}
+
+var PARAGRAPH_ENDING_CHARS = "=|[";
+
+function _leafStart(line, blocks) {
+  var i = 0;
+  var column = 0;
+  var carried = 0;
+  var depth = 0;
+  var residual = 0;
+  var base = 0;
+  var entered = false;
+  var opens = false;
+  var fenceDepth = blocks.leafDepth();
+  var fenced = fenceDepth >= 0;
+  var commonmark = blocks.reading().commonmark;
+  var htmlBlocks = blocks.reading().html;
+  var scanning = !commonmark && blocks.scanning();
+  var tabled = !commonmark && blocks.table();
+  var breakMemo = _breakMemo();
+  for (;;) {
+    var j = i;
+    var runColumn = column;
+    while (j < line.length && _isSpaceOrTab(line.charAt(j))) {
+      runColumn = _columnAfter(runColumn, line.charAt(j));
+      j += 1;
+    }
+    if (j >= line.length) {
+      blocks.line(depth, true, false, false, opens);
+      return {
+        index: j, blank: true, code: false, text: false, html: null, depth: depth,
+        opens: opens, paragraph: false,
+      };
+    }
+    var indent = runColumn - residual;
+    var scanDeep = scanning && indent - blocks.base(depth) > CONTAINER_MAX_INDENT &&
+      !(line.charAt(j) === ">" && depth < blocks.previousDepth());
+    var deep = scanDeep || (!fenced && line.charAt(j) !== ">" &&
+      indent - blocks.landing(depth, indent) > CONTAINER_MAX_INDENT);
+    var markerEnd = fenced
+      ? (depth < fenceDepth && line.charAt(j) === ">" ? j + 1 : -1)
+      : deep ? -1 : _markerAt(line, j, breakMemo);
+    if (fenced && depth < fenceDepth && markerEnd === -1) {
+      fenced = false;
+      blocks.dropLeaf();
+      markerEnd = _markerAt(line, j, breakMemo);
+    }
+    var inParagraph = !opens && !scanning && !tabled &&
+      (commonmark ? blocks.lazy() : blocks.paragraphText()) &&
+      depth === blocks.previousDepth() && indent >= blocks.base(depth);
+    if (markerEnd !== -1 && line.charAt(j) !== ">" && inParagraph &&
+        !_markerInterrupts(line, j, markerEnd)) {
+      markerEnd = -1;
+    }
+    var html = fenced || markerEnd !== -1 || !htmlBlocks || scanning || deep
+      ? null : _htmlBlockAt(line, j, inParagraph || tabled || (!opens && blocks.lazy()));
+    var erasedInItem = deep && !scanDeep && !commonmark && !fenced && depth === blocks.previousDepth() &&
+      indent < blocks.base(depth) &&
+      (_leafInterrupts(line, j, breakMemo) || (htmlBlocks && _htmlBlockAt(line, j, true) !== null));
+    if (!entered) {
+      var interrupts = !fenced && (erasedInItem || (!deep &&
+        (markerEnd !== -1 || html !== null || _leafInterrupts(line, j, breakMemo))));
+      if (blocks.enter(depth, runColumn - residual, interrupts)) {
+        opens = true;
+        inParagraph = false;
+        if (fenced) {
+          fenced = false;
+          blocks.dropLeaf();
+          markerEnd = _markerAt(line, j, breakMemo);
+          html = markerEnd !== -1 || !htmlBlocks ? null : _htmlBlockAt(line, j, blocks.lazy());
+        }
+      }
+      base = residual + blocks.base(depth);
+      entered = true;
+    }
+    var rel = runColumn - base;
+    if (!commonmark && rel > CONTAINER_MAX_INDENT && line.charAt(j) === ">" &&
+        depth < blocks.previousDepth() && markerEnd !== -1) {
+      rel = 0;
+    }
+    if (rel > CONTAINER_MAX_INDENT) {
+      var erased = !commonmark && blocks.previousDepth() >= depth + 2 &&
+        (_markerAt(line, j, breakMemo) !== -1 || _leafInterrupts(line, j, breakMemo) ||
+         (htmlBlocks && _htmlBlockAt(line, j, true) !== null));
+      var shallower = !commonmark && (erased || (!scanning && !blocks.lazy())) && depth < blocks.previousDepth();
+      var lazy = !fenced && !opens && !shallower && !erasedInItem && (scanning || blocks.lazy());
+      var continued = !fenced && !opens && !shallower && blocks.paragraph();
+      blocks.line(depth, false, lazy, continued, opens);
+      return {
+        index: j, blank: false, code: true, text: lazy, html: null, depth: depth,
+        opens: opens, paragraph: continued,
+      };
+    }
+    if (markerEnd === -1) {
+      var text = !fenced && (deep || !_leafInterrupts(line, j, breakMemo));
+      var paragraph = text && PARAGRAPH_ENDING_CHARS.indexOf(line.charAt(j)) === -1;
+      var ch = line.charAt(j);
+      var underline = false;
+      if (text && (ch === "=" || ch === "-") && _isRunLine(line, j, ch) && !scanning) {
+        underline = inParagraph && blocks.paragraphText();
+        text = !underline;
+        paragraph = !underline;
+      }
+      var lazyOk = text && !fenced && html === null && !blocks.inHtml();
+      blocks.line(depth, false, text, paragraph, opens, lazyOk);
+      return {
+        index: j, blank: false, code: false, text: text, underline: underline, lazyOk: lazyOk,
+        html: fenced ? null : html, depth: depth, opens: opens, paragraph: paragraph,
+      };
+    }
+    if (line.charAt(j) === ">") {
+      if (depth + 1 > blocks.previousDepth()) opens = true;
+    } else {
+      opens = true;
+    }
+    column = runColumn;
+    for (var k = j; k < markerEnd; k += 1) column = _columnAfter(column, line.charAt(k));
+    i = markerEnd;
+    carried = 0;
+    if (line.charAt(j) === ">") {
+      if (line.charAt(i) === " ") { column += 1; i += 1; }
+      else if (line.charAt(i) === "\t") {
+        var stop = _columnAfter(column, "\t");
+        carried = stop - column - 1;
+        column = stop;
+        i += 1;
+      }
+      depth += 1;
+      residual = column - carried;
+      entered = false;
+      continue;
+    }
+    var s = i;
+    var sColumn = column;
+    while (s < line.length && _isSpaceOrTab(line.charAt(s))) {
+      sColumn = _columnAfter(sColumn, line.charAt(s));
+      s += 1;
+    }
+    if (s >= line.length || sColumn - column > LIST_MARKER_MAX_SPACES) {
+      if (line.charAt(i) === "\t") {
+        var tabStop = _columnAfter(column, "\t");
+        carried = tabStop - column - 1;
+        column = tabStop;
+      } else {
+        column += 1;
+      }
+      i = s >= line.length ? s : i + 1;
+    } else {
+      i = s;
+      column = sColumn;
+    }
+    base = column - carried;
+    blocks.open(depth, base - residual);
+  }
+}
+
+function _codeFenceLangs(input, mates, rawMates) {
+  if (mates === undefined) {
+    var codeSpans = _codeSpans(input);
+    mates = _squareMates(input, undefined, codeSpans);
+    rawMates = codeSpans.quoted ? _squareMates(input, undefined, null) : null;
+  }
+  var found = [];
+  var seen = new Set();
+  var mateSets = rawMates === null || rawMates === undefined ? [mates] : [mates, rawMates];
+  var readings = _readingsFor(input);
+  for (var s = 0; s < mateSets.length; s += 1) {
+    for (var r = 0; r < readings.length; r += 1) {
+      var fences = _readBlocks(input, mateSets[s], readings[r]).fences;
+      for (var f = 0; f < fences.length; f += 1) {
+        if (seen.has(fences[f].at)) continue;
+        seen.add(fences[f].at);
+        found.push(fences[f]);
+      }
+    }
+  }
+  found.sort(function (a, b) { return a.at - b.at; });
+  return found.map(function (fence) { return fence.info; });
+}
+
+var UNICODE_LINE_BREAK_RANGES = [0x2028, 0x2029];
+
+function _lineEndAt(s, at, unicodeBreaks) {
+  var i = at;
+  while (i < s.length) {
+    var c = s.charCodeAt(i);
+    if (c === 0x0A || c === 0x0D) break;
+    if (unicodeBreaks === true && (c === 0x2028 || c === 0x2029)) break;
+    i += 1;
+  }
+  return i;
+}
+
+function _nextLineStart(s, end) {
+  if (end >= s.length) return s.length;
+  if (s.charCodeAt(end) === 0x0D && s.charCodeAt(end + 1) === 0x0A) return end + 2;
+  return end + 1;
 }
 
 function _markdownLines(s) {
@@ -316,13 +1744,124 @@ function _hasLongEmphasisRun(s) {
 }
 
 
+var SCHEME_RAW_PREFIX = 24;
+
+function _rawPrefixIsPlain(url) {
+  var n = Math.min(url.length, SCHEME_RAW_PREFIX);
+  for (var i = 0; i < n; i += 1) {
+    var c = url.charCodeAt(i);
+    if (c < 0x21 || c > 0x7E || c === 0x26 || c === 0x25) return false;
+  }
+  return true;
+}
+
 function _isDangerousUrl(url, opts) {
   if (typeof url !== "string") return null;
-  var s = codepointClass.stripUrlSchemeWhitespace(
-    codepointClass.decodeMarkupEntities(url.trim()));
+  var s;
+  if (_rawPrefixIsPlain(url)) {
+    s = url.slice(0, SCHEME_RAW_PREFIX);
+  } else {
+    s = codepointClass.stripUrlSchemeWhitespace(
+      codepointClass.decodeMarkupEntities(url.trim()));
+  }
+  return _classifyNormalized(s, opts);
+}
+
+function _classifyNormalized(s, opts) {
   if (_leadingSchemeOf(s, DANGEROUS_SCHEMES) !== null) return _leadingLetterRun(s);
   if (_leadingSchemeOf(s, ["file"]) !== null && opts.filePolicy !== "allow") return "file";
   return null;
+}
+
+var SCHEME_SIGNIFICANT_CHARS = 32;
+
+function _readAt(input, pos) {
+  if (input.charCodeAt(pos) === 0x26) {
+    var ref = codepointClass.decodeReferenceAt(input, pos);
+    if (ref !== null) return ref;
+  }
+  var cp = input.codePointAt(pos);
+  var text = String.fromCodePoint(cp);
+  return { text: text, next: pos + text.length };
+}
+
+function _textIsStrippable(text) {
+  for (var k = 0; k < text.length; k += 1) {
+    var cp = text.codePointAt(k);
+    if (!codepointClass.isUrlSchemeStrippable(cp)) return false;
+    if (cp > 0xFFFF) k += 1;
+  }
+  return true;
+}
+
+function _textIsStrippableAnywhere(text) {
+  for (var k = 0; k < text.length; k += 1) {
+    var cp = text.codePointAt(k);
+    if (cp === 0x20 || !codepointClass.isUrlSchemeStrippable(cp)) return false;
+    if (cp > 0xFFFF) k += 1;
+  }
+  return true;
+}
+
+function _makeSkipIndex(input, isSkippable) {
+  var n = input.length;
+  var nextSig = _makeSpanIndex();
+  return function (i, end) {
+    if (i >= end) return end;
+    var known = nextSig.find(i);
+    if (known !== undefined) return Math.min(known, end);
+    var j = i;
+    while (j < end) {
+      var ahead = nextSig.find(j);
+      if (ahead !== undefined) { j = ahead; break; }
+      var r = _readAt(input, j);
+      if (!isSkippable(r.text)) break;
+      j = r.next;
+    }
+    nextSig.add(i, Math.min(j, n) - 1, j);
+    return Math.min(j, end);
+  };
+}
+
+function _textIsMarkupSpace(text) {
+  if (text.length === 0) return false;
+  var cp = text.codePointAt(0);
+  if (String.fromCodePoint(cp).length !== text.length) return false;
+  return codepointClass.inRanges(cp, codepointClass.WHITESPACE_RANGES);
+}
+
+function _textIsSpaceOrStrippableAnywhere(text) {
+  return _textIsMarkupSpace(text) || _textIsStrippableAnywhere(text);
+}
+
+function _makeSignificantIndex(input) {
+  return {
+    lead: _makeSkipIndex(input, _textIsStrippable),
+    any:  _makeSkipIndex(input, _textIsStrippableAnywhere),
+    ws:   _makeSkipIndex(input, _textIsSpaceOrStrippableAnywhere),
+  };
+}
+
+function _schemePrefixAt(input, start, end, sig) {
+  var out = "";
+  var pos = sig.lead(start, end);
+  var count = 0;
+  while (pos < end && count < SCHEME_SIGNIFICANT_CHARS) {
+    var r = _readAt(input, pos);
+    if (_textIsMarkupSpace(r.text)) {
+      if (out.charAt(out.length - 1) !== " ") { out += " "; count += 1; }
+      pos = sig.ws(r.next, end);
+      continue;
+    }
+    out += r.text;
+    count += 1;
+    pos = sig.any(r.next, end);
+  }
+  return out;
+}
+
+function _isDangerousUrlAt(input, start, end, sig, opts) {
+  return _classifyNormalized(_schemePrefixAt(input, start, end, sig), opts);
 }
 
 var PROFILES = Object.freeze({
@@ -407,13 +1946,14 @@ function _detectIssues(input, opts) {
   var pre = gateContract.detectStringInput(input, opts, { name: "markdown", noun: "input", emptyMode: "skip", scanCodepoints: false, cap: { bytes: opts.maxBytes, kind: "too-large", snippet: function (byteLen, max) { return "input " + byteLen + " bytes exceeds maxBytes " + max; } } });
   if (pre.done) return pre.issues;
   var issues = pre.issues;
+  var report = gateContract.makeIssueReporter(issues);
 
   var lineCount = 0;
   for (var li = 0; li < input.length; li += 1) {
     if (input.charCodeAt(li) === 10) lineCount += 1;
   }
   if (lineCount > opts.maxLines) {
-    issues.push({
+    report({
       kind: "line-cap", severity: "high", ruleId: "markdown.line-cap",
       snippet: "line count " + lineCount + " exceeds maxLines " + opts.maxLines,
     });
@@ -421,7 +1961,7 @@ function _detectIssues(input, opts) {
 
   if (opts.frontMatterPolicy !== "allow") {
     if (_hasFrontMatter(input, "---") || _hasFrontMatter(input, "+++")) {
-      issues.push({
+      report({
         kind: "front-matter",
         severity: opts.frontMatterPolicy === "reject" ? "high" : "warn",
         ruleId: "markdown.front-matter",
@@ -431,7 +1971,7 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.doctypePolicy !== "allow" && _hasDoctype(input)) {
-    issues.push({
+    report({
       kind: "doctype",
       severity: opts.doctypePolicy === "reject" ? "critical" : "warn",
       ruleId: "markdown.doctype",
@@ -440,7 +1980,7 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.dangerousTagPolicy !== "allow" && _hasDangerousTag(input)) {
-    issues.push({
+    report({
       kind: "dangerous-tag", severity: "critical",
       ruleId: "markdown.dangerous-tag",
       snippet: "raw HTML tag from danger list (script/iframe/object/etc. " +
@@ -449,7 +1989,7 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.rawHtmlPolicy !== "allow" && _hasRawHtmlTag(input)) {
-    issues.push({
+    report({
       kind: "raw-html",
       severity: opts.rawHtmlPolicy === "reject" ? "high" : "warn",
       ruleId: "markdown.raw-html",
@@ -458,7 +1998,7 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.htmlCommentPolicy !== "allow" && _hasHtmlComment(input)) {
-    issues.push({
+    report({
       kind: "html-comment",
       severity: opts.htmlCommentPolicy === "reject" ? "high" : "warn",
       ruleId: "markdown.html-comment",
@@ -468,16 +2008,36 @@ function _detectIssues(input, opts) {
 
   var linkCount = 0;
   var imageCount = 0;
-  var inlineMatches = _inlineLinks(input);
+  var openers = _countOpeners(input);
+  var mates = null;
+  var rawMates = null;
+  var inlineMatches = [];
+  if (openers > MAX_VALIDATE_OPENERS) {
+    report({
+      kind: "delimiter-cap", severity: "high", ruleId: "markdown.delimiter-cap",
+      snippet: "bracket opener count " + openers + " exceeds " + MAX_VALIDATE_OPENERS +
+               ", so links and reference definitions were not extracted",
+    });
+  } else {
+    var codeSpans = _codeSpans(input);
+    var inlineLimit = opts.maxLinks + opts.maxImages + 2;
+    mates = _squareMates(input, openers, codeSpans);
+    inlineMatches = _inlineLinks(input, inlineLimit, mates);
+    if (codeSpans.quoted) {
+      rawMates = _squareMates(input, openers, null);
+      inlineMatches = _unionMatches(inlineMatches,
+        _inlineLinks(input, inlineLimit, rawMates));
+    }
+  }
+  var sigIndex = _makeSignificantIndex(input);
   for (var im = 0; im < inlineMatches.length; im += 1) {
     var m = inlineMatches[im];
     var isImage = m.bang === "!";
-    if (isImage) imageCount += 1; else linkCount += 1;
-    var scheme = _isDangerousUrl(m.url, opts);
+    if (m.counted !== false) { if (isImage) imageCount += 1; else linkCount += 1; }
+    var scheme = _isDangerousUrlAt(input, m.urlStart, m.urlEnd, sigIndex, opts);
     if (scheme === null) continue;
     var policy = isImage ? opts.imageSchemePolicy : opts.dangerousSchemePolicy;
-    if (policy === "allow") continue;
-    issues.push({
+    report({
       kind: isImage ? "image-scheme" : "link-scheme",
       severity: policy === "reject" ? "critical" : "high",
       ruleId: isImage ? "markdown.image-scheme" : "markdown.link-scheme",
@@ -487,13 +2047,13 @@ function _detectIssues(input, opts) {
     if (issues.length > 256) break;
   }
   if (linkCount > opts.maxLinks) {
-    issues.push({
+    report({
       kind: "link-cap", severity: "high", ruleId: "markdown.link-cap",
       snippet: "link count " + linkCount + " exceeds maxLinks " + opts.maxLinks,
     });
   }
   if (imageCount > opts.maxImages) {
-    issues.push({
+    report({
       kind: "image-cap", severity: "high", ruleId: "markdown.image-cap",
       snippet: "image count " + imageCount +
                " exceeds maxImages " + opts.maxImages,
@@ -506,8 +2066,7 @@ function _detectIssues(input, opts) {
     autolinkCount += 1;
     var aScheme = _isDangerousUrl(autolinkMatches[am].url, opts);
     if (aScheme === null) continue;
-    if (opts.autolinkSchemePolicy === "allow") continue;
-    issues.push({
+    report({
       kind: "autolink-scheme",
       severity: opts.autolinkSchemePolicy === "reject" ? "critical" : "high",
       ruleId: "markdown.autolink-scheme",
@@ -516,7 +2075,7 @@ function _detectIssues(input, opts) {
     if (issues.length > 256) break;
   }
   if (autolinkCount > opts.maxAutolinks) {
-    issues.push({
+    report({
       kind: "autolink-cap", severity: "high",
       ruleId: "markdown.autolink-cap",
       snippet: "autolink count " + autolinkCount +
@@ -525,13 +2084,15 @@ function _detectIssues(input, opts) {
   }
 
   var refDefCount = 0;
-  var refDefMatches = _refDefs(input);
+  var refDefMatches = _refDefs(input, mates);
+  if (rawMates !== null) {
+    refDefMatches = _unionMatches(refDefMatches, _refDefs(input, rawMates));
+  }
   for (var rm = 0; rm < refDefMatches.length; rm += 1) {
-    refDefCount += 1;
+    if (refDefMatches[rm].counted !== false) refDefCount += 1;
     var rScheme = _isDangerousUrl(refDefMatches[rm].url, opts);
     if (rScheme === null) continue;
-    if (opts.referenceLinkPolicy === "allow") continue;
-    issues.push({
+    report({
       kind: "reference-link-scheme",
       severity: opts.referenceLinkPolicy === "reject" ? "critical" : "high",
       ruleId: "markdown.reference-link-scheme",
@@ -541,7 +2102,7 @@ function _detectIssues(input, opts) {
     if (issues.length > 256) break;
   }
   if (refDefCount > opts.maxRefDefs) {
-    issues.push({
+    report({
       kind: "ref-def-cap", severity: "high",
       ruleId: "markdown.ref-def-cap",
       snippet: "reference-def count " + refDefCount +
@@ -550,12 +2111,12 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.codeFenceLangPolicy !== "allow") {
-    var fenceMatches = _codeFenceLangs(input);
+    var fenceMatches = _codeFenceLangs(input, mates, rawMates);
     for (var fm = 0; fm < fenceMatches.length; fm += 1) {
       var lang = fenceMatches[fm];
       if (!lang) continue;
       if (codepointClass.indexOfAny(lang, ATTR_BREAKING_CHARS) !== -1) {
-        issues.push({
+        report({
           kind: "code-fence-lang",
           severity: opts.codeFenceLangPolicy === "reject" ? "critical" : "high",
           ruleId: "markdown.code-fence-lang",
@@ -568,7 +2129,7 @@ function _detectIssues(input, opts) {
   }
 
   if (opts.emphasisRunPolicy !== "allow" && _hasLongEmphasisRun(input)) {
-    issues.push({
+    report({
       kind: "emphasis-run",
       severity: opts.emphasisRunPolicy === "reject" ? "high" : "warn",
       ruleId: "markdown.emphasis-run",
@@ -600,7 +2161,7 @@ function _detectIssues(input, opts) {
     }
   }
   if (maxListDepthSeen > opts.maxListDepth) {
-    issues.push({
+    report({
       kind: "list-depth-cap", severity: "high",
       ruleId: "markdown.list-depth-cap",
       snippet: "list nesting depth " + maxListDepthSeen +
@@ -608,7 +2169,7 @@ function _detectIssues(input, opts) {
     });
   }
   if (maxBqDepthSeen > opts.maxBlockquoteDepth) {
-    issues.push({
+    report({
       kind: "blockquote-depth-cap", severity: "high",
       ruleId: "markdown.blockquote-depth-cap",
       snippet: "blockquote nesting depth " + maxBqDepthSeen +
@@ -616,7 +2177,7 @@ function _detectIssues(input, opts) {
     });
   }
 
-  issues.push.apply(issues, codepointClass.detectCharThreats(input, opts, "markdown"));
+  codepointClass.detectCharThreats(input, opts, "markdown").forEach(report);
 
   return issues;
 }
@@ -757,6 +2318,7 @@ function _gateDispositionFor(issue, opts) {
     case "autolink-cap":
     case "ref-def-cap":
     case "list-depth-cap":
+    case "delimiter-cap":
     case "blockquote-depth-cap":  return "refuse";
     default:                      return null;
   }
@@ -1432,6 +2994,7 @@ module.exports = gateContract.defineGuard({
     _bracketIndexEntriesForTest: function () { return _bracketIndexEntries; },
     _bracketLookupStepsForTest: function () { return _bracketLookupSteps; },
     _blockOffsetArraysForTest: function () { return _blockOffsetArrays; },
+    _spanIndexForTest: _makeSpanIndex,
     _shapesForTest: {
       inlineLinks:      _inlineLinks,
       autolinks:        _autolinks,
