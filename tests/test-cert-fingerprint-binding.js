@@ -79,7 +79,9 @@ function syncReq(pathname, apiKey, mtlsOn, body) {
   return encryptedRequest(subCtx, pathname, { method: 'POST', body: body, apiKey: apiKey });
 }
 
-describe('certFingerprint enforcement across /sync/* endpoints', { timeout: 15000 }, function () {
+// The limit covers the whole suite, and each test starts two to four blocking
+// seeding processes that each load the server's modules.
+describe('certFingerprint enforcement across /sync/* endpoints', { timeout: 60000 }, function () {
 
   it('/sync/ws rejects upgrade when the key has a certFingerprint that does not match', async function () {
     var bundle = createBundleViaDb(ctx.dbPath, { bundleType: 'sync' });

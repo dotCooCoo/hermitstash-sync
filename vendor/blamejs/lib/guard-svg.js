@@ -490,6 +490,16 @@ function _animatedProperty(tok) {
   return null;
 }
 
+function _animationTargetsSafe(attrs, safeAttrNames) {
+  for (var i = 0; i < attrs.length; i += 1) {
+    if (attrs[i].name.toLowerCase() === "attributename" &&
+        !safeAttrNames[attrs[i].value.toLowerCase().trim()]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function _functionalRefsOf(tok, animation) {
   var attrs = tok.attrs || [];
   var refs = { inherited: [], applied: [] };
@@ -1341,14 +1351,7 @@ function _sanitize(input, opts) {
     }
     var allowed = !dangerousTags[tok.name] && allowedTags[tok.name];
     if (animationTags[tok.name] && opts.allowAnimation && allowedTags[tok.name]) {
-      var safeAnimation = true;
-      (tok.attrs || []).forEach(function (a) {
-        if (a.name.toLowerCase() === "attributename" &&
-            !safeAttrNames[a.value.toLowerCase().trim()]) {
-          safeAnimation = false;
-        }
-      });
-      allowed = safeAnimation;
+      allowed = _animationTargetsSafe(tok.attrs || [], safeAttrNames);
     }
     if (!allowed) {
       if (BODY_DROP[tok.name] && !tok.selfClosing) {
@@ -1480,7 +1483,7 @@ function _sanitize(input, opts) {
  *     '<svg><script>alert(1)</script><circle r="10"/></svg>',
  *     { profile: "balanced" });
  *   safe;
- *   // → '<svg><circle r="10"></circle></svg>'
+ *   // → '<svg><circle r="10"/></svg>'
  *
  *   // Event-handler attributes are stripped:
  *   var clean = b.guardSvg.sanitize(

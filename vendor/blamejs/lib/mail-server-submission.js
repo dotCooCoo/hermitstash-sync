@@ -94,7 +94,7 @@
  *   composes `b.guardSmtpCommand` (wire-protocol gate + smuggling
  *   defense), `b.safeSmtp` (wire-protocol parser), the operator's
  *   authenticator (SASL verify), `b.mail.send` (outbound MX routing),
- *   and the framework's TLS posture via `b.network.tls.context`.
+ *   and the framework's TLS posture via `b.network.tls.applyToContext`.
  *
  * @card
  *   Outbound SMTP submission listener (RFC 6409 / RFC 8314). AUTH-
@@ -151,10 +151,10 @@ var REPLY_552_SIZE_EXCEEDED      = "552";
 var REPLY_553_SENDER_REJECTED    = "553";
 var REPLY_554_TRANSACTION_FAILED = "554";
 
-var RE_MAIL_FROM = /^MAIL\s+FROM:\s*<([^>]*)>(?:\s+(.*))?$/i;
-var RE_RCPT_TO   = /^RCPT\s+TO:\s*<([^>]+)>(?:\s+.*)?$/i;
+var RE_MAIL_FROM = /^MAIL\s+FROM:(.*)$/i;                                                               // allow:regex-no-length-cap — line length bounded by maxLineBytes
+var RE_RCPT_TO   = /^RCPT\s+TO:(.*)$/i;                                                                 // allow:regex-no-length-cap — line length bounded by maxLineBytes
 var RE_SIZE      = /SIZE=(\d+)/i;
-var RE_AUTH      = /^AUTH\s+([A-Za-z0-9_-]{1,32})(?:\s+(.*))?$/i;
+var RE_AUTH      = /^AUTH\s+([A-Za-z0-9_-]{1,32})(?:\s+(\S.*)?)?$/i;
 
 var _CRLF_CRLF = Buffer.from([0x0d, 0x0a, 0x0d, 0x0a]);
 function _findHeaderEnd(buf) {
@@ -195,15 +195,31 @@ function _extractDkimDTag(sigValue) {
   return null;
 }
 
-function _actorDomain(actor, mailFrom) {
-  if (actor && typeof actor.domain === "string" && actor.domain.length > 0) return actor.domain;
-  if (actor && typeof actor.id === "string" && actor.id.indexOf("@") !== -1) {
-    return actor.id.slice(actor.id.lastIndexOf("@") + 1);
+function _approvedSenderDomains(state) {
+  var approved = state && state.policyApprovedSender;
+  if (typeof approved !== "string") return [];
+  var at = approved.lastIndexOf("@");
+  return at === -1 ? [] : [approved.slice(at + 1).toLowerCase()];
+}
+
+function _actorDomains(actor) {
+  if (!actor) return [];
+  var out = [];
+  function _add(d) {
+    if (typeof d !== "string" || d.length === 0) return;
+    var lower = d.toLowerCase();
+    if (out.indexOf(lower) === -1) out.push(lower);
   }
-  if (typeof mailFrom === "string" && mailFrom.indexOf("@") !== -1) {
-    return mailFrom.slice(mailFrom.lastIndexOf("@") + 1);
+  _add(actor.domain);
+  if (typeof actor.id === "string" && actor.id.indexOf("@") !== -1) {
+    _add(actor.id.slice(actor.id.lastIndexOf("@") + 1));
   }
-  return null;
+  var boxes = _actorMailboxes(actor);
+  for (var i = 0; i < boxes.length; i += 1) {
+    var at = boxes[i].lastIndexOf("@");
+    if (at !== -1) _add(boxes[i].slice(at + 1));
+  }
+  return out;
 }
 
 /**
@@ -218,7 +234,9 @@ function _actorDomain(actor, mailFrom) {
  *    connectionCount(), _portForTest() }`.
  *
  * @opts
- *   tlsContext:      TlsContext,   // required — b.network.tls.context() output
+ *   tlsContext:      SecureContext, // required: b.mail.server.tls.context({ certFile, keyFile }).secureContext
+ *                                  // (or a getter returning it, to pick up a reload), or
+ *                                  // tls.createSecureContext(b.network.tls.applyToContext({ base }))
  *   implicitTls:     boolean,      // wrap connection in TLS from the SYN (port 465); default false
  *   greeting:        string,       // EHLO/220 banner; default "blamejs Submission"
  *   auth:            object,       // SASL config (required unless permissive profile)
@@ -229,6 +247,8 @@ function _actorDomain(actor, mailFrom) {
  *                                  // carry smtpCode ("550"), enhancedStatus ("5.7.1") and replyText to
  *                                  // choose its own refusal; without them the reply is 451 4.3.0
  *   identityBinding: "strict" | "permissive",  // MAIL FROM must match auth identity (default strict)
+ *   requireDkim:     boolean,      // a message must carry a DKIM-Signature; default true under the strict profile
+ *   dkimRequireMode: "self" | "any" | "off",   // which signature satisfies requireDkim; default "any". "any" takes any DKIM-Signature header. "self" takes one whose d= names a domain this connection may send as: the actor's `domain`, the domain of an `actor.id` spelled as an address, the domain of any assigned mailbox, or the domain of an alias `senderPolicy` approved for the transaction being sent. An actor carrying none of those, and a connection with no authenticated actor, have no domain to be "self", so every signature is refused. An envelope sender the operator has not approved is not consulted, because that is what the mode is checking. "off" clears requireDkim
  *   subaddressDelimiter: string,   // RFC 5233 local-part separator the identity check folds on ("+" on most systems, "-" on qmail-derived ones). OFF unless set: subaddressing is a delivery convention, and folding where plus-addresses are distinct mailboxes would grant send-as authority over another account
  *   senderPolicy:    function (ctx) → { ok } | { ok: false },   // optional, asked only when the actor's mailbox set does not already cover MAIL FROM — for aliases and anything else resolved at request time. Fails CLOSED: a policy that throws or rejects refuses the sender
  *   maxLineBytes:    number,       // default 1 KiB
@@ -237,10 +257,37 @@ function _actorDomain(actor, mailFrom) {
  *   idleTimeoutMs:   number,       // default 5 minutes
  *   maxConnections:  number,       // default 1024 — listener-wide ceiling
  *   profile:         string,       // "strict" | "balanced" | "permissive"; default "strict"
+ *   rateLimit:       b.mail.server.rateLimit handle | opts | false,  // connection and command
+ *                                  // admission control for the listener, distinct from `auth`'s
+ *                                  // own nested `rateLimit`, which budgets authentication
+ *                                  // failures. `false` disables it. A custom limiter must
+ *                                  // implement the whole interface the listeners call, or
+ *                                  // b.mail.server.rateLimit.resolve raises
+ *                                  // mail-server-rate-limit/incomplete-limiter rather than
+ *                                  // leaving a method added later silently unimplemented
+ *   allowSmtpUtf8:   boolean,      // offer RFC 6531 SMTPUTF8; default false. Anything other than a
+ *                                  // boolean raises mail-server-submission/bad-opts
+ *   guardDomain:     boolean | object,  // the b.guardDomain screen every envelope domain passes, at this
+ *                                  // listener's `profile` unless an object carries its own `profile`.
+ *                                  // `false` turns the screen off; a refusal emits
+ *                                  // mail.server.submission.domain_refused
+ *   recipientPolicy: function (ctx) → { ok } | { ok: false },  // asked once per RCPT TO with
+ *                                  // { actor, mailFrom, rcptTo, connectionId, remoteAddress, tls }.
+ *                                  // Admits only on an exact `ok: true`, so a policy that throws or
+ *                                  // rejects refuses the recipient
+ *   tenantScope:     object,       // a b.agent.tenant.create() instance whose `check` runs against the
+ *                                  // authenticated actor. One without a `.check` function raises
+ *                                  // mail-server-submission/bad-tenant-scope at create, since a
+ *                                  // malformed scope would refuse every auth as cross-tenant. Requires
+ *                                  // agentTenantId, or create raises
+ *                                  // mail-server-submission/no-agent-tenant-id
+ *   agentTenantId:   string,       // the tenant this listener belongs to, which tenantScope compares
+ *                                  // against the actor's; a mismatch emits
+ *                                  // mail.server.submission.cross_tenant_refused
  *
  * @example
  *   var tls = require("node:tls").createSecureContext(
- *     b.network.tls.buildOptions({ cert: certPem, key: keyPem }));
+ *     b.network.tls.applyToContext({ base: { cert: certPem, key: keyPem } }));
  *   var server = b.mail.server.submission.create({
  *     tlsContext: tls,
  *     greeting:   "smtp.example.com Submission blamejs",
@@ -284,6 +331,22 @@ function create(opts) {
   numericBounds.requireAllPositiveFiniteIntIfPresent(opts,
     ["maxLineBytes", "maxMessageBytes", "maxRcptsPerMessage", "idleTimeoutMs", "maxConnections"],
     "mail.server.submission.", MailServerSubmissionError, "mail-server-submission/bad-bound");
+  validateOpts.optionalBoolean(opts.implicitTls,
+    "mail.server.submission.create: opts.implicitTls (RFC 8314 §3 TLS from the SYN; " +
+    "anything other than a boolean was read as false, which leaves the listener on port " +
+    "587 with STARTTLS while the configuration says otherwise)",
+    MailServerSubmissionError, "mail-server-submission/bad-opts");
+  validateOpts.optionalBoolean(opts.requireDkim,
+    "mail.server.submission.create: opts.requireDkim (whether a message must carry a DKIM " +
+    "signature; anything other than a boolean was read as false, which accepts unsigned mail " +
+    "under a configuration that asked for the opposite)",
+    MailServerSubmissionError, "mail-server-submission/bad-opts");
+  validateOpts.optionalBoolean(opts.allowSmtpUtf8,
+    "mail.server.submission.create: opts.allowSmtpUtf8 (whether RFC 6531 SMTPUTF8 is offered)",
+    MailServerSubmissionError, "mail-server-submission/bad-opts");
+  validateOpts.optionalNonEmptyString(opts.greeting,
+    "mail.server.submission.create: opts.greeting (the 220 line every connection reads first)",
+    MailServerSubmissionError, "mail-server-submission/bad-opts");
 
   var profile = opts.profile || "strict";
   var allowSmtpUtf8 = opts.allowSmtpUtf8 === true;
@@ -384,6 +447,7 @@ function create(opts) {
       authenticated: false,
       actor:         null,
       mailFrom:      null,
+      policyApprovedSender: null,
       rcpts:         [],
       authPending:   null,
     };
@@ -879,12 +943,13 @@ function create(opts) {
         return;
       }
       var match = line.match(RE_MAIL_FROM);
-      if (!match) {
+      var path = match ? mailServerNet.sliceAnglePath(match[1]) : null;
+      if (!path) {
         _writeReply(socket, REPLY_501_BAD_ARGS,
           "5.5.4 Syntax: MAIL FROM:<address> [SIZE=n]");
         return;
       }
-      var mailFrom = match[1].toLowerCase();
+      var mailFrom = path.address.toLowerCase();
       var __mfAt = mailFrom.lastIndexOf("@");
       var mailFromDomain = __mfAt === -1 ? "" : mailFrom.slice(__mfAt + 1);
       if (mailFromDomain && mailFromDomain[0] !== "[" && guardDomainProfile) {
@@ -896,7 +961,7 @@ function create(opts) {
           return;
         }
       }
-      var paramStr = match[2] || "";
+      var paramStr = path.tail || "";
       var sizeMatch = paramStr.match(RE_SIZE);
       if (sizeMatch) {
         var declaredSize = parseInt(sizeMatch[1], 10);
@@ -914,7 +979,8 @@ function create(opts) {
         if (allowed.length !== 0) {
           matched = allowed.indexOf(mailFrom) !== -1 ||
             allowed.some(function (m) {
-              return mailServerNet.foldSubaddress(m, subaddressDelimiter) === deliveredTo;
+              return mailServerNet.mailboxesEqual(m, mailFrom,
+                { subaddressDelimiter: subaddressDelimiter });
             });
         }
         if (!matched && typeof senderPolicy === "function") {
@@ -929,6 +995,7 @@ function create(opts) {
             _refuseSender(state, socket, mailFrom, allowed);
             return _drainLines(state, socket);
           }
+          state.policyApprovedSender = mailFrom;
           _acceptSender(state, socket, mailFrom);
           return _drainLines(state, socket);
         }
@@ -972,11 +1039,12 @@ function create(opts) {
         return;
       }
       var match = line.match(RE_RCPT_TO);
-      if (!match) {
+      var rcptPath = match ? mailServerNet.sliceAnglePath(match[1]) : null;
+      if (!rcptPath || rcptPath.address.length === 0) {
         _writeReply(socket, REPLY_501_BAD_ARGS, "5.5.4 Syntax: RCPT TO:<address>");
         return;
       }
-      var rcpt = match[1].toLowerCase();
+      var rcpt = rcptPath.address.toLowerCase();
 
       var __rcptAt = rcpt.lastIndexOf("@");
       var __rcptDomain = __rcptAt === -1 ? "" : rcpt.slice(__rcptAt + 1);
@@ -1077,7 +1145,7 @@ function create(opts) {
     }
 
     function _refuseSmuggledBdatBody(state, socket, body) {
-      if (!guardSmtpCommand.detectBodySmuggling(body)) return false;
+      if (!guardSmtpCommand.detectBodySmuggling(body, true, false, false)) return false;
       _emit("mail.server.submission.smtp_smuggling_detected",
         { connectionId: state.id, mailFrom: state.mailFrom,
           rcptCount: state.rcpts.length, framing: "BDAT" },
@@ -1101,10 +1169,11 @@ function create(opts) {
           if (dkimRequireMode === "any") {
             dkimOk = true;
           } else if (dkimRequireMode === "self") {
-            var actorDomain = _actorDomain(state.actor, state.mailFrom);
+            var selfDomains = _actorDomains(state.actor)
+              .concat(_approvedSenderDomains(state));
             for (var i = 0; i < dkimSigs.length; i += 1) {
               var d = _extractDkimDTag(dkimSigs[i]);
-              if (d && actorDomain && d.toLowerCase() === actorDomain.toLowerCase()) {
+              if (d && selfDomains.indexOf(d.toLowerCase()) !== -1) {
                 dkimOk = true;
                 break;
               }
@@ -1241,6 +1310,7 @@ function create(opts) {
 
     function _resetTransaction(state) {
       state.mailFrom     = null;
+      state.policyApprovedSender = null;
       state.rcpts        = [];
       state.rcptsPending = 0;
       state.stage        = "ehlo";

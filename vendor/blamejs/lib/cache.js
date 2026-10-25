@@ -778,6 +778,18 @@ function _customBackend(operatorBackend, cfg) {
  * Backends are interchangeable from the caller's perspective —
  * `await cache.get(key)` returns the same shape regardless.
  *
+ * `create` throws `cache/bad-opt` for a missing or malformed option: an
+ * empty namespace or one containing `:`, an unknown backend string, a redis
+ * backend without `redisUrl`, a custom backend or `invalidationPubsub`
+ * without the methods it needs, or a size, TTL or sweep interval out of
+ * range. With the redis backend, `create` throws `redis-client/compromised-key`
+ * when `redisCa` holds a certificate with a compromised key (see
+ * `b.crypto.compromisedKey`), and a cache call rejects with
+ * `redis-client/compromised-key` when the server's verified certificate
+ * chain carries one. No command is sent to that server. Without `redisCa`,
+ * the client does not trust a certificate in Node's default CA store whose
+ * key is compromised (one added through `NODE_EXTRA_CA_CERTS`, for example).
+ *
  * @opts
  *   namespace:               string,                       // required; collision domain; must not contain ':'
  *   backend:                 "memory" | "cluster" | "redis" | object,  // default "memory"
@@ -961,6 +973,11 @@ function create(opts) {
   var SWR_HARD_MULTIPLIER = 2;
 
   function _resolveTtl(callerOpts, methodName) {
+    if (callerOpts !== undefined && callerOpts !== null &&
+        (typeof callerOpts !== "object" || Array.isArray(callerOpts))) {
+      throw _err("cache/bad-opt", "cache." + methodName + ": opts must be an object, got " +
+        (Array.isArray(callerOpts) ? "array" : typeof callerOpts));
+    }
     if (callerOpts && callerOpts.ttlMs !== undefined) {
       _validateTtl("cache." + methodName + ": ttlMs", callerOpts.ttlMs);
       return callerOpts.ttlMs;
@@ -997,7 +1014,12 @@ function create(opts) {
         }
       }
     }
-    var seal = !!(callerOpts && callerOpts.seal === true);
+    var setOpts = callerOpts || {};
+    validateOpts.optionalBoolean(setOpts.seal,
+      "cache.set: opts.seal (anything other than a boolean was read as false, so the value " +
+      "reached the backend unsealed for a caller that asked for it sealed)",
+      CacheError, "cache/bad-opt");
+    var seal = setOpts.seal === true;
     if (seal && backend.name !== "cluster") {
       throw _err("cache/bad-opt",
         "cache.set: seal: true is only supported on the cluster backend " +
@@ -1060,7 +1082,12 @@ function create(opts) {
     }
     var ttlMs = _resolveTtl(callerOpts, "update");
     var expiresAt = (ttlMs === Infinity) ? Infinity : (clock() + ttlMs);
-    var seal = !!(callerOpts && callerOpts.seal === true);
+    var updateOpts = callerOpts || {};
+    validateOpts.optionalBoolean(updateOpts.seal,
+      "cache.update: opts.seal (anything other than a boolean was read as false, so the value " +
+      "reached the backend unsealed for a caller that asked for it sealed)",
+      CacheError, "cache/bad-opt");
+    var seal = updateOpts.seal === true;
     if (seal && backend.name !== "cluster") {
       throw _err("cache/bad-opt",
         "cache.update: seal: true is only supported on the cluster backend " +

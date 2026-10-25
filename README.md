@@ -74,8 +74,8 @@ All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP3
 ## Requirements
 
 - Node.js 24.21.0+ (ships OpenSSL 3.5.8; also covers `node:sqlite` and the OpenSSL 3.5 PQC groups)
-- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.20.1) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
-- The encrypted control-plane routes — file rename and public-uploader bundle init/finalize — additionally require a server built on a matching v0.20.x blamejs. Its per-session api-encrypt envelope binds the request fields into the AEAD, and a server on an older framework rejects the request. Upload, download, metadata, delete, and the WebSocket sync stream are unaffected by this requirement.
+- HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.21.4) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
+- File rename uses a per-session api-encrypt envelope that binds the request fields into the AEAD. It works with a server built on blamejs v0.20.1 or later (HermitStash v1.15.7 and later). Upload, download, metadata, delete, and the WebSocket sync stream do not use the envelope.
 
 ## Install
 
@@ -213,6 +213,12 @@ file over an unencrypted, non-post-quantum connection. A loopback target
 same host) stays allowed; to reach a trusted non-loopback proxy over plaintext
 deliberately, set `HERMITSTASH_ALLOW_PLAINTEXT=1`.
 
+The client resolves the server's hostname, and the release host that auto-update
+contacts, through the operating system's resolver, so a Docker service name, an
+`/etc/hosts` entry or a name that exists only on your network works. Set
+`BLAMEJS_DNS_TRANSPORT=doh` to resolve through DNS over HTTPS (Cloudflare), or
+`BLAMEJS_DNS_TRANSPORT=dot` to resolve through DNS over TLS (1.1.1.1), instead.
+
 `maxFileSize` (bytes, `0` = no extra cap) refuses any file larger than it before
 an upload or download starts. It can only *tighten* the built-in per-file
 memory-safety ceiling (`HERMITSTASH_MAX_FILE_BYTES`, default 256 GiB), never
@@ -260,7 +266,7 @@ For deployments that need to bind the daemon to a specific server identity (defe
 }
 ```
 
-Every TLS handshake (HTTPS + WebSocket) must produce a leaf cert whose SPKI hash matches one of the listed pins. Layered ON TOP of the default chain + hostname checks — pinning is additive, not a bypass.
+Every TLS handshake (HTTPS + WebSocket) must produce a leaf cert whose SPKI hash matches one of the listed pins. The pin is checked in addition to the default chain and hostname checks, and the chain must still lead to a trusted root. A certificate whose private key is publicly known is refused with `tls/compromised-key` even when it matches a pin.
 
 The pin binds to the public-key bytes, not the cert. Cert rotation that reuses the same keypair keeps the pin valid (the deliberate key-continuity property). Planned key rotations are supported by listing both old + new pins during the cutover window.
 
@@ -453,7 +459,7 @@ The `status` command shows which state the daemon is in:
 - **Atomic config + cert writes** — `config.json` and the enrolled mTLS client/cert/key/CA trio are written via `b.atomicFile.writeSync` (temp file, fsync, rename, parent-dir fsync) so a crash mid-write leaves the previous good copy intact instead of a torn file
 - **Phase-ordered graceful shutdown** — SIGTERM/SIGINT routes through `b.appShutdown` with per-phase time budgets and idempotent semantics, so a double signal during drain doesn't kick off a parallel teardown
 - **Crypto-strength retry jitter** — upload retries use `b.retry.withRetry`'s full-jitter exponential backoff sourced from `crypto.randomInt`, so retry timing isn't predictable from `Math.random`
-- **Boot-time wall-clock gate** — `hermitstash-sync start` runs an SNTPv4 drift check (`b.ntpCheck.bootCheck`) against `pool.ntp.org` before opening the engine. The cert-renewal threshold and the auto-update probation window both depend on `Date.now()` being roughly correct; a laptop resuming from a long sleep, a container without an RTC, or a system whose NTP daemon died can drift far enough to mis-renew certs or false-clear probation. Default thresholds: warn at 5 min, fatal at 1 hr. Unreachable NTP is non-fatal so offline boots still work. Override with `HERMITSTASH_NTP_DISABLE=1` (skip) or `HERMITSTASH_NTP_STRICT=1` (refuse to boot if unreachable).
+- **Boot-time wall-clock gate** — `hermitstash-sync start` runs an SNTPv4 drift check (`b.ntpCheck.bootCheck`) against `pool.ntp.org` before opening the engine. The cert-renewal threshold and the auto-update probation window both depend on `Date.now()` being roughly correct; a laptop resuming from a long sleep, a container without an RTC, or a system whose NTP daemon died can drift far enough to mis-renew certs or false-clear probation. Default thresholds: warn at 1 min, fatal at 1 hr. Unreachable NTP is non-fatal so offline boots still work. Override with `HERMITSTASH_NTP_DISABLE=1` (skip), or with `HERMITSTASH_NTP_STRICT=1` or `BLAMEJS_NTP_REQUIRE_REACHABLE=1` (refuse to boot if unreachable).
 - **CSAF 2.1 VEX disclosures on releases** — when transitive CVEs surface in the vendored runtime that don't reach a vulnerable code path here, an OASIS CSAF 2.1 VEX document (`hermitstash-sync-vX.Y.Z.vex.json`) is published alongside the binaries. CSAF-aware scanners (e.g. `trivy --vex`, `grype --vex`) can consume it to suppress alerts on declared `known_not_affected` findings with a justification. Generated via `b.vex` from the assessments committed at `vex/statements.json`.
 - **CycloneDX 1.6 SBOM on releases** — every release publishes `hermitstash-sync-vX.Y.Z.cdx.json` alongside the binaries. The SBOM enumerates the SEA's vendored surface (blamejs and its transitive noble-ciphers + noble-post-quantum bundles) with CPE 2.3 + purl identifiers and per-component SHA-256 hashes so CISA / NVD-driven scanners (Dependency-Track, OWASP Dependency-Check, Snyk SBOM Monitor) can CVE-match against the actual code shipping inside the binary, not just what `package.json` itself declares.
 - **SLSA L3 provenance + Sigstore-keyless SBOM/VEX signatures** — every release attaches a `hermitstash-sync-vX.Y.Z.intoto.jsonl` SLSA L3 attestation (produced by `slsa-framework/slsa-github-generator` and signed via Sigstore-keyless) covering every platform binary plus the SBOM (and VEX when present). The SBOM and VEX additionally carry their own cosign sign-blob bundles (`*.cdx.json.sigstore` / `*.vex.json.sigstore`) anchored in the Sigstore transparency log. Verify the provenance with `slsa-verifier verify-artifact`; verify the SBOM/VEX with `cosign verify-blob --bundle <bundle>.sigstore --certificate-identity-regexp 'https://github.com/dotCooCoo/hermitstash-sync/' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'`.
@@ -589,12 +595,12 @@ Download the latest release from the [Releases page](https://github.com/dotCooCo
 ### Building locally
 
 ```bash
-# Requires Node.js 24.21.0+ and postject
-node --experimental-sea-config build/sea-config.json
-cp $(which node) build/hermitstash-sync
-npx postject build/hermitstash-sync NODE_SEA_BLOB build/hermitstash-sync.blob \
-  --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+# Requires Node.js 24.21.0+
+npm ci --ignore-scripts
+node build/build-sea.js
 ```
+
+`npm ci` installs the esbuild and postject versions that `package-lock.json` pins. `build/build-sea.js` bundles the client, builds the SEA blob, copies the running Node.js binary and injects the blob into it. The binary and its `.sha256` and `.sha3-512` files are written to `build/`.
 
 Or use the local release script: `bash scripts/release.sh` (builds + signs + optional VirusTotal scan).
 

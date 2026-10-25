@@ -41,8 +41,9 @@
  *       Without it, a 1 MiB PING echoes back as a 1 MiB PONG — a 2x
  *       outbound-bandwidth amplification DoS.
  *     - Strict UTF-8 validation on TEXT frames + close reasons (§5.6).
- *     - Close-code allowlist per §7.4.2 (1000–1011, 3000–4999;
- *       reserved 1004/1005/1006/1015 refused on the wire).
+ *     - Close-code allowlist per §7.4 and the IANA WebSocket Close Code
+ *       Number registry (1000-1003, 1007-1014, 3000-4999; 1004, 1005,
+ *       1006 and 1015 refused on the wire and by `close()`).
  *     - Frame + message length capped at `maxMessageBytes`
  *       (default 1 MiB).
  *     - Heartbeat: ping every 30s, abort after 35s without pong.
@@ -86,6 +87,7 @@ var safeAsync        = require("./safe-async");
 var safeBuffer       = require("./safe-buffer");
 var pick             = require("./pick");
 var structuredFields = require("./structured-fields");
+var numericBounds    = require("./numeric-bounds");
 var { FrameworkError } = require("./framework-error");
 var { boot } = require("./log");
 
@@ -123,15 +125,45 @@ var CLOSE_MESSAGE_TOO_BIG     = 0x3F1;
 var CLOSE_INTERNAL_ERROR      = 0x3F3;
 
 var DEFAULT_MAX_MESSAGE_BYTES = C.BYTES.mib(1);
+var MIN_FRAGMENT_ACCOUNTING_BYTES = 64;
+var MAX_FRAGMENTS_FLOOR = 8192;
 var DEFAULT_PING_INTERVAL_MS  = C.TIME.seconds(30);
 var DEFAULT_PONG_TIMEOUT_MS   = C.TIME.seconds(35);
 var CLOSE_GRACE_MS            = C.TIME.seconds(2);
 
-function _isValidCloseCode(code) {
-  if (code === 1004 || code === 1005 || code === 1006 || code === 1015) return false;
-  if (code >= 1000 && code <= 1011) return true;                                              // allow:raw-time-literal — code is a numeric, not seconds
-  if (code >= 3000 && code <= 4999) return true;                                              // allow:raw-time-literal — WebSocket close-code range bound (RFC 6455 7.4.2); coincidental multiple-of-60, C.TIME N/A
-  return false;
+// registry: https://www.iana.org/assignments/websocket/websocket.xhtml#close-code-number
+var ASSIGNED_CLOSE_CODES = Object.freeze([
+  1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014,
+]);
+var APPLICATION_CLOSE_CODE_MIN = 3000;                                                         // allow:raw-time-literal — WebSocket close-code range bound (RFC 6455 7.4.2); coincidental multiple-of-60, C.TIME N/A
+var APPLICATION_CLOSE_CODE_MAX = 4999;
+
+/**
+ * @primitive b.websocket.isValidCloseCode
+ * @signature b.websocket.isValidCloseCode(code)
+ * @since     0.21.3
+ * @status    stable
+ * @related   b.websocket.WebSocketConnection, b.wsClient.connect
+ *
+ * Answers whether `code` may be carried in a Close frame (RFC 6455
+ * 7.4). True for the codes assigned in the IANA WebSocket Close Code
+ * Number registry (1000-1003 and 1007-1014) and for the 3000-4999 range
+ * left to libraries and applications. False for 1004, for 1005, 1006 and
+ * 1015, which an endpoint never sends, for the unassigned 1016-2999, and
+ * for anything that is not an integer from 0 to 65535.
+ *
+ * `WebSocketConnection` and `b.wsClient` fail a connection whose peer
+ * sends a code this refuses, and their `close(code)` throws a `TypeError`
+ * for one.
+ *
+ * @example
+ *   b.websocket.isValidCloseCode(1013);   // → true (Try Again Later)
+ *   b.websocket.isValidCloseCode(1006);   // → false
+ */
+function isValidCloseCode(code) {
+  if (typeof code !== "number" || !Number.isInteger(code)) return false;
+  if (ASSIGNED_CLOSE_CODES.indexOf(code) !== -1) return true;
+  return code >= APPLICATION_CLOSE_CODE_MIN && code <= APPLICATION_CLOSE_CODE_MAX;
 }
 
 var STATE_OPEN    = "open";
@@ -352,7 +384,10 @@ function negotiateSubprotocol(req, supported) {
  *                          // through, so wiring it there is enough.
  *
  * @example
- *   var req = { headers: { origin: "https://app.example.com",
+ *   // With no list the rule is same-origin, and a scheme is part of an
+ *   // origin: this request carries no TLS marker, so its own origin is the
+ *   // http one. A request served over TLS matches an https Origin instead.
+ *   var req = { headers: { origin: "http://app.example.com",
  *                          host:   "app.example.com" } };
  *   b.websocket.isOriginAllowed(req, undefined);                 // → true
  *   b.websocket.isOriginAllowed(req, ["https://other.example"]); // → false
@@ -703,7 +738,9 @@ function serializeFrame(opcode, payload, opts) {
  *     TEXT frame; throws `WebSocketError` if not OPEN.
  *   - `conn.ping(payload?)` — send PING (no-op if not OPEN).
  *   - `conn.close(code?, reason?)` — send CLOSE, wait `closeGraceMs`
- *     for the peer's echo, end the underlying socket.
+ *     for the peer's echo, end the underlying socket. An omitted `code`
+ *     sends 1000; any other `code` that `b.websocket.isValidCloseCode`
+ *     refuses, `0` and `null` included, throws `TypeError`.
  *
  * Events: `'message' (data, isBinary)`, `'ping' (payload)`,
  * `'pong' (payload)`, `'close' (code, reason, wasClean)` (fires
@@ -747,6 +784,9 @@ class WebSocketConnection extends EventEmitter {
     this.socket = socket;
     this.subprotocol = opts.subprotocol || null;
     this.maxMessageBytes = opts.maxMessageBytes || DEFAULT_MAX_MESSAGE_BYTES;
+    this._maxFragments = numericBounds.isPositiveFiniteInt(opts.maxFragments)
+      ? opts.maxFragments
+      : Math.max(MAX_FRAGMENTS_FLOOR, Math.ceil(this.maxMessageBytes / MIN_FRAGMENT_ACCOUNTING_BYTES));
     this.transport = opts.transport === "h2" ? "h2" : "h1";
     this._permessageDeflate = opts.permessageDeflate || null;
     var pingMs = opts.pingIntervalMs || DEFAULT_PING_INTERVAL_MS;
@@ -828,6 +868,9 @@ class WebSocketConnection extends EventEmitter {
     if (frame.rsv1 && frame.opcode === OPCODE_CONTINUATION) {
       return this._abort(CLOSE_PROTOCOL_ERROR, "RSV1 on continuation frame (must be on start)");
     }
+    if (frame.rsv1 && frame.opcode >= 0x8) {
+      return this._abort(CLOSE_PROTOCOL_ERROR, "RSV1 set on control frame (RFC 7692 §6.1)");
+    }
 
     if (frame.opcode >= 0x8) {
       if (frame.payload.length > 125) {
@@ -868,6 +911,10 @@ class WebSocketConnection extends EventEmitter {
   }
 
   _appendFragment(frame) {
+    if (this._fragChunks.length >= this._maxFragments) {
+      return this._abort(CLOSE_MESSAGE_TOO_BIG,
+        "message exceeds the maximum fragment count (" + this._maxFragments + ")");
+    }
     var newLen = this._fragLen + frame.payload.length;
     if (newLen > this.maxMessageBytes) {
       return this._abort(CLOSE_MESSAGE_TOO_BIG, "message exceeds maxMessageBytes");
@@ -918,7 +965,7 @@ class WebSocketConnection extends EventEmitter {
     }
     if (frame.payload.length >= 2) {
       code = frame.payload.readUInt16BE(0);
-      if (!_isValidCloseCode(code)) {
+      if (!isValidCloseCode(code)) {
         return this._abort(CLOSE_PROTOCOL_ERROR,
           "close code " + code + " is reserved or invalid (RFC 6455 §7.4.2)");
       }
@@ -997,8 +1044,12 @@ class WebSocketConnection extends EventEmitter {
   }
 
   close(code, reason) {
+    if (code === undefined) code = CLOSE_NORMAL;
+    if (!isValidCloseCode(code)) {
+      throw new TypeError("websocket close: code " + code + " may not be sent in a Close frame " +
+        "(RFC 6455 7.4); use 1000-1003, 1007-1014 or 3000-4999");
+    }
     if (this._state !== STATE_OPEN) return;
-    code = code || CLOSE_NORMAL;
     this._sendCloseFrame(code, reason || "");
     this._closeSent = true;
     this._state = STATE_CLOSING;
@@ -1116,6 +1167,7 @@ function handleUpgrade(req, socket, head, opts) {
   var conn = new WebSocketConnection(socket, {
     subprotocol:        subprotocol,
     maxMessageBytes:    opts.maxMessageBytes,
+    maxFragments:       opts.maxFragments,
     pingIntervalMs:     opts.pingIntervalMs,
     pongTimeoutMs:      opts.pongTimeoutMs,
     permessageDeflate:  pmd,
@@ -1152,12 +1204,15 @@ function handleUpgrade(req, socket, head, opts) {
  *   pongTimeoutMs:     number,           // abort-after-silence, default 35s
  *
  * @example
- *   var http2 = require("http2");
- *   var server = http2.createSecureServer({
- *     key:  fs.readFileSync("/etc/blamejs/tls.key"),
- *     cert: fs.readFileSync("/etc/blamejs/tls.crt"),
- *     settings: { enableConnectProtocol: true },
- *   });
+ *   var fs = require("node:fs");
+ *   var http2 = require("node:http2");
+ *   var server = http2.createSecureServer(b.network.tls.applyToContext({
+ *     base: {
+ *       key:  fs.readFileSync("/etc/blamejs/tls.key"),
+ *       cert: fs.readFileSync("/etc/blamejs/tls.crt"),
+ *       settings: { enableConnectProtocol: true },
+ *     },
+ *   }));
  *   server.on("stream", function (stream, headers) {
  *     if (headers[":method"] !== "CONNECT") return;
  *     var conn = b.websocket.handleExtendedConnect(stream, headers, {
@@ -1203,6 +1258,7 @@ function handleExtendedConnect(stream, requestHeaders, opts) {
     transport:       "h2",
     subprotocol:     subprotocol,
     maxMessageBytes: opts.maxMessageBytes,
+    maxFragments:    opts.maxFragments,
     pingIntervalMs:  opts.pingIntervalMs,
     pongTimeoutMs:   opts.pongTimeoutMs,
   });
@@ -1223,7 +1279,18 @@ _UPGRADE_REFUSAL_TEXT[HTTP.FORBIDDEN]          = "Forbidden";
 _UPGRADE_REFUSAL_TEXT[HTTP.METHOD_NOT_ALLOWED] = "Method Not Allowed";
 _UPGRADE_REFUSAL_TEXT[0x1AA]                   = "Upgrade Required";
 
+function _swallowSocketErrors(socket) {
+  if (!socket || typeof socket.on !== "function") return socket;
+  socket.on("error", function () {
+    if (typeof socket.destroy === "function" && !socket.destroyed) {
+      try { socket.destroy(); } catch (_e) { /* best-effort */ }
+    }
+  });
+  return socket;
+}
+
 function _refuseUpgrade(socket, status, reason) {
+  _swallowSocketErrors(socket);
   var statusText = _UPGRADE_REFUSAL_TEXT[status] || "Bad Request";
   var body = reason || statusText;
   var resp =
@@ -1245,10 +1312,12 @@ module.exports = {
   buildUpgradeResponse:    buildUpgradeResponse,
   FrameParser:             FrameParser,
   serializeFrame:          serializeFrame,
+  isValidCloseCode:        isValidCloseCode,
   WebSocketConnection:     WebSocketConnection,
   WebSocketError:          WebSocketError,
   handleUpgrade:           handleUpgrade,
   handleExtendedConnect:   handleExtendedConnect,
+  _swallowSocketErrors:    _swallowSocketErrors,
   _parseExtensionHeader:   _parseExtensionHeader,
   GUID:                    GUID,
   REFUSED_AUTH_QUERY_PARAMS: REFUSED_AUTH_QUERY_PARAMS,

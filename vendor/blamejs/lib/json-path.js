@@ -417,10 +417,12 @@ function _evalSegments(segments, root) {
     var base = nodes;
     if (seg.kind === "descendant") {
       var acc = []; var budget = { n: 0 };
-      nodes.forEach(function (nd) { _descend(nd, acc, budget); });
+      for (var ni = 0; ni < nodes.length; ni++) _descend(nodes[ni], acc, budget);
       base = acc;
     }
-    base.forEach(function (nd) { seg.selectors.forEach(function (sel) { _applySelector(sel, nd, root, next); }); });
+    for (var bi = 0; bi < base.length; bi++) {
+      for (var si = 0; si < seg.selectors.length; si++) _applySelector(seg.selectors[si], base[bi], root, next);
+    }
     if (next.length > MAX_TOTAL_NODES) {
       throw new JsonPathError("json-path/too-large",
         "jsonPath: nodelist exceeded " + MAX_TOTAL_NODES + " nodes (chained selector cross-product)");
@@ -600,7 +602,7 @@ function _evalFunctionLogical(node, current, root) {
  * @since     0.12.61
  * @status    stable
  * @compliance soc2
- * @related   b.jsonPath.paths, b.guardJsonPath.gate
+ * @related   b.jsonPath.paths, b.guardJsonpath.gate
  *
  * Evaluate an RFC 9535 JSONPath query against a JSON value and return the
  * array of matched node values (the nodelist, in document order). The

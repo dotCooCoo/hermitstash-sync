@@ -21,8 +21,8 @@
  * signature: the daemon's self-update verifier (lib/updater.js)
  * uses the ECDSA `.sig` (raw IEEE-P1363 r||s, via
  * node:crypto). The `.mldsa.sig` is an additional sidecar for
- * operators who want a PQC-only verification posture; verify with
- * `scripts/verify-release.js --mldsa`.
+ * operators who want a PQC-only verification posture; the "Post-quantum
+ * release key (ML-DSA-65)" section of SECURITY.md shows how to verify it.
  */
 
 var b      = require('../vendor/blamejs');

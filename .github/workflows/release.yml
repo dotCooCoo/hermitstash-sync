@@ -64,7 +64,7 @@ jobs:
         # zizmor: ignore[cache-poisoning] no cache input is set, so setup-node
         # caches nothing here; the released artifacts are signature-verified
         # end to end downstream.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # EXACT pin, never a range. This Node builds the SEA binary, and which
           # shared libraries that binary dynamically links is a property of the
@@ -102,6 +102,12 @@ jobs:
             exit 1
           fi
           echo "VERSION $PKG_VERSION matches pushed tag v$TAG_VERSION"
+
+      - name: Install build tools
+        # esbuild and postject at the versions package-lock.json pins, with
+        # their integrity hashes checked. Install scripts do not run; esbuild
+        # loads its platform binary from its optional dependency.
+        run: npm ci --ignore-scripts
 
       - name: Build SEA binary
         run: node build/build-sea.js
@@ -187,7 +193,7 @@ jobs:
       # ---- Upload artifacts for release job ----
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -218,7 +224,7 @@ jobs:
 
       - name: Setup Node.js
         # zizmor: ignore[cache-poisoning] no cache input set, so setup-node caches nothing.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.21.0'
 
@@ -235,7 +241,7 @@ jobs:
         run: node scripts/check-changelog-extract.js
 
       - name: Download all matrix artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
@@ -267,8 +273,8 @@ jobs:
       # Independent of the in-binary auto-update ECDSA signature
       # (which the daemon verifies via node:crypto). The .mldsa.sig
       # is an additive sidecar for operators with a PQC-only
-      # verification posture; verify via scripts/verify-release.js
-      # --mldsa.
+      # verification posture; SECURITY.md ("Post-quantum release key
+      # (ML-DSA-65)") shows how to verify it.
       #
       # Conditional on the operator having completed the one-time
       # release-key setup (`node scripts/generate-release-signing-key.js`,
@@ -304,7 +310,7 @@ jobs:
           PLAIN_BINS=()
           for f in "${BINS[@]}"; do
             case "$f" in
-              *.sha256|*.sha3-512|*.sig|*.asc|*.mldsa.sig|*.sigstore|*.intoto.jsonl|*.cdx.json|*.vex.json) ;;
+              *.sha256|*.sha3-512|*.sig|*.asc|*.sigstore|*.intoto.jsonl|*.cdx.json|*.vex.json) ;;
               *) PLAIN_BINS+=("$f") ;;
             esac
           done
@@ -366,7 +372,7 @@ jobs:
           PLAIN_BINS=()
           for f in "${BINS[@]}"; do
             case "$f" in
-              *.sha256|*.sha3-512|*.sig|*.asc|*.mldsa.sig|*.sigstore|*.intoto.jsonl) ;;
+              *.sha256|*.sha3-512|*.sig|*.asc|*.sigstore|*.intoto.jsonl) ;;
               *) PLAIN_BINS+=("$f") ;;
             esac
           done
@@ -411,7 +417,7 @@ jobs:
           head -20 release-notes.md
 
       - name: Upload release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundle
           path: |
@@ -474,12 +480,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download release bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-bundle
 
       - name: Download SLSA provenance attestation
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: hermitstash-sync-v${{ needs.prepare-release.outputs.version }}.intoto.jsonl
 

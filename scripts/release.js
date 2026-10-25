@@ -171,9 +171,9 @@ function _readVersion() {
   // AS a deletion and ship a release whose `npm ci` no longer resolves. Skipping
   // the check when the file is gone makes deleting it the way around the check.
   if (!fs.existsSync(LOCK_PATH)) {
-    throw new Error('release: package-lock.json is missing. It pins the dev toolchain ' +
-      '(eslint, c8 and their transitives) and is part of the release set, so a cut ' +
-      'without it ships a tree `npm ci` cannot install. Restore it before releasing.');
+    throw new Error('release: package-lock.json is missing. It pins the dev toolchain and ' +
+      'the esbuild and postject versions the release build installs, and it is part of the ' +
+      'release set. A cut without it ships a tree `npm ci` cannot install. Restore it before releasing.');
   }
   var lock = b.safeJson.parse(fs.readFileSync(LOCK_PATH, 'utf8'), { maxBytes: b.constants.BYTES.mib(8) });
   var lockRoot = lock && lock.version;
@@ -359,7 +359,7 @@ function _regenArtifacts(opts) {
   _run('node', ['scripts/project-transitive-manifest.js', '--check']);
   _ok('vendored transitive SBOM projection drift-checked');
   // Hand-typed version references in the operator-facing docs (the vendored
-  // blamejs version, its minor line, the Node floor) must match their source of
+  // blamejs version and the Node floor) must match their source of
   // truth — vendor-hash.js syncs them on a refresh; here we gate drift so a
   // vendor bump that skipped vendor-hash, or a hand-edit, fails prepare loud
   // instead of shipping a stale version in the README.
@@ -423,7 +423,7 @@ function cmdPrepare(opts) {
   if (freshness.status === 0) {
     _ok('vendored blamejs current');
   } else if (freshness.status === 2) {
-    console.warn('warning: could not reach the GitHub API to check vendored blamejs currency — ' +
+    console.warn('warning: could not reach the npm registry to check vendored blamejs currency — ' +
       'unverified, not known-stale. Re-run `prepare` when connectivity returns if you want the proof.');
   } else if (opts && opts.vendorStaleReason) {
     // Audited override for the real race: blamejs ships often, so upstream can

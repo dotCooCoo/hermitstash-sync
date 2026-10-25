@@ -123,7 +123,7 @@ function refreshStandaloneVerifier() {
   const refreshed = refreshStandaloneVerifier();
 
   // Keep the hand-typed version references in the operator-facing docs (the
-  // vendored blamejs version, its minor line, and the Node floor) in lockstep
+  // vendored blamejs version and the Node floor) in lockstep
   // with their source of truth, so a vendor bump can't leave a stale version
   // stranded in the README. Gated by `check-doc-versions.js --check` in release
   // prepare + CI.

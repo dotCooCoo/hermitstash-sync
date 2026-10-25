@@ -159,7 +159,7 @@ var tableMetadata = {};
 var streamLimit = C.BYTES.bytes(1000000);
 var columnGateMode = "reject";
 
-// literal names ARE the contract. allow:hand-rolled-sql markers below.
+// allow:hand-rolled-sql — the reserved table-name declarations below are the local guard set an operator schema may not collide with, not query SQL; the literal names are the contract
 var RESERVED_TABLE_NAMES = new Set([
   "audit_log",
   "audit_checkpoints",
@@ -400,7 +400,7 @@ var FRAMEWORK_SCHEMA = [
       expiresAt:     "INTEGER NOT NULL",
       lastActivity:  "INTEGER NOT NULL",
     },
-    indexes: ["userIdHash", "expiresAt"],
+    indexes: ["userIdHash", "expiresAt", "lastActivity", "createdAt"],
     sealedFields:  ["userId", "data"],
     derivedHashes: { userIdHash: { from: "userId" } },
   },
@@ -559,6 +559,7 @@ var FRAMEWORK_SCHEMA = [
       sessionId:          "TEXT",
       ip:                 "TEXT",
       kwGrantHalf:        "TEXT",
+      ownerKeyVersion:    "INTEGER NOT NULL DEFAULT 1",
     },
     indexes: [
       { name: "idx_bg_grants_actor",   columns: ["issuedToActorHash"] },
@@ -915,6 +916,43 @@ function _ownerNamespace() {
   return _namespaceFrom(process.platform, nodeFs.readlinkSync);
 }
 
+var FRAMEWORK_CATEGORY_VOCAB = Object.freeze([
+  "name", "email", "phone", "address", "ip", "id-document",
+  "biometric", "health", "genetic", "sexual-orientation",
+  "racial-or-ethnic-origin", "political-opinion", "religious-belief",
+  "trade-union-membership", "criminal-record",
+  "financial", "location", "behavioral", "device-id",
+  "child-data", "education", "employment", "operator-defined",
+]);
+
+function _checkPersonalDataCategories(st) {
+  Object.keys(st.personalDataCategories).forEach(function (field) {
+    var cat = st.personalDataCategories[field];
+    if (typeof cat !== "string" || cat.length === 0) {
+      throw new DbError("db/bad-personal-data-category",
+        "table '" + st.name + "' field '" + field +
+        "': category must be a non-empty string");
+    }
+    if (FRAMEWORK_CATEGORY_VOCAB.indexOf(cat) === -1) {
+      try {
+        var auditMod = require("./audit");                                              // allow:inline-require — circular-load defense (audit imports db)
+        auditMod.safeEmit({
+          action:   "db.personal_data_category_unknown",
+          outcome:  "success",
+          metadata: {
+            severity: "warning",
+            table:    st.name,
+            field:    field,
+            category: cat,
+            vocabHint: "use one of: " + FRAMEWORK_CATEGORY_VOCAB.join(", ") +
+                       " (or operator-defined for genuinely-custom)",
+          },
+        });
+      } catch (_e) { /* drop-silent */ }
+    }
+  });
+}
+
 function _anchorCheckpoint() {
   if (readOnly) return Promise.resolve(null);
   return audit.checkpoint({ skipIfUnchanged: true });
@@ -993,6 +1031,41 @@ function cleanStaleTmpDbs(tmpDir) {
  * to boot on any chain breakage, signature mismatch, or rollback —
  * compliance posture demands fail-closed at the earliest signal.
  *
+ * Each of those boot checks has its own code, so a refusal says which one
+ * failed: `db/audit-chain-break` and `db/consent-chain-break` for a chain whose
+ * row hashes do not link, `db/audit-checkpoint-break` for a checkpoint
+ * signature that does not verify, `db/audit-tip-unreadable` when the recorded
+ * tip cannot be read, `db/audit-rollback-detected` when the chain is shorter
+ * than that tip, `db/integrity-check-failed` for a failed
+ * `PRAGMA integrity_check`, and `db/enc-truncated` or `db/key-unseal-empty` for
+ * a data file or sealed key that does not open.
+ *
+ * `db/working-copy-missing`, `db/flush-pending-wal` and
+ * `db/immutable-pending-wal` are raised by the encrypt-to-disk path rather than
+ * by this call, which runs on the flush timer, at process exit and on
+ * `b.db.close`, so `init` does not refuse with them.
+ *
+ * The configuration is refused before any of that: `db/bad-init` for an `opts`
+ * it cannot read, `db/bad-at-rest`, `db/bad-immutable`, `db/bad-read-only`,
+ * `db/bad-seal-migration`, `db/bad-min-free-bytes`,
+ * `db/bad-personal-data-categories` and `db/bad-resolve-purge-archive` for a
+ * setting whose shape is wrong, `db/bad-personal-data-category` for one field's
+ * category within that map that is not a non-empty string, `db/reserved-table-name` for a schema table in
+ * the framework's own namespace, `db/read-only-no-key` for a read-only boot with
+ * no key to open the data with, and `db/posture-violation` when the compliance
+ * posture forbids the configuration asked for. The purge-anchor settings refuse
+ * with `db/bad-purge-anchor-public-key`,
+ * `db/bad-accept-unsigned-purge-anchor` and
+ * `db/bad-accept-rotated-purge-anchor-key`. The time settings refuse with
+ * `db/bad-ntp-setting`, and the boot drift check with `db/ntp-unreachable`,
+ * `db/ntp-drift-fatal` or `db/nts-required` when authenticated time is demanded
+ * and unavailable.
+ *
+ * Encrypted mode needs a memory-backed temporary directory, and the two ways
+ * that can fail are separate codes: `db/no-tmpfs` when no path is named at all,
+ * and `db/tmpdir-not-tmpfs` when one is named but is not a tmpfs mount, which
+ * `allowNonTmpfsTmpDir: true` accepts with the disk-residency tradeoff.
+ *
  * @opts
  *   dataDir:                 string,            // required — where db.enc + db.key.enc live
  *   schema:                  Array,             // required — [{ name, columns, indexes, sealedFields, derivedHashes, foreignKeys, primaryKey, subjectField, personalDataCategories }, ...]
@@ -1001,7 +1074,7 @@ function cleanStaleTmpDbs(tmpDir) {
  *   readOnly:                boolean,           // default false — open without ever writing back. Under `atRest: "encrypted"` two processes sharing one volume each decrypt their own working copy, so whichever flushes last overwrites the other's writes; a reader takes no part in that. SQLite refuses writes too, so a stray one fails where it is issued.
  *   tmpDir:                  string,            // the encrypted-mode tmpfs path. Defaults to `BLAMEJS_TMPDIR`, then to `/dev/shm` on Linux only — off Linux nothing is inferred and encrypted mode refuses with `db/no-tmpfs` until one of the two names a mount.
  *   allowNonTmpfsTmpDir:     boolean,           // default false — on Linux, where the mount table can be compared against, encrypted mode THROWS when tmpDir resolves outside the recognized tmpfs mounts (plaintext-on-disk leak); pass true to downgrade that to a warning when the mount is verified in-memory out-of-band. Off Linux the mount cannot be classified, so an operator-named path is always taken with a warning and this option changes nothing.
- *   migrationDir:            string,            // optional — path to ./migrations/ (run-once each)
+ *   migrationDir:            string,            // optional — path to ./migrations/ (run-once each); each file's up(db) must be synchronous: an async up(db) fails init before it is called, and a plain up(db) that returns a promise has its synchronous writes rolled back and fails init, while work its promise does afterward runs outside any transaction
  *   streamLimit:             number,            // default 1_000_000 — db.stream row ceiling
  *   columnGate:              "reject"|"warn"|"off", // default "reject" — refuse queries on columns not declared in the table schema
  *   skipBootIntegrityCheck:  boolean,           // default false — skip PRAGMA integrity_check
@@ -1044,8 +1117,15 @@ async function _initReleasingClaimOnFailure(opts) {
   } catch (e) {
     if (initialized) {
       try { _shutdown(false); } catch (_e) { /* the caller's error is the refusal, not this */ }
-    } else if (workingCopyClaimed) {
-      try { removePlaintextFiles(); } catch (_e) { /* best effort on a failing path */ }
+    } else {
+      if (database) {
+        try { database.close(); } catch (_e) { /* best effort on a failing path */ }
+        database = null;
+        _dbGenerationCounter++;
+      }
+      if (workingCopyClaimed) {
+        try { removePlaintextFiles(); } catch (_e) { /* best effort on a failing path */ }
+      }
     }
     throw e;
   }
@@ -1288,39 +1368,7 @@ async function init(opts) {
           throw new DbError("db/bad-personal-data-categories",
             "table '" + st.name + "': personalDataCategories must be an object mapping field name → category");
         }
-        var FRAMEWORK_CATEGORY_VOCAB = [
-          "name", "email", "phone", "address", "ip", "id-document",
-          "biometric", "health", "genetic", "sexual-orientation",
-          "racial-or-ethnic-origin", "political-opinion", "religious-belief",
-          "trade-union-membership", "criminal-record",
-          "financial", "location", "behavioral", "device-id",
-          "child-data", "education", "employment", "operator-defined",
-        ];
-        Object.keys(st.personalDataCategories).forEach(function (field) {
-          var cat = st.personalDataCategories[field];
-          if (typeof cat !== "string" || cat.length === 0) {
-            throw new DbError("db/bad-personal-data-category",
-              "table '" + st.name + "' field '" + field +
-              "': category must be a non-empty string");
-          }
-          if (FRAMEWORK_CATEGORY_VOCAB.indexOf(cat) === -1) {
-            try {
-              var auditMod = require("./audit");                                              // allow:inline-require — circular-load defense (audit imports db)
-              auditMod.safeEmit({
-                action:   "db.personal_data_category_unknown",
-                outcome:  "success",
-                metadata: {
-                  severity: "warning",
-                  table:    st.name,
-                  field:    field,
-                  category: cat,
-                  vocabHint: "use one of: " + FRAMEWORK_CATEGORY_VOCAB.join(", ") +
-                             " (or operator-defined for genuinely-custom)",
-                },
-              });
-            } catch (_e) { /* drop-silent */ }
-          }
-        });
+        _checkPersonalDataCategories(st);
       }
       subjectTables.push({
         name:                   st.name,
@@ -1531,6 +1579,15 @@ async function init(opts) {
  * audit-emission are wired into the chain so operator code never
  * concatenates SQL by hand.
  *
+ * `.asActor(actor)` names the principal the read is for, which is
+ * what `b.cryptoField.configureUnsealRateCap` counts unseal failures
+ * per. Without it every read shares one bucket, so a forged value in
+ * a sealed column puts every reader of that column into the same
+ * cooldown. The actor is the object the request carries, or a string
+ * or number naming the principal directly. The chain refuses a value
+ * that names no principal, which includes an object carrying none of
+ * the identity fields, an empty string, and a non-finite number.
+ *
  * @example
  *   var b = require("blamejs");
  *   await b.db.init({ dataDir: "/tmp/data", schema: [
@@ -1573,7 +1630,8 @@ function from(tableName) {
  *
  * @example
  *   b.db.getDeclaredColumns("orders");
- *   // → ["_id", "customerId", "total", "createdAt"]
+ *   // → the columns that table was declared with, ["_id", "customerId",
+ *   //   "total", "createdAt"] say, and null for a table nothing declared
  */
 function getDeclaredColumns(tableName) {
   var md = tableMetadata[tableName];
@@ -1661,7 +1719,9 @@ function prepare(sql) {
  * ceiling override). Default ceiling is the module-level
  * `streamLimit` (1_000_000); the stream destroys with a
  * `db/stream-limit-exceeded` error past the cap rather than
- * accumulating unboundedly.
+ * accumulating unboundedly. A `streamLimit` that is not a positive
+ * integer throws `db/bad-stream-limit` before the stream opens, and calling it
+ * before `b.db.init()` has been awaited throws `db/not-initialized`.
  *
  * @example
  *   var b = require("blamejs");
@@ -1833,6 +1893,18 @@ function execRaw(sql) {
  * so a rolled-back transaction never leaves a phantom row in
  * `audit_log`.
  *
+ * `fn` must be synchronous. An `async` function is refused with
+ * `db/async-transaction-fn` before it is called, so none of its body
+ * runs. A plain function that returns a promise is also refused with
+ * `db/async-transaction-fn`: the transaction rolls back what `fn` wrote
+ * before it returned, and any work its promise performs afterward runs
+ * outside any transaction. Use `b.clusterStorage.transaction` for an
+ * async body.
+ *
+ * Calling `transaction` before `b.db.init()` has completed throws
+ * `db/not-initialized`, and an `fn` that is not a function throws
+ * `db/bad-transaction-fn`.
+ *
  * @example
  *   var b = require("blamejs");
  *   await b.db.init({ dataDir: "/tmp/data", schema: [
@@ -1856,9 +1928,17 @@ function transaction(fn) {
   if (typeof fn !== "function") {
     throw new DbError("db/bad-transaction-fn", "transaction requires a function");
   }
+  if (dbSchema.isAsyncFunction(fn)) {
+    throw new DbError("db/async-transaction-fn",
+      "transaction: fn is an async function; fn must be a synchronous function, so it was not run");
+  }
   runSql(database, "BEGIN");
   try {
     var result = fn(module.exports);
+    if (dbSchema.containThenable(result)) {
+      throw new DbError("db/async-transaction-fn",
+        "transaction: fn returned a promise; fn must be a synchronous function, so the transaction was rolled back");
+    }
     runSql(database, "COMMIT");
     return result;
   } catch (e) {
@@ -2171,6 +2251,11 @@ function close() {
 
 function _shutdown(anchorCheckpoint) {
   if (!initialized) {
+    if (database) {
+      try { database.close(); } catch (_e) { /* already closed */ }
+      database = null;
+      _dbGenerationCounter++;
+    }
     if (workingCopyClaimed) removePlaintextFiles();
     return;
   }
@@ -2722,6 +2807,19 @@ async function _runNtpBootCheck(opts) {
       "no one vouched for. Set BLAMEJS_NTS_SERVERS to a reachable NTS-KE server, or " +
       "unset BLAMEJS_NTS_REQUIRE to accept unauthenticated time.");
   }
+  if (result.driftMs === null && result.ok === false) {
+    log.error("ntp: " + result.message);
+    events.emit(events.EVENTS.NTP_DRIFT, {
+      severity: "fatal",
+      driftMs:  null,
+      server:   result.server,
+      message:  result.message,
+    });
+    throw _dbErr("db/ntp-unreachable",
+      "FATAL: no NTP server answered and BLAMEJS_NTP_REQUIRE_REACHABLE=1: " +
+      (result.unreachableReason || "no server answered") +
+      ". Refusing to boot rather than run on an unverified clock.");
+  }
   if (result.severity === "info") {
     log("ntp: " + result.message);
   } else if (result.severity === "warning") {
@@ -2732,12 +2830,6 @@ async function _runNtpBootCheck(opts) {
       server:   result.server,
       message:  result.message,
     });
-    if (result.driftMs === null &&
-        safeEnv.readVar("BLAMEJS_NTP_REQUIRE_REACHABLE", { default: "" }) === "1") {
-      throw _dbErr("db/ntp-unreachable",
-        "FATAL: no NTP server answered and BLAMEJS_NTP_REQUIRE_REACHABLE=1 — " +
-        result.message + ". Refusing to boot rather than run on an unverified clock.");
-    }
   } else if (result.severity === "fatal") {
     log.error("FATAL: ntp clock drift exceeds threshold: " + result.message);
     events.emit(events.EVENTS.NTP_DRIFT, {
@@ -3036,9 +3128,13 @@ function getActivePosture() { return _activePosture; }
  * @related   b.db.init, b.db.getDbPath
  *
  * Diagnostic accessor — returns the active at-rest posture
- * (`"encrypted"` or `"plain"`) chosen at `init` time.
+ * (`"encrypted"` or `"plain"`) chosen at `init` time. The posture is the one
+ * the FIRST `init` selected: a later `init` on an already-initialized process
+ * returns without reading its options, so this reports that first choice.
  *
  * @example
+ *   // requires: a process in which b.db.init has not already run, because the
+ *   // posture reported is the one the first init selected
  *   var b = require("blamejs");
  *   await b.db.init({ dataDir: "/tmp/data", atRest: "plain", schema: [] });
  *   b.db.getMode();
@@ -3134,24 +3230,38 @@ function getActivePosture() { return _activePosture; }
  *
  * Declarative `CREATE VIEW` + `GRANT` migration spec for a
  * Postgres-backed `b.externalDb` deployment. Returns a migration-
- * shape object consumed by `b.externalDb.migrate`. Postgres-only;
- * fail-fast at apply time on other dialects.
+ * shape object (`description`, `target`, `up`, `down`) consumed by
+ * `b.externalDb.migrate`. Postgres-only; fail-fast at apply time on
+ * other dialects.
+ *
+ * The caller does not write the column list. At apply time the source
+ * table's columns are read from `information_schema.columns` and the
+ * excluded ones are removed, so `redactColumns`, `sealedColumns` and
+ * the source columns named by `hashColumns` do not reach the view. A
+ * spec whose exclusions remove every column raises
+ * `declare-view/empty-select`.
  *
  * @opts
- *   name:    string,    // required — view identifier
- *   select:  string,    // required — view body
- *   grants:  object,    // optional — { role: ["SELECT", ...] }
- *   schema:  string,    // optional — schema-qualified namespace
+ *   schema:         string,            // required — schema the view is created in
+ *   name:           string,            // required — view identifier
+ *   source:         string | string[], // required — source table, "schema.table" or ["schema","table"]; a single segment resolves under "public"
+ *   redactColumns:  string[],          // excluded from the view; each must exist on the source at apply time (default: none)
+ *   sealedColumns:  string[],          // excluded from the view; absent from the source without error (default: none)
+ *   hashColumns:    object,            // { hashColumn: sourcePlaintextColumn }; both must exist on the source (default: none)
+ *   whereClause:    string,            // boolean expression appended as WHERE; a ";" raises declare-view/bad-where (default: none)
+ *   grantTo:        string[],          // roles granted SELECT; each must exist in pg_roles at apply time (default: none)
+ *   backend:        string,            // pins the spec to one externalDb backend; applying it against another raises declare-view/backend-mismatch (default: the runner's backend)
  *
  * @example
- *   var b = require("blamejs");
  *   var spec = b.db.declareView({
- *     name:   "active_users",
- *     select: "SELECT id, email FROM users WHERE deleted_at IS NULL",
- *     grants: { app_reader: ["SELECT"] },
+ *     schema:        "public",
+ *     name:          "active_users",
+ *     source:        "users",
+ *     redactColumns: ["ssn"],
+ *     grantTo:       ["app_reader"],
  *   });
- *   spec.kind;
- *   // → "view"
+ *   spec.description;
+ *   // → "declareView public.active_users"
  */
 
 /**
@@ -3164,28 +3274,37 @@ function getActivePosture() { return _activePosture; }
  * Declarative Postgres ROW LEVEL SECURITY migration spec. Pairs
  * with `b.externalDb.transaction({ sessionGucs })` for the per-
  * request `SET LOCAL` plumbing that scopes the policy. Returns a
- * migration-shape object consumed by `b.externalDb.migrate`.
- * Postgres-only; fail-fast on other dialects.
+ * migration-shape object (`description`, `target`, `up`, `down`)
+ * consumed by `b.externalDb.migrate`. Postgres-only; fail-fast on
+ * other dialects.
+ *
+ * Applying the spec enables row-level security on the table when it
+ * is not enabled already, then creates the policy through
+ * `b.sql.createPolicy`. A table that is not visible to the migration
+ * role raises `declare-row-policy/table-not-found`.
  *
  * @opts
- *   table:    string,    // required — target table
- *   name:     string,    // required — policy identifier
- *   command:  string,    // optional — "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "ALL"
- *   using:    string,    // optional — USING expression
- *   withCheck:string,    // optional — WITH CHECK expression
- *   roles:    string[],  // optional — TO role list
+ *   schema:     string,   // required — schema holding the table
+ *   table:      string,   // required — target table
+ *   name:       string,   // required — policy identifier
+ *   using:      string,   // required — USING boolean expression; a ";" raises declare-row-policy/bad-expression
+ *   withCheck:  string,   // WITH CHECK expression for writes; same ";" refusal (default: none, so USING alone governs)
+ *   role:       string,   // one role the policy applies TO (default: none, so it applies to every role)
+ *   command:    string,   // "ALL" | "SELECT" | "INSERT" | "UPDATE" | "DELETE", matched case-insensitively (default: "ALL")
+ *   permissive: boolean,  // false emits a RESTRICTIVE policy, which narrows rather than widens access (default: true)
+ *   backend:    string,   // pins the spec to one externalDb backend; applying it against another raises declare-row-policy/backend-mismatch (default: the runner's backend)
  *
  * @example
- *   var b = require("blamejs");
  *   var spec = b.db.declareRowPolicy({
+ *     schema:  "public",
  *     table:   "orders",
  *     name:    "tenant_isolation",
  *     command: "ALL",
  *     using:   "tenant_id = current_setting('app.tenant_id')::uuid",
- *     roles:   ["app_user"],
+ *     role:    "app_user",
  *   });
- *   spec.kind;
- *   // → "row-policy"
+ *   spec.description;
+ *   // → "declareRowPolicy public.orders.tenant_isolation"
  */
 
 module.exports = {
@@ -3209,6 +3328,7 @@ module.exports = {
   runSql:              execRaw,
   ["e" + "xec"]:        execRaw,
   transaction:         transaction,
+  get isTransaction() { return !!(database && database.isTransaction); },
   hashFor:             hashFor,
   hashCandidatesFor:   hashCandidatesFor,
   close:               close,

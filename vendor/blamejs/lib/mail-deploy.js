@@ -49,6 +49,8 @@
 
 var nodeCrypto = require("node:crypto");
 var zlib = require("node:zlib");
+var asn1 = require("./asn1-der");
+var bCrypto = require("./crypto");
 var lazyRequire = require("./lazy-require");
 var validateOpts = require("./validate-opts");
 var numericBounds = require("./numeric-bounds");
@@ -108,12 +110,12 @@ function _xmlEscape(s) {
  *     maxAgeSec: 604800,
  *   });
  *   rv.policyText;            // → multi-line MTA-STS policy
- *   rv.dnsTxtRecord;          // → "v=STSv1; id=20260516T120000Z;"
+ *   rv.dnsTxtRecord;          // → "v=STSv1; id=<stamp of this publish>;"
  *   rv.policyPath;            // → "/.well-known/mta-sts.txt"
  *   rv.dnsTxtName;            // → "_mta-sts.example.com"
  */
 function mtaStsPublish(opts) {
-  validateOpts.requireObject(opts || {}, "b.mail.deploy.mtaStsPublish",
+  validateOpts.requireObject(opts, "b.mail.deploy.mtaStsPublish",
     MailDeployError, "mail-deploy/bad-opts");
   if (!_domainOk(opts.domain)) {
     throw new MailDeployError("mail-deploy/bad-domain",
@@ -194,6 +196,18 @@ function mtaStsPublish(opts) {
  * the recommended posture per RFC 7672 §3.1.3 because it survives
  * intermediate-CA changes as long as the leaf key stays stable.
  *
+ * A certificate whose key `b.crypto.compromisedKey` reports, such as an
+ * ECDSA key whose private scalar is 1, throws `mail-deploy/compromised-key`
+ * for every usage and selector. Selector 1 hashes the subjectPublicKeyInfo
+ * DER of the key node:crypto loads from the certificate. For a key that
+ * node:crypto cannot load, such as a composite ML-DSA key, it hashes the
+ * subjectPublicKeyInfo bytes the certificate carries, and a certificate whose
+ * subjectPublicKeyInfo cannot be read either throws `mail-deploy/bad-cert`.
+ * Invalid options throw `mail-deploy/bad-opts`,
+ * `mail-deploy/bad-cert`, `mail-deploy/bad-mx-host`, `mail-deploy/bad-port`,
+ * `mail-deploy/bad-usage`, `mail-deploy/bad-selector` or
+ * `mail-deploy/bad-match-type`.
+ *
  * @opts
  *   certPem:    string,    // PEM cert text
  *   mxHost:     string,    // e.g. "mx1.example.com"
@@ -212,7 +226,7 @@ function mtaStsPublish(opts) {
  *   rv.zoneLine;    // → "_25._tcp.mx1.example.com. IN TLSA 3 1 1 <64-hex>"
  */
 function danePublish(opts) {
-  validateOpts.requireObject(opts || {}, "b.mail.deploy.danePublish",
+  validateOpts.requireObject(opts, "b.mail.deploy.danePublish",
     MailDeployError, "mail-deploy/bad-opts");
   validateOpts.requireNonEmptyString(opts.certPem,
     "b.mail.deploy.danePublish: opts.certPem", MailDeployError, "mail-deploy/bad-cert");
@@ -247,17 +261,35 @@ function danePublish(opts) {
 
   var x509;
   try {
-    x509 = new nodeCrypto.X509Certificate(opts.certPem);
+    x509 = bCrypto._x509(opts.certPem);
   } catch (e) {
     throw new MailDeployError("mail-deploy/bad-cert",
       "danePublish: cert PEM did not parse: " + (e && e.message ? e.message : String(e)));
+  }
+  try {
+    bCrypto.assertNotCompromised(x509, {
+      errorClass: MailDeployError, code: "mail-deploy/compromised-key", label: "danePublish: the certificate's key",
+    });
+  } catch (e) {
+    if (e && e.code === "mail-deploy/compromised-key") throw e;
+    throw new MailDeployError("mail-deploy/bad-cert",
+      "danePublish: the certificate's public key could not be read: " + (e && e.message ? e.message : String(e)));
   }
   var bytes;
   if (selector === 0) {
     bytes = x509.raw;
   } else {
-    var spki = x509.publicKey.export({ type: "spki", format: "der" });
-    bytes = spki;
+    var nodeKey = null;
+    try { nodeKey = x509.publicKey; } catch (_e) { nodeKey = null; }
+    if (nodeKey) {
+      bytes = nodeKey.export({ type: "spki", format: "der" });
+    } else {
+      try { bytes = asn1.readCertificateTbsFields(x509.raw).spki.raw; }
+      catch (e) {
+        throw new MailDeployError("mail-deploy/bad-cert",
+          "danePublish: the certificate's subjectPublicKeyInfo could not be read: " + (e && e.message ? e.message : String(e)));
+      }
+    }
   }
   var algo = matchType === 1 ? "sha256" : "sha512";
   var hashHex = nodeCrypto.createHash(algo).update(bytes).digest("hex");
@@ -289,6 +321,23 @@ function danePublish(opts) {
  * Outlook, Apple Mail's Mail.app, and Evolution all read the same
  * file when present.
  *
+ * A `domain` that is missing, empty, longer than 253 characters, or carrying a
+ * control character or a double quote throws `mail-deploy/bad-domain`. This is
+ * the check that keeps the value from breaking out of the XML it is written
+ * into; it is not a hostname grammar, so a syntactically invalid name that
+ * carries none of those characters is written as given. An `opts` carrying a
+ * key this primitive does not accept throws `mail-deploy/bad-opts`, as does an
+ * `opts` that is not an object, including `undefined`. A `displayName` longer
+ * than 256 characters throws `mail-deploy/bad-displayName`.
+ *
+ * Each server entry is checked as it is written, by the same rule: a `host`
+ * that is missing, empty, over-length or carrying a control character or a
+ * double quote throws `mail-deploy/bad-host`, and a `port` outside 1..65535
+ * throws `mail-deploy/bad-port`, both naming the protocol whose entry carried
+ * it. A `jmap` without a non-empty `url` throws `mail-deploy/bad-jmap-url`.
+ * Supplying none of `imap`, `pop3` and `jmap` throws `mail-deploy/bad-opts`,
+ * since the document has no incoming server to describe.
+ *
  * @opts
  *   domain:        string,                          // e.g. "example.com"
  *   displayName:   string?,                         // brand label; defaults to domain
@@ -306,8 +355,11 @@ function danePublish(opts) {
  *   // Serve at `https://autoconfig.example.com/mail/config-v1.1.xml`
  */
 function autoConfigXml(opts) {
-  validateOpts.requireObject(opts || {}, "b.mail.deploy.autoConfigXml",
+  validateOpts.requireObject(opts, "b.mail.deploy.autoConfigXml",
     MailDeployError, "mail-deploy/bad-opts");
+  validateOpts.checkOrThrow(opts,
+    ["domain", "displayName", "imap", "pop3", "smtp", "jmap"],
+    "mail.deploy.autoConfigXml", MailDeployError, "mail-deploy/bad-opts");
   if (!_domainOk(opts.domain)) {
     throw new MailDeployError("mail-deploy/bad-domain",
       "autoConfigXml: opts.domain must be a valid hostname");
@@ -409,7 +461,7 @@ function autoConfigXml(opts) {
  *   });
  */
 function autoDiscoverXml(opts) {
-  validateOpts.requireObject(opts || {}, "b.mail.deploy.autoDiscoverXml",
+  validateOpts.requireObject(opts, "b.mail.deploy.autoDiscoverXml",
     MailDeployError, "mail-deploy/bad-opts");
   if (typeof opts.email !== "string" || opts.email.length === 0 || opts.email.length > 254) {
     throw new MailDeployError("mail-deploy/bad-email",
@@ -517,6 +569,20 @@ var TLSRPT_POLICY_TYPES = Object.freeze({
  *   - Missing REQUIRED §4.4 fields → `mail-tlsrpt/bad-schema`.
  *   - `policies` MUST be an array (RFC 8460 §4.4 erratum, even for
  *     single-policy reports).
+ *   - `input` that is neither a Buffer nor a string →
+ *     `mail-tlsrpt/bad-input`.
+ *   - A byte-cap or ratio option that is not a positive finite integer
+ *     → `mail-tlsrpt/bad-opts`.
+ *   - Bytes that are not JSON once decompressed →
+ *     `mail-tlsrpt/bad-json`.
+ *
+ * The decoded report is then validated against RFC 8460's shape, and a report
+ * that parses as JSON but is not a TLSRPT report is refused rather than
+ * half-read: `mail-tlsrpt/bad-policy` for a `policies` entry whose
+ * `failure-details` is not an array, `mail-tlsrpt/bad-failure-detail` for an
+ * entry within it that is not an object, `mail-tlsrpt/bad-summary` for a
+ * `summary` count that is not a number, and `mail-tlsrpt/too-many-policies` or
+ * `mail-tlsrpt/too-many-failures` past the per-report and per-policy caps.
  *
  * @opts
  *   contentType:           string,    // optional — hint for gzip routing
@@ -804,6 +870,12 @@ function tlsRptReportSchema() {
  *     to their mTLS-peer-cert / IP-allowlist / signed-header /
  *     reverse-proxy auth boundary. The framework intentionally does
  *     NOT couple to any specific auth scheme.
+ *
+ * Throws `mail-tlsrpt/bad-opts` when the handler is built: an
+ * `authenticate` that is not a function, a `trustedReporters` that is not
+ * an array of strings, or a `maxCompressedBytes` that is not a positive
+ * integer. The handler itself answers with a status code rather than
+ * throwing.
  *
  * @opts
  *   authenticate:            Function,  // (req) → boolean | Promise<boolean>; SHA real auth boundary

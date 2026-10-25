@@ -158,14 +158,16 @@ describe('encrypted-session recovery branches', () => {
     client.destroy();
   });
 
-  it('400 encrypted-payload-rejected retry is terminal — a second 400 surfaces, no loop', async () => {
+  it('400 encrypted-payload-rejected retry is terminal: a second 400 rejects with ENC_PAYLOAD_REJECTED, no loop', async () => {
     const client = makeClient();
     const ctl = installScript(client, [
       { resp: { statusCode: 400, body: { error: 'encrypted-payload-rejected' } } },
       { resp: { statusCode: 400, body: { error: 'encrypted-payload-rejected' } } },
     ]);
-    const resp = await client._encryptedRequest('POST', '/sync/rename', { a: 1 });
-    assert.strictEqual(resp.statusCode, 400);
+    await assert.rejects(
+      client._encryptedRequest('POST', '/sync/rename', { a: 1 }),
+      (e) => e.code === 'ENC_PAYLOAD_REJECTED',
+    );
     assert.strictEqual(ctl.callCount, 2, 'one retry then terminal');
     assert.strictEqual(ctl.resetCount, 1);
     client.destroy();
@@ -300,11 +302,11 @@ describe('encrypted-request wall-clock cap (timeoutMs forwarded to the primitive
 
   it('a non-timeout rejection passes through untranslated', async () => {
     const client = makeClient();
-    const orig = new Error('decrypt failed'); orig.code = 'api-encrypt/client-response-not-json';
+    const orig = new Error('decrypt failed'); orig.code = 'api-encrypt/client-response-tampered';
     installScript(client, [{ throw: orig }]);
     await assert.rejects(
       client._encryptedRequest('POST', '/x', { a: 1 }),
-      (e) => e === orig && e.code === 'api-encrypt/client-response-not-json',
+      (e) => e === orig && e.code === 'api-encrypt/client-response-tampered',
     );
     client.destroy();
   });

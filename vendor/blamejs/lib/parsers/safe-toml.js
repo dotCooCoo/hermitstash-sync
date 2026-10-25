@@ -9,6 +9,7 @@ var codepointClass = require("../codepoint-class");
 var numericBounds = require("../numeric-bounds");
 var safeBuffer = require("../safe-buffer");
 var { FrameworkError } = require("../framework-error");
+var frameworkError = require("../framework-error");
 
 class SafeTomlError extends FrameworkError {
   constructor(message, code, line, col) {
@@ -20,6 +21,8 @@ class SafeTomlError extends FrameworkError {
     this.isSafeTomlError = true;
   }
 }
+
+frameworkError.messageFirstFactory(SafeTomlError);
 
 var RADIX_BIN     = 0x2;
 var RADIX_OCTAL   = 0x8;
@@ -293,7 +296,7 @@ function parse(input, opts) {
         continue;
       }
       var cc = _peekCode();
-      if (codepointClass.isForbiddenControlChar(cc)) {
+      if (codepointClass.isForbiddenControlChar(cc, { allowC1: true })) {
         throw _err("unescaped control char in string", "toml/bad-string");
       }
       _advance();
@@ -621,6 +624,10 @@ function parse(input, opts) {
     t[last] = value;
   }
 
+  function _tableDefinedTwice(fullPath) {
+    throw _err("table '" + fullPath + "' defined twice", "toml/redefine");
+  }
+
   function _parseTableHeader() {
     var isAoT = _peek(1) === "[";
     _advance(isAoT ? 2 : 1);
@@ -670,9 +677,7 @@ function parse(input, opts) {
         }
         if (isLast && !isAoT) {
           var fullPath = segments.slice(0, i + 1).join(".");
-          boundedMap.requireAbsentMember(definedTables, fullPath, function () {
-            throw _err("table '" + fullPath + "' defined twice", "toml/redefine");
-          });
+          boundedMap.requireAbsentMember(definedTables, fullPath, _tableDefinedTwice);
           definedTables.add(fullPath);
           current = sub;
           return;

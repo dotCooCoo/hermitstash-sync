@@ -131,6 +131,9 @@ function _reconstructHtu(req, protoResolver, hostResolver) {
  *     trustedProxies: string|string[],             // CIDRs of your reverse proxies — peer-gates X-Forwarded-Proto + X-Forwarded-Host for htu reconstruction
  *     protocolResolver: function(req): "http"|"https",  // own the scheme decision
  *     hostResolver:   function(req): string|null,  // own the authority decision
+ *     trustForwardedHeaders: boolean,              // legacy; refused unless getHtu is supplied or
+ *                                                  // trustedProxies/protocolResolver peer-gates the
+ *                                                  // scheme (spoofable), and never contributes to htu
  *     nonceStore:     object,
  *     nonceWindowSec: number,
  *     nonceRotateSec: number,
@@ -166,6 +169,11 @@ function create(opts) {
   validateOpts.requireMethods(opts.replayStore, ["checkAndInsert"],
     "middleware.dpop: opts.replayStore", AuthError, "auth-dpop/replay-store-required");
   var replayStore = opts.replayStore;
+  validateOpts.optionalBoolean(opts.requireNonce,
+    "middleware.dpop: opts.requireNonce (whether a proof must carry a server-issued nonce; " +
+    "anything other than a boolean was read as false, which accepted a proof with no nonce " +
+    "under a configuration that asked for one)",
+    AuthError, "auth-dpop/bad-opt");
   var requireNonce = opts.requireNonce === true;
 
   var nonceMgr = null;
@@ -264,7 +272,7 @@ function create(opts) {
             metadata: {
               method: "dpop",
               reason: (e && e.code) || "verify-failed",
-              route:  req.url,
+              route:  requestHelpers.resolveRoute(req),
             },
           });
         } catch (_ignored) { /* drop-silent — observability sink failure */ }
@@ -287,7 +295,8 @@ function create(opts) {
               action:  "auth.bearer.failure",
               actor:   { clientIp: requestHelpers.clientIp(req) },
               outcome: "failure",
-              metadata: { method: "dpop", reason: "stale-nonce", route: req.url },
+              metadata: { method: "dpop", reason: "stale-nonce",
+                          route: requestHelpers.resolveRoute(req) },
             });
           } catch (_ignored) { /* drop-silent */ }
         }
@@ -308,7 +317,8 @@ function create(opts) {
           action:  "auth.bearer.success",
           actor:   { clientIp: requestHelpers.clientIp(req) },
           outcome: "success",
-          metadata: { method: "dpop", jkt: result.jkt, route: req.url },
+          metadata: { method: "dpop", jkt: result.jkt,
+                      route: requestHelpers.resolveRoute(req) },
         });
       } catch (_ignored) { /* drop-silent */ }
     }

@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
-# vendor-update.sh — Vendor a dependency for hermitstash-sync
+# vendor-update.sh: refresh the vendored blamejs framework for hermitstash-sync
 #
 # Usage:
-#   ./scripts/vendor-update.sh <package-name> [version]
+#   ./scripts/vendor-update.sh blamejs                 # latest published release
+#   ./scripts/vendor-update.sh blamejs 0.21.0          # a specific release
 #   ./scripts/vendor-update.sh --check                 # check for updates
 #   ./scripts/vendor-update.sh --diff <package-name>   # show changelog
 #
-# Examples:
-#   ./scripts/vendor-update.sh ws                      # latest
-#   ./scripts/vendor-update.sh ws 8.18.0               # specific version
+# For blamejs it resolves the release on npm as @blamejs/core, downloads the
+# tarball, checks its sha512 against the integrity value the registry
+# publishes, extracts it into vendor/blamejs, and records the consumed files'
+# hashes in vendor/MANIFEST.json. blamejs is the only vendored upstream, and
+# any other package name is refused.
 #
-# What it does:
-#   1. Installs the package temporarily via npm
-#   2. Bundles with esbuild into a single CJS file
-#   3. Updates vendor/MANIFEST.json with version and date
-#   4. Removes the npm package
-#   5. Shows git diff of changed vendor files
-#
-# vendor/ contains bundled (vendored) code only.
-# After running, verify with: node bin/hermitstash-sync.js version
+# After running, verify with:
+#   node tests/test-vendor-integrity.js && node bin/hermitstash-sync.js version
 # Then commit: git add vendor/ && git commit
 
 set -euo pipefail
@@ -99,8 +95,14 @@ if [ "${1:-}" = "--diff" ]; then
 fi
 
 # ---- Update mode ----
-PKG="${1:?Usage: vendor-update.sh <package-name> [version]}"
+PKG="${1:?Usage: vendor-update.sh blamejs [version]}"
 VER="${2:-latest}"
+
+# blamejs is the only vendored upstream; any other package name is refused.
+if [ "$PKG" != "blamejs" ]; then
+  echo "ERROR: '$PKG' is not vendored. Only blamejs is: bash scripts/vendor-update.sh blamejs [version]" >&2
+  exit 1
+fi
 
 echo "=== Vendoring $PKG@$VER ==="
 
@@ -210,69 +212,3 @@ if [ "$PKG" = "blamejs" ]; then
   echo "Next: node tests/test-vendor-integrity.js && node bin/hermitstash-sync.js version"
   exit 0
 fi
-
-# Install temporarily
-npm install "${PKG}@${VER}" --no-save --ignore-scripts 2>/dev/null
-INSTALLED_VER=$(node -e "console.log(require('./node_modules/${PKG}/package.json').version)")
-echo "Installed: $PKG@$INSTALLED_VER"
-
-# Bundle based on package name
-OUTFILE="vendor/${PKG//[@\/]/-}.cjs"
-
-case "$PKG" in
-  # Add specific bundling instructions per package here.
-  # Example for 'ws' (if we ever need it):
-  # "ws")
-  #   echo "module.exports = require('ws');" > _entry.cjs
-  #   npx esbuild _entry.cjs --bundle --format=cjs --platform=node --minify --outfile="$OUTFILE"
-  #   rm _entry.cjs
-  #   ;;
-
-  *)
-    # Generic bundling: CJS, minified, node platform
-    echo "module.exports = require(\"$PKG\");" > _entry.cjs
-    npx esbuild _entry.cjs --bundle --format=cjs --platform=node --minify --outfile="$OUTFILE" --external:crypto --external:node:crypto --external:node:fs --external:node:path --external:node:os --external:node:child_process --external:node:events --external:node:net --external:node:tls --external:node:https --external:node:http --external:node:url --external:node:stream --external:node:sqlite
-    rm _entry.cjs
-    sed -i "1s|^|// $PKG v${INSTALLED_VER} — vendored for hermitstash-sync. License: see package.\n|" "$OUTFILE"
-    ;;
-esac
-
-# Update MANIFEST.json
-node -e "
-var fs = require('fs');
-var m = JSON.parse(fs.readFileSync('$MANIFEST', 'utf8'));
-m.packages['$PKG'] = {
-  version: '$INSTALLED_VER',
-  bundledAt: '$DATE',
-  file: '$OUTFILE'
-};
-fs.writeFileSync('$MANIFEST', JSON.stringify(m, null, 2) + '\n');
-console.log('Updated MANIFEST.json: $PKG → $INSTALLED_VER');
-"
-
-# Remove npm package
-npm uninstall "$PKG" --no-save 2>/dev/null || true
-rm -rf node_modules package-lock.json 2>/dev/null || true
-
-# Verify bundle loads
-echo ""
-echo "=== Verifying bundle ==="
-node -e "try{require('./$OUTFILE');console.log('  $OUTFILE: OK')}catch(e){console.log('  $OUTFILE: FAIL — '+e.message);process.exit(1)}" \
-  || { echo "Bundle verification failed!"; exit 1; }
-
-# Show size
-echo ""
-echo "=== Bundle size ==="
-ls -lh "$OUTFILE" | awk '{print "  " $NF ": " $5}'
-
-echo ""
-echo "=== Git diff ==="
-git diff --stat vendor/ 2>/dev/null || true
-
-echo ""
-echo "=== Done: $PKG v$INSTALLED_VER vendored ==="
-echo ""
-echo "Next steps:"
-echo "  1. Review:  git diff vendor/"
-echo "  2. Verify:  node bin/hermitstash-sync.js version"
-echo "  3. Commit:  git add vendor/ && git commit -m 'Vendor $PKG@$INSTALLED_VER'"

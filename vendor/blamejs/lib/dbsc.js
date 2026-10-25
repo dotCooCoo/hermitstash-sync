@@ -35,6 +35,7 @@
  */
 
 var nodeCrypto    = require("node:crypto");
+var numericBounds = require("./numeric-bounds");
 var validateOpts  = require("./validate-opts");
 var safeJson      = require("./safe-json");
 var bCrypto       = require("./crypto");
@@ -151,7 +152,21 @@ function verifyChallenge(challengeStr, opts) {
  * the device-bound private key whose header includes the JWK
  * thumbprint of the binding key. Returns `{ valid, jkt, claims }`.
  * Refuses HS256 / none (algorithm-confusion class) and any
- * mismatched audience / challenge.
+ * mismatched audience / challenge. An embedded `jwk` that
+ * `b.crypto.compromisedKey` reports is refused with
+ * `dbsc/compromised-key`.
+ *
+ * The other codes it raises are `dbsc/bad-opts`, `dbsc/bad-assertion`,
+ * `dbsc/missing-aud`, `dbsc/bad-jwt-shape`, `dbsc/bad-jwt-header`,
+ * `dbsc/bad-jwt-payload`, `dbsc/bad-alg`, `dbsc/no-jwk`, `dbsc/bad-jwk`,
+ * `dbsc/bad-sig`, `dbsc/bad-signature`, `dbsc/bad-aud`,
+ * `dbsc/no-freshness`, `dbsc/bad-max-age`, `dbsc/stale`,
+ * `dbsc/iat-future` and `dbsc/bad-jwk-kty`. A `challenge` claim is checked
+ * with `b.dbsc.verifyChallenge`, which raises `dbsc/bad-secret`,
+ * `dbsc/bad-challenge`, `dbsc/bad-challenge-shape`, `dbsc/bad-expires`,
+ * `dbsc/expired` or `dbsc/bad-mac`. A `jwk` that does not match `alg` raises
+ * `auth-jwt-external/alg-kty-mismatch` or
+ * `auth-jwt-external/alg-crv-mismatch`.
  *
  * @opts
  *   secretKey:     Buffer,     // HMAC secret used by challenge() (for re-verify)
@@ -197,9 +212,10 @@ function verifyBindingAssertion(assertion, opts) {
   }
   jwtExternal._assertAlgKtyMatch(headerJson.alg, headerJson.jwk);
   var pubKey = bCrypto.importPublicJwk(headerJson.jwk, {
-    errorClass:    DbscError,
-    code:          "dbsc/bad-jwk",
-    messagePrefix: "verifyBindingAssertion: jwk could not be imported: ",
+    errorClass:      DbscError,
+    code:            "dbsc/bad-jwk",
+    compromisedCode: "dbsc/compromised-key",
+    messagePrefix:   "verifyBindingAssertion: jwk could not be imported: ",
   });
   var signingInput = parts[0] + "." + parts[1];
   var sigBytes = Buffer.from(parts[2], "base64url");
@@ -227,10 +243,15 @@ function verifyBindingAssertion(assertion, opts) {
       "or 'challenge' (server-nonce-bound); without freshness material the " +
       "assertion replays indefinitely");
   }
-  var maxAge = (opts.maxAgeSec || 300) * 1000;                                                        // allow:raw-time-literal — 5min default
+  numericBounds.requireNonNegativeFiniteIntIfPresent(opts.maxAgeSec,
+    "dbsc.verifyBindingAssertion: opts.maxAgeSec (a non-number multiplied out to NaN, and " +
+    "every age comparison against NaN is false, so the assertion replayed indefinitely)",
+    DbscError, "dbsc/bad-max-age");
+  var maxAgeSec = opts.maxAgeSec === undefined ? 300 : opts.maxAgeSec;                                // allow:raw-time-literal — 5min default
+  var maxAge = maxAgeSec * 1000;                                                                      // allow:raw-time-literal — sec→ms
   if (typeof payloadJson.iat === "number" && Date.now() - payloadJson.iat * 1000 > maxAge) {          // allow:raw-time-literal — sec→ms
     throw new DbscError("dbsc/stale",
-      "verifyBindingAssertion: iat is more than " + opts.maxAgeSec + "s old");
+      "verifyBindingAssertion: iat is more than " + maxAgeSec + "s old");
   }
   if (typeof payloadJson.iat === "number" && payloadJson.iat * 1000 - Date.now() > IAT_FUTURE_SKEW_MS) {   // allow:raw-time-literal — sec→ms
     throw new DbscError("dbsc/iat-future",

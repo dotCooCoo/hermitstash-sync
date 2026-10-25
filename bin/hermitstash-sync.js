@@ -77,7 +77,13 @@
         if (!Object.prototype.hasOwnProperty.call(files, kind)) continue;
         var rel = files[kind];
         var expected = hashes && hashes[kind];
-        if (typeof rel !== 'string' || typeof expected !== 'string') continue;
+        // An entry with no path or no recorded hash cannot be verified, so it
+        // counts as a mismatch, as it does in the framework's own check.
+        if (typeof rel !== 'string' || typeof expected !== 'string') {
+          checkedCount += 1;
+          mismatches.push(typeof rel === 'string' ? rel : '<unverifiable entry ' + kind + '>');
+          continue;
+        }
         var actual;
         try {
           actual = 'sha256:' + nodeCrypto.createHash('sha256').update(nodeFs.readFileSync(nodePath.join(baseDir, rel))).digest('hex');
@@ -196,7 +202,7 @@
   try {
     // node:sea is only available on Node ≥21; older Nodes throw on
     // require. Wrap so a non-SEA Node without the module still proceeds
-    // to the gate (the Node-floor gate above already enforces ≥24.18).
+    // to the gate (the Node-floor gate above already enforces 24.21.0 or newer).
     var sea;
     try { sea = require('node:sea'); } catch (_e) { sea = null; }
     if (sea && typeof sea.isSea === 'function' && sea.isSea()) return;
@@ -259,6 +265,18 @@
     );
     process.exit(70); // EX_SOFTWARE
   }
+})();
+
+// Hostnames resolve through the operating system's resolver, which knows Docker
+// service names, /etc/hosts entries and names that exist only on the local
+// network. Without this, blamejs sends every name outside a few local suffixes
+// to a public DNS-over-HTTPS resolver, and a server reached by such a name is
+// never found. An operator who sets BLAMEJS_DNS_TRANSPORT (system, dot or doh)
+// keeps that choice.
+(function _useSystemResolver() {
+  var b = require('../vendor/blamejs');
+  if (b.safeEnv.readVar('BLAMEJS_DNS_TRANSPORT')) return;
+  b.network.dns.useSystemResolver();
 })();
 
 const { run } = require('../lib/cli');

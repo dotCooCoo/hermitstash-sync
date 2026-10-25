@@ -10,6 +10,7 @@ var safeBuffer = require("../safe-buffer");
 var codepointClass = require("../codepoint-class");
 var yamlLex = require("../yaml-lex");
 var { FrameworkError } = require("../framework-error");
+var frameworkError = require("../framework-error");
 
 class SafeYamlError extends FrameworkError {
   constructor(message, code, line, col) {
@@ -20,6 +21,15 @@ class SafeYamlError extends FrameworkError {
     this.col = col == null ? null : col;
     this.isSafeYamlError = true;
   }
+}
+
+frameworkError.messageFirstFactory(SafeYamlError);
+
+function _duplicateKeyThrower(ln) {
+  return function (key) {
+    throw new SafeYamlError("duplicate mapping key '" + key + "'",
+      "yaml/duplicate-key", ln.lineNumber, ln.indent + 1);
+  };
 }
 
 var RADIX_OCTAL = 0x8;
@@ -153,7 +163,7 @@ function _findTag(text) {
     var atStart = i === 0;
     var after = text.charAt(i + 1) === "!" ? text.charAt(i + 2) : text.charAt(i + 1);
     if (after.length !== 1) continue;
-    if (after !== "<" && codepointClass.ASCII_ALNUM.indexOf(after) === -1) continue;
+    if (after !== "<" && after !== "%" && codepointClass.ASCII_ALNUM.indexOf(after) === -1) continue;
     return { index: atStart ? i : i - 1 };
   }
   return null;
@@ -415,10 +425,7 @@ function parse(input, opts) {
         throw new SafeYamlError("merge key '<<' not supported (anchor-using feature)",
           "yaml/merge-key-banned", ln.lineNumber, ln.indent + 1);
       }
-      boundedMap.requireAbsentMember(seen, key, function () {
-        throw new SafeYamlError("duplicate mapping key '" + key + "'",
-          "yaml/duplicate-key", ln.lineNumber, ln.indent + 1);
-      });
+      boundedMap.requireAbsentMember(seen, key, _duplicateKeyThrower(ln));
       seen.add(key);
       _bumpKeys(ln.lineNumber);
 

@@ -5,15 +5,11 @@
  * Vendor-freshness gate.
  *
  * Reads the pinned blamejs tag from `vendor/MANIFEST.json` and compares it
- * to the latest release on GitHub. Exits non-zero with a GitHub-Actions-
- * style `::error::` annotation when they diverge, so CI fails loudly the
- * moment blamejs ships a new version we haven't pulled in.
- *
- * Talks to the GitHub API through the same hardened transport the rest
- * of the client uses — b.httpClient.request (SSRF guard, DNS pinning,
- * response byte cap, PQC TLS 1.3 via b.pqcAgent) — and parses the body
- * with b.safeJson.parse (size + depth + prototype-pollution caps). Runs
- * identically in CI and locally.
+ * to the latest version the npm registry publishes for @blamejs/core
+ * (`npm view @blamejs/core version`). Exits non-zero with a GitHub-Actions-
+ * style `::error::` annotation when they diverge. `release.js prepare`
+ * treats a non-zero exit as a failed cut, and ci.yml runs the check as an
+ * advisory step. Runs identically in CI and locally.
  *
  * Run via:
  *   node scripts/check-blamejs-version.js

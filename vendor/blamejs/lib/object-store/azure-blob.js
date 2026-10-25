@@ -31,12 +31,7 @@ function _arrayify(value) {
 }
 
 function _encodeBlobKey(key) {
-  if (key.indexOf("\0") !== -1) {
-    throw _err("objectstore/invalid-key", "null byte in blob key", true);
-  }
-  return key.split("/").map(function (s) {
-    return sigv4.awsUriEncode(s, true);
-  }).join("/");
+  return sigv4.encodeObjectKeyPath(key);
 }
 
 var DEFAULT_API_VERSION = "2024-08-04";
@@ -135,13 +130,10 @@ function create(config) {
   if (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
   var apiVersion = config.apiVersion || DEFAULT_API_VERSION;
   var timeoutMs = config.timeoutMs;
-  var allowedProtocols = config.allowedProtocols || safeUrl.ALLOW_HTTP_TLS;
-  var allowInternal    = config.allowInternal != null ? config.allowInternal : null;
-  safeUrl.parse(endpoint, { allowedProtocols: allowedProtocols, errorClass: ObjectStoreError });
+  var { allowedProtocols, reqOpts } = sharedRequest.resolveTransport(
+    config.allowedProtocols, config.allowInternal, [endpoint], timeoutMs);
   var pathStyle = config.pathStyle === true;
   var pathPrefix = pathStyle ? ("/" + config.accountName) : "";
-  var reqOpts = { timeoutMs: timeoutMs, allowedProtocols: allowedProtocols };
-  if (allowInternal !== null) reqOpts.allowInternal = allowInternal;
 
   function _blobUrl(key, params) {
     var u = _internalUrl(endpoint + pathPrefix + "/" + config.container + "/" + _encodeBlobKey(key),
@@ -190,14 +182,23 @@ function create(config) {
     return getResponse(key, opts).then(function (r) { return r.body; });
   }
 
-  function getStream(key, opts) { return sharedRequest.promiseToStream(get(key, opts)); }
+  function getStream(key, opts) {
+    return sharedRequest.streamObject(_rawGet(key, opts, "stream"), key);
+  }
 
-  function getResponse(key, opts) {
+  function _rawGet(key, opts, responseMode) {
     opts = opts || {};
     var url = _blobUrl(key);
     var extraHeaders = sharedRequest.applyConditionalGetHeaders({}, opts, "x-ms-range");
     var headers = _signed("GET", url, extraHeaders);
-    return _httpRequest("GET", url, headers, null, reqOpts).then(function (res) {
+    var localReqOpts = responseMode
+      ? Object.assign({}, reqOpts, { responseMode: responseMode })
+      : reqOpts;
+    return _httpRequest("GET", url, headers, null, localReqOpts);
+  }
+
+  function getResponse(key, opts) {
+    return _rawGet(key, opts, null).then(function (res) {
       return sharedRequest.mapGetResponse(res);
     }, function (err) {
       if (err && err.statusCode === requestHelpers.HTTP_STATUS.NOT_MODIFIED) {
@@ -321,6 +322,7 @@ function create(config) {
     if (opts.key.indexOf("\0") !== -1) {
       throw _err("objectstore/invalid-key", "null byte in key", true);
     }
+    sharedRequest.assertSafeContentType(opts.contentType, "presigned URL");
 
     var token = _buildSasToken(permissions, opts);
     var url = _internalUrl(endpoint + pathPrefix + "/" + config.container + "/" + _encodeBlobKey(opts.key) + "?" + token.sas, allowedProtocols);

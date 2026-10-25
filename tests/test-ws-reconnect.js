@@ -312,15 +312,9 @@ describe('WsClient drops a late open that wins the race against close()', () => 
 
 });
 
-describe('WsClient SSRF refusal is detected even when the slug lands in err.message (arg-swap)', () => {
+describe('WsClient SSRF refusal is terminal', () => {
 
-  it('a real ssrf-guard error (code = human message, message = slug) is still terminal', async () => {
-    // blamejs constructs the guard refusal via SsrfError(message, code, ctx) but
-    // passes errorClass: WsClientError whose signature is (code, message,
-    // statusCode), so the live error has err.code = the human message and
-    // err.message = the 'ssrf-guard/...' slug. The wrapper must detect the slug
-    // in EITHER field. A code-only check (the pre-fix behavior) would miss this
-    // and churn a reconnect storm against the blocked target.
+  it('a ws-client error carrying an ssrf-guard code is terminal and routed to upgrade_rejected', async () => {
     const h = withCapturingTransport(0);
     try {
       let reconnected = false;
@@ -329,10 +323,9 @@ describe('WsClient SSRF refusal is detected even when the slug lands in err.mess
         assert.fail('a real SSRF refusal must route through upgrade_rejected, not generic error: ' + (e && e.message));
       });
       const rejectedP = waitForEvent(h.ws, 'upgrade_rejected', 3000);
-      // Swapped: code = message text, message = the slug.
       const err = new WsClientError(
-        'URL resolves to 169.254.169.254 (cloud-metadata) — blocked unconditionally',
-        'ssrf-guard/blocked-cloud-metadata');
+        'ssrf-guard/blocked-cloud-metadata',
+        'URL resolves to 169.254.169.254 (cloud-metadata) — blocked unconditionally');
       driveError(h.stub, err);
 
       const [info] = await rejectedP;

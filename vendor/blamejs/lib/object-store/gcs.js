@@ -68,6 +68,19 @@ function _signJwt(serviceAccount, scope, audience) {
   return signingInput + "." + _base64UrlEncode(signature);
 }
 
+function _assertServiceAccountKey(serviceAccount, where) {
+  var saKey;
+  try { saKey = nodeCrypto.createPrivateKey(serviceAccount.private_key); }
+  catch (e) {
+    throw new ObjectStoreError("objectstore/gcs-bad-key",
+      where + ": serviceAccount.private_key could not be parsed: " + ((e && e.message) || String(e)));
+  }
+  return bCrypto.assertKeyType(saKey, "rsa", {
+    errorClass: ObjectStoreError, code: "objectstore/gcs-bad-key",
+    label: where + ": serviceAccount.private_key (signs RS256 tokens and GOOG4-RSA-SHA256 URLs)",
+  });
+}
+
 function create(config) {
   if (!config) throw new Error("gcs protocol requires config");
   if (!config.bucket) throw new Error("gcs: bucket is required");
@@ -85,6 +98,7 @@ function create(config) {
   if (!serviceAccount) {
     throw new Error("gcs: serviceAccount with { client_email, private_key } is required (or serviceAccountFile pointing to one)");
   }
+  _assertServiceAccountKey(serviceAccount, "gcs");
 
   var endpoint = config.endpoint || DEFAULT_ENDPOINT;
   if (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
@@ -92,12 +106,8 @@ function create(config) {
   var bucket    = config.bucket;
   var scope     = config.scope || DEFAULT_SCOPE;
   var timeoutMs = config.timeoutMs;
-  var allowedProtocols = config.allowedProtocols || safeUrl.ALLOW_HTTP_TLS;
-  var allowInternal    = config.allowInternal != null ? config.allowInternal : null;
-  safeUrl.parse(endpoint,      { allowedProtocols: allowedProtocols, errorClass: ObjectStoreError });
-  safeUrl.parse(tokenEndpoint, { allowedProtocols: allowedProtocols, errorClass: ObjectStoreError });
-  var reqOpts = { timeoutMs: timeoutMs, allowedProtocols: allowedProtocols };
-  if (allowInternal !== null) reqOpts.allowInternal = allowInternal;
+  var { allowedProtocols, reqOpts } = sharedRequest.resolveTransport(
+    config.allowedProtocols, config.allowInternal, [endpoint, tokenEndpoint], timeoutMs);
 
   var cachedToken = null;
 
@@ -156,6 +166,7 @@ function create(config) {
   }
 
   async function put(key, body, opts) {
+    sigv4.assertSafeObjectKey(key);
     var token = await _ensureToken();
     var url = _uploadUrl(key);
     var buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === "string" ? body : "", "utf8");
@@ -175,17 +186,25 @@ function create(config) {
   }
 
   function getStream(key, opts) {
-    return sharedRequest.promiseToStream(get(key, opts));
+    return sharedRequest.streamObject(_rawGet(key, opts, "stream"), key);
   }
 
-  async function getResponse(key, opts) {
+  async function _rawGet(key, opts, responseMode) {
     opts = opts || {};
+    sigv4.assertSafeObjectKey(key);
     var token = await _ensureToken();
     var url = _objectUrl(key, { alt: "media" });
     var headers = authHeader.bearer(token);
     sharedRequest.applyConditionalGetHeaders(headers, opts, "Range");
+    var localReqOpts = responseMode
+      ? Object.assign({}, reqOpts, { responseMode: responseMode })
+      : reqOpts;
+    return _httpRequest("GET", url, headers, null, localReqOpts);
+  }
+
+  async function getResponse(key, opts) {
     try {
-      var res = await _httpRequest("GET", url, headers, null, reqOpts);
+      var res = await _rawGet(key, opts, null);
       return sharedRequest.mapGetResponse(res);
     } catch (err) {
       if (err && err.statusCode === requestHelpers.HTTP_STATUS.NOT_MODIFIED) {
@@ -196,6 +215,7 @@ function create(config) {
   }
 
   async function head(key) {
+    sigv4.assertSafeObjectKey(key);
     var token = await _ensureToken();
     var url = _objectUrl(key);
     var res;
@@ -214,6 +234,7 @@ function create(config) {
 
   async function deleteKey(key, opts) {
     opts = opts || {};
+    sigv4.assertSafeObjectKey(key);
     if (opts.versionId) {
       throw _err("objectstore/versionid-unsupported",
         "deleteKey: versioned delete (opts.versionId) is S3/sigv4-only; the GCS " +
@@ -254,11 +275,10 @@ function create(config) {
   function _v4Presign(method, opts) {
     opts = opts || {};
     sharedRequest.requirePresignKey(opts, "presigned URL");
+    sharedRequest.assertSafeContentType(opts.contentType, "presigned URL");
     var expiresIn = sharedRequest.resolvePresignExpires(opts, "presigned URL", "V4");
 
-    var encodedKey = opts.key.split("/")
-      .map(function (s) { return sigv4.awsUriEncode(s, true); })
-      .join("/");
+    var encodedKey = sigv4.encodeObjectKeyPath(opts.key);
     var url = _internalUrl(endpoint + "/" + encodeURIComponent(bucket) + "/" + encodedKey, allowedProtocols);
 
     var date = opts.date || new Date();
@@ -314,6 +334,8 @@ function create(config) {
   function presignedUploadPolicy(opts) {
     opts = opts || {};
     sharedRequest.requirePresignKey(opts, "presignedUploadPolicy");
+    sigv4.assertSafeObjectKey(opts.key);
+    sharedRequest.assertSafeContentType(opts.contentType, "presignedUploadPolicy");
     var minBytes = sharedRequest.resolvePresignUploadMinBytes(opts);
     var expiresIn = sharedRequest.resolvePresignExpires(opts, "presignedUploadPolicy", "V4");
 
@@ -390,6 +412,7 @@ function create(config) {
 module.exports = {
   create:                create,
   _signJwt:              _signJwt,
+  _assertServiceAccountKey: _assertServiceAccountKey,
   _base64UrlEncode:      _base64UrlEncode,
   DEFAULT_ENDPOINT:      DEFAULT_ENDPOINT,
   TOKEN_ENDPOINT:        TOKEN_ENDPOINT,

@@ -33,9 +33,10 @@
  *     - RSA v4 signatures using OpenPGP public-key algorithm 1 (RSA)
  *       with EMSA-PKCS1-v1_5 padding over SHA-256, which is what
  *       every fielded PGP implementation expects for v4 RSA
- *       signatures. Keys < 2048 bits are refused at sign time
- *       (RFC 8301 §3.1 RSA floor; v0.7.x DKIM established the same
- *       posture across the mail surface).
+ *       signatures. Keys < 2048 bits are refused at sign and verify
+ *       time: `b.mail.dkim.RSA_MIN_BITS`, the framework RSA floor, which
+ *       follows the RFC 8301 §3.2 recommendation and applies across the
+ *       mail surface.
  *
  *   Threat model:
  *     - EFAIL (CVE-2017-17688 / CVE-2017-17689) attacks decrypt-and-
@@ -106,7 +107,7 @@
  * RFC citations:
  *   - RFC 9580 (OpenPGP, Nov 2024; obsoletes RFC 4880)
  *   - RFC 3156 (MIME Security with OpenPGP)
- *   - RFC 8301 (DKIM RSA floor — reused as the cross-surface RSA bit floor)
+ *   - RFC 8301 §3.2 (DKIM RSA key sizes; the framework RSA floor follows its 2048-bit recommendation)
  *
  * CVE citations:
  *   - CVE-2017-17688 / CVE-2017-17689 (EFAIL — informs the encrypt/
@@ -119,8 +120,10 @@ var lazyRequire  = require("./lazy-require");
 var safeBuffer   = require("./safe-buffer");
 var audit        = lazyRequire(function () { return require("./audit"); });
 var nodeCrypto   = require("node:crypto");
+var nodeTypes    = require("node:util").types;
 var validateOpts = require("./validate-opts");
 var numericBounds = require("./numeric-bounds");
+var dkim         = require("./mail-dkim");
 var { defineClass } = require("./framework-error");
 
 var MailCryptoError = defineClass("MailCryptoError", { alwaysPermanent: true });
@@ -136,7 +139,7 @@ var SIG_TYPE_BINARY = 0;
 var SUBPKT_SIG_CREATION_TIME = 2;
 var SUBPKT_ISSUER_FPR        = 33;
 
-var RSA_MIN_BITS = 2048;
+var RSA_MIN_BITS = dkim.RSA_MIN_BITS;
 
 var ARMOR_BEGIN = "-----BEGIN PGP SIGNATURE-----";
 var ARMOR_END   = "-----END PGP SIGNATURE-----";
@@ -348,7 +351,37 @@ function _hashName(hashAlgId) {
  * `multipart/signed; protocol="application/pgp-signature"` body
  * (RFC 3156 §5). Ed25519 (algorithm 22) and RSA-PKCS#1-v1.5 over
  * SHA-256 (algorithm 1) are the v1 signing forms; RSA keys below
- * 2048 bits are refused per RFC 8301 §3.1.
+ * 2048 bits, the size RFC 8301 §3.2 recommends, are refused.
+ *
+ * A refused call throws `MailCryptoError` with one of these codes:
+ * `mail-crypto/pgp/bad-opts` for an `opts` that is not an object or that
+ * carries an option not listed below,
+ * `mail-crypto/pgp/bad-message` for a `message` that is not a non-empty string
+ * or Buffer, `mail-crypto/pgp/bad-key` for a `privateKeyPem` that is absent,
+ * empty or does not parse, `mail-crypto/pgp/bad-passphrase` for a `passphrase`
+ * that is not a string, `mail-crypto/pgp/bad-creation-time` for a
+ * `creationTime` that is not a non-negative integer,
+ * `mail-crypto/pgp/compromised-key` for a signing key whose public half
+ * `b.crypto.compromisedKey` reports, `mail-crypto/pgp/bad-key-type` for a key
+ * that is neither Ed25519 nor RSA, `mail-crypto/pgp/rsa-too-small` for an RSA
+ * key below 2048 bits, and `mail-crypto/pgp/bad-signature` for an Ed25519
+ * signature that is not 64 bytes.
+ *
+ * @opts
+ *   message:       string | Buffer,  // required, non-empty; the bytes signed over.
+ *                                    // Anything else raises mail-crypto/pgp/bad-message
+ *   privateKeyPem: string,           // required; PEM signing key. Absent or empty raises
+ *                                    // mail-crypto/pgp/bad-key
+ *   passphrase:    string,           // optional; decrypts an encrypted private key. A
+ *                                    // non-string that is not null raises
+ *                                    // mail-crypto/pgp/bad-passphrase
+ *   creationTime:  number,           // default Math.floor(Date.now() / 1000) — the signature's
+ *                                    // creation time in epoch seconds. A non-finite or
+ *                                    // out-of-range value raises mail-crypto/pgp/bad-creation-time
+ *   audit:         object,           // audit handle the mail.crypto.pgp.sign success event is
+ *                                    // emitted through; defaults to the framework's own. Every
+ *                                    // refusal above throws before that emit, so a failed sign
+ *                                    // reaches the caller and not the audit trail
  *
  * @example
  *   var rv = b.mail.crypto.pgp.sign({
@@ -359,7 +392,8 @@ function _hashName(hashAlgId) {
  */
 function sign(opts) {
   opts = validateOpts.requireObject(opts, "mail.crypto.pgp.sign", MailCryptoError, "mail-crypto/pgp/bad-opts");
-  validateOpts(opts, ["message", "privateKeyPem", "passphrase", "audit", "creationTime"], "mail.crypto.pgp.sign");
+  validateOpts.checkOrThrow(opts, ["message", "privateKeyPem", "passphrase", "audit", "creationTime"],
+    "mail.crypto.pgp.sign", MailCryptoError, "mail-crypto/pgp/bad-opts");
 
   var message = opts.message;
   if (!(typeof message === "string" || Buffer.isBuffer(message))) {
@@ -398,22 +432,27 @@ function sign(opts) {
   }
 
   var publicKey = nodeCrypto.createPublicKey(privateKey);
+  bCrypto.assertNotCompromised(publicKey, {
+    errorClass: MailCryptoError, code: "mail-crypto/pgp/compromised-key", label: "privateKeyPem",
+  });
   var keyType = privateKey.asymmetricKeyType;
 
-  var pubAlg, hashAlg, publicPacketBody;
+  var pubAlg, hashAlg, hashName, publicPacketBody;
   if (keyType === "ed25519") {
-    pubAlg  = PUB_ALG_ED25519_LEGACY;
-    hashAlg = HASH_ALG_SHA512;
+    pubAlg   = PUB_ALG_ED25519_LEGACY;
+    hashAlg  = HASH_ALG_SHA512;
+    hashName = "sha512";
     var rawPub = _extractEd25519PublicRaw(publicKey);
     publicPacketBody = _ed25519PublicPacketBody(rawPub, creationTime);
   } else if (keyType === "rsa") {
-    pubAlg  = PUB_ALG_RSA;
-    hashAlg = HASH_ALG_SHA256;
+    pubAlg   = PUB_ALG_RSA;
+    hashAlg  = HASH_ALG_SHA256;
+    hashName = "sha256";
     var rsaPub = _extractRsaPublicComponents(publicKey);
     if (rsaPub.bits < RSA_MIN_BITS) {
       throw new MailCryptoError("mail-crypto/pgp/rsa-too-small",
         "RSA key is " + rsaPub.bits + " bits; minimum is " + RSA_MIN_BITS +
-        " (RFC 8301 §3.1)");
+        " (the framework RSA floor, following the RFC 8301 §3.2 recommendation)");
     }
     publicPacketBody = _rsaPublicPacketBody(rsaPub.n, rsaPub.e, creationTime);
   } else {
@@ -444,7 +483,6 @@ function sign(opts) {
 
   var dataBuf = Buffer.isBuffer(message) ? message : Buffer.from(message, "utf8");
 
-  var hashName = _hashName(hashAlg);
   var digest = nodeCrypto.createHash(hashName)
     .update(dataBuf)
     .update(signedSection)
@@ -672,6 +710,41 @@ function _readMpi(buf, offset) {
  * callers can pin to a known operator key rather than trusting any
  * key that happens to verify.
  *
+ * A malformed call throws: `mail-crypto/pgp/bad-opts` for an `opts`
+ * that is not an object or that carries an option not listed below,
+ * `mail-crypto/pgp/bad-message` for a `message`
+ * that is not a string or Buffer, and `mail-crypto/pgp/bad-armor` or
+ * `mail-crypto/pgp/bad-key` for an absent or empty `armored` or
+ * `publicKeyPem`. A signature that does not verify returns
+ * `{ ok: false, code, reason }`, and the code is one of these:
+ * `mail-crypto/pgp/bad-armor` for armor without its framing or CRC-24,
+ * `mail-crypto/pgp/bad-packet` for a malformed signature packet,
+ * `mail-crypto/pgp/bad-version` for a packet that is not v4,
+ * `mail-crypto/pgp/bad-sig-type` for a signature that is not over a binary
+ * document, `mail-crypto/pgp/bad-hash` for a hash other than SHA-256 or
+ * SHA-512, `mail-crypto/pgp/bad-mpi` for a truncated signature value,
+ * `mail-crypto/pgp/bad-key` for a `publicKeyPem` that does not parse or that
+ * `b.crypto.compromisedKey` cannot read, `mail-crypto/pgp/compromised-key` for
+ * a `publicKeyPem` that `b.crypto.compromisedKey` reports,
+ * `mail-crypto/pgp/key-alg-mismatch` for a key whose type is not the one the
+ * signature names, `mail-crypto/pgp/bad-pubalg` for a public-key algorithm
+ * other than RSA or Ed25519, `mail-crypto/pgp/rsa-too-small` for an RSA key
+ * below 2048 bits, `mail-crypto/pgp/fingerprint-mismatch` for an Issuer
+ * Fingerprint that names another key, `mail-crypto/pgp/hash-mismatch` for a
+ * digest whose leading 16 bits differ from the packet's,
+ * `mail-crypto/pgp/verify-error` when node:crypto throws during the check, and
+ * `mail-crypto/pgp/bad-signature` for a signature that does not verify.
+ *
+ * @opts
+ *   message:      string | Buffer,  // required, non-empty; the bytes the signature covers.
+ *                                   // Anything else raises mail-crypto/pgp/bad-message
+ *   armored:      string,           // required; the ASCII-armored detached signature. Absent
+ *                                   // or empty raises mail-crypto/pgp/bad-armor
+ *   publicKeyPem: string,           // required; PEM verification key. Absent or empty raises
+ *                                   // mail-crypto/pgp/bad-key
+ *   audit:        object,           // audit handle to emit through; defaults to the framework's
+ *                                   // own, so mail.crypto.pgp.verify_fail is recorded either way
+ *
  * @example
  *   var rv = b.mail.crypto.pgp.verify({
  *     message:      bytes,
@@ -682,7 +755,8 @@ function _readMpi(buf, offset) {
  */
 function verify(opts) {
   opts = validateOpts.requireObject(opts, "mail.crypto.pgp.verify", MailCryptoError, "mail-crypto/pgp/bad-opts");
-  validateOpts(opts, ["message", "armored", "publicKeyPem", "audit"], "mail.crypto.pgp.verify");
+  validateOpts.checkOrThrow(opts, ["message", "armored", "publicKeyPem", "audit"],
+    "mail.crypto.pgp.verify", MailCryptoError, "mail-crypto/pgp/bad-opts");
 
   var message = opts.message;
   if (!(typeof message === "string" || Buffer.isBuffer(message))) {
@@ -717,6 +791,14 @@ function verify(opts) {
   try { publicKey = nodeCrypto.createPublicKey({ key: opts.publicKeyPem, format: "pem" }); }
   catch (e) { return _fail("mail-crypto/pgp/bad-key",
     "publicKeyPem could not be parsed: " + ((e && e.message) || String(e))); }
+  var compromised;
+  try { compromised = bCrypto.compromisedKey(publicKey); }
+  catch (e) { return _fail("mail-crypto/pgp/bad-key",
+    "publicKeyPem could not be checked: " + ((e && e.message) || String(e))); }
+  if (compromised !== null) {
+    return _fail("mail-crypto/pgp/compromised-key",
+      "publicKeyPem is a compromised key: " + compromised.reason);
+  }
 
   var keyType = publicKey.asymmetricKeyType;
   if (parsed.pubAlg === PUB_ALG_RSA && keyType !== "rsa") {
@@ -738,7 +820,7 @@ function verify(opts) {
     if (rsaPub.bits < RSA_MIN_BITS) {
       return _fail("mail-crypto/pgp/rsa-too-small",
         "RSA key is " + rsaPub.bits + " bits; minimum is " + RSA_MIN_BITS +
-        " (RFC 8301 §3.1)");
+        " (the framework RSA floor, following the RFC 8301 §3.2 recommendation)");
     }
     var creationTimeFromSub = (subs.signedAt === undefined) ? 0 : subs.signedAt;
     publicPacketBody = _rsaPublicPacketBody(rsaPub.n, rsaPub.e, creationTimeFromSub);
@@ -851,7 +933,8 @@ var PGP_PQ_VERSION = 1;
 function experimentalEncrypt(opts) {
   opts = validateOpts.requireObject(opts, "mail.crypto.pgp.experimental.encrypt",
     MailCryptoError, "mail-crypto/pgp/bad-opts");
-  validateOpts(opts, ["message", "recipients", "audit"], "mail.crypto.pgp.experimental.encrypt");
+  validateOpts.checkOrThrow(opts, ["message", "recipients", "audit"],
+    "mail.crypto.pgp.experimental.encrypt", MailCryptoError, "mail-crypto/pgp/bad-opts");
   if (!opts.message || (!Buffer.isBuffer(opts.message) && typeof opts.message !== "string")) {
     throw new MailCryptoError("mail-crypto/pgp/bad-message",
       "encrypt: opts.message must be a Buffer or string");
@@ -870,7 +953,7 @@ function experimentalEncrypt(opts) {
       throw new MailCryptoError("mail-crypto/pgp/bad-recipient",
         "encrypt: recipients[" + i + "].recipientId must be a Buffer");
     }
-    if (!(r.publicKey instanceof Uint8Array)) {
+    if (!nodeTypes.isUint8Array(r.publicKey)) {
       throw new MailCryptoError("mail-crypto/pgp/bad-recipient",
         "encrypt: recipients[" + i + "].publicKey must be a Uint8Array (ML-KEM-1024)");
     }
@@ -919,13 +1002,13 @@ function _envNeed(buf, off, n) {
 function experimentalDecrypt(opts) {
   opts = validateOpts.requireObject(opts, "mail.crypto.pgp.experimental.decrypt",
     MailCryptoError, "mail-crypto/pgp/bad-opts");
-  validateOpts(opts, ["armored", "envelope", "recipientId", "secretKey", "audit"],
-    "mail.crypto.pgp.experimental.decrypt");
+  validateOpts.checkOrThrow(opts, ["armored", "envelope", "recipientId", "secretKey", "audit"],
+    "mail.crypto.pgp.experimental.decrypt", MailCryptoError, "mail-crypto/pgp/bad-opts");
   if (!Buffer.isBuffer(opts.recipientId)) {
     throw new MailCryptoError("mail-crypto/pgp/bad-opts",
       "decrypt: opts.recipientId must be a Buffer");
   }
-  if (!(opts.secretKey instanceof Uint8Array)) {
+  if (!nodeTypes.isUint8Array(opts.secretKey)) {
     throw new MailCryptoError("mail-crypto/pgp/bad-opts",
       "decrypt: opts.secretKey must be a Uint8Array");
   }
@@ -1049,7 +1132,17 @@ function _dearmorMessage(armored) {
  * body: Buffer }>` is operator-supplied so the framework doesn't
  * couple to a specific HTTP client. Returns
  * `{ keyBytes, source: "direct" | "advanced", url }` or throws
- * `mail-crypto/pgp/wkd-not-found` when both URLs fail.
+ * `mail-crypto/pgp/wkd-not-found` when both URLs fail. A response whose body
+ * exceeds `maxKeyBytes` refuses with `mail-crypto/pgp/wkd-too-large` rather
+ * than being read to the end.
+ *
+ * Before either request it throws `mail-crypto/pgp/bad-opts` when `opts`
+ * is not an object, `mail-crypto/pgp/no-https-get` when `httpsGet` is not
+ * a function, and `mail-crypto/pgp/bad-max-key-bytes` when `maxKeyBytes`
+ * is supplied as anything but a positive integer. Computing the URL throws
+ * `mail-crypto/pgp/bad-email` for an address it cannot split, and
+ * `mail-crypto/pgp/bad-domain` for a domain that is not ASCII letters, digits,
+ * hyphens and dots, so an internationalized domain is Punycode-encoded upstream.
  *
  * @opts
  *   httpsGet:      Function,   // (url) → Promise<{ status, body }>; REQUIRED

@@ -25,15 +25,17 @@
  *   forced operators to hand-write the JSON.
  */
 
-var framework_error = require("../framework-error");
+var cdnCacheControl = require("../cdn-cache-control");
+var frameworkError  = require("../framework-error");
 var validateOpts    = require("../validate-opts");
 var requestHelpers  = require("../request-helpers");
 var safeUrl         = require("../safe-url");
+var jwtExternal     = require("../auth/jwt-external");
 var nodeCrypto      = require("node:crypto");
 
 var H = requestHelpers.HTTP_STATUS;
 
-var ProtectedResourceMetadataError = framework_error.defineClass(
+var ProtectedResourceMetadataError = frameworkError.defineClass(
   "ProtectedResourceMetadataError",
   "middleware/protected-resource-metadata"
 );
@@ -56,6 +58,22 @@ function _b64url(buf) {
  * metadata JSON document at `/.well-known/oauth-protected-resource`
  * (or operator-overridden path).
  *
+ * A `signMetadata.key` that `b.crypto.compromisedKey` reports is refused with
+ * `middleware/protected-resource-metadata/compromised-key`. A key whose type
+ * does not match `signMetadata.alg`, or that cannot be read, raises
+ * `middleware/protected-resource-metadata/bad-sign-key`. The other codes it
+ * raises are `middleware/protected-resource-metadata/bad-opts`,
+ * `middleware/protected-resource-metadata/no-resource`,
+ * `middleware/protected-resource-metadata/no-as`,
+ * `middleware/protected-resource-metadata/bad-as`,
+ * `middleware/protected-resource-metadata/bad-as-url`,
+ * `middleware/protected-resource-metadata/bad-bearer-method`,
+ * `middleware/protected-resource-metadata/bad-dpop-alg`,
+ * `protected-resource-metadata/bad-opt` (a non-boolean
+ * `dpopBoundAccessTokensRequired` or `mtlsBoundAccessTokensRequired`),
+ * `middleware/protected-resource-metadata/bad-sign` and
+ * `middleware/protected-resource-metadata/bad-sign-alg`.
+ *
  * @opts
  *   {
  *     resource:                       string,        // canonical resource URI (required)
@@ -70,6 +88,7 @@ function _b64url(buf) {
  *     dpopBoundAccessTokensRequired?: boolean,
  *     mtlsBoundAccessTokensRequired?: boolean,
  *     path?:                          string,        // default "/.well-known/oauth-protected-resource"
+ *     signMetadata?:                  { key, alg, kid? }, // signs the document; key type must match alg (bad-sign-key otherwise)
  *   }
  *
  * @example
@@ -144,6 +163,12 @@ function create(opts) {
   if (opts.resourcePolicyUri)                     doc.resource_policy_uri = opts.resourcePolicyUri;
   if (opts.resourceTosUri)                        doc.resource_tos_uri = opts.resourceTosUri;
   if (opts.dpopSigningAlgValuesSupported)         doc.dpop_signing_alg_values_supported = opts.dpopSigningAlgValuesSupported;
+  ["dpopBoundAccessTokensRequired", "mtlsBoundAccessTokensRequired"].forEach(function (name) {
+    validateOpts.optionalBoolean(opts[name],
+      "middleware.protectedResourceMetadata: opts." + name + " (anything other than a boolean " +
+      "was read as false, so the published document told clients the binding is not required)",
+      ProtectedResourceMetadataError, "protected-resource-metadata/bad-opt");
+  });
   if (opts.dpopBoundAccessTokensRequired === true) doc.dpop_bound_access_tokens_required = true;
   if (opts.mtlsBoundAccessTokensRequired === true) doc.tls_client_certificate_bound_access_tokens = true;
 
@@ -186,6 +211,12 @@ function create(opts) {
         "middleware/protected-resource-metadata/bad-sign-key",
         "signMetadata.key parse failed: " + ((e && e.message) || String(e)));
     }
+    jwtExternal._assertJwsAlgKey(sm.alg, signingKey, {
+      errorClass:      ProtectedResourceMetadataError,
+      code:            "middleware/protected-resource-metadata/bad-sign-key",
+      compromisedCode: "middleware/protected-resource-metadata/compromised-key",
+      label:           "middleware.protectedResourceMetadata: signMetadata.key",
+    });
     signedDoc = Object.assign({}, doc, { iss: opts.resource, sub: opts.resource });
     var jwsHeader = { alg: sm.alg, typ: "oauth-protected-resource+jwt" };
     if (sm.kid) jwsHeader.kid = sm.kid;
@@ -225,7 +256,7 @@ function create(opts) {
       res.writeHead(H.OK, {
         "Content-Type":   "application/jwt",
         "Content-Length": String(signedBytes),
-        "Cache-Control":  "public, max-age=3600",
+        "Cache-Control":  cdnCacheControl.keepNoStore(res, "public, max-age=3600"),
       });
       if (req.method === "HEAD") { res.end(); return; }
       res.end(signedJwt);
@@ -234,7 +265,7 @@ function create(opts) {
     res.writeHead(H.OK, {
       "Content-Type":   "application/json",
       "Content-Length": String(bodyBytes),
-      "Cache-Control":  "public, max-age=3600",
+      "Cache-Control":  cdnCacheControl.keepNoStore(res, "public, max-age=3600"),
     });
     if (req.method === "HEAD") { res.end(); return; }
     res.end(bodyText);

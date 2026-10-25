@@ -86,6 +86,7 @@ var DEFAULTS = Object.freeze({
 var SHA3_512_HEX_LENGTH = C.BYTES.bytes(128);
 var SIDECAR_MAX_BYTES = C.BYTES.kib(256);
 var METADATA_MAX_BYTES = C.BYTES.kib(64);
+var OWNER_KEY_VERSION = 2;
 
 var UPLOAD_ID_RE = /^[A-Za-z0-9._-]+$/;
 var UPLOAD_ID_MAX_LENGTH = C.BYTES.bytes(128);
@@ -142,6 +143,14 @@ function _validateCreateOpts(opts) {
     },
     allowCrossActor: function (v, label) {
       validateOpts.optionalBoolean(v, label, FileUploadError, "file-upload/bad-opt");
+    },
+    actorKey: function (v, label) {
+      if (v === undefined || v === null) return;
+      if (typeof v !== "function") {
+        throw new FileUploadError("file-upload/bad-opt",
+          label + " must be a function (actor) => string naming the principal that " +
+          "owns an upload");
+      }
     },
     contentSafety: function (v, label) {
       if (v === undefined || v === null) return;
@@ -202,6 +211,7 @@ function _validateCreateOpts(opts) {
  *   maxStreamReassemblyBytes:  number,                 // above this finalize streams; default 64 MiB
  *   maxStagingBytes:           number,                 // default 50 GiB
  *   maxActiveUploadsPerActor:  number,                 // default 16
+ *   actorKey:                  function,               // (actor) => string naming the owner, for a deployment whose actors carry none of id, userId, username, sub, principalId, email
  *   maxChunks:                 number,                 // default 16384
  *   incompleteTtlMs:           number,                 // since createdAt; default 24h
  *   maxIdleMs:                 number,                 // since lastChunkAt; default 30m
@@ -213,6 +223,8 @@ function _validateCreateOpts(opts) {
  *   fileType:                  b.fileType,             // required when allowedFileTypes is non-empty
  *   contentSafety:             Object | null,          // ext→gate map; null = audited opt-out; undefined = b.guardAll.byExtension({ profile: "strict" })
  *   filenameSafety:            Object | null,          // gate; null = audited opt-out; undefined = b.guardFilename.gate({ profile: "strict" })
+ *   contentSafetyDisabledReason:  string,              // recorded as `reason` on the fileupload.content_safety.disabled audit event raised when contentSafety is null; default "operator-explicit-opt-out"
+ *   filenameSafetyDisabledReason: string,              // the same for fileupload.filename_safety.disabled when filenameSafety is null; default "operator-explicit-opt-out"
  *   onChunk:                   async function (info),  // optional per-chunk hook
  *   onFinalize:                async function (info),  // operator decides final storage
  *   clock:                     function () → number,    // test-fixture clock; default Date.now
@@ -243,6 +255,7 @@ function create(opts) {
   var fileType                = opts.fileType || null;
   var permissions             = opts.permissions || null;
   var allowCrossActor         = opts.allowCrossActor === true;
+  var actorKeyFn              = opts.actorKey || null;
   var contentSafety;
   if (opts.contentSafety === undefined) {
     contentSafety = guardAll().byExtension({
@@ -254,7 +267,7 @@ function create(opts) {
     if (opts.audit && typeof opts.audit.safeEmit === "function") {
       try {
         opts.audit.safeEmit({
-          action:   "fileUpload.contentSafety.disabled",
+          action:   "fileupload.content_safety.disabled",
           actor:    {},
           outcome:  "success",
           metadata: {
@@ -278,7 +291,7 @@ function create(opts) {
     if (opts.audit && typeof opts.audit.safeEmit === "function") {
       try {
         opts.audit.safeEmit({
-          action:   "fileUpload.filenameSafety.disabled",
+          action:   "fileupload.filename_safety.disabled",
           actor:    {},
           outcome:  "success",
           metadata: {
@@ -311,7 +324,7 @@ function create(opts) {
   // (drop-silent — by design) so a throwing sink never breaks the upload.
   function _emitContentSafetySkipped(uploadId, actor, reason, ext, size) {
     _emitObs("fileUpload.content_safety_skipped", 1, { reason: reason, ext: ext || "" });
-    _emitAudit("fileUpload.content_safety_skipped", {
+    _emitAudit("fileupload.content_safety_skipped", {
       actor:    requestHelpers.extractActorContext(actor),
       resource: { kind: "fileUpload", id: uploadId },
       outcome:  "success",
@@ -341,8 +354,8 @@ function create(opts) {
 
   function _checkOwnership(action, actor, meta) {
     if (!meta) return;
-    var callerKey = _actorKey(actor);
-    if (meta.actorId === callerKey) return;
+    var callerKey = _actorKeyOrNull(actor);
+    if (callerKey !== null && _ownsRecord(actor, meta)) return;
     if (allowCrossActor) {
       var adminOk = !permissions;
       if (permissions) {
@@ -351,7 +364,7 @@ function create(opts) {
       }
       if (adminOk) return;
       _emitObs("fileUpload.permission_denied", 1, { action: "admin" });
-      _emitAudit("fileUpload." + action, {
+      _emitAudit("fileupload." + action, {
         actor:    requestHelpers.extractActorContext(actor),
         resource: { kind: "fileUpload", id: meta.uploadId },
         outcome:  "denied",
@@ -362,8 +375,9 @@ function create(opts) {
       throw _err("file-upload/permission-denied",
         "fileUpload." + action + ": cross-actor access requires scope 'fileUpload.admin'");
     }
+    if (callerKey === null) _actorKey(actor);
     _emitObs("fileUpload.ownership_violation", 1, { action: action });
-    _emitAudit("fileUpload." + action, {
+    _emitAudit("fileupload." + action, {
       actor:    requestHelpers.extractActorContext(actor),
       resource: { kind: "fileUpload", id: meta.uploadId },
       outcome:  "denied",
@@ -401,8 +415,31 @@ function create(opts) {
     atomicFile.writeSync(_metaPath(uploadId), JSON.stringify(meta), { mode: 0o600 });
   }
 
+  function _actorKeyOrNull(actor) {
+    try { return requestHelpers.actorIdentityKey(actor, { actorKey: actorKeyFn }); }
+    catch (_e) {
+      _emitObs("fileUpload.actor_key_threw", 1, {});
+      return null;
+    }
+  }
+
+  function _ownsRecord(actor, meta) {
+    if (meta.ownerKeyVersion === OWNER_KEY_VERSION) return meta.actorId === _actorKey(actor);
+    if (meta.ownerKeyVersion !== undefined) return false;
+    var legacy = requestHelpers.legacyActorKey(actor);
+    return legacy !== null && meta.actorId === legacy;
+  }
+
   function _actorKey(actor) {
-    return (actor && (actor.id || actor.userId)) || "_anonymous";
+    var key = _actorKeyOrNull(actor);
+    if (key === null) {
+      throw _err("file-upload/unidentified-actor",
+        "fileUpload: the actor carries none of the fields this module reads to tell " +
+        "one owner from another (id, userId, username, sub, principalId, email), so " +
+        "its upload would be owned by every other unnamed actor too; name it with " +
+        "the actorKey option");
+    }
+    return key;
   }
 
   function _enumerateUploads() {
@@ -433,11 +470,11 @@ function create(opts) {
     return total;
   }
 
-  function _activeUploadsForActor(actorId) {
+  function _activeUploadsForActor(actor) {
     var uploads = _enumerateUploads();
     var count = 0;
     for (var i = 0; i < uploads.length; i++) {
-      if (uploads[i].meta && uploads[i].meta.actorId === actorId) count += 1;
+      if (uploads[i].meta && _ownsRecord(actor, uploads[i].meta)) count += 1;
     }
     return count;
   }
@@ -466,7 +503,7 @@ function create(opts) {
     }
 
     var actorId = _actorKey(actor);
-    if (_activeUploadsForActor(actorId) >= maxActiveUploadsPerActor) {
+    if (_activeUploadsForActor(actor) >= maxActiveUploadsPerActor) {
       _emitObs("fileUpload.actor_quota_exceeded", 1);
       throw _err("file-upload/actor-quota-exceeded",
         "fileUpload.init: actor '" + actorId + "' has " + maxActiveUploadsPerActor +
@@ -483,6 +520,7 @@ function create(opts) {
     var meta = {
       uploadId:             uploadId,
       actorId:              actorId,
+      ownerKeyVersion:      OWNER_KEY_VERSION,
       metadata:             metadata,
       createdAt:            now,
       lastChunkAt:          now,
@@ -492,7 +530,7 @@ function create(opts) {
     _writeReceivedIndices(uploadId, []);
 
     _emitObs("fileUpload.init", 1);
-    _emitAudit("fileUpload.init", {
+    _emitAudit("fileupload.init", {
       actor:    requestHelpers.extractActorContext(actor),
       resource: { kind: "fileUpload", id: uploadId },
       outcome:  "success",
@@ -557,7 +595,7 @@ function create(opts) {
     var actualHex = bCrypto.sha3Hash(body);
     if (!bCrypto.timingSafeEqual(actualHex, sha3Hex)) {
       _emitObs("fileUpload.chunk_hash_mismatch", 1);
-      _emitAudit("fileUpload.chunk_received", {
+      _emitAudit("fileupload.chunk_received", {
         actor:    requestHelpers.extractActorContext(actor),
         resource: { kind: "fileUpload", id: uploadId },
         outcome:  "failure",
@@ -580,7 +618,7 @@ function create(opts) {
         });
       } catch (e) {
         _emitObs("fileUpload.onchunk_rejected", 1);
-        _emitAudit("fileUpload.chunk_received", {
+        _emitAudit("fileupload.chunk_received", {
           actor:    requestHelpers.extractActorContext(actor),
           resource: { kind: "fileUpload", id: uploadId },
           outcome:  "failure",
@@ -629,7 +667,7 @@ function create(opts) {
 
     _emitObs("fileUpload.chunks_received", 1);
     _emitObs("fileUpload.bytes_received", body.length);
-    _emitAudit("fileUpload.chunk_received", {
+    _emitAudit("fileupload.chunk_received", {
       actor:    requestHelpers.extractActorContext(actor),
       resource: { kind: "fileUpload", id: uploadId },
       outcome:  "success",
@@ -813,7 +851,7 @@ function create(opts) {
     try { _checkAllowedFileType(firstChunk, claimedMime); }
     catch (e) {
       _emitObs("fileUpload.mime_rejected", 1);
-      _emitAudit("fileUpload.finalize", {
+      _emitAudit("fileupload.finalize", {
         actor:    requestHelpers.extractActorContext(actor),
         resource: { kind: "fileUpload", id: uploadId },
         outcome:  "failure",
@@ -836,7 +874,7 @@ function create(opts) {
         });
       } catch (fnErr) {
         _emitObs("fileUpload.filename_safety_threw", 1);
-        _emitAudit("fileUpload.finalize_failure", {
+        _emitAudit("fileupload.finalize_failure", {
           actor:    requestHelpers.extractActorContext(actor),
           outcome:  "failure", reason: "filename-safety-threw",
           metadata: { uploadId: uploadId, error: fnErr && fnErr.message },
@@ -846,7 +884,7 @@ function create(opts) {
       }
       if (!fnDecision.ok || fnDecision.action === "refuse") {
         _emitObs("fileUpload.filename_safety_refused", 1);
-        _emitAudit("fileUpload.finalize_failure", {
+        _emitAudit("fileupload.finalize_failure", {
           actor:    requestHelpers.extractActorContext(actor),
           outcome:  "failure", reason: "filename-safety-refused",
           metadata: {
@@ -892,7 +930,7 @@ function create(opts) {
           });
         } catch (gateErr) {
           _emitObs("fileUpload.content_safety_threw", 1);
-          _emitAudit("fileUpload.finalize_failure", {
+          _emitAudit("fileupload.finalize_failure", {
             actor:    requestHelpers.extractActorContext(actor),
             outcome:  "failure", reason: "content-safety-threw",
             metadata: { uploadId: uploadId, error: gateErr && gateErr.message },
@@ -902,7 +940,7 @@ function create(opts) {
         }
         if (!safetyDecision.ok || safetyDecision.action === "refuse") {
           _emitObs("fileUpload.content_safety_refused", 1, { ext: gateExt });
-          _emitAudit("fileUpload.finalize_failure", {
+          _emitAudit("fileupload.finalize_failure", {
             actor:    requestHelpers.extractActorContext(actor),
             outcome:  "failure", reason: "content-safety-refused",
             metadata: {
@@ -970,7 +1008,7 @@ function create(opts) {
       }
     } catch (e) {
       _emitObs("fileUpload.finalize_failure", 1);
-      _emitAudit("fileUpload.finalize", {
+      _emitAudit("fileupload.finalize", {
         actor:    requestHelpers.extractActorContext(actor),
         resource: { kind: "fileUpload", id: uploadId },
         outcome:  "failure",
@@ -986,7 +1024,7 @@ function create(opts) {
 
     _emitObs("fileUpload.finalize_success", 1);
     _emitObs("fileUpload.finalize_bytes", deliveredSize);
-    _emitAudit("fileUpload.finalize", {
+    _emitAudit("fileupload.finalize", {
       actor:    requestHelpers.extractActorContext(actor),
       resource: { kind: "fileUpload", id: uploadId },
       outcome:  "success",
@@ -1019,7 +1057,8 @@ function create(opts) {
   function list(callerOpts) {
     callerOpts = callerOpts || {};
     _checkPermission("list", callerOpts.actor);
-    var actorFilter = callerOpts.actor && (callerOpts.actor.id || callerOpts.actor.userId);
+    var scoping = callerOpts.scopeToActor !== false;
+    if (scoping) _actorKey(callerOpts.actor);
     var sinceMs     = (typeof callerOpts.since === "number") ? callerOpts.since : 0;
     var uploads     = _enumerateUploads();
     var out = [];
@@ -1027,10 +1066,10 @@ function create(opts) {
       var u = uploads[i];
       if (!u.meta) continue;
       if (sinceMs && u.meta.createdAt < sinceMs) continue;
-      if (actorFilter && callerOpts.scopeToActor !== false && u.meta.actorId !== actorFilter) continue;
+      if (scoping && !_ownsRecord(callerOpts.actor, u.meta)) continue;
       out.push({
         uploadId:           u.meta.uploadId,
-        actorId:            u.meta.actorId,
+        ownerKey:           u.meta.actorId,
         metadata:           u.meta.metadata || {},
         createdAt:          u.meta.createdAt,
         lastChunkAt:        u.meta.lastChunkAt,
@@ -1050,7 +1089,7 @@ function create(opts) {
     try { nodeFs.rmSync(_uploadDir(uploadId), { recursive: true, force: true }); }
     catch (_e) { /* best-effort */ }
     _emitObs("fileUpload.cancelled", 1);
-    _emitAudit("fileUpload.cancelled", {
+    _emitAudit("fileupload.cancelled", {
       actor:    requestHelpers.extractActorContext(callerOpts.actor),
       resource: { kind: "fileUpload", id: uploadId },
       outcome:  "success",
@@ -1085,7 +1124,7 @@ function create(opts) {
     }
     if (purged.length > 0) {
       _emitObs("fileUpload.purged_incomplete", purged.length);
-      _emitAudit("fileUpload.purged", {
+      _emitAudit("fileupload.purged", {
         actor:    { kind: "framework" },
         resource: { kind: "fileUpload", id: stagingDir },
         outcome:  "success",

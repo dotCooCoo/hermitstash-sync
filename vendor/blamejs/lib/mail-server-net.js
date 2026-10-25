@@ -2,10 +2,19 @@
 // Copyright (c) blamejs contributors
 "use strict";
 
+var net            = require("node:net");
+
 var C              = require("./constants");
 var codepointClass = require("./codepoint-class");
 var bCrypto        = require("./crypto");
+var ipUtils        = require("./ip-utils");
+var lazyRequire    = require("./lazy-require");
 var safeAsync      = require("./safe-async");
+var safeBuffer     = require("./safe-buffer");
+var ssrfGuard      = require("./ssrf-guard");
+
+// Circular: b.mail loads the server modules for its own send path.
+var mailModule = lazyRequire(function () { return require("./mail"); });
 
 var DEFAULT_MAX_CONNECTIONS = 1024;
 
@@ -32,7 +41,7 @@ function createTcpListener(net, cfg) {
     });
     return new Promise(function (resolve, reject) {
       server.once("error", reject);
-      server.listen(port, address, function () {
+      server.listen(port, ipUtils.dialHost(address), function () {
         listening = true;
         server.removeListener("error", reject);
         var payload = { port: port, address: address };
@@ -216,6 +225,7 @@ function acceptConnection(rawSocket, cfg) {
 
 function admitConnection(socket, rateLimit, emit, cfg) {
   var remoteAddress = socket.remoteAddress || "0.0.0.0";
+  if (net.isIP(remoteAddress) !== 0) remoteAddress = ssrfGuard.canonicalizeHost(remoteAddress);
   var admit = rateLimit.admitConnection(remoteAddress);
   if (!admit.ok) {
     emit(cfg.refusedEvent, { remoteAddress: remoteAddress, reason: admit.reason }, "denied");
@@ -249,6 +259,69 @@ function saslChallengeOrNull(challenge) {
 function replyTextOrFallback(text, fallback) {
   if (typeof text !== "string" || text.length === 0) return fallback;
   return codepointClass.firstLineInjectionCharOffset(text) === -1 ? text : fallback;
+}
+
+function identityCovers(identityAddress, address, opts) {
+  opts = opts || {};
+  var identity = _normalizedMailbox(identityAddress, opts.subaddressDelimiter);
+  var candidate = _normalizedMailbox(address, opts.subaddressDelimiter);
+  if (identity === null || candidate === null) return false;
+  if (identity.domain !== candidate.domain) return false;
+  if (identity.local === "*" && !identity.quoted) return true;
+  return identity.local === candidate.local;
+}
+
+function sliceAnglePath(rest) {
+  if (typeof rest !== "string") return null;
+  var i = 0;
+  while (i < rest.length && (rest.charAt(i) === " " || rest.charAt(i) === "\t")) i += 1;
+  if (rest.charAt(i) !== "<") return null;
+  var close = safeBuffer.unquotedIndexOf(rest, ">", i + 1);
+  if (close === -1) return null;
+  var tail = rest.slice(close + 1);
+  if (tail.length > 0 && tail.charAt(0) !== " " && tail.charAt(0) !== "\t") return null;
+  return { address: rest.slice(i + 1, close), tail: tail };
+}
+
+function mailboxesEqual(left, right, opts) {
+  opts = opts || {};
+  var a = _normalizedMailbox(left, opts.subaddressDelimiter);
+  var c = _normalizedMailbox(right, opts.subaddressDelimiter);
+  if (a === null || c === null) return false;
+  return a.domain === c.domain && a.local === c.local;
+}
+
+function _isAddressLiteral(domain) {
+  return domain.length >= 2 && domain.charAt(0) === "[" &&
+    domain.charAt(domain.length - 1) === "]";
+}
+
+function _normalizedMailbox(address, delimiter) {
+  if (typeof address !== "string" || address.length === 0) return null;
+  var at = address.lastIndexOf("@");
+  if (at <= 0 || at === address.length - 1) return null;
+  var rawDomain = address.slice(at + 1);
+  var domain = _isAddressLiteral(rawDomain)
+    ? rawDomain : mailModule().toAscii(rawDomain);
+  if (domain === null) return null;
+  var raw = address.slice(0, at);
+  var local = _unquotedLocalPart(raw);
+  if (local === null) return null;
+  var quoted = raw.charAt(0) === "\"";
+  if (!quoted && typeof delimiter === "string" && delimiter.length > 0) {
+    var tag = local.indexOf(delimiter);
+    if (tag > 0) local = local.slice(0, tag);
+  }
+  return { local: local, quoted: quoted, domain: domain.toLowerCase() };
+}
+
+function _unquotedLocalPart(local) {
+  if (local.charAt(0) !== "\"") {
+    return codepointClass.isUtf8DotAtomText(local) ? local : null;
+  }
+  var read = safeBuffer.readQuotedString(local);
+  if (read === null || read.next !== local.length) return null;
+  return read.value;
 }
 
 function foldSubaddress(address, delimiter) {
@@ -358,5 +431,8 @@ module.exports = {
   replyTextOrFallback:  replyTextOrFallback,
   agentRefusalReply:    agentRefusalReply,
   foldSubaddress:       foldSubaddress,
+  identityCovers:       identityCovers,
+  mailboxesEqual:       mailboxesEqual,
+  sliceAnglePath:       sliceAnglePath,
   fireConsumerHook:     fireConsumerHook,
 };

@@ -2,7 +2,7 @@
 // Copyright (c) blamejs contributors
 "use strict";
 
-var framework_error = require("../framework-error");
+var frameworkError  = require("../framework-error");
 var numericBounds   = require("../numeric-bounds");
 var pick            = require("../pick");
 var validateOpts    = require("../validate-opts");
@@ -13,7 +13,7 @@ var C               = require("../constants");
 
 var H = requestHelpers.HTTP_STATUS;
 
-var ScimServerError = framework_error.defineClass(
+var ScimServerError = frameworkError.defineClass(
   "ScimServerError",
   "middleware/scim-server"
 );
@@ -29,7 +29,7 @@ var BULK_ID_REF_RE = /^bulkId:(.+)$/;
 
 var ALLOWED_FILTER_OPS = ["eq", "ne", "co", "sw", "ew", "pr", "gt", "ge", "lt", "le"];
 
-var SCIM_FILTER_RE = /^\s*([a-zA-Z][a-zA-Z0-9._-]*)\s+(eq|ne|co|sw|ew|pr|gt|ge|lt|le)(?:\s+(.+))?\s*$/;
+var SCIM_FILTER_RE = /^([a-zA-Z][a-zA-Z0-9._-]*)\s+(eq|ne|co|sw|ew|pr|gt|ge|lt|le)(?:\s+(\S.*))?$/i;
 var RESOURCE_PATH_RE = /^\/(Users|Groups)(?:\/([^/]+))?$/;
 var BEARER_RE = /^Bearer\s+(\S.*)$/i;
 
@@ -688,8 +688,8 @@ function _parseQuery(qs) {
 
 function _parseFilter(filter) {
   if (typeof filter !== "string" || filter.length === 0) return null;
-  if (!SCIM_FILTER_RE.test(filter)) return { raw: filter };
-  var m = filter.match(SCIM_FILTER_RE);
+  var m = filter.trim().match(SCIM_FILTER_RE);
+  if (!m) return { raw: filter };
   var op = m[2].toLowerCase();
   if (ALLOWED_FILTER_OPS.indexOf(op) === -1) return { raw: filter };
   var rv = { attribute: m[1], op: op, raw: filter };

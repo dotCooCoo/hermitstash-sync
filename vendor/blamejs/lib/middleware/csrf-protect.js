@@ -43,7 +43,13 @@ function _parseCookieHeader(header) {
 }
 
 
-function _checkOriginAllowed(req, allowedOrigins, isHttpsFn, requireOrigin) {
+function _opaqueOriginAllowed(req, strictNullOrigin) {
+  if (strictNullOrigin) return false;
+  var sfs = req && req.headers && req.headers["sec-fetch-site"];
+  return sfs === "same-origin" || sfs === "none";
+}
+
+function _checkOriginAllowed(req, allowedOrigins, isHttpsFn, requireOrigin, strictNullOrigin) {
   var headers = req.headers || {};
   var origin = headers.origin;
   var referer = headers.referer;
@@ -76,6 +82,9 @@ function _checkOriginAllowed(req, allowedOrigins, isHttpsFn, requireOrigin) {
   }
 
   if (typeof origin === "string" && origin.length > 0) {
+    if (origin === "null") {
+      return _opaqueOriginAllowed(req, strictNullOrigin) ? null : "opaque-origin";
+    }
     var oo = _originOf(origin);
     if (oo === null) return "malformed-origin";
     if (!_isAllowed(oo)) return "origin-mismatch (" + oo + " vs " + requestOrigin + ")";
@@ -130,12 +139,24 @@ function _writeReject(req, res, message, reason, onDeny, problemMode) {
  *     checkOrigin:            boolean,
  *     allowedOrigins:         string[],
  *     requireOrigin:          boolean,
+ *     strictNullOrigin:       boolean,   // default true — refuse an opaque `Origin: null` even when Sec-Fetch-Site reports a same-origin navigation. A page served with `Referrer-Policy: no-referrer`, which b.middleware.securityHeaders writes by default, makes a browser opaque the Origin of a form POST from that page, so an app keeping both defaults refuses its own forms. Set false to admit that one case (Sec-Fetch-Site must say same-origin or none), or serve the forms under `Referrer-Policy: same-origin`, which keeps the real origin on this site's own requests and sends nothing to any other site.
  *     requireJsonContentType: boolean,
  *     trustedProxies:         string|string[],  // CIDRs of your reverse proxies — peer-gates X-Forwarded-Proto for the Secure-cookie decision
  *     protocolResolver:       function(req): "http"|"https",  // own the HTTPS decision
  *     trustProxy:             boolean|number,    // legacy; refused unless paired with trustedProxies/protocolResolver (spoofable)
  *     audit:                  boolean,
  *     skipStateless:          boolean,   // default false — skip the token check for cookieless (not-CSRF-able) requests. Turns on the absence of the ambient credential only: an Authorization header is not part of the test, and it never waives `checkOrigin`.
+ *     skipPaths:              Array<string|RegExp>,  // default [] — paths this middleware is skipped for
+ *                                                    // ENTIRELY: the token check, `checkOrigin` and
+ *                                                    // `requireJsonContentType` all go with it, unlike
+ *                                                    // `skipStateless`, which keeps `checkOrigin`. A string
+ *                                                    // matches on a segment boundary ("/api" matches /api
+ *                                                    // and /api/x, not /apixyz); a RegExp is asserted
+ *                                                    // ReDoS-safe and stateless at construction
+ *     skip:                   function(req): boolean, // consulted after skipPaths and skipping the same
+ *                                                     // checks; only an exact true skips, and a predicate
+ *                                                     // that throws is read as do-not-skip, so a broken
+ *                                                     // exemption leaves the guard on
  *     onDeny:                 function(req, res, info): void,  // own the 403; info = { status, reason }
  *     problemDetails:         boolean,   // default false — emit RFC 9457 application/problem+json instead of the default JSON envelope
  *   }
@@ -156,7 +177,8 @@ function create(opts) {
     "cookie", "tokenLookup", "fieldName", "headerName", "methods", "audit",
     "trustProxy", "trustedProxies", "protocolResolver",
     "checkOrigin", "allowedOrigins", "requireJsonContentType",
-    "requireOrigin", "skipStateless", "skipPaths", "skip", "onDeny", "problemDetails",
+    "requireOrigin", "strictNullOrigin", "skipStateless", "skipPaths", "skip",
+    "onDeny", "problemDetails",
   ], "middleware.csrfProtect");
   var onDeny = typeof opts.onDeny === "function" ? opts.onDeny : null;
   var problemMode = opts.problemDetails === true;
@@ -200,9 +222,24 @@ function create(opts) {
   var allowedOrigins = Array.isArray(opts.allowedOrigins)
     ? opts.allowedOrigins.slice() : null;
 
+  validateOpts.optionalBoolean(opts.requireJsonContentType,
+    "middleware.csrfProtect: opts.requireJsonContentType (whether a state-changing request " +
+    "must declare a JSON content type; anything other than a boolean was read as false, " +
+    "which dropped the check under a configuration that asked for it)");
   var requireJsonCt = opts.requireJsonContentType === true;
 
+  validateOpts.optionalBoolean(opts.requireOrigin,
+    "middleware.csrfProtect: opts.requireOrigin (whether a request carrying no Origin or " +
+    "Referer is refused rather than allowed; anything other than a boolean was read as " +
+    "false, which allowed it under a configuration that asked for the opposite)");
   var requireOriginOpt = opts.requireOrigin === true;
+
+  validateOpts.optionalBoolean(opts.strictNullOrigin,
+    "middleware.csrfProtect: opts.strictNullOrigin (whether an opaque `Origin: null` is " +
+    "refused even when Sec-Fetch-Site reports a same-origin navigation; anything other " +
+    "than a boolean was read as true, which kept the strict reading under a configuration " +
+    "that asked to relax it)");
+  var strictNullOrigin = opts.strictNullOrigin !== false;
 
   var skipStateless = opts.skipStateless === true;
 
@@ -261,7 +298,7 @@ function create(opts) {
       outcome:  "denied",
       actor:    requestHelpers.extractActorContext(req),
       reason:   reason,
-      metadata: { method: req.method, path: (req.url || "").split("?")[0] },
+      metadata: { method: req.method, path: requestHelpers.resolveRoute(req) },
     });
   }
 
@@ -311,7 +348,7 @@ function create(opts) {
 
     if (_shouldSkip(req)) return next();
 
-    if (methods.indexOf(req.method) === -1) return next();
+    if (methods.indexOf(String(req.method || "").toUpperCase()) === -1) return next();
 
     if (requireJsonCt) {
       var ct = req.headers && req.headers["content-type"];
@@ -323,7 +360,8 @@ function create(opts) {
     }
 
     if (checkOrigin) {
-      var originReason = _checkOriginAllowed(req, allowedOrigins, _isHttps, requireOriginOpt);
+      var originReason = _checkOriginAllowed(req, allowedOrigins, _isHttps, requireOriginOpt,
+                                             strictNullOrigin);
       if (originReason !== null) {
         _emitDenied(req, "origin/referer: " + originReason);
         return _writeReject(req, res, "CSRF cross-origin request refused.", "cross-origin-refused", onDeny, problemMode);

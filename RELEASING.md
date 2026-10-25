@@ -34,7 +34,7 @@ Releases are automated end-to-end via GitHub Actions. The canonical local driver
 4. **Run the local gates.** Two checks gate every commit on the release path. Both also run automatically in `ci.yml` on every push and PR to `main`, so a missed local run surfaces in the CI step summary rather than at tag time — but the local invocation is fast feedback:
 
    - `node scripts/check-changelog-extract.js` — refuses to pass if either (a) the current `VERSION`'s release-notes JSON is missing, or (b) `CHANGELOG.md` drifts from the JSON tree. The release workflow runs the same render step at tag time.
-   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite (46 detectors) includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
+   - `node --test scripts/test-codebase-patterns.js` — the codebase-patterns suite includes three operator-facing-doc detectors that interface with the changelog pipeline. See "Operator-facing doc gates" below.
 
 5. **Update `README.md`** if anything user-visible changed — commands, requirements, attached artifacts, security claims.
 
@@ -112,7 +112,7 @@ node scripts/release.js all
 
 # Equivalent step-by-step (each a standalone, re-runnable subcommand; run on main):
 1. Author release-notes/vX.Y.Z.json      # prepare refuses without it
-2. node scripts/release.js prepare        # bump VERSION (constants.js + package.json), rebuild CHANGELOG, run gates
+2. node scripts/release.js prepare        # bump VERSION (constants.js + package.json + package-lock.json), rebuild CHANGELOG, run gates
 3. Update README.md if anything user-visible changed
 4. node scripts/release.js test           # full suite (node tests/run-all.js)
 5. node scripts/release.js commit         # signed release commit

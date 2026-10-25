@@ -76,6 +76,7 @@ var observability = require("../observability");
 var frameworkFiles = require("../framework-files");
 var vaultPassphraseSource = require("./passphrase-source");
 var vaultWrap = require("./wrap");
+var argon2 = require("../argon2-builtin");
 var { defineClass } = require("../framework-error");
 
 var VaultError = defineClass("VaultError", { alwaysPermanent: true });
@@ -269,6 +270,23 @@ function getDerivedHashMacKey() {
  *   await b.vault.init({ dataDir: "/var/lib/blamejs" });
  *   b.vault.getMode();   // → "wrapped"
  */
+async function initReleasingPassphraseOnOutcome(opts) {
+  var owner = "vault.init";
+  var reads = vaultPassphraseSource._envPassphraseReadCount(
+    vaultPassphraseSource.ENV_PASSPHRASE);
+  var withOwner = Object.assign({}, opts || {}, { _holdOwner: owner });
+  try {
+    var answer = await init(withOwner);
+    vaultPassphraseSource._releaseHeldEnvPassphrase(
+      vaultPassphraseSource.ENV_PASSPHRASE, null, owner, reads);
+    return answer;
+  } catch (e) {
+    vaultPassphraseSource._releaseHeldEnvPassphrase(
+      vaultPassphraseSource.ENV_PASSPHRASE, e, owner, reads);
+    throw e;
+  }
+}
+
 async function init(opts) {
   if (initialized) return;
   opts = opts || {};
@@ -313,8 +331,8 @@ async function init(opts) {
   }
 
   if (mode === "wrapped") {
-    if (hasSealed) await initWrapped();
-    else await initFirstRunWrapped();
+    if (hasSealed) await initWrapped(opts._holdOwner);
+    else await initFirstRunWrapped(opts._holdOwner);
   } else {
     log.warn("WARNING: running in PLAINTEXT mode — vault.key is unprotected on disk.");
     log.warn("         Use mode: 'wrapped' (default) for any deployment that holds real data.");
@@ -355,7 +373,7 @@ function initPlaintext() {
   log("plaintext vault keypair generated at " + paths.plaintext);
 }
 
-async function initWrapped() {
+async function initWrapped(holdOwner) {
   log("unsealing vault.key.sealed...");
   var sealedBytes;
   try {
@@ -367,7 +385,9 @@ async function initWrapped() {
 
   var passphrase;
   try {
-    passphrase = await vaultPassphraseSource.getPassphrase({ prompt: "Vault passphrase: " });
+    passphrase = await vaultPassphraseSource.getPassphrase({
+      prompt: "Vault passphrase: ", _holdForRetry: true, _holdOwner: holdOwner,
+    });
   } catch (e) {
     throw new VaultError("vault/passphrase-error", e.message);
   }
@@ -378,8 +398,14 @@ async function initWrapped() {
     plaintextBuf = await vaultWrap.unwrap(sealedBytes, passphrase);
     plaintextJson = plaintextBuf.toString("utf8");
   } catch (e) {
+    if (argon2.isArgon2Error(e)) throw e;
+    if (vaultWrap.isUnreadableFile(e)) {
+      throw new VaultError("vault/sealed-file-unreadable",
+        "the sealed vault key cannot be read (" + e.message +
+        "); the passphrase was never tested");
+    }
     throw new VaultError("vault/unwrap-failed",
-      "passphrase rejected or sealed file corrupted (" + e.message + ")");
+      "passphrase rejected, or the sealed ciphertext is corrupted (" + e.message + ")");
   } finally {
     if (plaintextBuf) safeBuffer.secureZero(plaintextBuf);
   }
@@ -405,13 +431,15 @@ async function initWrapped() {
   log("unsealed successfully.");
 }
 
-async function initFirstRunWrapped() {
+async function initFirstRunWrapped(holdOwner) {
   log("first run with mode: 'wrapped' — generating wrapped keypair...");
 
   var passphrase;
   try {
     passphrase = await vaultPassphraseSource.getPassphrase({
       prompt: "Choose a vault passphrase (loss = data loss, store it safely): ",
+      _holdForRetry: true,
+      _holdOwner: holdOwner,
     });
   } catch (e) {
     throw new VaultError("vault/passphrase-error", e.message);
@@ -424,6 +452,7 @@ async function initFirstRunWrapped() {
   try {
     sealed = await vaultWrap.wrap(plaintextJson, passphrase);
   } catch (e) {
+    if (argon2.isArgon2Error(e)) throw e;
     throw new VaultError("vault/wrap-failed",
       "failed to wrap new vault key: " + e.message);
   }
@@ -563,7 +592,7 @@ function getKeysJson() {
  * @primitive b.vault.getCurrentPassphrase
  * @signature b.vault.getCurrentPassphrase()
  * @since     0.6.0
- * @related   b.vault.init, b.vaultPassphraseOps.changePassphrase, b.vaultRotate.rotate
+ * @related   b.vault.init, b.vaultPassphraseOps.rotate, b.vaultRotate.rotate
  *
  * Returns the Buffer holding the passphrase the vault was unsealed
  * with on this boot, or `null` for `mode: "plaintext"` and for
@@ -573,7 +602,7 @@ function getKeysJson() {
  *
  * The Buffer is already in the JS heap during unwrap; retaining it
  * does not change the threat model meaningfully and is what makes
- * `b.vaultPassphraseOps.changePassphrase` ergonomic. Operators
+ * `b.vaultPassphraseOps.rotate` ergonomic. Operators
  * concerned about heap residency rotate the passphrase and let the
  * old Buffer get zeroed and replaced.
  *
@@ -638,7 +667,7 @@ function _zeroizeAndReplace(replacement) {
 }
 
 module.exports = {
-  init:                  init,
+  init:                  initReleasingPassphraseOnOutcome,
   seal:                  seal,
   unseal:                unseal,
   getDefaultStore:       function () { return { seal: seal, unseal: unseal }; },

@@ -7,6 +7,7 @@ var nodeFs = require("node:fs");
 var C = require("./constants");
 var lazyRequire = require("./lazy-require");
 var { defineClass } = require("./framework-error");
+var numericBounds = require("./numeric-bounds");
 var atomicFile = require("./atomic-file");
 
 var ArchiveReadError = defineClass("ArchiveReadError", { alwaysPermanent: true });
@@ -478,8 +479,24 @@ async function _decompressEntry(adapter, entry, dataStart, bombPolicy) {
     " — only STORE (0) and DEFLATE (8) are supported");
 }
 
+var _BOMB_POLICY_INT_CAPS = ["maxEntries", "maxEntryDecompressedBytes",
+                             "maxTotalDecompressedBytes"];
+
+function _validateBombPolicy(p, label, errorClass, code) {
+  if (!p) return p;
+  for (var i = 0; i < _BOMB_POLICY_INT_CAPS.length; i += 1) {
+    var key = _BOMB_POLICY_INT_CAPS[i];
+    numericBounds.requireNonNegativeFiniteIntIfPresent(p[key], label + ": " + key,
+      errorClass, code);
+  }
+  numericBounds.requirePositiveFiniteNumberIfPresent(p.maxExpansionRatio,
+    label + ": maxExpansionRatio", errorClass, code);
+  return p;
+}
+
 function _normalizeBombPolicy(p) {
   if (!p) return DEFAULT_BOMB_POLICY;
+  _validateBombPolicy(p, "bombPolicy", ArchiveReadError, "archive-read/bad-bomb-policy");
   return Object.freeze(Object.assign({}, DEFAULT_BOMB_POLICY, p));
 }
 
@@ -637,7 +654,7 @@ function zip(adapter, opts) {
     extractOpts = extractOpts || {};
     var loaded = await _loadCD();
     _enforceBombPolicy(loaded.entries, bombPolicy);
-    _assertGuardMetadata(loaded.entries, "archive.read.extractEntries.refused");
+    _assertGuardMetadata(loaded.entries, "archive.read.extract_entries.refused");
     var totalDecompressed = 0;
     var yielded = 0;
     for (var i = 0; i < loaded.entries.length; i += 1) {
@@ -665,7 +682,7 @@ function zip(adapter, opts) {
       yielded += 1;
       yield { name: entry.name, bytes: body, size: body.length };
     }
-    _emitAudit(opts, "archive.read.extractEntries.completed", "success", { entries: yielded });
+    _emitAudit(opts, "archive.read.extract_entries.completed", "success", { entries: yielded });
   }
 
   async function extract(extractOpts) {
@@ -851,4 +868,5 @@ module.exports = {
   DEFAULT_ENTRY_TYPE_POLICY: DEFAULT_ENTRY_TYPE_POLICY,
   _locateEocd:               _locateEocd,
   _readCentralDirectory:     _readCentralDirectory,
+  _validateBombPolicy:       _validateBombPolicy,
 };

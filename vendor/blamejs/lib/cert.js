@@ -36,7 +36,7 @@
  *
  *   Key escrow: when `keyEscrow: { recipient }` is set, the renewed
  *   private key is also encrypted to the recipient's public key via
- *   `b.crypto.encryptEnvelope` and persisted alongside the sealed key.
+ *   `b.crypto.encryptEnvelopeAsCertPeer` and persisted alongside the sealed key.
  *   The recipient is operator-controlled (typically an offline
  *   break-glass key); the escrow copy is for legitimate key-recovery
  *   under break-glass policy, NOT for routine access.
@@ -139,6 +139,34 @@ function _createSealedDiskStorage(opts) {
   };
 }
 
+function _accountKeyMaterial(accountKey) {
+  if (!accountKey || typeof accountKey !== "object") return null;
+  if (accountKey instanceof nodeCrypto.KeyObject) return accountKey;
+  if (typeof accountKey.privatePem === "string") return accountKey.privatePem;
+  if (accountKey.privateKey instanceof nodeCrypto.KeyObject) return accountKey.privateKey;
+  return null;
+}
+
+function _refuseCompromisedAccountKey(accountKey) {
+  var material = _accountKeyMaterial(accountKey);
+  if (material === null) return;
+  var found = null;
+  var readable = true;
+  try { found = bCrypto().compromisedKey(material); }
+  catch (_e) { readable = false; }
+  if (!readable) {
+    var keyObj;
+    try { keyObj = nodeCrypto.createPrivateKey(material); }
+    catch (_e2) { return; }
+    try { found = bCrypto().compromisedKey(keyObj); }
+    catch (_e3) { return; }
+  }
+  if (found !== null) {
+    throw new CertError("cert/compromised-key",
+      "cert.create.acme.accountKey is a compromised key: " + found.reason);
+  }
+}
+
 /**
  * @primitive b.cert.create
  * @signature b.cert.create(opts)
@@ -151,24 +179,66 @@ function _createSealedDiskStorage(opts) {
  * `b.safeAsync.repeating` for the renewal scheduler, and
  * `b.network.tls.ocsp` for stapling.
  *
+ * An `opts` that is not an object throws `cert/bad-opts`. A missing
+ * `storage` block throws `cert/bad-storage`, a `storage.type` other than
+ * `"sealed-disk"` throws `cert/bad-storage-type`, a missing
+ * `storage.rootDir` throws `cert/bad-storage-root`, and a `storage.vault`
+ * without `seal` and `unseal` methods throws `cert/bad-storage-vault`. A
+ * missing `acme` block throws `cert/bad-acme`, and a missing
+ * `acme.directory` throws `cert/bad-acme-directory`. An `acme.accountKey`
+ * that is a compromised key (`b.crypto.compromisedKey`) throws
+ * `cert/compromised-key`. An `"auto"` account key read back from storage
+ * is judged the first time the manager contacts the CA, and a compromised
+ * one is refused with `acme/compromised-key` before any request is signed.
+ * `refresh(name)` throws that error, and `start()` throws it when a
+ * certificate needs issuance. A scheduled renewal reports it through the
+ * `cert.renew_failed` audit event and the `cert.renew-failed` event. A
+ * `start()` that finds
+ * every certificate in storage and outside the renewal window does not
+ * read the account key.
+ *
+ * A `certs` that is not a non-empty array throws `cert/bad-certs`, and one
+ * with more than 1000 entries throws `cert/too-many-certs`. In an entry, a
+ * `name` that does not match `[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}` or contains
+ * `..` throws `cert/bad-cert-name`, and a repeated `name` throws
+ * `cert/duplicate-name`. A `domains` that is not a non-empty array throws
+ * `cert/bad-domains`, one with more than 100 entries throws
+ * `cert/too-many-domains`, and a domain that is not a non-empty string
+ * throws `cert/bad-domain`. A missing `challenge` throws
+ * `cert/bad-challenge`, a `challenge.type` other than `http-01`, `dns-01`
+ * or `tls-alpn-01` throws `cert/bad-challenge-type`, and a challenge
+ * without `provision` and `cleanup` functions throws
+ * `cert/bad-challenge-callbacks`. A `keyAlg` outside the listed five throws
+ * `cert/bad-key-alg`, and a `keyEscrow.recipient` that is neither a PEM
+ * string nor a `{ publicKey, ecPublicKey }` object throws
+ * `cert/bad-key-escrow`.
+ *
+ * A `renew.intervalMs` that is not a positive finite number throws
+ * `cert/bad-renew-interval`, a `renew.minDaysBeforeExpiry` of that kind
+ * throws `cert/bad-renew-window`, and an `ocsp.refreshMs` of that kind
+ * throws `cert/bad-ocsp-refresh`. An `ocsp.certIdHashAlg` outside
+ * `b.network.tls.ocsp.CERTID_HASH_ALGS` throws
+ * `cert/bad-ocsp-certid-hash-alg`, and a `compliance` entry outside
+ * `b.compliance.KNOWN_POSTURES` throws `cert/unknown-compliance-posture`.
+ *
  * The handle exposes:
  *   - `start()`           — ensures every manifest cert exists (issues if absent); starts the renewal scheduler.
  *   - `stop()`            — halts the renewal scheduler; releases sealed handles.
  *   - `getContext(name)`  — returns `{ cert, key, ca, expiresAt, fingerprintSha256 }` (PEM strings + meta) for the named cert.
- *   - `sniCallback`       — function (servername, cb) suitable for `https.createServer({ SNICallback })` — looks up by SNI hostname, falls back to the first registered cert.
+ *   - `sniCallback`       — function (servername, cb) suitable for `https.createServer({ SNICallback })` — looks up by SNI hostname, falls back to the first registered cert. The context it returns carries the certificate, its key and the certificate-compression algorithms the runtime supports. The listener takes its key-exchange groups from its own options, so build those with `b.network.tls.applyToContext({ base })` or serve through `b.router`'s `listen()`, which writes `b.network.tls.serverKeyAgreementGroups()`.
  *   - `refresh(name)`     — force-renew the named cert NOW (operator override).
  *   - `on(event, fn)`     — `cert.issued` / `cert.renewed` / `cert.renew-failed` / `cert.ocsp-refreshed`.
  *
  * @opts
  *   storage: {
- *     type:    "sealed-disk",         // only backend in v1 — operator-supplied storage extensible via the same shape
+ *     type:    "sealed-disk",         // the one backend; operator storage uses the same shape
  *     rootDir: string,                // required — directory under which sealed artifacts land
  *     vault:   b.vault.Store,         // optional — defaults to b.vault.getDefaultStore()
  *   },
  *   acme: {
  *     directory:    string,           // required — RFC 8555 directory URL (https://)
  *     contactEmail: string,           // optional — mailto: contact registered on account
- *     accountKey:   { privatePem, publicPem } | "auto",   // "auto" → generate + persist on first start; sealed via storage.vault
+ *     accountKey:   { privatePem, publicPem } | "auto",   // "auto" → generate + persist on first start; sealed via storage.vault; a compromised key throws cert/compromised-key
  *     timeoutMs:    number,           // optional — per-HTTP-call timeout; defaults from b.acme.create
  *     ariCompliant: boolean,          // optional, default true — RFC 9773 ARI renewalInfo respect
  *   },
@@ -196,6 +266,7 @@ function _createSealedDiskStorage(opts) {
  *   ocsp: {
  *     stapling:   boolean,            // default true — refresh + cache OCSP responses for server-side stapling
  *     refreshMs:  number,             // default 12h — OCSP-response cache lifetime
+ *     certIdHashAlg: string,          // default sha256 — CertID lookup hash, one of b.network.tls.ocsp.CERTID_HASH_ALGS (throws on any other value); set "sha1" for a SHA-1-only responder
  *   },
  *   audit:    boolean | object,       // default true — emit cert.* lifecycle events via b.audit.safeEmit
  *   compliance: Array<string>,         // optional — posture names (e.g. ["hipaa"]); validated against b.compliance.KNOWN_POSTURES (throws on an unknown name) + surfaced on getContext().compliance. Cert keys/certs are always sealed at rest, so storage-confidentiality postures hold by construction.
@@ -242,7 +313,7 @@ function create(opts) {
   var storageType = opts.storage.type || "sealed-disk";
   if (storageType !== "sealed-disk") {
     throw new CertError("cert/bad-storage-type",
-      "cert.create: storage.type must be 'sealed-disk' (the only backend in v1)");
+      "cert.create: storage.type must be 'sealed-disk', which is the only backend");
   }
   var storage = _createSealedDiskStorage(opts.storage);
 
@@ -255,6 +326,7 @@ function create(opts) {
   validateOpts.requireNonEmptyString(opts.acme.directory,
     "cert.create.acme: directory (RFC 8555 directory URL) is required",
     CertError, "cert/bad-acme-directory");
+  _refuseCompromisedAccountKey(opts.acme.accountKey);
 
   if (!Array.isArray(opts.certs) || opts.certs.length === 0) {
     throw new CertError("cert/bad-certs",
@@ -348,11 +420,20 @@ function create(opts) {
   var ariCompliant = renewOpts.ariCompliant !== false;
 
   var ocspOpts = opts.ocsp || {};
-  validateOpts(ocspOpts, ["stapling", "refreshMs"], "cert.create.ocsp");
+  validateOpts(ocspOpts, ["stapling", "refreshMs", "certIdHashAlg"], "cert.create.ocsp");
   var ocspStapling = ocspOpts.stapling !== false;
   var ocspRefreshMs = _positiveFiniteOrDefault(
     ocspOpts.refreshMs, DEFAULT_OCSP_REFRESH_MS,
     "cert.create.ocsp.refreshMs", "cert/bad-ocsp-refresh");
+  var ocspCertIdHashAlg = ocspOpts.certIdHashAlg;
+  if (ocspCertIdHashAlg !== undefined && ocspCertIdHashAlg !== null) {
+    var certIdHashAlgs = networkTls().ocsp.CERTID_HASH_ALGS;
+    if (typeof ocspCertIdHashAlg !== "string" || certIdHashAlgs.indexOf(ocspCertIdHashAlg) === -1) {
+      throw new CertError("cert/bad-ocsp-certid-hash-alg",
+        "cert.create.ocsp.certIdHashAlg must be one of " + certIdHashAlgs.join(", ") +
+        "; got " + JSON.stringify(ocspCertIdHashAlg));
+    }
+  }
 
   var auditEnabled = opts.audit !== false;
   var compliancePostures = Array.isArray(opts.compliance) ? opts.compliance.slice() : [];
@@ -485,7 +566,7 @@ function create(opts) {
         try { await certManifest.challenge.cleanup(provisionParams); }
         catch (cleanupErr) {
           // operator should know — emit drop-silent audit.
-          _emitAudit("cert.challenge-cleanup", "failure", {
+          _emitAudit("cert.challenge_cleanup", "failure", {
             name:   certManifest.name,
             domain: auth.identifier.value,
             error:  (cleanupErr && cleanupErr.message) || String(cleanupErr),
@@ -506,7 +587,7 @@ function create(opts) {
   }
 
   function _certMeta(certPem) {
-    var cert = new nodeCrypto.X509Certificate(certPem);
+    var cert = bCrypto()._x509(certPem);
     return {
       expiresAt:         Date.parse(cert.validTo),
       issuedAt:          Date.parse(cert.validFrom),
@@ -612,7 +693,7 @@ function create(opts) {
     try {
       await _ensureCert(certManifest);
     } catch (e) {
-      _emitAudit("cert.renew-failed", "failure", {
+      _emitAudit("cert.renew_failed", "failure", {
         name:    certManifest.name,
         domains: certManifest.domains,
         error:   (e && e.message) || String(e),
@@ -635,12 +716,14 @@ function create(opts) {
     if (chain.length < 2) return;
     try {
       // allow:raw-outbound-http-framework-internal — b.network.tls.ocsp.fetch composes b.httpClient internally (SSRF guard + pinned DNS); not a raw outbound call
-      var rv = await networkTls().ocsp.fetch({ leafPem: chain[0], issuerPem: chain[1] });
+      var rv = await networkTls().ocsp.fetch({ leafPem: chain[0], issuerPem: chain[1], certIdHashAlg: ocspCertIdHashAlg });
       ctx.ocspResponse = rv.ocspDer;
       _emitAudit("cert.ocsp.refreshed", "success", { name: name });
     } catch (e) {
-      _emitAudit("cert.ocsp.refresh-failed", "failure",
-        { name: name, error: (e && e.message) || String(e) });
+      var refreshError = (e && e.message) || String(e);
+      log.warn("cert: OCSP staple refresh for '" + name + "' failed (" + refreshError + ")");
+      _emitAudit("cert.ocsp.refresh_failed", "failure",
+        { name: name, error: refreshError });
     }
   }
 
@@ -732,6 +815,7 @@ function create(opts) {
       var sniCtxOpts = { cert: match.cert, key: match.key };
       var sniCompression = C.TLS_CERT_COMPRESSION();
       if (sniCompression.length > 0) sniCtxOpts.certificateCompression = sniCompression;
+      // allow:listener-group-preference: a listener reads its groups from its initial context, not from the context an SNICallback returns
       var secureCtx = require("node:tls").createSecureContext(sniCtxOpts);
       cb(null, secureCtx);
     } catch (e) {

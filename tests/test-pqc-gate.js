@@ -100,9 +100,19 @@ function buildClientHello(groupIds, opts) {
 }
 
 describe('PQC Gate: PQC_GROUP_IDS derivation', function () {
-  it('PQC_GROUP_IDS matches Object.values(PQC_GROUPS)', function () {
-    var expected = new Set(Object.values(PQC_GROUPS));
-    assert.deepStrictEqual([...PQC_GROUP_IDS].sort(), [...expected].sort());
+  it('PQC_GROUP_IDS matches the hybrid groups in PQC_GROUPS', function () {
+    // The gate counts the ML-KEM hybrids only; a pure ML-KEM group in
+    // PQC_GROUPS is not one a HermitStash listener negotiates.
+    var expected = Object.keys(PQC_GROUPS)
+      .filter(function (name) { return /^(X25519|SecP\d+r1)MLKEM\d+$/.test(name); })
+      .map(function (name) { return PQC_GROUPS[name]; });
+    assert.deepStrictEqual([...PQC_GROUP_IDS].sort(), expected.sort());
+  });
+
+  it('PQC_GROUP_IDS does not contain the pure ML-KEM groups', function () {
+    assert.ok(!PQC_GROUP_IDS.has(PQC_GROUPS.MLKEM512));
+    assert.ok(!PQC_GROUP_IDS.has(PQC_GROUPS.MLKEM768));
+    assert.ok(!PQC_GROUP_IDS.has(PQC_GROUPS.MLKEM1024));
   });
 
   it('PQC_GROUP_IDS contains X25519MLKEM768 (0x11EC)', function () {

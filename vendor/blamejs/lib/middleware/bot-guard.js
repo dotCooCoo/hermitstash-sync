@@ -30,6 +30,7 @@ var BotGuardError = defineClass("BotGuardError", { alwaysPermanent: true });
 function _coerceAgentPattern(r, where) {
   if (r instanceof RegExp) {
     guardRegex().assertSafe(r, where, BotGuardError, "bot-guard/unsafe-pattern");
+    guardRegex().assertStateless(r, where, BotGuardError, "bot-guard/stateful-pattern");
     return r;
   }
   throw new BotGuardError("bot-guard/bad-pattern",
@@ -163,7 +164,7 @@ function create(opts) {
           action:   "system.botguard.tag",
           outcome:  "denied",
           reason:   hit,
-          metadata: { method: req.method, path: req.pathname || req.url, requestId: req.requestId },
+          metadata: { method: req.method, path: requestHelpers.resolveRoute(req), requestId: req.requestId },
           requestId: req.requestId,
         });
       } catch (_e) { /* audit best-effort */ }
@@ -176,7 +177,7 @@ function create(opts) {
         action:   "system.botguard.block",
         outcome:  "denied",
         reason:   hit,
-        metadata: { method: req.method, path: req.pathname || req.url, requestId: req.requestId },
+        metadata: { method: req.method, path: requestHelpers.resolveRoute(req), requestId: req.requestId },
         requestId: req.requestId,
       });
     } catch (_e) { /* audit best-effort */ }

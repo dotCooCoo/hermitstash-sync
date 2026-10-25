@@ -176,6 +176,10 @@ async function encryptedRequest(ctx, urlPath, opts = {}) {
     }
     const httpClient = new HttpClient({ server: ctx.url, mtls: mtls }, ctx.apiKey);
     httpClient._agent.options.rejectUnauthorized = false;
+    // Close each socket after its request, for the reason httpRequest uses a
+    // new connection: a blocking seeding helper can outlast the server's 5 s
+    // keep-alive timeout and leave a pooled socket the server has closed.
+    httpClient._agent.keepAlive = false;
     ctx._encAgent = httpClient._agent;
     ctx._encHttpClient = httpClient;
   }
@@ -264,6 +268,11 @@ function httpRequest(url, opts = {}) {
       cert: opts.cert || undefined,
       key: opts.key || undefined,
       ca: opts.ca || undefined,
+      // A new connection for every request. The seeding helpers block the event
+      // loop with a child process, and one that runs longer than the server's
+      // 5 s keep-alive timeout leaves a pooled socket the server has already
+      // closed, so the next request on it fails with ECONNRESET.
+      agent: false,
     };
 
     const req = mod.request(reqOpts, res => {

@@ -6,6 +6,7 @@ var validateOpts        = require("./validate-opts");
 var lazyRequire         = require("./lazy-require");
 var C                   = require("./constants");
 var { ComplianceError }  = require("./framework-error");
+var bCrypto             = require("./crypto");
 
 var prohibited     = require("./compliance-ai-act-prohibited");
 var risk           = require("./compliance-ai-act-risk");
@@ -59,6 +60,11 @@ var GPAI_OBLIGATIONS = Object.freeze([
 
 function gpaiClassify(opts) {
   if (!opts || typeof opts !== "object") return { isGpai: false, isSystemicRisk: false };
+  validateOpts.optionalBoolean(opts.designatedSystemicRisk,
+    "compliance.aiAct.gpai.classify: opts.designatedSystemicRisk (anything other than a " +
+    "boolean was read as false, so a model the operator declared designated was classified " +
+    "as not systemic-risk and its Article 55 obligations were not raised)",
+    ComplianceError, "compliance-ai-act/bad-input");
   var isGpai = opts.kind === "gpai" ||
                (typeof opts.modalities === "object" && opts.generalPurpose === true);
   var isSystemicRisk = false;
@@ -153,6 +159,15 @@ function classify(systemDescription) {
       "compliance.aiAct.classify: systemDescription must be an object — got " +
       typeof systemDescription);
   }
+  ["safetyComponentForRegulatedProduct", "requiresThirdPartyConformity"].forEach(function (nm) {
+    if (systemDescription[nm] === undefined || systemDescription[nm] === null) return;
+    if (typeof systemDescription[nm] !== "boolean") {
+      throw new ComplianceError("compliance-ai-act/bad-input",
+        "compliance.aiAct.classify: " + nm + " must be a boolean; anything else was read as " +
+        "false, which classified the system as not high-risk, got " +
+        typeof systemDescription[nm]);
+    }
+  });
 
   var prohibitedHits = prohibited.classify(systemDescription);
   if (prohibitedHits.length > 0) {
@@ -726,12 +741,27 @@ var EVIDENCE_HASH_RE = /^[0-9a-f]{128}$/;                                       
 
 var DEFAULT_VALIDITY_MS = C.TIME.days(90);
 
+var FORM_ALLOWED_KEYS = [
+  "modelId", "modelVersion", "provider", "isSystemicRisk", "trainingFlops",
+  "designatedSystemicRisk", "copVersion", "commitments",
+  "trainingDataSummary", "generatedAt", "validityMs",
+];
+
 var DECLARE_ALLOWED_KEYS = [
   "modelId", "modelVersion", "provider", "isSystemicRisk", "trainingFlops",
-  "designatedSystemicRisk", "modalities", "copVersion", "commitments",
-  "trainingDataSummary", "generatedAt", "validityMs", "privateKeyPem",
-  "serialNumber", "audit",
+  "designatedSystemicRisk", "copVersion", "commitments",
+  "trainingDataSummary", "generatedAt", "validityMs",
+  "privateKeyPem", "serialNumber", "audit",
 ];
+
+function _formOptionsFrom(opts) {
+  var out = {};
+  for (var i = 0; i < FORM_ALLOWED_KEYS.length; i += 1) {
+    var key = FORM_ALLOWED_KEYS[i];
+    if (Object.prototype.hasOwnProperty.call(opts, key)) out[key] = opts[key];
+  }
+  return out;
+}
 
 function _deriveGpaiObligations(opts) {
   var probe = {
@@ -796,7 +826,7 @@ function _deriveGpaiObligations(opts) {
 function adherenceForm(opts) {
   validateOpts.requireObject(opts, "compliance.aiAct.gpai.adherenceForm",
     ComplianceError, "compliance-ai-act/bad-input");
-  validateOpts(opts, DECLARE_ALLOWED_KEYS, "compliance.aiAct.gpai.adherenceForm");
+  validateOpts(opts, FORM_ALLOWED_KEYS, "compliance.aiAct.gpai.adherenceForm");
   validateOpts.requireNonEmptyString(opts.modelId, "adherenceForm: modelId",
     ComplianceError, "compliance-ai-act/no-model-id");
   validateOpts.requireNonEmptyString(opts.modelVersion, "adherenceForm: modelVersion",
@@ -916,6 +946,21 @@ function adherenceForm(opts) {
  * declaration (`generatedAt + validityMs < now`) so a stale adherence
  * cannot be replayed past its window.
  *
+ * An `opts` that is not an object throws `compliance-ai-act/bad-input`. A
+ * missing `privateKeyPem` throws `compliance-ai-act/no-signing-key`, and a
+ * compromised `privateKeyPem` (`b.crypto.compromisedKey`) throws
+ * `compliance-ai-act/compromised-key`. A missing `modelId` or
+ * `modelVersion` throws `compliance-ai-act/no-model-id` or
+ * `compliance-ai-act/no-model-version`, a `copVersion` that is not a
+ * `YYYY-MM` label throws `compliance-ai-act/cop-version-bad`, and a
+ * `validityMs` that is not a positive finite number throws
+ * `compliance-ai-act/bad-validity`. An empty derived obligation set throws
+ * `compliance-ai-act/cop-no-obligations`. A commitment without a string
+ * `article` throws `compliance-ai-act/cop-commitment-shape`, one whose
+ * `evidenceHash` is not 128 lowercase hex characters throws
+ * `compliance-ai-act/cop-evidence-bad-hash`, and a required article with no
+ * commitment throws `compliance-ai-act/cop-obligation-unevidenced`.
+ *
  * @opts
  *   modelId:        string,     // required
  *   modelVersion:   string,     // required
@@ -926,6 +971,7 @@ function adherenceForm(opts) {
  *   copVersion:     string,     // Code of Practice release label "YYYY-MM" (default "2025-07")
  *   commitments:    object[],   // [{ article, statement, evidenceHash }]; evidenceHash is b.crypto.sha3Hash output
  *   trainingDataSummary: object,// Art. 53(1)(d) public-summary pointer (b.compliance.aiAct.gpai.trainingDataSummary)
+ *   generatedAt:    string,     // ISO 8601 UTC stamp the validity window runs from; defaults to now
  *   validityMs:     number,     // validity window; default 90 days
  *   privateKeyPem:  string,     // required — ML-DSA-87 signing key (b.crypto.generateSigningKeyPair)
  *   serialNumber:   string,     // urn:uuid:...; defaults to a fresh UUIDv4
@@ -948,8 +994,12 @@ function declareAdherence(opts) {
   validateOpts(opts, DECLARE_ALLOWED_KEYS, "compliance.aiAct.gpai.declareAdherence");
   validateOpts.requireNonEmptyString(opts.privateKeyPem,
     "declareAdherence: privateKeyPem", ComplianceError, "compliance-ai-act/no-signing-key");
+  bCrypto.assertNotCompromised(opts.privateKeyPem, {
+    errorClass: ComplianceError, code: "compliance-ai-act/compromised-key",
+    label: "declareAdherence: privateKeyPem",
+  });
 
-  var form = adherenceForm(opts);
+  var form = adherenceForm(_formOptionsFrom(opts));
 
   var unevidenced = form.commitments
     .filter(function (c) { return !c.evidenced; })
@@ -1026,6 +1076,8 @@ function declareAdherence(opts) {
  * `reason: "expired"` so a stale adherence cannot be replayed past its
  * auditor-review window. Returns `{ valid, adherence, reason }`; never
  * throws (the documented contract mirrors b.ai.modelManifest.verify).
+ * A declaration whose `publicKeyPem` is a compromised key returns
+ * `reason: "compromised-key"`.
  *
  * @opts
  *   now:    number,     // override the comparison clock (ms epoch); default Date.now()

@@ -10,7 +10,7 @@
  * @intro
  *   Inbound SMTP / MX listener. Composes the framework's existing
  *   mail-gate substrates (`b.mail.helo`, `b.mail.rbl`,
- *   `b.mail.greylist`, `b.guardEnvelope`, `b.mail.auth.dmarc`,
+ *   `b.mail.greylist`, `b.guardEnvelope`, `b.mail.dmarc`,
  *   `b.safeMime`, `b.guardEmail`, `b.guardSmtpCommand`,
  *   `b.mail.agent`) into one operator-facing server that accepts
  *   inbound mail per RFC 5321 with PQC-shaped TLS posture, SMTP-
@@ -31,10 +31,15 @@
  *     wire line passes through `b.guardSmtpCommand.validate` which
  *     refuses bare LF, bare CR, NUL, C0 controls, DEL, and oversize.
  *     The DATA body's `\r\n.\r\n` terminator is matched on canonical
- *     CRLF only — bare-LF dot-terminators are refused. Together this
- *     defends the CVE-2023-51764 class where a hostile sender
- *     smuggles a second message past the framework's filter by
- *     terminating the first one with `\n.\n` instead of `\r\n.\r\n`.
+ *     CRLF only, and the body is refused if it carries a `.`-alone-line
+ *     whose surrounding line endings are not both canonical CRLF
+ *     (`b.guardSmtpCommand.detectBodySmuggling` covers every variant:
+ *     `\n.\n`, `\r\n.\n`, `\n.\r\n`, `\r.\r`, `\r.\n`, `\n.\r`,
+ *     `\r\n.\r`), so no non-canonical dot-terminator survives to a
+ *     lenient relay hop. Together this defends the CVE-2023-51764 class
+ *     where a hostile sender smuggles a second message past the
+ *     framework's filter by terminating the first one with `\n.\n`
+ *     instead of `\r\n.\r\n`.
  *
  *   - **Open-relay defense** — RCPT TO non-local refused with 550
  *     5.7.1 Relaying denied unless the operator explicitly registered
@@ -58,7 +63,7 @@
  *     §4.5.3.2.7). Operator opts up with explicit bounds.
  *
  *   - **TLS posture** — `tlsContext` MUST be supplied (no implicit
- *     plaintext-only mode). Operator passes a `b.network.tls.context`
+ *     plaintext-only mode). Operator passes a `b.network.tls.applyToContext`
  *     output which carries the framework's TLS 1.3 default + OCSP /
  *     CT-log posture. Pre-STARTTLS plain commands are limited to
  *     EHLO / HELO / STARTTLS / NOOP / QUIT / RSET; MAIL / RCPT /
@@ -164,6 +169,7 @@ var safeAsync = require("./safe-async");
 var safeBuffer = require("./safe-buffer");
 var safeSmtp = require("./safe-smtp");
 var validateOpts = require("./validate-opts");
+var structuredFields = require("./structured-fields");
 var guardSmtpCommand = require("./guard-smtp-command");
 var guardDomain = require("./guard-domain");
 var guardCidr = require("./guard-cidr");
@@ -207,8 +213,8 @@ var REPLY_550_MAILBOX_UNAVAIL    = "550";
 var REPLY_552_SIZE_EXCEEDED      = "552";
 var REPLY_554_TRANSACTION_FAILED = "554";
 
-var RE_MAIL_FROM = /^MAIL\s+FROM:\s*<([^>]*)>(?:\s+(.*))?$/i;
-var RE_RCPT_TO   = /^RCPT\s+TO:\s*<([^>]+)>(?:\s+.*)?$/i;
+var RE_MAIL_FROM = /^MAIL\s+FROM:(.*)$/i;                                                               // allow:regex-no-length-cap — line length bounded by maxLineBytes
+var RE_RCPT_TO   = /^RCPT\s+TO:(.*)$/i;                                                                 // allow:regex-no-length-cap — line length bounded by maxLineBytes
 var RE_SIZE      = /SIZE=(\d+)/i;
 
 var _RELAY_CIDR_OPTS = Object.freeze({
@@ -219,14 +225,6 @@ var _RELAY_CIDR_OPTS = Object.freeze({
   family:                 "either",
 });
 
-function _normalizeRelayCidr(cidr) {
-  if (typeof cidr !== "string") return cidr;
-  var m = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,3})$/i.exec(cidr);
-  if (!m) return cidr;
-  var prefix = parseInt(m[2], 10);
-  if (prefix < 96 || prefix > 128) return cidr;
-  return m[1] + "/" + (prefix - 96);
-}
 
 function _envelopeActionFor(inbound, gate) {
   var dmarc = inbound.dmarc || {};
@@ -238,27 +236,76 @@ function _envelopeActionFor(inbound, gate) {
   return "accept";
 }
 
+function _fieldNameOf(unfolded) {
+  var colon = unfolded.indexOf(":");
+  if (colon === -1) return null;
+  return safeBuffer.stripTrailingHspace(unfolded.slice(0, colon)).toLowerCase();
+}
+
+function _authservIdOf(unfolded) {
+  var colon = unfolded.indexOf(":");
+  if (colon === -1) return null;
+  var value = unfolded.slice(colon + 1);
+  var i = 0;
+  for (;;) {
+    while (i < value.length && (value.charAt(i) === " " || value.charAt(i) === "\t")) i += 1;
+    if (value.charAt(i) !== "(") break;
+    var depth = 0;
+    while (i < value.length) {
+      var c = value.charAt(i);
+      if (c === "\\") { i += 2; continue; }
+      if (c === "(") depth += 1;
+      else if (c === ")") { depth -= 1; if (depth === 0) { i += 1; break; } }
+      i += 1;
+    }
+    if (depth !== 0) return null;
+  }
+  if (value.charAt(i) === '"') {
+    var out = "";
+    i += 1;
+    while (i < value.length) {
+      var q = value.charAt(i);
+      if (q === "\\") { out += value.charAt(i + 1); i += 2; continue; }
+      if (q === '"') return out.toLowerCase();
+      out += q;
+      i += 1;
+    }
+    return null;
+  }
+  var start = i;
+  while (i < value.length && " \t;".indexOf(value.charAt(i)) === -1) i += 1;
+  var token = value.slice(start, i);
+  return token.length === 0 ? null : token.toLowerCase();
+}
+
 function _stripForgedAuthResults(messageBuf, authservId) {
   if (!authservId) return messageBuf;
   var sepIdx = messageBuf.indexOf("\r\n\r\n");
   var headerEnd = sepIdx === -1 ? messageBuf.length : sepIdx + 2;
   var head = messageBuf.slice(0, headerEnd).toString("latin1");
   var rest = messageBuf.slice(headerEnd);
-  if (head.toLowerCase().indexOf("authentication-results:") === -1) return messageBuf;
+  if (head.toLowerCase().indexOf("authentication-results") === -1) return messageBuf;
+
   var lines = head.split("\r\n");
+  var wantId = String(authservId).toLowerCase();
   var out = [];
-  var skipping = false;
-  var prefix = "authentication-results:";
-  var wantId = authservId.toLowerCase();
-  for (var i = 0; i < lines.length; i += 1) {
-    var line = lines[i];
-    if (skipping && (line.charAt(0) === " " || line.charAt(0) === "\t")) continue;
-    skipping = false;
-    if (line.slice(0, prefix.length).toLowerCase() === prefix) {
-      var idTok = line.slice(prefix.length).trim().split(/[;\s]/)[0].toLowerCase();
-      if (idTok === wantId) { skipping = true; continue; }
+  var i = 0;
+  while (i < lines.length) {
+    var block = [lines[i]];
+    var j = i + 1;
+    while (j < lines.length &&
+           (lines[j].charAt(0) === " " || lines[j].charAt(0) === "\t")) {
+      block.push(lines[j]);
+      j += 1;
     }
-    out.push(line);
+    var unfolded = structuredFields.unfoldHeaderContinuations(block.join("\n"));
+    if (_fieldNameOf(unfolded) === "authentication-results" &&
+        _authservIdOf(unfolded) === wantId) {
+      i = j;
+      continue;
+    }
+    for (var k = 0; k < block.length; k += 1) out.push(block[k]);
+    i = j;
   }
   return Buffer.concat([Buffer.from(out.join("\r\n"), "latin1"), rest]);
 }
@@ -274,8 +321,10 @@ function _stripForgedAuthResults(messageBuf, authservId) {
  * close({ timeoutMs? }), connectionCount(), _portForTest() }`.
  *
  * @opts
- *   tlsContext:        TlsContext,      // required — a SecureContext built from
- *                                       // b.network.tls.buildOptions() (no implicit plaintext)
+ *   tlsContext:        SecureContext,   // required: b.mail.server.tls.context({ certFile, keyFile }).secureContext
+ *                                       // (or a getter returning it, to pick up a reload), or
+ *                                       // tls.createSecureContext(b.network.tls.applyToContext({ base }))
+ *                                       // (no implicit plaintext)
  *   greeting:          string,          // default "blamejs ESMTP" — HELO/EHLO 220-line banner
  *   helo:              b.mail.helo,            // optional gate — HELO identity (FCrDNS / shape / self-name)
  *   rbl:               b.mail.rbl.create(…),   // optional gate — DNS blocklist on the connecting IP
@@ -302,10 +351,24 @@ function _stripForgedAuthResults(messageBuf, authservId) {
  *     minRsaBits?:    number,                  // DKIM minimum RSA key size
  *     timeoutMs?:     number,                  // pipeline wall-clock ceiling; default 20s (timeout → temperror disposition)
  *   },
+ *   allowSmtpUtf8:     boolean,        // offer RFC 6531 SMTPUTF8; default false. Read strictly, so
+ *                          only `true` offers it and any other value, the string "true" included,
+ *                          leaves it off. The submission listener validates the same option and
+ *                          refuses a non-boolean outright
+ *   guardDomain:       boolean | object,  // the b.guardDomain screen every envelope domain passes, at
+ *                          this listener's `profile` unless an object carries its own `profile`.
+ *                          `false` turns the screen off; a refusal emits mail.server.mx.domain_refused,
+ *                          and a recipient domain outside localDomains emits
+ *                          mail.server.mx.local_domain_refused
+ *   rateLimit:         b.mail.server.rateLimit handle | opts | false,  // `false` disables admission
+ *                          control. A custom limiter must implement the whole interface the listeners
+ *                          call, or b.mail.server.rateLimit.resolve raises
+ *                          mail-server-rate-limit/incomplete-limiter rather than leaving a method
+ *                          added later silently unimplemented
  *
  * @example
  *   var tls = require("node:tls").createSecureContext(
- *     b.network.tls.buildOptions({ cert: certPem, key: keyPem }));
+ *     b.network.tls.applyToContext({ base: { cert: certPem, key: keyPem } }));
  *   var server = b.mail.server.mx.create({
  *     tlsContext:   tls,
  *     greeting:     "mx.example.com ESMTP blamejs",
@@ -354,7 +417,7 @@ function create(opts) {
     for (var __ri = 0; __ri < opts.relayAllowedFor.length; __ri += 1) {
       var __re = opts.relayAllowedFor[__ri];
       var __reOk = __re && typeof __re === "object" && !Array.isArray(__re) &&
-        guardCidr.validate(_normalizeRelayCidr(__re.cidr), _RELAY_CIDR_OPTS).ok;
+        guardCidr.validate(ssrfGuard._canonicalListEntry(__re.cidr), _RELAY_CIDR_OPTS).ok;
       if (!__reOk) {
         throw new MailServerMxError("mail-server-mx/bad-relay-cidr",
           "mail.server.mx.create: relayAllowedFor[" + __ri + "] must be an object with a " +
@@ -375,9 +438,10 @@ function create(opts) {
     : (opts.localDomains || []).map(function (d) { return String(d).toLowerCase(); });
   var relayAllowedFor   = (opts.relayAllowedFor || []).map(function (__e) {
     return (__e && typeof __e === "object" && !Array.isArray(__e))
-      ? Object.assign({}, __e, { cidr: _normalizeRelayCidr(__e.cidr) })
+      ? Object.assign({}, __e, { cidr: ssrfGuard._canonicalListEntry(__e.cidr) })
       : __e;
   });
+  var relayCidrs        = relayAllowedFor.map(function (__e) { return __e.cidr; });
   var profile           = opts.profile || "strict";
   var allowSmtpUtf8     = opts.allowSmtpUtf8 === true;
 
@@ -488,6 +552,10 @@ function create(opts) {
     boundedMap.getOrInsert(_ldWarned, key, function () { emitFn(); return true; });
   }
 
+  function _warnOnceEvent(key, action, fields) {
+    _warnOnce(key, function () { _emit(action, fields, "warning"); });
+  }
+
   function _resolveLocalDomains() {
     try { return _resolveLocalDomainsInner(); }
     catch (err) {
@@ -526,16 +594,12 @@ function create(opts) {
       try {
         coerced.push(String(raw[i]).toLowerCase());
       } catch (entryErr) {
-        var entryIndex = i;
         var entryReason = String((entryErr && entryErr.message) || entryErr).slice(0, 160);
-        _warnOnce("__entry" + entryIndex, function () {
-          _emit("mail.server.mx.local_domain_refused",
-            { domain: null, kind: "unreadable",
-              remark: "localDomains() entry " + entryIndex + " could not be read (" +
-                      entryReason +
-                      "); it is refused and the rest of the set still serves" },
-            "warning");
-        });
+        _warnOnceEvent("__entry" + i, "mail.server.mx.local_domain_refused",
+          { domain: null, kind: "unreadable",
+            remark: "localDomains() entry " + i + " could not be read (" +
+                    entryReason +
+                    "); it is refused and the rest of the set still serves" });
       }
     }
 
@@ -550,27 +614,18 @@ function create(opts) {
         try { verdict = guardDomain.validate(d, guardDomainProfile); }
         catch (guardErr) {
           var guardReason = String((guardErr && guardErr.message) || guardErr).slice(0, 160);
-          _warnOnce("__guard:" + d, function () {
-            _emit("mail.server.mx.local_domain_refused",
-              { domain: d, kind: "guard-threw",
-                remark: "b.guardDomain threw on this entry (" + guardReason +
-                        "); it is refused and the rest of the set still serves" },
-              "warning");
-          });
+          _warnOnceEvent("__guard:" + d, "mail.server.mx.local_domain_refused",
+            { domain: d, kind: "guard-threw",
+              remark: "b.guardDomain threw on this entry (" + guardReason +
+                      "); it is refused and the rest of the set still serves" });
           continue;
         }
         if (!verdict.ok) {
-          var refusedDomain = d;
-          var refusedKind =
-            (verdict.issues && verdict.issues[0] && verdict.issues[0].kind) || null;
-          _warnOnce(refusedDomain, function () {
-            _emit("mail.server.mx.local_domain_refused",
-              { domain: refusedDomain,
-                kind: refusedKind,
-                remark: "rejected by b.guardDomain; mail for it is refused and the rest " +
-                        "of the set still serves" },
-              "warning");
-          });
+          _warnOnceEvent(d, "mail.server.mx.local_domain_refused",
+            { domain: d,
+              kind: (verdict.issues && verdict.issues[0] && verdict.issues[0].kind) || null,
+              remark: "rejected by b.guardDomain; mail for it is refused and the rest " +
+                      "of the set still serves" });
           continue;
         }
       }
@@ -894,12 +949,13 @@ function create(opts) {
         return;
       }
       var match = line.match(RE_MAIL_FROM);
-      if (!match) {
+      var path = match ? mailServerNet.sliceAnglePath(match[1]) : null;
+      if (!path) {
         _writeReply(socket, REPLY_501_BAD_ARGS,
           "5.5.4 Syntax: MAIL FROM:<address> [SIZE=n]");
         return;
       }
-      var mailFrom = match[1].toLowerCase();
+      var mailFrom = path.address.toLowerCase();
       var __mfAtIdx = mailFrom.lastIndexOf("@");
       var mailFromDomain = __mfAtIdx === -1 ? "" : mailFrom.slice(__mfAtIdx + 1);
       if (mailFromDomain && mailFromDomain[0] !== "[" && guardDomainProfile) {
@@ -911,7 +967,7 @@ function create(opts) {
           return;
         }
       }
-      var paramStr = match[2] || "";
+      var paramStr = path.tail || "";
       var sizeMatch = paramStr.match(RE_SIZE);
       var declaredSize = null;
       if (sizeMatch) {
@@ -952,12 +1008,13 @@ function create(opts) {
         return;
       }
       var match = line.match(RE_RCPT_TO);
-      if (!match) {
+      var rcptPath = match ? mailServerNet.sliceAnglePath(match[1]) : null;
+      if (!rcptPath || rcptPath.address.length === 0) {
         rateLimit.noteRcptFailure(state.remoteAddress);
         _writeReply(socket, REPLY_501_BAD_ARGS, "5.5.4 Syntax: RCPT TO:<address>");
         return;
       }
-      var rcpt = match[1].toLowerCase();
+      var rcpt = rcptPath.address.toLowerCase();
       var _atIdx = rcpt.lastIndexOf("@");
       var rcptDomain = _atIdx === -1 ? "" : rcpt.slice(_atIdx + 1);
       if (rcptDomain && rcptDomain[0] !== "[" && guardDomainProfile) {
@@ -1230,16 +1287,7 @@ function create(opts) {
     function _isRelayAllowed(remoteAddress, _rcptTo) {
       if (relayAllowedFor.length === 0) return false;
       if (typeof remoteAddress !== "string" || remoteAddress.length === 0) return false;
-      var canonPeer;
-      try { canonPeer = ssrfGuard.canonicalizeHost(remoteAddress); }
-      catch (_e) { canonPeer = remoteAddress; }
-      for (var i = 0; i < relayAllowedFor.length; i += 1) {
-        var entry = relayAllowedFor[i];
-        if (!entry || typeof entry !== "object") continue;
-        if (ssrfGuard.cidrContains(entry.cidr, remoteAddress)) return true;
-        if (canonPeer !== remoteAddress && ssrfGuard.cidrContains(entry.cidr, canonPeer)) return true;
-      }
-      return false;
+      return ssrfGuard._listMatches(relayCidrs, remoteAddress, false);
     }
   }
 
@@ -1309,6 +1357,7 @@ function _writeMultiline(socket, code, lines) {
 }
 
 module.exports = {
-  create:            create,
-  MailServerMxError: MailServerMxError,
+  create:                  create,
+  stripForgedAuthResults:  _stripForgedAuthResults,
+  MailServerMxError:       MailServerMxError,
 };

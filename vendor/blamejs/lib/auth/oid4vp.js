@@ -287,6 +287,7 @@ function matchDcql(presentations, dcql) {
  *     issuerKeyResolver:  fn(header)→keyOrJwk,  // resolves SD-JWT VC issuer signing key
  *     audience?:          string,     // override aud claim (defaults to clientId)
  *     keyAttestationVerifier?: fn,
+ *     statusListResolver?: fn({idx,uri})→statusInt,  // resolves a presented credential's Token Status List entry (0 = valid); a credential carrying a `status` claim is refused when this is absent
  *   }
  *
  * @example
@@ -370,6 +371,10 @@ function create(opts) {
    * legacy Presentation Exchange `presentation_submission` is
    * accepted but not consumed — DCQL is the canonical query path.
    *
+   * A presentation whose issuer key or `cnf` holder key is compromised
+   * (`b.crypto.compromisedKey`) fails verification: `valid` is false and its
+   * entry in `errors` says the key is a compromised key.
+   *
    * @opts
    *   {
    *     vpToken:                object|string,
@@ -388,6 +393,13 @@ function create(opts) {
    */
   async function verifyResponse(vopts) {
     vopts = vopts || {};
+    if (vopts.requireKeyAttestation !== undefined && vopts.requireKeyAttestation !== null &&
+        typeof vopts.requireKeyAttestation !== "boolean") {
+      throw new AuthError("auth-oid4vp/bad-opt",
+        "verifyResponse: requireKeyAttestation must be a boolean; anything else was read as " +
+        "false, which accepted a presentation whose key attestation was never verified, got " +
+        typeof vopts.requireKeyAttestation);
+    }
     if (!vopts.dcql) {
       throw new AuthError("auth-oid4vp/no-dcql",
         "verifyResponse: dcql required");
@@ -444,6 +456,7 @@ function create(opts) {
             requireKeyBinding:      true,
             requireKeyAttestation:  vopts.requireKeyAttestation === true,
             keyAttestationVerifier: opts.keyAttestationVerifier || null,
+            statusListResolver:     opts.statusListResolver || undefined,
             expectedVct:            expectedVct,
           });
           if (dcqlVctValues && dcqlVctValues.length > 1) {

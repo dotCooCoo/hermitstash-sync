@@ -36,6 +36,24 @@ const peerCert = { raw: x509.raw };                 // the shape spkiPin accepts
 const realPin = HttpClient.spkiPin(peerCert);       // "sha256/<base64>"
 const wrongPin = 'sha256/' + 'A'.repeat(43) + '=';  // valid shape, never matches
 
+describe('a pinned or tunnel-mode agent keeps the framework chain and compromised-key check', () => {
+  const b = require('../vendor/blamejs');
+
+  for (const [label, extra] of [
+    ['no pin', {}],
+    ['pinned', { pinnedServerSpki: [realPin] }],
+    ['tunnel mode', { pinnedServerSpki: [realPin], tunnelMode: true }],
+  ]) {
+    it(label + ': the agent\'s checkServerIdentity is the chain-checked wrapper', () => {
+      const client = new HttpClient(Object.assign({ server: 'https://127.0.0.1:9/' }, extra), 'k');
+      try {
+        assert.equal(b.network.tls._isChainChecked(client._agent.options.checkServerIdentity), true,
+          'a checkServerIdentity assigned after pqcAgent.create() would skip the chain-to-anchor and compromised-key check');
+      } finally { client.destroy(); }
+    });
+  }
+});
+
 describe('tunnel mode — checkServerIdentity relaxation (lib/http-client.js)', () => {
 
   it('no pins + no relax → undefined (default trust path, no override installed)', () => {

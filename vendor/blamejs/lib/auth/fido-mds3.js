@@ -3,6 +3,7 @@
 "use strict";
 
 var nodeCrypto  = require("node:crypto");
+var nodeTypes   = require("node:util").types;
 
 var C            = require("../constants");
 var safeJson     = require("../safe-json");
@@ -10,6 +11,8 @@ var safeBuffer   = require("../safe-buffer");
 var lazyRequire  = require("../lazy-require");
 var validateOpts = require("../validate-opts");
 var x509Chain    = require("../x509-chain");
+var bCrypto      = require("../crypto");
+var pkiToolkit   = require("../vendor/blamejs-pki.cjs");
 var jwtExternal  = require("./jwt-external");
 var { FidoMds3Error } = require("../framework-error");
 
@@ -114,11 +117,35 @@ function _verifyParamsForAlg(alg) {
   return params;
 }
 
+function _refuseCompromisedCert(cert, label, failCode) {
+  try {
+    bCrypto.assertNotCompromised(cert, {
+      errorClass: FidoMds3Error, code: "fido-mds3/compromised-key", label: label,
+    });
+    return true;
+  } catch (e) {
+    if (e instanceof FidoMds3Error) throw e;
+    if (e && e.code === "crypto/bad-key") return false;
+    throw new FidoMds3Error(failCode,
+      label + " could not be checked for a compromised key: " + ((e && e.message) || String(e)));
+  }
+}
+
+function _refuseCompromisedRoots(rootPems) {
+  for (var i = 0; i < rootPems.length; i++) {
+    var root;
+    try { root = bCrypto._x509(rootPems[i]); }
+    catch (_e) { continue; }
+    _refuseCompromisedCert(root, "caCertificate[" + i + "]", "fido-mds3/bad-ca");
+  }
+  return rootPems;
+}
+
 function _resolveRoots(caCertificate) {
   if (caCertificate === undefined || caCertificate === null) {
     return [MDS3_ROOT_PEM];
   }
-  if (typeof caCertificate === "string") return [caCertificate];
+  if (typeof caCertificate === "string") return _refuseCompromisedRoots([caCertificate]);
   if (Array.isArray(caCertificate)) {
     if (caCertificate.length === 0) {
       throw new FidoMds3Error("fido-mds3/bad-ca",
@@ -130,7 +157,7 @@ function _resolveRoots(caCertificate) {
           "caCertificate[" + i + "] must be a PEM string");
       }
     }
-    return caCertificate.slice();
+    return _refuseCompromisedRoots(caCertificate.slice());
   }
   throw new FidoMds3Error("fido-mds3/bad-ca",
     "caCertificate must be a PEM string or array of PEM strings");
@@ -140,6 +167,11 @@ function _validateChain(x5c, rootPems) {
   if (!Array.isArray(x5c) || x5c.length === 0) {
     throw new FidoMds3Error("fido-mds3/bad-x5c", "JWS x5c chain is empty");
   }
+  var limit = pkiToolkit.constants.LIMITS.WEBAUTHN_X5C_MAX_CERTS;
+  if (x5c.length > limit) {
+    throw new FidoMds3Error("fido-mds3/bad-x5c",
+      "JWS x5c chain carries " + x5c.length + " certificates, above the " + limit + " this verifier parses");
+  }
   var chain = [];
   for (var i = 0; i < x5c.length; i++) {
     if (typeof x5c[i] !== "string" || x5c[i].length === 0) {
@@ -147,10 +179,14 @@ function _validateChain(x5c, rootPems) {
         "x5c[" + i + "] must be a base64-encoded DER cert");
     }
     try {
-      chain.push(new nodeCrypto.X509Certificate(_derToPem(x5c[i])));
+      chain.push(bCrypto._x509(_derToPem(x5c[i])));
     } catch (e) {
       throw new FidoMds3Error("fido-mds3/bad-x5c",
         "x5c[" + i + "] failed to parse: " + ((e && e.message) || String(e)));
+    }
+    if (!_refuseCompromisedCert(chain[i], "x5c[" + i + "]", "fido-mds3/bad-x5c")) {
+      throw new FidoMds3Error("fido-mds3/bad-x5c",
+        "x5c[" + i + "] carries a public key that could not be read");
     }
   }
   var now = Date.now();
@@ -180,20 +216,29 @@ function _validateChain(x5c, rootPems) {
   }
   var tail = chain[chain.length - 1];
   var anchored = false;
+  var pathLenFailed = false;
+  var nameConstraintFailed = false;
   for (var r = 0; r < rootPems.length; r++) {
     var root;
-    try { root = new nodeCrypto.X509Certificate(rootPems[r]); }
+    try { root = bCrypto._x509(rootPems[r]); }
     catch (_e) { continue; }
-    if (x509Chain.issuerValidlyIssued(root, tail)) {
-      anchored = true;
-      break;
-    }
-    if (tail.fingerprint256 === root.fingerprint256) {
-      anchored = true;
-      break;
-    }
+    var isIssuer = x509Chain.issuerValidlyIssued(root, tail);
+    var isSelf = tail.fingerprint256 === root.fingerprint256;
+    if (!isIssuer && !isSelf) continue;
+    var orderedChain = isIssuer ? chain.concat([root]) : chain;
+    if (!x509Chain.pathLenSatisfied(orderedChain)) { pathLenFailed = true; continue; }
+    if (!x509Chain.nameConstraintsSatisfied(orderedChain)) { nameConstraintFailed = true; continue; }
+    anchored = true; break;
   }
   if (!anchored) {
+    if (pathLenFailed) {
+      throw new FidoMds3Error("fido-mds3/chain-pathlen-exceeded",
+        "x5c chain exceeds a CA's basicConstraints pathLenConstraint (RFC 5280 §4.2.1.9)");
+    }
+    if (nameConstraintFailed) {
+      throw new FidoMds3Error("fido-mds3/name-constraint-violation",
+        "x5c chain violates a CA's nameConstraints (RFC 5280 §4.2.1.10)");
+    }
     throw new FidoMds3Error("fido-mds3/chain-not-anchored",
       "x5c chain does not anchor to any provided trust root");
   }
@@ -232,7 +277,7 @@ function _getCache() {
 }
 
 function _ttlFromNextUpdate(nextUpdateDate) {
-  if (!(nextUpdateDate instanceof Date) || !isFinite(nextUpdateDate.getTime())) {
+  if (!nodeTypes.isDate(nextUpdateDate) || !isFinite(nextUpdateDate.getTime())) {
     return MIN_CACHE_TTL_MS;
   }
   var ms = nextUpdateDate.getTime() - Date.now();
@@ -319,6 +364,21 @@ function _verifyAndParseBlob(token) {
  *   4. Verify the JWS signature against the leaf cert's public key.
  *   5. Parse nextUpdate; reject if missing or malformed.
  *
+ * A `caCertificate` or an x5c certificate that carries a compromised key
+ * (`b.crypto.compromisedKey`) is refused with `fido-mds3/compromised-key`.
+ * An x5c chain of more than ten certificates is refused with
+ * `fido-mds3/bad-x5c` before any certificate in it is checked, and so is an
+ * x5c certificate whose key cannot be read. A `caCertificate` entry whose
+ * key cannot be read is skipped.
+ *
+ * These checks run before any request. A truthy `url` other than an
+ * `https://` string throws `fido-mds3/bad-url`, and a falsy `url` such as
+ * `""` uses the default. A numeric `timeoutMs` that is not a
+ * positive finite number throws `fido-mds3/bad-timeout`; a `timeoutMs` of
+ * any other type uses the default. A `caCertificate` that is neither a
+ * string nor a non-empty array of strings throws `fido-mds3/bad-ca`. A
+ * `caCertificate` string that node cannot read as a certificate is skipped.
+ *
  * @opts
  *   url:           string,         // default: https://mds3.fidoalliance.org/
  *   caCertificate: string|string[],// PEM(s) overriding the default MDS3 root
@@ -356,7 +416,13 @@ async function fetch(opts) {   // allow:raw-outbound-http-framework-internal —
     try { await c.del(cacheKey); } catch (_e) { /* best-effort */ }
   }
 
-  return await c.wrap(cacheKey, async function () {
+  var cached = await c.get(cacheKey);
+  if (cached !== undefined && nodeTypes.isDate(cached.nextUpdate) &&
+      cached.nextUpdate.getTime() >= Date.now()) {
+    return cached;
+  }
+
+  return await c.wrap("fetch:" + url, async function () {
     var rsp;
     try {
       rsp = await httpClient().request({
@@ -386,7 +452,7 @@ async function fetch(opts) {   // allow:raw-outbound-http-framework-internal —
 
     var record = _verifyBlobWithRoots(token, rootPems);
     record.url = url;
-    try { await c.set(cacheKey, record, _ttlFromNextUpdate(record.nextUpdate)); }
+    try { await c.set(cacheKey, record, { ttlMs: _ttlFromNextUpdate(record.nextUpdate) }); }
     catch (_e) { /* cache.set best-effort */ }
     try { audit().safeEmit({
       action:   "auth.fido_mds3.fetch",
@@ -395,7 +461,7 @@ async function fetch(opts) {   // allow:raw-outbound-http-framework-internal —
                   nextUpdate: record.nextUpdate.toISOString().slice(0, 10) },
     }); } catch (_e) { /* audit best-effort */ }
     return record;
-  }, MIN_CACHE_TTL_MS);
+  }, { ttlMs: 0 });
 }
 
 /**

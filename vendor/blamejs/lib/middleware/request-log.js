@@ -71,6 +71,7 @@ function create(opts) {
     }
     if (skipPaths[i] instanceof RegExp) {
       guardRegex.assertSafe(skipPaths[i], "middleware.requestLog: skipPaths[" + i + "]");
+      guardRegex.assertStateless(skipPaths[i], "middleware.requestLog: skipPaths[" + i + "]");
     }
   }
   var trustProxy = opts.trustProxy === true || typeof opts.trustProxy === "number"
@@ -141,7 +142,7 @@ function create(opts) {
       });
       var src = {
         method:     req.method,
-        path:       req.pathname || (req.url || "").split("?")[0],
+        path:       requestHelpers.resolveRoute(req),
         status:     statusCode,
         durationMs: Math.round(durationMs * 100) / 100,
         bytes:      bytes,

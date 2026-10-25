@@ -2,15 +2,15 @@
   "note": "Vendored dependencies for hermitstash-sync. blamejs is the single vendored upstream source — the sync client now consumes blamejs's hardened wire-layer primitives (b.wsClient for the outbound WebSocket, b.safeJson for size/depth-capped JSON parsing) plus the noble-* CJS bundles blamejs itself vendors for the HermitStash-specific ECIES bootstrap.",
   "packages": {
     "blamejs": {
-      "version": "0.20.1",
+      "version": "0.21.4",
       "license": "Apache-2.0",
       "author": "blamejs",
       "directory": "vendor/blamejs/",
       "source": "https://github.com/blamejs/blamejs",
-      "tag": "v0.20.1",
-      "bundledAt": "2026-09-12",
-      "cpe": "cpe:2.3:a:blamejs:blamejs:0.20.1:*:*:*:*:node.js:*:*",
-      "purl": "pkg:github/blamejs/blamejs@v0.20.1",
+      "tag": "v0.21.4",
+      "bundledAt": "2026-10-24",
+      "cpe": "cpe:2.3:a:blamejs:blamejs:0.21.4:*:*:*:*:node.js:*:*",
+      "purl": "pkg:github/blamejs/blamejs@v0.21.4",
       "consumed": [
         "vendor/blamejs/lib/ws-client.js — b.wsClient (outbound RFC 6455 client with decompression-bomb defence, UTF-8 fatal validation, control-frame caps, RSV1-on-cont reject, fragmented-message reassembly bounded per-frame, permanent-error classifier, TLSv1.3 pin, RFC 6455 default handshake GUID)",
         "vendor/blamejs/lib/safe-json.js — b.safeJson.parse (size + depth + prototype-pollution caps on untrusted server responses)",
@@ -41,23 +41,23 @@
         "noble-ciphers": "vendor/blamejs/lib/vendor/noble-ciphers.cjs"
       },
       "hashes": {
-        "index": "sha256:6a6e429282e16b3cd1f8f16fbf6bfb6e479cfb5bf5d3c01600512393b59e9bfa",
-        "safe-json": "sha256:705ad61e51b234d85f9473dc2a055060f850665b2133b992c2ef1dc5ef86b23f",
-        "safe-url": "sha256:5b8a932c8da624a9468133f50fc13b0f3b5d5a241387cdb14763dcc472813ac5",
-        "pqc-agent": "sha256:f2ae3dadfc3cb6cd091f844a497e52cb37abdc0007fa767db3898357143668db",
+        "index": "sha256:ba64da2961df8152f0f33d2b17eb42a644084e95a1368ac6855665df445ec029",
+        "safe-json": "sha256:cf9e678f66f415adeb9eaf3026d7b1c23bf11bc2a08e72beaeab5c04eede0402",
+        "safe-url": "sha256:8ce3c1d719bfcc1c40d06a8e4d800df9867fe18ab7b4262ea36cac8d0ffba369",
+        "pqc-agent": "sha256:5252c560fabc4bab99b678c4c5dd76999afe3da7239a68dd4bb640b76875bdce",
         "pqc-software": "sha256:5b67ac4bd4f3a7b196a5b886cd8c5c1d83b67441ffd5a0330e1f552a90c782df",
-        "http-client": "sha256:e616fe434714fefa2db9887dc1cf3657b4d407e782e1867e894f0448047b6b81",
-        "ws-client": "sha256:207026953abbb2860af44ac449e1ea7764e23912b825b29e33d91bab19dde5c6",
-        "log-stream": "sha256:cf748ed85dc71766d4de890c8e34196e1764e35f22f2273d2af33fab19f6750a",
-        "log-stream-local": "sha256:30eb66c333280b222fee5240507a5c0e25d41446593a9ac01af600c34810e954",
-        "atomic-file": "sha256:f059b4a5ab6f1e1a696959e1e151b8ce8300a964e827c4bfbf2d18b3849b3f21",
-        "app-shutdown": "sha256:efc02703b8793a866a0b35ec12d4b9f81751d3b3d6632d4d7b2e75e578973aad",
-        "retry": "sha256:2745163b83c44967fd6e6a82de7891e6cca1d9670c0d006941e9396ef169923d",
-        "framework-error": "sha256:5702941367b3baf634619d2919621b18f80106bcff7c0d95e1cdbb6213237387",
+        "http-client": "sha256:d44d23ace269a91988e509069f395c8d7f1b75ee9a0201f7385864c80c9ac579",
+        "ws-client": "sha256:1e5b60c9cbbbacccca5576f6bccf47d6833f97e4c7388aa3faa2a1dc836a2d35",
+        "log-stream": "sha256:42ce0e21c7f340db4bd8c41e194c8ee8f5149d350a7c3dd33826d3a6d7370114",
+        "log-stream-local": "sha256:2a9c217b03ce15a261c637ed8516c4e67b99f9fea65e42385123411e7680c8f5",
+        "atomic-file": "sha256:dc2cc5f88fcd25d49955d50a1bcb897a804ffcf5ae2bda10d56bdd40c9ad958e",
+        "app-shutdown": "sha256:1356ca3dd77f720b0a95ef7ba2874f45be9cefafea6de3d360756b518e9882d8",
+        "retry": "sha256:d9452f46d57c2abcb62fec204c4e4aaa83e22d4c58ce82db8b792d5d65956976",
+        "framework-error": "sha256:28bca8b31a0bebd92f7e48c648497494fc55195e3a4cfeee4dfc7eda749a3a53",
         "process-spawn": "sha256:397fe858f90609ba8fc60a0f4a12f01ba35bed4ad99e68ffd730604c0a87f251",
-        "config-drift": "sha256:31f8c11ff029f90639f0045444c6b9c3e72bac713760153ff7f6569826e00201",
-        "middleware-api-encrypt": "sha256:11f3e70c25bf5a75eefa5023ac92285f2425e233e6695cf2f80750e927eb61ff",
-        "regex-linear": "sha256:8c19937dd3c07b8bbadba75b027aa86ce614db137b8debe41d8191240904d3c1",
+        "config-drift": "sha256:4236314d167566e09a1308341a5f8b4537ce06a3dd6d6c72747531b41ec0ada2",
+        "middleware-api-encrypt": "sha256:bc16340411a28d68aebfe952c226b3361b0d45f7e7040ea90b722810e80ce706",
+        "regex-linear": "sha256:a468473a44391a9ef00025766d7e6f722f9421d09beb259eee05c6cdf72d35aa",
         "noble-post-quantum": "sha256:04eaaa4838b43162912c851dd2cab52ab82f56decad8542934171247017a6893",
         "noble-ciphers": "sha256:acdcf1ba4bde8177cbfcfef22b543022284a1529afb68bc8329303837c8c021e"
       },
@@ -172,28 +172,28 @@
               "data_js": "lib/vendor/public-suffix-list.data.js"
             },
             "hashes": {
-              "server": "sha256:703a4d9781127c0bd3ecbb855913387147011ff2c916a208643e062eb48b567e",
-              "data_js": "sha256:e2bbbd85ef333346d681fbd95c3b7bd7c2dd6d597c0bf355c5a938207c55d158"
+              "server": "sha256:1026fc1bed62e606331f822dc9f5653cd90bff103de3d69d3c7b1331aaabee20",
+              "data_js": "sha256:4143a3d169fae6067bc1e05386796e220e0f090e2c46483f0781eab0463e9161"
             },
-            "bundledAt": "2026-09-09T00:00:00Z"
+            "bundledAt": "2026-10-23T00:00:00Z"
           },
           "@blamejs/pki": {
-            "version": "0.7.37",
+            "version": "0.9.7",
             "license": "Apache-2.0",
             "author": "blamejs",
             "source": "https://github.com/blamejs/pki",
-            "cpe": "cpe:2.3:a:blamejs:pki:0.7.37:*:*:*:*:node.js:*:*",
+            "cpe": "cpe:2.3:a:blamejs:pki:0.9.7:*:*:*:*:node.js:*:*",
             "files": {
               "server": "lib/vendor/blamejs-pki.cjs"
             },
             "hashes": {
-              "server": "sha256:01eba528ca2ddc99e90411170ea21fe6820e6c6a6bcdd723fe0cd0523214d21b"
+              "server": "sha256:5c66fa38df0bab0bb6692d93d13aea71911824c6be248ceb4108743780a87e82"
             },
-            "bundledAt": "2026-09-12T00:00:00Z"
+            "bundledAt": "2026-10-23T00:00:00Z"
           }
         }
       },
-      "integrity": "sha512-79k1pStrN0BDrlbocN6o1xrv1OzTkSfT5Swc4jzmqxaxMIlZAvftXe087lX3mxSU8IuCypalaNwwjHp+NKaZew=="
+      "integrity": "sha512-u0j5CQhC1ehFTq3X6gSeqXbT7riuwx8a2j2OLHG/kxpf83VQQs3bXRPgYG1F5eZt7QPG9/cdmNiH1cE7I53lGg=="
     }
   }
 }

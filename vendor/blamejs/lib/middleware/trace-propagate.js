@@ -4,6 +4,7 @@
 
 var lazyRequire = require("../lazy-require");
 var validateOpts = require("../validate-opts");
+var requestHelpers = require("../request-helpers");
 var { defineClass } = require("../framework-error");
 
 var TracePropagateError = defineClass("TracePropagateError", { alwaysPermanent: true });
@@ -50,6 +51,9 @@ function create(opts) {
     "setResponseHeader", "audit",
   ], "middleware.tracePropagate");
 
+  validateOpts.optionalBoolean(opts.auditOnMissing,
+    "middleware.tracePropagate: opts.auditOnMissing (anything other than a boolean was read " +
+    "as false, so a request arriving with no trace header was never recorded)");
   var generateIfMissing = opts.generateIfMissing !== false;
   var auditOnMissing    = opts.auditOnMissing === true;
   var setResponseHeader = opts.setResponseHeader === true;
@@ -84,7 +88,8 @@ function create(opts) {
           audit().safeEmit({
             action:   "system.trace.synthesised",
             outcome:  "success",
-            metadata: { route: req.url || "/", traceId: req.trace.traceId },
+            metadata: { route: requestHelpers.resolveRoute(req),
+                        traceId: req.trace.traceId },
           });
         } catch (_e) { /* drop-silent — observability sink */ }
       }

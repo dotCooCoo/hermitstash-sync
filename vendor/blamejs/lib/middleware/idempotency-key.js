@@ -66,6 +66,7 @@ var DEFAULT_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
 
 var KEY_RE = /^[\x21-\x7E]+$/;
 var KEY_MAX_LEN = 255;
+var ANONYMOUS_SCOPE = "anon";
 
 /**
  * @primitive b.middleware.idempotencyKey.memoryStore
@@ -212,6 +213,10 @@ function memoryStore(opts) {
  * EXISTS` won't migrate column layout. Pre-v1 the framework breaks
  * across patch versions for security correctness.
  *
+ * Throws `idempotency/bad-db` when `db` exposes no `prepare(sql)` method,
+ * and `idempotency/bad-table-name` when `tableName` is not a valid SQL
+ * identifier.
+ *
  * @opts
  *   db:         object,   // required — sqlite-shaped: { prepare(sql) → { run, get, all } }
  *   tableName?: string,   // default "blamejs_idempotency_keys"; validated via b.safeSql.validateIdentifier
@@ -257,7 +262,7 @@ function dbStore(opts) {
   var sealEnabled = false;
   if (sealReq) {
     try {
-      // allow:seal-without-aad-by-design — vault-readiness probe; throwaway
+      // allow:seal-without-aad-by-design — vault-readiness probe over a throwaway sentinel value, not row-bound data
       vault.seal("__idempotency_seal_probe__");
       sealEnabled = true;
     } catch (_vaultErr) {
@@ -438,8 +443,20 @@ function _validateStore(store, where) {
 }
 
 function _defaultScope(req) {
-  var actor = requestHelpers.extractActorContext(req);
-  return actor && typeof actor.userId === "string" && actor.userId ? actor.userId : "anon";
+  var carried = null, credential = null;
+  if (req && typeof req === "object") {
+    if (req.user && typeof req.user === "object") { carried = req.user; credential = "u"; }
+    else if (req.apiKey && typeof req.apiKey === "object") { carried = req.apiKey; credential = "k"; }
+  }
+  if (carried === null) {
+    var ctx = requestHelpers.extractActorContext(req);
+    if (ctx && typeof ctx.userId === "string" && ctx.userId.length > 0) {
+      return "u:" + requestHelpers.actorIdentityKey({ userId: ctx.userId });
+    }
+    return ANONYMOUS_SCOPE;
+  }
+  var key = requestHelpers.actorIdentityKey(carried);
+  return key === null ? null : credential + ":" + key;
 }
 
 function _fingerprintRequest(req, bodyBytes, store) {
@@ -496,12 +513,25 @@ var _emitAudit = auditEmit.emit;
  * implement a distributed-lock layer in their store's `set()`
  * method (the interface is opaque to the middleware).
  *
+ * The codes above are answered on the response. Building the middleware
+ * throws instead: `idempotency/bad-opts` when `opts` is not an object,
+ * `idempotency/bad-ttl` and `idempotency/bad-max-body` when `ttlMs` or
+ * `maxBodyBytes` is not a positive integer,
+ * `idempotency/bad-body-fingerprint` and `idempotency/bad-scope-fn` when
+ * those are not functions, `idempotency/bad-body-fingerprint-fallback` for
+ * a `bodyFingerprintFallback` other than the two named below, and
+ * `idempotency/bad-opt` when `requireIdempotencyKey` is not a boolean, so a
+ * configuration that meant to refuse unkeyed requests is not read as false. A
+ * `store` that does not expose the three-method interface throws
+ * `idempotency/bad-store`.
+ *
  * @opts
  *   store:                 object,   // required — get/set/delete interface
  *   ttlMs:                 number,   // default: 24h
  *   methods:               string[], // default: ["POST","PUT","PATCH","DELETE"]
  *   headerName:            string,   // default: "idempotency-key"
  *   requireIdempotencyKey: boolean,  // default: false — refuse missing-key
+ *   scopeFn:               function, // (req) => string; cache scope, default the authenticated user or API key, else anonymous
  *   bodyFingerprint:       function, // (req) => Buffer|string|object|null — operator-supplied body extractor
  *   maxBodyBytes:          number,   // default: 1 MiB — replay-cache body cap
  *   bodyFingerprintFallback: string, // default "deny" — when neither
@@ -556,6 +586,11 @@ function create(opts) {
   var headerName = typeof opts.headerName === "string" && opts.headerName.length > 0
     ? opts.headerName.toLowerCase()
     : "idempotency-key";
+  validateOpts.optionalBoolean(opts.requireIdempotencyKey,
+    "middleware.idempotencyKey: opts.requireIdempotencyKey (whether a request without the " +
+    "header is refused; anything other than a boolean was read as false, which processed " +
+    "unkeyed requests under a configuration that asked for the opposite)",
+    IdempotencyError, "idempotency/bad-opt");
   var requireKey = opts.requireIdempotencyKey === true;
   var bodyFingerprintFn = validateOpts.optionalFunction(
     opts.bodyFingerprint, "idempotencyKey.bodyFingerprint",
@@ -594,7 +629,7 @@ function create(opts) {
         status: C.HTTP.STATUS.BAD_REQUEST,
         detail: "This endpoint requires an Idempotency-Key header (draft-ietf-httpapi-idempotency-key).",
       });
-      _emitAudit("idempotency.missing_key", { method: method, path: req.url }, "denied");
+      _emitAudit("idempotency.missing_key", { method: method, path: requestHelpers.resolveRoute(req) }, "denied");
       return problemDetails().respond(res, missing);
     }
 
@@ -609,7 +644,19 @@ function create(opts) {
       return problemDetails().respond(res, bad);
     }
 
-    var scope = String(scopeFn(req) || "anon");
+    var scopeValue = scopeFn(req);
+    if (scopeValue === null || scopeValue === undefined || String(scopeValue).length === 0) {
+      _emitAudit("idempotency.unnamed_actor", { method: method }, "denied");
+      return problemDetails().respond(res, {
+        type:   "about:blank",
+        title:  "Idempotency scope unavailable",
+        status: C.HTTP.STATUS.BAD_REQUEST,
+        detail: "the request carries no actor this middleware can name, and one " +
+                "idempotency key would otherwise answer two principals from the same " +
+                "cache entry; name the field with the scopeFn option",
+      });
+    }
+    var scope = String(scopeValue);
     var scopedKey = scope.length + ":" + scope + ":" + key;
 
     var bodyBytes;
@@ -632,7 +679,9 @@ function create(opts) {
       }
     } else {
       bodyBytes = req._rawBody || req.body || null;
-      if (bodyBytes && typeof bodyBytes === "object" && !Buffer.isBuffer(bodyBytes)) {
+      if (typeof bodyBytes === "string") {
+        bodyBytes = Buffer.from(bodyBytes, "utf8");
+      } else if (bodyBytes && typeof bodyBytes === "object" && !Buffer.isBuffer(bodyBytes)) {
         try {
           bodyBytes = Buffer.from(JSON.stringify(bodyBytes), "utf8");
         } catch (_e) {
@@ -645,7 +694,7 @@ function create(opts) {
       _emitAudit("idempotency.empty_body_fingerprint",
         {
           method:          method,
-          path:            req.url,
+          path:            requestHelpers.resolveRoute(req),
           hasRawBody:      Boolean(req._rawBody),
           hasParsedBody:   req.body !== undefined && req.body !== null,
           hasFingerprintHook: Boolean(bodyFingerprintFn),
@@ -685,7 +734,7 @@ function create(opts) {
           detail: "The Idempotency-Key matches a prior request but the request body/method/path differs (draft §4.3).",
         });
         _emitAudit("idempotency.key_reuse_mismatch",
-          { method: method, path: req.url, keyHash: _hashKey(key) }, "denied");
+          { method: method, path: requestHelpers.resolveRoute(req), keyHash: _hashKey(key) }, "denied");
         return problemDetails().respond(res, mismatch);
       }
       var rawBody;
@@ -698,7 +747,7 @@ function create(opts) {
         catch (_hdrErr) { /* operator-restricted header — skip */ }
       }
       _emitAudit("idempotency.replay",
-        { method: method, path: req.url, statusCode: cached.statusCode, keyHash: _hashKey(key) });
+        { method: method, path: requestHelpers.resolveRoute(req), statusCode: cached.statusCode, keyHash: _hashKey(key) });
       res.end(rawBody);
       return;
     }
@@ -719,7 +768,7 @@ function create(opts) {
       catch (_capErr) {
         oversized = true;
         _emitAudit("idempotency.body_too_large",
-          { method: method, path: req.url, cap: maxBodyBytes, keyHash: _hashKey(key) }, "warning");
+          { method: method, path: requestHelpers.resolveRoute(req), cap: maxBodyBytes, keyHash: _hashKey(key) }, "warning");
       }
     }
     res.write = function (chunk, encoding) {
@@ -751,14 +800,14 @@ function create(opts) {
               body:        combined.toString("base64"),
             }, ttlMs);
             _emitAudit("idempotency.cache_store",
-              { method: method, path: req.url, statusCode: status, keyHash: _hashKey(key), bodyBytes: combined.length });
+              { method: method, path: requestHelpers.resolveRoute(req), statusCode: status, keyHash: _hashKey(key), bodyBytes: combined.length });
           } catch (storeErr) {
             _emitAudit("idempotency.store_write_failed",
               { key: _redactKey(key), error: String(storeErr.message || storeErr) }, "warning");
           }
         } else if (!oversized) {
           _emitAudit("idempotency.skip_5xx",
-            { method: method, path: req.url, statusCode: status, keyHash: _hashKey(key) });
+            { method: method, path: requestHelpers.resolveRoute(req), statusCode: status, keyHash: _hashKey(key) });
         }
       }
       return origEnd(chunk, encoding);

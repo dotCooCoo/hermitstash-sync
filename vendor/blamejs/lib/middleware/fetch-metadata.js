@@ -96,6 +96,16 @@ function _writeReject(req, res, message, reason, onDeny, problemMode) {
  *     allowedNavigate:    boolean,    // default true
  *     methods:            string[],   // default POST/PUT/DELETE/PATCH
  *     audit:              boolean,    // default true
+ *     skipPaths:          Array<string|RegExp>,  // default [] — paths this middleware is skipped for
+ *                                                // ENTIRELY: the site check, `deniedDest` and the
+ *                                                // Sec-Fetch-Storage-Access refusal all go with it. A string
+ *                                                // matches on a segment boundary ("/api" matches /api
+ *                                                // and /api/x, not /apixyz); a RegExp is asserted ReDoS-safe
+ *                                                // and stateless at construction
+ *     skip:               function(req): boolean, // consulted after skipPaths and skipping the same checks;
+ *                                                 // only an exact true skips, and a predicate that throws is
+ *                                                 // read as do-not-skip, so a broken exemption leaves the
+ *                                                 // guard on
  *     onDeny:             function(req, res, info): void,  // own the 403; info = { status, reason }
  *     problemDetails:     boolean,    // default false — emit RFC 9457 application/problem+json instead of the default JSON envelope
  *   }
@@ -129,6 +139,13 @@ function create(opts) {
   var _shouldSkip = requestHelpers.makeSkipMatcher(opts, "middleware.fetchMetadata");
 
   var onDeny = typeof opts.onDeny === "function" ? opts.onDeny : null;
+  ["allowSameSite", "allowCrossSite", "allowMissing", "allowedNavigate",
+   "allowStorageAccess", "problemDetails"].forEach(function (name) {
+    validateOpts.optionalBoolean(opts[name],
+      "middleware.fetchMetadata: opts." + name + " (part of the resource-isolation policy " +
+      "this middleware applies; a value that is not a boolean was read as the opposite of " +
+      "what it reads like, and for the allow* options that left them ON)");
+  });
   var problemMode = opts.problemDetails === true;
   var allowSameSite      = opts.allowSameSite !== false;
   var allowCrossSite     = opts.allowCrossSite === true;
@@ -161,7 +178,7 @@ function create(opts) {
         outcome:  "denied",
         actor:    requestHelpers.extractActorContext(req),
         reason:   reason,
-        metadata: { method: req.method, path: (req.url || "").split("?")[0] },
+        metadata: { method: req.method, path: requestHelpers.resolveRoute(req) },
       });
     } catch (_e) { /* audit best-effort */ }
   }
@@ -171,7 +188,7 @@ function create(opts) {
     if (req._fetchMetadataGates[GATE_ID]) return next();
     req._fetchMetadataGates[GATE_ID] = true;
     if (_shouldSkip(req)) return next();
-    if (methods.indexOf(req.method) === -1) return next();
+    if (methods.indexOf(String(req.method || "").toUpperCase()) === -1) return next();
 
     var headers = req.headers || {};
     var site = headers["sec-fetch-site"];

@@ -43,6 +43,7 @@
  * @card
  *   RFC 4180 parser + serializer with operator-friendly defaults.
  */
+var nodeTypes = require("node:util").types;
 var C = require("./constants");
 var numericBounds = require("./numeric-bounds");
 var pick = require("./pick");
@@ -188,7 +189,7 @@ function parse(input, opts) {
   var s;
   if (typeof input === "string") s = input;
   else if (Buffer.isBuffer(input)) s = input.toString("utf8");
-  else if (input instanceof Uint8Array) s = Buffer.from(input).toString("utf8");
+  else if (nodeTypes.isUint8Array(input)) s = Buffer.from(input).toString("utf8");
   else {
     throw new CsvError("csv/bad-input",
       "parse: input must be string, Buffer, or Uint8Array, got " + typeof input);
@@ -405,7 +406,8 @@ function stringify(rows, opts) {
     var rec = rows[i];
     var cells;
     if (asObjects) {
-      cells = header.map(function (k) { return escapeCell(rec[k]); });
+      cells = new Array(header.length);
+      for (var hi = 0; hi < header.length; hi++) cells[hi] = escapeCell(rec[header[hi]]);
     } else {
       cells = rec.map(escapeCell);
     }

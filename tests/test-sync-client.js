@@ -243,7 +243,7 @@ describe('Sync Client Modules', { timeout: 30000 }, () => {
     await assert.rejects(
       client.renameFile(bundle.bundleId, 'ghost.txt', 'renamed.txt'),
       function (err) {
-        assert.match(err.message, /File not found at old nodePath/i,
+        assert.match(err.message, /File not found at old (?:nodePath|path)\b/i,
           'thrown error should carry the decrypted server detail, got: ' + err.message);
         return true;
       }

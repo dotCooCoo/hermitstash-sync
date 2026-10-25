@@ -23,7 +23,7 @@
  *                   to the file backend when CredentialManager is absent
  *     - File     -> XChaCha20-Poly1305-sealed JSON whose KEK is derived
  *                   via Argon2id from `opts.passphrase`. Wrap format is
- *                   shared with `b.vault.wrap` (magic 0xE2). File mode
+ *                   shared with `b.vaultWrap.wrap` (magic 0xE2). File mode
  *                   0o600, atomic via `b.atomicFile.write`.
  *
  *   Process-list-safety: every native-tool invocation passes the
@@ -52,6 +52,7 @@ var atomicFile = require("./atomic-file");
 var C = require("./constants");
 var lazyRequire = require("./lazy-require");
 var processSpawn = require("./process-spawn");
+var argon2 = require("./argon2-builtin");
 var safeBuffer = require("./safe-buffer");
 var safeEnv = require("./parsers/safe-env");
 var safeJson = require("./safe-json");
@@ -118,15 +119,16 @@ function _resolveOnPath(binName) {
   return null;
 }
 
-function _validateCommonOpts(opts, primitive) {
+var COMMON_OPTS = [
+  "service", "account", "fallbackFile", "passphrase", "preferFile", "audit",
+];
+
+function _validateCommonOpts(opts, primitive, extraOpts) {
   if (opts == null || typeof opts !== "object") {
     throw new KeychainError("keychain/bad-opts",
       primitive + ": opts must be an object");
   }
-  validateOpts(opts, [
-    "service", "account", "password", "fallbackFile", "passphrase",
-    "preferFile", "audit",
-  ], primitive);
+  validateOpts(opts, COMMON_OPTS.concat(extraOpts || []), primitive);
   validateOpts.requireNonEmptyString(opts.service, "service",
     KeychainError, "keychain/bad-service");
   validateOpts.requireNonEmptyString(opts.account, "account",
@@ -168,9 +170,17 @@ async function _readFile(fallbackFile, passphrase) {
   var plaintext;
   try {
     plaintext = await vaultWrap.unwrap(sealed, pwBuf);
-  } catch (_e) {
+  } catch (e) {
+    if (argon2.isArgon2Error(e)) throw e;
+    if (vaultWrap.isUnreadableFile(e)) {
+      throw new KeychainError("keychain/file-unreadable",
+        "the fallback keychain file cannot be read (" + ((e && e.message) || String(e)) +
+        "); the passphrase was never tested");
+    }
     throw new KeychainError("keychain/file-unseal-failed",
-      "fallback file passphrase rejected or file corrupted");
+      "fallback file passphrase rejected, or its ciphertext is corrupted: " +
+      "authentication fails the same way for both, so the header being intact " +
+      "does not narrow it further");
   } finally {
     safeBuffer.secureZero(pwBuf);
   }
@@ -544,7 +554,7 @@ function _isFallbackError(e) {
  *   // → { stored: true, backend: "macos-security" }
  */
 async function store(opts) {
-  _validateCommonOpts(opts, "keychain.store");
+  _validateCommonOpts(opts, "keychain.store", ["password"]);
   validateOpts.requireNonEmptyString(opts.password, "password",
     KeychainError, "keychain/bad-password");
 

@@ -66,6 +66,10 @@ function _extractToken(req, scheme) {
  * a token-expired challenge. Emits `auth.bearer.success` /
  * `auth.bearer.failure` audit events with actor context.
  *
+ * Building the middleware throws `auth-bearer/missing-verify` without a
+ * `verify(token)` function, since the verification path is the operator's to
+ * supply, and `auth-bearer/bad-realm` when `realm` is not a string.
+ *
  * @opts
  *   {
  *     verify:         async function(token): user|null,  // required
@@ -136,7 +140,7 @@ function create(opts) {
       audit().safeEmit({
         action: action, outcome: outcome,
         metadata: Object.assign({}, actor, {
-          route:  req.url,
+          route:  requestHelpers.resolveRoute(req),
           method: req.method,
           reason: reason || null,
         }),

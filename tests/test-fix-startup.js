@@ -155,9 +155,14 @@ describe('cli#21 — init rejects an empty enrollment code before any network ca
       const driver =
         'const cli=require(' + JSON.stringify(CLI_PATH) + ');' +
         'cli.run(["init"]).catch(e=>{process.stderr.write(String(e&&e.message||e)+"\\n");process.exit(1);});';
+      // The child is a plain CLI run, not a test-runner child: with the
+      // inherited NODE_TEST_CONTEXT its prompts never reach stdout, so the
+      // driver below would wait for them until the kill timer fires.
+      const env = Object.assign({}, process.env, { HERMITSTASH_SYNC_CONFIG_DIR: tmp });
+      delete env.NODE_TEST_CONTEXT;
       const child = nodeCp.spawn(process.execPath, ['-e', driver], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: Object.assign({}, process.env, { HERMITSTASH_SYNC_CONFIG_DIR: tmp }),
+        env,
       });
       let out = '';
       let err = '';

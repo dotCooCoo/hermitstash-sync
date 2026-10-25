@@ -79,6 +79,43 @@ function _matchOrigin(origin, allowList) {
   return null;
 }
 
+var ORIGIN_PATTERN_PROBES = [
+  "",
+  "https://blamejs-cors-anchor-probe.invalid",
+  "http://blamejs-cors-anchor-probe.invalid",
+  "https://blamejs-cors-anchor-probe.invalid:31337",
+  "http://blamejs-cors-anchor-probe.invalid:31337",
+  "https://192.0.2.1",
+  "https://192.0.2.1:31337",
+  "http://192.0.2.1:31337",
+  "https://[2001:db8::1]",
+  "https://[2001:db8::1]:31337",
+];
+
+function _anchoredOriginPattern(re, idx) {
+  var src = re.source;
+  // allow:dynamic-regex — wraps an operator origin pattern so matching consumes the WHOLE origin (outer ^...$ neutralizes internal alternation / partial anchors); this anchored form is the one guardRegex.assertSafe screens and the one the middleware runs
+  var anchored = new RegExp("^(?:" + src + ")$", re.flags.replace(/[gym]/g, ""));
+  guardRegex().assertSafe(anchored, "middleware.cors: origins[" + idx + "]", CorsError, "cors/unsafe-pattern");
+  if (src.charAt(0) !== "^" || src.charAt(src.length - 1) !== "$") {
+    throw new CorsError("cors/unanchored-pattern",
+      "origins[" + idx + "] is a RegExp that is not anchored at both ends (^...$). " +
+      "Origin matching must be a whole-origin match, not a substring: an unanchored " +
+      "pattern like /example\\.com/ also matches https://example.com.attacker.test and " +
+      "reflects that attacker origin into Access-Control-Allow-Origin (with credentials, a " +
+      "full CORS bypass). Anchor the pattern end to end so it matches the complete origin");
+  }
+  for (var pi = 0; pi < ORIGIN_PATTERN_PROBES.length; pi += 1) {
+    if (anchored.test(ORIGIN_PATTERN_PROBES[pi])) {
+      throw new CorsError("cors/overbroad-pattern",
+        "origins[" + idx + "] is a RegExp that matches an arbitrary origin, so it would reflect " +
+        "any Origin header (with credentials, a full CORS bypass). Constrain it to the specific " +
+        "host(s) you trust rather than a catch-all across a scheme");
+    }
+  }
+  return anchored;
+}
+
 function _canonicalOrigin(input) {
   if (!input || typeof input !== "string") return null;
   try {
@@ -151,6 +188,9 @@ function _isSameOrigin(req, originHeader, configuredSiteOrigins, protoResolve, s
  *     protocolResolver: function(req): "http"|"https",  // own the HTTPS decision
  *     clientIpResolver: function(req): string|null,     // own the audit-actor IP
  *     trustProxy:       boolean|number,    // legacy; refused unless paired with trustedProxies/resolver (spoofable)
+ *     allowPrivateNetwork: boolean,  // default false — answer a Private Network Access preflight with
+ *                                    // Access-Control-Allow-Private-Network: true; left off, that preflight
+ *                                    // is refused with reason private-network-not-permitted
  *     onDeny:           function(req, res, info): void,  // own every refusal; info = { status, reason, origin, header? }
  *     problemDetails:   boolean,    // default false — emit RFC 9457 application/problem+json instead of text/plain
  *   }
@@ -159,7 +199,7 @@ function _isSameOrigin(req, originHeader, configuredSiteOrigins, protoResolve, s
  *   var b = require("@blamejs/core");
  *   var app = b.router.create();
  *   app.use(b.middleware.cors({
- *     origins:    ["https://app.example.com", /\.example\.com$/],
+ *     origins:    ["https://app.example.com", /^https:\/\/([a-z0-9-]+\.)?example\.com$/],
  *     siteOrigin: "https://example.com",
  *     methods:    ["GET", "POST"],
  *   }));
@@ -186,6 +226,7 @@ function create(opts) {
   }
   var _xffIp = _ip.resolve;
 
+  var credentials = !!opts.credentials;
   var rawOrigins = opts.origins || [];
   var origins = [];
   for (var oi = 0; oi < rawOrigins.length; oi++) {
@@ -198,8 +239,17 @@ function create(opts) {
       }
       origins.push({ kind: "string", canonical: canonEntry, original: entry });
     } else if (entry instanceof RegExp) {
-      guardRegex().assertSafe(entry, "middleware.cors: origins[" + oi + "]", CorsError, "cors/unsafe-pattern");
-      origins.push({ kind: "regex", pattern: entry });
+      if (credentials) {
+        throw new CorsError("cors/regex-origin-with-credentials",
+          "origins[" + oi + "] is a RegExp and credentials is true. A credentialed CORS response " +
+          "reflects the matched Origin, so a RegExp that admits any host an attacker can register " +
+          "(across schemes, ports, IP forms, or a public-suffix wildcard like /.*\\.com$/) leaks " +
+          "authenticated responses to that origin, and no finite check can prove an arbitrary " +
+          "RegExp is host-specific. Use exact string origins for credentialed CORS; keep RegExp " +
+          "origins for credentials:false, where no credentials are reflected");
+      }
+      guardRegex().assertStateless(entry, "middleware.cors: origins[" + oi + "]", CorsError, "cors/stateful-pattern");
+      origins.push({ kind: "regex", pattern: _anchoredOriginPattern(entry, oi) });
     } else {
       throw new CorsError("cors/bad-origin",
         "origins[" + oi + "] must be a string or RegExp (got " + typeof entry + ")");
@@ -229,7 +279,6 @@ function create(opts) {
   var headers = headersList.join(", ");
   var allowedHeadersSet = headersList.map(function (h) { return String(h).trim().toLowerCase(); });
   var exposeHeaders = (opts.exposeHeaders || ["X-Request-Id"]).join(", ");
-  var credentials = !!opts.credentials;
   var maxAge = String(opts.maxAgeSeconds || (C.TIME.minutes(10) / C.TIME.seconds(1)));
   var refuseUnknown = opts.refuseUnknown !== false;
   var strictNullOrigin = opts.strictNullOrigin !== false;
@@ -268,7 +317,8 @@ function create(opts) {
             action:   "system.cors.block",
             outcome:  "denied",
             reason:   "origin not in allow-list",
-            metadata: { origin: origin, method: req.method, path: req.pathname || req.url, requestId: req.requestId },
+            metadata: { origin: origin, method: req.method,
+                        path: requestHelpers.resolveRoute(req), requestId: req.requestId },
             requestId: req.requestId,
           });
         } catch (_e) { /* audit best-effort */ }

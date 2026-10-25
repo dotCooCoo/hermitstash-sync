@@ -1,6 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) blamejs contributors
 "use strict";
+/**
+ * @module   b.staticServe
+ * @nav      HTTP
+ * @title    Static Serve
+ * @featured true
+ * @slug     static-serve
+ *
+ * @intro
+ *   Serving a file off disk is the one place where a request path becomes a
+ *   filesystem path, so the handler resolves every request under its root and
+ *   refuses anything that leaves it, whatever the path spells.
+ *
+ *   The bytes are sniffed and gated before they are sent. With no
+ *   <code>contentSafety</code> option the handler takes the map
+ *   <code>b.guardAll.byExtension</code> returns at the strict profile, so a
+ *   file someone managed to write into the served directory does not become a
+ *   delivered payload. Opting out is possible and is recorded in the audit
+ *   trail with the reason.
+ *
+ *   That map covers the extensions the guard family has a content guard for:
+ *   HTML and XHTML, XML, SVG, Markdown, plain text, JSON and JSON-LD, YAML,
+ *   CSV, mail formats and the archive formats. An extension outside it,
+ *   <code>.js</code>, <code>.css</code> and images other than SVG among them,
+ *   is served without a content check, because there is no guard for those
+ *   bytes to run. Supply a <code>contentSafety</code> entry for an extension
+ *   that needs one.
+ *
+ *   Caching, conditional requests and byte ranges are answered from one
+ *   metadata cache per file, which also supplies the Subresource Integrity
+ *   digest <code>integrity()</code> hands a template. That digest is the
+ *   file's. Where a <code>contentSafety</code> gate is configured to sanitize,
+ *   the response carries the gate's bytes and their own digest instead, which
+ *   each response reports in its <code>X-Integrity</code> header.
+ *
+ * @card
+ *   A static-file handler that confines every request to its root, gates the
+ *   bytes through the guard family before sending them, and answers caching
+ *   validators, byte ranges and SRI digests from one cache.
+ */
 
 var nodeFs = require("node:fs");
 var fsp = require("node:fs/promises");
@@ -8,6 +47,7 @@ var nodeCrypto = require("node:crypto");
 var nodePath = require("node:path");
 var atomicFile = require("./atomic-file");
 var C = require("./constants");
+var cdnCacheControl = require("./cdn-cache-control");
 var gateContract = require("./gate-contract");
 var lazyRequire = require("./lazy-require");
 var numericBounds = require("./numeric-bounds");
@@ -34,6 +74,9 @@ var HTTP = requestHelpers.HTTP_STATUS;
 
 var DEFAULT_HASHED_PATTERN = /\.[a-fA-F0-9]{8,}\./;
 var DEFAULT_INDEX_FILE     = "index.html";
+var ATTR_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" +
+                 "!#$&+-.^_`|~";
+
 var DEFAULT_MAX_AGE_SEC    = C.TIME.hours(1) / C.TIME.seconds(1);
 var IMMUTABLE_MAX_AGE_SEC  = C.TIME.days(365) / C.TIME.seconds(1);
 var DEFAULT_BANDWIDTH_WINDOW_MS = C.TIME.minutes(1);
@@ -254,12 +297,55 @@ function _shouldForceAttachment(contentType, ext, contentSafetyMap, allowSvgRend
   return true;
 }
 
-function _attachmentDisposition(filePath) {
-  var name = nodePath.basename(filePath);
-  if (/[\r\n\0]/.test(name)) name = "download";
+function _encodeExtValueChars(name) {
+  var bytes = Buffer.from(name, "utf8");
+  var out = "";
+  for (var i = 0; i < bytes.length; i += 1) {
+    var byte = bytes[i];
+    if (byte < 0x80 && ATTR_CHARS.indexOf(String.fromCharCode(byte)) !== -1) {
+      out += String.fromCharCode(byte);
+      continue;
+    }
+    out += "%" + (byte < 0x10 ? "0" : "") + byte.toString(16).toUpperCase();
+  }
+  return out;
+}
+
+/**
+ * @primitive b.staticServe.attachmentDisposition
+ * @signature b.staticServe.attachmentDisposition(filename)
+ * @since     0.20.32
+ * @status    stable
+ * @related   b.staticServe.create, b.safeMime.extractAttachments
+ *
+ * Build the `Content-Disposition` header that serves a file as a download
+ * under a name a stranger chose. Returns the RFC 6266 section 4.3 pairing: a
+ * plain `filename` with the non-ASCII folded away for readers that predate
+ * the extension, and a `filename*` ext-value carrying the real name.
+ *
+ * The ext-value is percent-escaped against RFC 8187 section 3.2.1
+ * `attr-char`, which is not the set `encodeURIComponent` leaves alone: that
+ * function emits `'`, `(`, `)` and `*` raw, and the apostrophe is the
+ * delimiter the ext-value is parsed on, so a name holding one reads back
+ * truncated at it.
+ *
+ * A name carrying CR, LF or NUL, or an empty one, is served as `download`.
+ *
+ * @example
+ *   b.staticServe.attachmentDisposition("report (final).pdf");
+ *   // → attachment; filename="report (final).pdf"; filename*=UTF-8''report%20%28final%29.pdf
+ */
+function attachmentDisposition(filename) {
+  var raw = filename === undefined || filename === null ? "" : String(filename);
+  var name = nodePath.basename(raw);
+  if (name === "" || /[\r\n\0]/.test(name)) name = "download";
   var asciiName = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  var encName = encodeURIComponent(name);
-  return 'attachment; filename="' + asciiName + '"; filename*=UTF-8\'\'' + encName;
+  return 'attachment; filename="' + asciiName + '"; filename*=UTF-8\'\'' +
+    _encodeExtValueChars(name);
+}
+
+function _attachmentDisposition(filePath) {
+  return attachmentDisposition(filePath);
 }
 
 function _parseRangeHeader(header, size) {
@@ -309,6 +395,7 @@ function _validateCreateOpts(opts) {
       }
       if (value instanceof RegExp) {
         guardRegex().assertSafe(value, "staticServe: hashedPathPattern", StaticServeError, "static/unsafe-pattern");
+        guardRegex().assertStateless(value, "staticServe: hashedPathPattern", StaticServeError, "static/stateful-pattern");
       }
     },
     indexFile: "optional-string",
@@ -488,9 +575,18 @@ async function _decConcurrency(cache, actorKey) {
   await _atomicCounter(cache, "static:conc:" + actorKey, function (c) { return c > 0 ? c - 1 : 0; }, C.TIME.minutes(10));
 }
 
-function _actorKeyFromContext(ctx) {
+function _actorKeyFromRequest(req, ctx) {
+  var r = (req && typeof req === "object") ? req : null;
+  if (r && r.user && typeof r.user === "object") {
+    var userKey = requestHelpers.actorIdentityKey(r.user);
+    if (userKey !== null) return "u:" + userKey;
+  }
+  if (r && r.apiKey && typeof r.apiKey === "object") {
+    var keyKey = requestHelpers.actorIdentityKey(r.apiKey);
+    if (keyKey !== null) return "k:" + keyKey;
+  }
   if (!ctx) return null;
-  if (ctx.userId) return "id:" + ctx.userId;
+  if (ctx.userId) return "u:" + requestHelpers.actorIdentityKey({ userId: ctx.userId });
   if (ctx.ip)     return "ip:" + ctx.ip;
   return null;
 }
@@ -499,7 +595,7 @@ function _writeError(res, status, code, message, headers) {
   var hdrs = Object.assign({ "Content-Type": "text/plain; charset=utf-8" }, headers || {});
   hdrs["Content-Length"] = Buffer.byteLength(message, "utf8");
   try {
-    res.writeHead(status, hdrs);
+    res.writeHead(status, requestHelpers.finalizeHeaders(res, hdrs));
     res.end(message);
   } catch (_e) {
     // response already torn down — best effort
@@ -507,6 +603,38 @@ function _writeError(res, status, code, message, headers) {
   void code;
 }
 
+/**
+ * @primitive b.staticServe.integrity
+ * @signature b.staticServe.integrity(absPath)
+ * @since     0.1.63
+ * @status    stable
+ * @related   b.staticServe.create, b.staticServe.attachmentDisposition
+ *
+ * Resolve with one file's Subresource Integrity value, as `sha384-<base64>`,
+ * ready to put in the `integrity` attribute of a `script` or `link` tag.
+ *
+ * The digest comes from the same metadata cache the handler serves from, so a
+ * template asking for it does not re-hash a file the handler has already
+ * hashed.
+ *
+ * It is the digest of the file on disk. A handler configured with a
+ * `contentSafety` gate whose action is `sanitize` serves the gate's bytes
+ * instead, and those hash differently, so an `integrity` attribute built from
+ * this value makes the browser reject the response. Every response carries
+ * the digest of the bytes it actually sent in its `X-Integrity` header, which
+ * is where to read the value when a gate may rewrite an asset. With no gate,
+ * or with a gate whose action is `serve`, `audit-only` or `refuse`, the served
+ * bytes are the file's and this value is the one the response carries.
+ *
+ * An empty or non-string path raises `static/bad-opt`, and a path with no file
+ * behind it raises `static/not-found`, since an SRI attribute built from a
+ * missing file blocks the asset in the browser with nothing to explain it.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var sri = await b.staticServe.integrity("/srv/app/public/app.js");
+ *   sri;                         // → "sha384-…"
+ */
 async function integrity(absPath) {
   if (typeof absPath !== "string" || absPath.length === 0) {
     throw _err("static/bad-opt", "staticServe.integrity: absPath must be a non-empty string");
@@ -517,6 +645,85 @@ async function integrity(absPath) {
   return meta.integrity;
 }
 
+/**
+ * @primitive b.staticServe.create
+ * @signature b.staticServe.create(opts)
+ * @since     0.4.0
+ * @status    stable
+ * @related   b.staticServe.attachmentDisposition, b.guardAll.byExtension, b.safePath.confineToBase
+ *
+ * Build a static-file handler for one directory. Returns an Express-style
+ * `(req, res, next)` function that resolves a request path under `root`,
+ * confines it to that directory, sniffs and gates the bytes, and answers with
+ * caching validators and range support.
+ *
+ * Content safety is wired on by default: with no `contentSafety` option the
+ * handler uses the map `b.guardAll.byExtension({ profile: "strict" })`
+ * returns. That map holds the extensions the guard family has a content guard
+ * for, so an extension outside it, `.js`, `.css` and images other than SVG
+ * among them, is served without a byte check. `contentSafety` takes a map of
+ * extension to gate for anything else that needs one, and `null` opts out
+ * entirely, recording the reason in the audit trail.
+ *
+ * @opts
+ *   root:              string,    // required — the directory served, resolved once
+ *   mountPath:         string,    // default "" — the prefix stripped before resolution
+ *   indexFile:         string,    // default "index.html"; null serves no directory index
+ *   hashedPathPattern: RegExp,    // default: fingerprinted-asset shape, served immutable
+ *   defaultMaxAge:     number,    // seconds — default 3600
+ *   contentTypes:      object,    // extension → media type, over the built-in table
+ *   contentSafety:     object,    // { ".ext": gate }; null opts out, undefined is default-on
+ *   allowedFileTypes:  [string],  // sniffed types admitted; empty means no sniffing gate
+ *   fileType:          object,    // b.fileType handle, required when allowedFileTypes is set
+ *   permissions:       object,    // per-path authorization hook
+ *   cache:             object,    // b.cache handle for stat + digest memoization
+ *   audit:             b.audit,
+ *   mountType:         string,    // "curated" (default) or "user-content"; anything else raises
+ *                                 // static/bad-opt. "user-content" is what makes
+ *                                 // forceAttachmentForNonText default on, so a mount serving
+ *                                 // uploads sends non-text as a download unless that is set
+ *                                 // explicitly
+ *   contentSafetyDisabledReason: string,  // recorded as `reason` on the
+ *                                 // staticserve.content_safety.disabled audit event raised when
+ *                                 // contentSafety is turned off; defaults to
+ *                                 // "operator-explicit-opt-out", so the trail says the screen was
+ *                                 // disabled either way and this names why
+ *   acceptRanges:      boolean,   // default true — sends Accept-Ranges and honors a Range request
+ *   maxRangeBytes:     number,    // default 67108864 (64 MiB); a longer range is refused.
+ *                                 // Infinity serves any length
+ *   maxBytesPerActorPerWindowMs:  number,  // default 0 (off) — per-actor byte budget inside
+ *                                 // bandwidthWindowMs
+ *   maxBytesAllActorsPerWindowMs: number,  // default 0 (off) — the same budget across all actors
+ *   bandwidthWindowMs: number,    // default 60000 — the window both byte budgets are counted in
+ *   maxConcurrentDownloadsPerActor: number,  // default 0 (off) — in-flight responses one actor
+ *                                 // may hold
+ *   maxIdleMs:         number,    // default 120000 — a response making no progress for this long
+ *                                 // is dropped
+ *   auditSuccess:      boolean,   // default true — emit staticServe.serve.success per response
+ *   auditFailures:     boolean,   // default true — emit staticServe.serve.failure per refusal
+ *   forceAttachmentForNonText: boolean,  // sends non-text as a download; defaults on when
+ *                                 // mountType is "user-content", off otherwise
+ *   safeAttachmentForRiskyMimes: boolean,  // default false — sends a risky media type as an
+ *                                 // attachment rather than inline
+ *   safeRenderSvg:     boolean,   // default true — serves SVG inline; false sends it as a download
+ *   safeRenderPdf:     boolean,   // default false — PDF is sent as a download unless this is set
+ *   retention:         object,    // { isServable(absPath, ctx) } consulted per request; a false
+ *                                 // answer refuses the file
+ *   revokeStore:       object,    // { isRevoked(key), revoke(key), unrevoke(key) } backing
+ *                                 // handle.revoke / handle.unrevoke
+ *   observability:     b.observability,
+ *   onServe:           async function ({ req, res, absPath, urlPath, size, sendBytes, range, headers, actor }),
+ *                                 // after the response headers are decided; a throw is audited as
+ *                                 // reason "onServe_threw"
+ *   onError:           function ({ req, res, urlPath, absPath, status, code, actor }),
+ *                                 // every refusal, including the ones answered before the file is read
+ *
+ * @example
+ *   app.use("/assets", b.staticServe.create({
+ *     root:      "./public",
+ *     mountPath: "/assets",
+ *   }));
+ */
 function create(opts) {
   opts = opts || {};
   _validateCreateOpts(opts);
@@ -544,7 +751,7 @@ function create(opts) {
     if (opts.audit && typeof opts.audit.safeEmit === "function") {
       try {
         opts.audit.safeEmit({
-          action:   "staticServe.contentSafety.disabled",
+          action:   "staticserve.content_safety.disabled",
           actor:    {},
           outcome:  "success",
           metadata: {
@@ -662,7 +869,7 @@ function create(opts) {
     if (!absPath) return next();
 
     var actorCtx = requestHelpers.extractActorContext(req);
-    var actorKey = _actorKeyFromContext(actorCtx);
+    var actorKey = _actorKeyFromRequest(req, actorCtx);
 
     function writeErr(r, status, code, message, headers) {
       _writeError(r, status, code, message, headers);
@@ -677,7 +884,7 @@ function create(opts) {
       stats.permissionDenied += 1;
       _emitObs("staticServe.permission_denied", 1, { route: urlPath });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "permission_denied", resource: urlPath,
         }, actorCtx));
       }
@@ -700,7 +907,7 @@ function create(opts) {
       stats.failures += 1;
       _emitObs("staticServe.revoked", 1, { route: urlPath });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "revoked", resource: urlPath,
         }, actorCtx));
       }
@@ -711,7 +918,7 @@ function create(opts) {
       stats.failures += 1;
       _emitObs("staticServe.retention_blocked", 1, { route: urlPath });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "retention_blocked", resource: urlPath,
         }, actorCtx));
       }
@@ -728,7 +935,7 @@ function create(opts) {
         stats.failures += 1;
         _emitObs("staticServe.mime_rejected", 1, { route: urlPath, reason: mimeCheck.reason });
         if (auditFailures) {
-          emitAudit("staticServe.serve.failure", Object.assign({
+          emitAudit("staticserve.serve.failure", Object.assign({
             outcome: "failure", reason: "mime_rejected", resource: urlPath,
             detectedMime: mimeCheck.detected || null,
           }, actorCtx));
@@ -757,7 +964,7 @@ function create(opts) {
             _emitObs("staticServe.content_safety_refused", 1, { route: urlPath });
             try { await gateHandle.close(); } catch (_ce) { /* close best-effort */ }
             if (auditFailures) {
-              emitAudit("staticServe.serve.failure", Object.assign({
+              emitAudit("staticserve.serve.failure", Object.assign({
                 outcome: "failure", reason: "content_safety_too_large",
                 resource: urlPath, ext: ext, sizeBytes: gateStat.size,
               }, actorCtx));
@@ -796,7 +1003,7 @@ function create(opts) {
           stats.failures += 1;
           _emitObs("staticServe.content_safety_threw", 1, { route: urlPath });
           if (auditFailures) {
-            emitAudit("staticServe.serve.failure", Object.assign({
+            emitAudit("staticserve.serve.failure", Object.assign({
               outcome: "failure", reason: "content_safety_threw", resource: urlPath,
               error: gateErr && gateErr.message,
             }, actorCtx));
@@ -808,7 +1015,7 @@ function create(opts) {
           stats.failures += 1;
           _emitObs("staticServe.content_safety_refused", 1, { route: urlPath });
           if (auditFailures) {
-            emitAudit("staticServe.serve.failure", Object.assign({
+            emitAudit("staticserve.serve.failure", Object.assign({
               outcome: "failure", reason: "content_safety_refused",
               resource: urlPath, ext: ext,
               issues: gateContract.summarizeIssues(gateDecision.issues),
@@ -837,7 +1044,7 @@ function create(opts) {
       _emitObs("staticServe.etag_hits", 1, { route: urlPath });
       res.writeHead(HTTP.NOT_MODIFIED, {
         "ETag":          served.etag,
-        "Cache-Control": cacheControl,
+        "Cache-Control": cdnCacheControl.keepNoStore(res, cacheControl),
         "Last-Modified": meta.lastModified,
       });
       return res.end();
@@ -859,7 +1066,7 @@ function create(opts) {
         _emitObs("staticServe.if_modified_since_hits", 1, { route: urlPath });
         res.writeHead(HTTP.NOT_MODIFIED, {
           "ETag":          served.etag,
-          "Cache-Control": cacheControl,
+          "Cache-Control": cdnCacheControl.keepNoStore(res, cacheControl),
           "Last-Modified": meta.lastModified,
         });
         return res.end();
@@ -914,7 +1121,7 @@ function create(opts) {
       stats.quotaRejected += 1;
       _emitObs("staticServe.concurrency_rejected", 1, { route: urlPath });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "concurrency_cap", resource: urlPath,
           current: concCheck.current, cap: concCheck.cap,
         }, actorCtx));
@@ -929,7 +1136,7 @@ function create(opts) {
       stats.quotaRejected += 1;
       _emitObs("staticServe.bandwidth_rejected", 1, { route: urlPath, scope: bwCheck.scope });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "bandwidth_quota", resource: urlPath,
           scope: bwCheck.scope, used: bwCheck.used, cap: bwCheck.cap,
         }, actorCtx));
@@ -944,7 +1151,7 @@ function create(opts) {
       "Content-Type":   _contentTypeFor(absPath, contentTypes),
       "Content-Length": sendBytes,
       "ETag":           served.etag,
-      "Cache-Control":  cacheControl,
+      "Cache-Control":  cdnCacheControl.keepNoStore(res, cacheControl),
       "Last-Modified":  meta.lastModified,
       "X-Integrity":    served.integrity,
     };
@@ -973,7 +1180,7 @@ function create(opts) {
         stats.failures += 1;
         _emitObs("staticServe.onServe_threw", 1, { route: urlPath });
         if (auditFailures) {
-          emitAudit("staticServe.serve.failure", Object.assign({
+          emitAudit("staticserve.serve.failure", Object.assign({
             outcome: "failure", reason: "onServe_threw", resource: urlPath,
             error: e && e.message,
           }, actorCtx));
@@ -990,12 +1197,12 @@ function create(opts) {
         delete headers["Content-Range"];
         status = HTTP.OK;
       }
-      res.writeHead(status, headers);
+      res.writeHead(status, requestHelpers.finalizeHeaders(res, headers));
       res.end();
       stats.requestsServed += 1;
       _emitObs("staticServe.requests_served", 1, { route: urlPath, method: "HEAD" });
       if (auditSuccess) {
-        emitAudit("staticServe.serve.success", Object.assign({
+        emitAudit("staticserve.serve.success", Object.assign({
           outcome: "success", resource: urlPath, method: "HEAD",
           size: headSize, contentType: headers["Content-Type"],
         }, actorCtx));
@@ -1008,14 +1215,14 @@ function create(opts) {
         "Content-Length": gateBytesOverride.length,
       });
       delete overrideHeaders["Content-Range"];
-      res.writeHead(HTTP.OK, overrideHeaders);
+      res.writeHead(HTTP.OK, requestHelpers.finalizeHeaders(res, overrideHeaders));
       res.end(gateBytesOverride);
       stats.requestsServed += 1;
       stats.bytesServed += gateBytesOverride.length;
       _emitObs("staticServe.requests_served", 1, { route: urlPath, method: "GET", sanitized: true });
       _emitObs("staticServe.bytes_served", gateBytesOverride.length, { route: urlPath, sanitized: true });
       if (auditSuccess) {
-        emitAudit("staticServe.serve.success", Object.assign({
+        emitAudit("staticserve.serve.success", Object.assign({
           outcome: "success", resource: urlPath, method: "GET",
           size: gateBytesOverride.length, contentType: overrideHeaders["Content-Type"],
           sanitized: true,
@@ -1030,7 +1237,7 @@ function create(opts) {
       return writeErr(res, HTTP.NOT_FOUND, "not_found", "Not Found");
     }
 
-    res.writeHead(status, headers);
+    res.writeHead(status, requestHelpers.finalizeHeaders(res, headers));
 
     await _incConcurrency(cache, actorKey);
     var slotReleased = false;
@@ -1080,7 +1287,7 @@ function create(opts) {
       stats.failures += 1;
       _emitObs("staticServe.stream_error", 1, { route: urlPath });
       if (auditFailures) {
-        emitAudit("staticServe.serve.failure", Object.assign({
+        emitAudit("staticserve.serve.failure", Object.assign({
           outcome: "failure", reason: "stream_error", resource: urlPath,
           error: e && e.message,
         }, actorCtx));
@@ -1099,7 +1306,7 @@ function create(opts) {
       _consumeBandwidth(cache, actorKey, perActorCap, globalCap, bandwidthWindowMs, bytesSent)
         .catch(function () {});
       if (auditSuccess) {
-        emitAudit("staticServe.serve.success", Object.assign({
+        emitAudit("staticserve.serve.success", Object.assign({
           outcome: "success", resource: urlPath, method: "GET",
           size: bytesSent, contentType: headers["Content-Type"],
           range: range ? { start: range.start, end: range.end } : null,
@@ -1144,6 +1351,7 @@ function _resetCacheForTest() { _metaCache.clear(); }
 module.exports = {
   create:                 create,
   integrity:              integrity,
+  attachmentDisposition:  attachmentDisposition,
   DEFAULT_MAX_AGE_SEC:    DEFAULT_MAX_AGE_SEC,
   IMMUTABLE_MAX_AGE_SEC:  IMMUTABLE_MAX_AGE_SEC,
   DEFAULT_HASHED_PATTERN: DEFAULT_HASHED_PATTERN,

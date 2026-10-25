@@ -210,7 +210,11 @@ function buildRequest(data, opts) {
 function parseResponse(der) {
   var buf = _bytes(der, "der");
   var root;
-  try { root = asn1.readNode(buf, 0); } catch (e) {
+  try { root = asn1.readNodeStrict(buf); } catch (e) {
+    if (e && e.code === "asn1/trailing-data") {
+      throw new TsaError("tsa/trailing-data",
+        "tsa.parseResponse: trailing bytes after the top-level TimeStampResp DER structure");
+    }
     throw new TsaError("tsa/malformed", "tsa.parseResponse: not DER: " + ((e && e.message) || e));
   }
   if (root.tag !== asn1.TAG.SEQUENCE || root.tagClass !== asn1.TAG_CLASS.UNIVERSAL) {
@@ -287,7 +291,11 @@ function _parseGeneralizedTime(node) {
 }
 
 function _parseTstInfo(eContent) {
-  var root = asn1.readNode(eContent, 0);
+  var root;
+  try { root = asn1.readNodeStrict(eContent); }
+  catch (e) {
+    throw new TsaError("tsa/malformed", "tsa: TSTInfo is not valid DER: " + ((e && e.message) || e));
+  }
   if (root.tag !== asn1.TAG.SEQUENCE) {
     throw new TsaError("tsa/malformed", "tsa: TSTInfo must be a SEQUENCE");
   }
@@ -407,7 +415,7 @@ function _candidateSigners(sidRaw, certs) {
   } catch (_e) { wantSerial = null; }
   if (wantSerial === null) return certs.slice();
   var matched = certs.filter(function (d) {
-    try { return _normHex(new nodeCrypto.X509Certificate(d).serialNumber) === wantSerial; }
+    try { return _normHex(bCrypto._certificateFromDer(d).serialNumber) === wantSerial; }
     catch (_e) { return false; }
   });
   return matched.length ? matched : certs.slice();
@@ -438,20 +446,26 @@ function _verifyCmsSignature(si, eContent, signerCertDer) {
     throw new TsaError("tsa/message-digest-mismatch",
       "tsa.verifyToken: recomputed eContent digest does not match the messageDigest attribute");
   }
-  if (attrs.contentType && attrs.contentType !== OID_TST_INFO) {
+  if (!attrs.contentType) {
+    throw new TsaError("tsa/no-content-type-attr",
+      "tsa.verifyToken: signed attrs missing the contentType attribute (RFC 5652 §11.1)");
+  }
+  if (attrs.contentType !== OID_TST_INFO) {
     throw new TsaError("tsa/bad-content-type-attr",
       "tsa.verifyToken: signed contentType attribute is " + attrs.contentType + ", expected id-ct-TSTInfo");
   }
 
-  var pubKey = new nodeCrypto.X509Certificate(signerCertDer).publicKey;
   var hashName = alg.hash || digestNode;
-  var keyParam = pubKey;
-  if (alg.scheme === "pss") {
-    keyParam = { key: pubKey, padding: nodeCrypto.constants.RSA_PKCS1_PSS_PADDING,
-      saltLength: nodeCrypto.constants.RSA_PSS_SALTLEN_AUTO };
-  }
   var ok;
-  try { ok = nodeCrypto.verify(hashName, si.signedAttrsRaw, keyParam, si.signature); }
+  try {
+    var pubKey = bCrypto._certificateFromDer(signerCertDer).publicKey;
+    var keyParam = pubKey;
+    if (alg.scheme === "pss") {
+      keyParam = { key: pubKey, padding: nodeCrypto.constants.RSA_PKCS1_PSS_PADDING,
+        saltLength: nodeCrypto.constants.RSA_PSS_SALTLEN_AUTO };
+    }
+    ok = nodeCrypto.verify(hashName, si.signedAttrsRaw, keyParam, si.signature);
+  }
   catch (e) {
     throw new TsaError("tsa/verify-threw",
       "tsa.verifyToken: signature verification threw: " + ((e && e.message) || e));
@@ -478,40 +492,19 @@ function _parseSignedAttrs(signedAttrsRaw) {
 }
 
 function _verifyChain(signerCertDer, tokenCerts, trustAnchorsPem, at) {
-  var anchors = trustAnchorsPem.map(function (p) { return new nodeCrypto.X509Certificate(p); });
-  var pool = tokenCerts.map(function (d) { return new nodeCrypto.X509Certificate(d); });
-  var current = new nodeCrypto.X509Certificate(signerCertDer);
-  var seen = 0;
-  var atTime = at.getTime();
-  while (seen <= pool.length + 1) {
-    _assertValidAt(current, atTime);
-    for (var a = 0; a < anchors.length; a += 1) {
-      if (_issued(anchors[a], current)) { _assertValidAt(anchors[a], atTime); return; }
-      if (current.fingerprint256 === anchors[a].fingerprint256) return;
-    }
-    var parent = null;
-    for (var p = 0; p < pool.length; p += 1) {
-      if (pool[p].fingerprint256 !== current.fingerprint256 && _issued(pool[p], current)) {
-        parent = pool[p]; break;
-      }
-    }
-    if (!parent) {
-      throw new TsaError("tsa/untrusted-chain",
-        "tsa.verifyToken: signer certificate does not chain to any supplied trust anchor");
-    }
-    current = parent;
-    seen += 1;
-  }
-  throw new TsaError("tsa/chain-loop", "tsa.verifyToken: certificate chain did not terminate");
-}
-function _issued(issuer, subject) {
-  return x509Chain.issuerValidlyIssued(issuer, subject);
-}
-function _assertValidAt(cert, atMs) {
-  if (atMs < cert.validFromDate.getTime() || atMs > cert.validToDate.getTime()) {
-    throw new TsaError("tsa/cert-expired",
-      "tsa.verifyToken: certificate '" + cert.subject + "' is not valid at the asserted time");
-  }
+  var anchors = trustAnchorsPem.map(function (p) { return bCrypto._x509(p); });
+  var pool = tokenCerts.map(function (d) { return bCrypto._certificateFromDer(d); });
+  var current = bCrypto._certificateFromDer(signerCertDer);
+  var res = x509Chain.resolveChain(current, pool, anchors, { validAt: x509Chain._validAt(at) });
+  var refusal = x509Chain._chainRefusal(res, {
+    compromised:      "tsa/compromised-key",
+    invalidCert:      "tsa/cert-expired",
+    pathlen:          "tsa/chain-pathlen-exceeded",
+    nameconstraint:   "tsa/name-constraint-violation",
+    untrusted:        "tsa/untrusted-chain",
+    untrustedMessage: "signer certificate does not chain to any supplied trust anchor",
+  }, { leaf: current, pool: pool, anchors: anchors });
+  if (refusal !== null) throw new TsaError(refusal.code, "tsa.verifyToken: " + refusal.message);
 }
 
 /**
@@ -533,7 +526,14 @@ function _assertValidAt(cert, atMs) {
  * <strong>required by default</strong> — without it a self-signed token
  * would pass on its self-contained signature alone. To accept an
  * unauthenticated timestamp, set <code>opts.allowUntrustedIssuer:true</code>;
- * the result then carries <code>issuerTrusted:false</code>.
+ * the result then carries <code>issuerTrusted:false</code>. A TSA signer
+ * certificate whose key <code>b.crypto.compromisedKey</code> reports, or whose
+ * key that check cannot read, throws <code>tsa/compromised-key</code>. With
+ * <code>opts.trustAnchorsPem</code>, a chain through a certificate or trust
+ * anchor with such a key also throws <code>tsa/compromised-key</code>. A
+ * compromised trust anchor that issued no certificate on the path is skipped.
+ * Every check reads each token certificate from its own DER bytes, including
+ * a certificate that carries PEM text in one of its fields.
  *
  * @opts
  *   {
@@ -562,6 +562,10 @@ function verifyToken(token, opts) {
   var sd;
   try { sd = cms.parseSignedData(_bytes(token, "token")); }
   catch (e) {
+    if (e && e.code === "cms/trailing-data") {
+      throw new TsaError("tsa/trailing-data",
+        "tsa.verifyToken: trailing bytes after the top-level token DER structure");
+    }
     throw new TsaError("tsa/not-cms", "tsa.verifyToken: token is not CMS SignedData: " + ((e && e.message) || e));
   }
   if (sd.encapContent.eContentType !== OID_TST_INFO) {
@@ -573,6 +577,12 @@ function verifyToken(token, opts) {
   }
   if (!sd.signerInfos.length) {
     throw new TsaError("tsa/no-signer", "tsa.verifyToken: token has no SignerInfo");
+  }
+  if (sd.signerInfos.length > 1) {
+    throw new TsaError("tsa/multiple-signers",
+      "tsa.verifyToken: token carries " + sd.signerInfos.length + " SignerInfos and RFC 3161 " +
+      "§2.4.2 allows the TSA signature and no other; one signature is checked here, so a " +
+      "verdict over the token would leave the rest unread");
   }
   if (!sd.certificates.length) {
     throw new TsaError("tsa/no-cert",
@@ -604,11 +614,22 @@ function verifyToken(token, opts) {
   var lastErr = null;
   for (var i = 0; i < candidates.length; i += 1) {
     try {
+      var verdict = x509Chain._compromiseVerdict(candidates[i]);
+      if (verdict !== null && verdict.id !== "unreadable") {
+        throw new TsaError("tsa/compromised-key",
+          "tsa.verifyToken: the TSA signer certificate's key is a compromised key: " + verdict.reason);
+      }
       _checkTimestampingEku(candidates[i]);
       _verifyCmsSignature(si, sd.encapContent.eContent, candidates[i]);
+      if (verdict !== null) {
+        throw new TsaError("tsa/compromised-key",
+          "tsa.verifyToken: the TSA signer certificate's key could not be checked for a compromised key: " + verdict.detail);
+      }
       signerCertDer = candidates[i];
       break;
-    } catch (e) { lastErr = e; }
+    } catch (e) {
+      if (!lastErr || lastErr.code !== "tsa/compromised-key") lastErr = e;
+    }
   }
   if (!signerCertDer) {
     throw lastErr || new TsaError("tsa/no-valid-signer",
@@ -640,7 +661,7 @@ function verifyToken(token, opts) {
     serialHex:     tst.serialHex,
     accuracy:      tst.accuracy,
     hashAlg:       imp.hashName,
-    signerCertPem: new nodeCrypto.X509Certificate(signerCertDer).toString(),
+    signerCertPem: bCrypto._certificateFromDer(signerCertDer).toString(),
     issuerTrusted: issuerTrusted,
   };
 }

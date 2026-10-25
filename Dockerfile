@@ -4,8 +4,9 @@
 #
 # Two-stage build. Stage 1 downloads the signed SEA binary from the matching
 # GitHub Release and verifies it (SHA3-512 + P-384 ECDSA) before letting it
-# enter the runtime image. Stage 2 is debian-slim with only ca-certificates,
-# the verified binary, and a small entrypoint.
+# enter the runtime image. Stage 2 is Chainguard wolfi-base with
+# ca-certificates, tini, bash, shadow and the C++ runtime libraries the SEA
+# links against, the verified binary, and a small entrypoint.
 #
 # Build:
 #   docker buildx build --build-arg VERSION=0.4.7 \
@@ -28,7 +29,7 @@ ARG VERSION
 #   docker buildx imagetools inspect node:24.21.0-slim
 # and copy the index Digest), updating the trailing date, on the same cadence
 # as RUNTIME_BASE and the GitHub Action pins.
-ARG NODE_VERSION=24.21.0-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553  # node 24.21.0-slim 2026-09-09
+ARG NODE_VERSION=24.21.0-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20  # node 24.21.0-slim 2026-10-06
 # Runtime base: Chainguard wolfi-base — glibc-dynamic, apk-based, rebuilt
 # continuously by Chainguard when upstream CVE fixes land. Typical CVE
 # count at any given digest is near zero; chosen over debian-slim to avoid
@@ -50,7 +51,7 @@ ARG NODE_VERSION=24.21.0-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a2
 # refresh surfaces as a failed build rather than a silently-vulnerable
 # image. RUNTIME_BASE stays a build-arg so a refresh is visible in the diff
 # and an operator can override it for a local rebuild against a newer base.
-ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:918a593b8268c222afd4e2c4f06860ac984e60719b4697e4c71d796bc8fcd042  # wolfi-base 2026-09-09
+ARG RUNTIME_BASE=cgr.dev/chainguard/wolfi-base@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7  # wolfi-base 2026-10-24
 
 # ---------- Stage 1: download + verify the signed binary ----------
 FROM node:${NODE_VERSION} AS verify

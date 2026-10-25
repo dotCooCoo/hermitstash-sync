@@ -92,9 +92,17 @@
  *   - `b.mailStore` — operator-supplied backend (must expose
  *     `openPop3Drop(actor, opts)` / `commitPop3Drop(actor, dropId)` /
  *     `getMessage(actor, dropId, msgNum, { headersOnly?, headerLines? })` /
- *     `listMessages(actor, dropId)` / `markDelete(actor, dropId, msgNum)`)
+ *     `listMessages(actor, dropId)` / `markDelete(actor, dropId, msgNum)`).
+ *     A message `size` (and the drop `totalBytes`) is the canonical wire
+ *     octet count: the message with CRLF line endings and a final CRLF
+ *     terminating its last line. This is what STAT / LIST advertise and
+ *     what RETR / TOP deliver, since the listener canonicalizes a body's
+ *     line endings to CRLF before dot-stuffing (RFC 1939 §3) and appends
+ *     a final CRLF when the stored body lacks one. A backend that stores
+ *     messages with bare-LF endings, or without a trailing newline,
+ *     reports this CRLF-normalized size, not the stored byte length.
  *   - operator's `auth.verify(mechanism, credentials)` async predicate
- *   - `b.network.tls.context` — TLS posture
+ *   - `b.network.tls.applyToContext` — TLS posture
  *
  * @card
  *   POP3 mailbox-access listener (RFC 1939 + RFC 2449 + RFC 2595 +
@@ -161,6 +169,12 @@ var ERR_CLAMP = 200;
  *   onSessionActivity: function (actor, sessionId, verb),   // optional. Fired for every command, NOOP included — the listener answers NOOP itself, so a consumer aging an idle lease would otherwise never see the keepalive the protocol defines for it and would reap the lease under a live connection
  *   rateLimit:         b.mail.server.rateLimit handle | opts | false,
  *   audit:             b.audit
+ *   tenantScope:       object,              // optional. A b.agent.tenant.create() instance the registry
+ *                           checks the authenticated actor against. One without a `.check` function
+ *                           raises mail-server-registry/bad-tenant-scope, and supplying it without
+ *                           agentTenantId raises mail-server-registry/no-agent-tenant-id
+ *   agentTenantId:     string,              // optional. The tenant this listener belongs to, which
+ *                           tenantScope compares the actor's against
  *
  * @example
  *   var pop3 = b.mail.server.pop3.create({
@@ -202,6 +216,14 @@ function create(opts) {
   numericBounds.requireAllPositiveFiniteIntIfPresent(opts,
     ["maxLineBytes", "idleTimeoutMs", "commitTimeoutMs", "maxConnections"],
     "mail.server.pop3.", MailServerPop3Error, "mail-server-pop3/bad-bound");
+  validateOpts.optionalBoolean(opts.implicitTls,
+    "mail.server.pop3.create: opts.implicitTls (RFC 8314 §3 TLS from the SYN; anything " +
+    "other than a boolean was read as false, which leaves the listener on port 110 with " +
+    "STLS while the configuration says otherwise)",
+    MailServerPop3Error, "mail-server-pop3/bad-opts");
+  validateOpts.optionalNonEmptyString(opts.greeting,
+    "mail.server.pop3.create: opts.greeting (the +OK line every connection reads first)",
+    MailServerPop3Error, "mail-server-pop3/bad-opts");
 
   var greeting        = opts.greeting        || DEFAULT_GREETING_VENDOR;
   var maxLineBytes    = opts.maxLineBytes    || DEFAULT_MAX_LINE_BYTES;
@@ -773,7 +795,7 @@ function create(opts) {
         var bodyBuf = msg.rawBytes
           ? msg.rawBytes
           : Buffer.from(msg.text || "", "utf8");
-        var stuffed = safeSmtp.dotStuff(bodyBuf);
+        var stuffed = safeSmtp.dotStuffForWire(bodyBuf);
         socket.write(stuffed);
         if (stuffed.length === 0 ||
             stuffed[stuffed.length - 2] !== 0x0d  ||
@@ -825,7 +847,7 @@ function create(opts) {
         var bodyBuf = msg.rawBytes
           ? msg.rawBytes
           : Buffer.from(msg.text || "", "utf8");
-        var stuffed = safeSmtp.dotStuff(bodyBuf);
+        var stuffed = safeSmtp.dotStuffForWire(bodyBuf);
         socket.write(stuffed);
         if (stuffed.length === 0 ||
             stuffed[stuffed.length - 2] !== 0x0d  ||

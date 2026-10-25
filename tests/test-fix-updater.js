@@ -466,3 +466,78 @@ describe('updater#18 (cap) — the signature download uses a small cap, the asse
     assert.equal(defaulted, MIB_256, 'an unspecified cap must default to the asset ceiling (never less bounded)');
   });
 });
+
+describe('updater — download time limit and failure messages', () => {
+  const MIB_256 = b.constants.BYTES.mib(256);
+  const KIB_64 = b.constants.BYTES.kib(64);
+
+  // Stubs the b.httpClient boundary, runs the REAL downloadTo and returns what
+  // it forwarded and how many attempts it made.
+  async function runDownload(downloadImpl, maxBytes) {
+    const realRequest = b.httpClient.request;
+    const realDownload = b.httpClient.downloadStream;
+    const seen = { attempts: 0, timeoutMs: null, error: null };
+    b.httpClient.request = async () => ({ body: { destroy() {} } });
+    b.httpClient.downloadStream = async (opts) => {
+      seen.attempts += 1;
+      seen.timeoutMs = opts.timeoutMs;
+      return downloadImpl(opts);
+    };
+    try {
+      const u = newUpdater({ currentVersion: '0.4.6' });
+      await u._internals.downloadTo('https://example.invalid/asset', nodePath.join(tmpDir('limit'), 'a'), maxBytes);
+    } catch (err) {
+      seen.error = err;
+    } finally {
+      b.httpClient.request = realRequest;
+      b.httpClient.downloadStream = realDownload;
+    }
+    return seen;
+  }
+
+  it('gives the asset leg a wall-clock limit sized for 128 KiB/s and the signature leg two minutes', async () => {
+    const asset = await runDownload(async () => {}, MIB_256);
+    assert.equal(asset.timeoutMs, Math.ceil(MIB_256 / b.constants.BYTES.kib(128)) * b.constants.TIME.seconds(1));
+    const sig = await runDownload(async () => {}, KIB_64);
+    assert.equal(sig.timeoutMs, b.constants.TIME.minutes(2));
+  });
+
+  it('retries a transient failure after the response started, up to maxAttempts', async () => {
+    const seen = await runDownload(async () => {
+      const e = new Error('downloadStream: body ended after 22000 of 10000000 bytes');
+      e.code = 'http-client/truncated-body';
+      e.statusCode = 200;
+      e.transient = true;
+      throw e;
+    }, MIB_256);
+    assert.ok(seen.error, 'downloadTo rejected');
+    assert.match(seen.error.message, /^Download from https:\/\/example\.invalid\/asset failed: downloadStream: body ended after/);
+    assert.equal(seen.attempts, 3, 'retried up to maxAttempts');
+  });
+
+  it('reports a non-transient failure after the response started by what happened, not as HTTP 200, and does not retry it', async () => {
+    const seen = await runDownload(async () => {
+      const e = new Error('downloadStream: pipeline failed: aborted');
+      e.code = 'ECONNRESET';
+      e.statusCode = 200;
+      throw e;
+    }, MIB_256);
+    assert.ok(seen.error, 'downloadTo rejected');
+    assert.match(seen.error.message, /^Download from https:\/\/example\.invalid\/asset failed: downloadStream: pipeline failed: aborted$/);
+    assert.doesNotMatch(seen.error.message, /HTTP 200/);
+    assert.equal(seen.attempts, 1);
+  });
+
+  it('still reports and retries an expired signed URL (HTTP 403) with its status', async () => {
+    const seen = await runDownload(async () => {
+      const e = new Error('downloadStream: upstream returned HTTP 403');
+      e.code = 'http-client/http-error';
+      e.statusCode = 403;
+      throw e;
+    }, MIB_256);
+    assert.ok(seen.error, 'downloadTo rejected');
+    assert.match(seen.error.message, /^HTTP 403 from https:\/\/example\.invalid\/asset$/);
+    assert.equal(seen.error.statusCode, 403);
+    assert.equal(seen.attempts, 3, 'retried up to maxAttempts');
+  });
+});

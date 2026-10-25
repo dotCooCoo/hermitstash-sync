@@ -50,6 +50,7 @@
  * @card
  *   Tamper-evident, append-only record of every privileged action — the forensic surface every compliance posture (HIPAA / PCI-DSS / SOC 2 / GDPR / SOX / DORA) bottoms out on.
  */
+var nodeTypes = require("node:util").types;
 var auditChain = require("./audit-chain");
 var auditSign = require("./audit-sign");
 var chainWriter = require("./chain-writer");
@@ -58,6 +59,7 @@ var clusterStorage = require("./cluster-storage");
 var { generateToken } = require("./crypto");
 var cryptoField = require("./crypto-field");
 var frameworkSchema = require("./framework-schema");
+var validateOpts = require("./validate-opts");
 var safeSql = require("./safe-sql");
 var sql = require("./sql");
 var dbRoleContext = require("./db-role-context");
@@ -91,7 +93,9 @@ async function _readLastCheckpointCounter() {
     .toSql();
   return await safeAsync.withTimeout(
     safeAsync.asyncRetry(function () {
-      return clusterStorage.executeOne(built.sql, built.params);
+      return dbRoleContext.runAsAuditChainWrite(function () {
+        return clusterStorage.executeOne(built.sql, built.params);
+      });
     }),
     FRAMEWORK_SQL_TIMEOUT_MS,
     { name: "audit.readLastCheckpoint" }
@@ -104,7 +108,9 @@ async function _readAllCheckpointsAsc() {
     .toSql();
   return await safeAsync.withTimeout(
     safeAsync.asyncRetry(function () {
-      return clusterStorage.executeAll(built.sql, built.params);
+      return dbRoleContext.runAsAuditChainWrite(function () {
+        return clusterStorage.executeAll(built.sql, built.params);
+      });
     }),
     FRAMEWORK_SQL_TIMEOUT_MS,
     { name: "audit.readAllCheckpoints" }
@@ -118,7 +124,9 @@ async function _readAuditRowHashAtCounter(counter) {
     .toSql();
   return await safeAsync.withTimeout(
     safeAsync.asyncRetry(function () {
-      return clusterStorage.executeOne(built.sql, built.params);
+      return dbRoleContext.runAsAuditChainWrite(function () {
+        return clusterStorage.executeOne(built.sql, built.params);
+      });
     }),
     FRAMEWORK_SQL_TIMEOUT_MS,
     { name: "audit.readRowHashAtCounter" }
@@ -137,11 +145,13 @@ async function _insertCheckpoint(values) {
     .columns(_CHECKPOINT_COLS)
     .values(rowObj)
     .toSql();
-  return await safeAsync.withTimeout(
-    clusterStorage.execute(built.sql, built.params),
-    FRAMEWORK_SQL_TIMEOUT_MS,
-    { name: "audit.insertCheckpoint" }
-  );
+  return await dbRoleContext.runAsAuditChainWrite(function () {
+    return safeAsync.withTimeout(
+      clusterStorage.execute(built.sql, built.params),
+      FRAMEWORK_SQL_TIMEOUT_MS,
+      { name: "audit.insertCheckpoint" }
+    );
+  });
 }
 
 var _DUP_COUNTER_REFS = ["atmonotoniccounter", "chkpt_counter"];
@@ -169,18 +179,20 @@ function _isDuplicateCheckpointCounter(e) {
 }
 
 async function _upsertAuditTip(counter, rowHash, signedAt, fencingToken) {
-  var fence = await clusterStorage.fencedUpsert({
-    table:      "_blamejs_audit_tip",   // allow:hand-rolled-sql — bare logical key
-    keyColumns: ["scope"],
-    label:      "audit.upsertAuditTip",
-    timeoutMs:  FRAMEWORK_SQL_TIMEOUT_MS,
-    values: {
-      scope:              "audit",
-      atMonotonicCounter: counter,
-      rowHash:            rowHash,
-      signedAt:           signedAt,
-      fencingToken:       fencingToken,
-    },
+  var fence = await dbRoleContext.runAsAuditChainWrite(function () {
+    return clusterStorage.fencedUpsert({
+      table:      "_blamejs_audit_tip",   // allow:hand-rolled-sql — bare logical key
+      keyColumns: ["scope"],
+      label:      "audit.upsertAuditTip",
+      timeoutMs:  FRAMEWORK_SQL_TIMEOUT_MS,
+      values: {
+        scope:              "audit",
+        atMonotonicCounter: counter,
+        rowHash:            rowHash,
+        signedAt:           signedAt,
+        fencingToken:       fencingToken,
+      },
+    });
   });
   if (fence.fenced) {
     throw new ClusterError(
@@ -293,6 +305,22 @@ var FRAMEWORK_NAMESPACES = [
   "incident",
   "middleware",
   "nis2",
+  "apiencrypt",
+  "bodyparser",
+  "cms",
+  "fileupload",
+  "gatecontract",
+  "staticserve",
+  "vendordata",
+  "guardsql",
+  "fsm",
+  "worm",
+  "agent",
+  "archive",
+  "daemon",
+  "selfupdate",
+  "guardenvelope",
+  "watcher",
 ];
 var registeredNamespaces = new Set(FRAMEWORK_NAMESPACES);
 
@@ -320,7 +348,9 @@ async function _resolveChainOrigin() {
   var built = sql.select("_blamejs_audit_purge_anchor", _sqlOpts())   // allow:hand-rolled-sql
     .where("scope", "audit")
     .toSql();
-  anchor = await clusterStorage.executeOne(built.sql, built.params);
+  anchor = await dbRoleContext.runAsAuditChainWrite(function () {
+    return clusterStorage.executeOne(built.sql, built.params);
+  });
   if (!anchor) return null;
 
   var verdict = auditChain.verifyPurgeAnchor(anchor, {
@@ -383,6 +413,78 @@ function registerNamespace(name) {
   registeredNamespaces.add(name);
 }
 
+var refusedActions = new Map();
+var MAX_REFUSED_ACTIONS = 64;
+var overflowedRefusals = 0;
+
+function _actionIsEmittable(action) {
+  try { _validateAction(action); return true; }
+  catch (_e) { return false; }
+}
+
+function _scrubAction(action) {
+  var text = String(action);
+  try { return redact.redactText(text); }
+  catch (_e) { return text; }
+}
+
+function _recordRefusedAction(action) {
+  var key = _scrubAction(action);
+  var seen = refusedActions.get(key);
+  if (seen === undefined && refusedActions.size >= MAX_REFUSED_ACTIONS) {
+    overflowedRefusals += 1;
+    return;
+  }
+  refusedActions.set(key, (seen || 0) + 1);
+  if (seen) return;
+  try {
+    log.error("audit: refusing to record action '" + key + "' because it is not " +
+      "'namespace.verb[.qualifier]' in lowercase with a registered namespace. " +
+      "No row is being written for it. Read b.audit.refusedActions() for the full list.");
+  } catch (_e) { /* logging must not break a drop-silent sink */ }
+  try {
+    observability.safeEvent("audit.action_refused", 1, { action: key });
+  } catch (_e) { /* drop-silent */ }
+}
+
+/**
+ * @primitive b.audit.refusedActions
+ * @signature b.audit.refusedActions()
+ * @since     0.21.1
+ * @status    stable
+ * @related   b.audit.safeEmit, b.audit.registerNamespace
+ *
+ * Every action `safeEmit` declined to record, with how many times it was
+ * attempted. `safeEmit` absorbs a failing sink by design, and an action the
+ * validator refuses used to be absorbed the same way, so a primitive emitting
+ * a misspelled action reported success and wrote nothing. A non-empty list
+ * means rows are missing: register the namespace with
+ * `b.audit.registerNamespace`, or correct the action to
+ * `namespace.verb[.qualifier]` in lowercase.
+ *
+ * The register holds 64 distinct actions and logs each one once. An
+ * application that derives an action from request data would otherwise let a
+ * client grow this map and the log without bound, one entry per distinct
+ * malformed value, on a path whose whole contract is to be drop-silent.
+ * Refusals past the 64th are counted under the action `(overflow)` and are
+ * neither stored individually nor logged.
+ *
+ * @example
+ *   b.audit.safeEmit({ action: "orders.Shipped", outcome: "success" });
+ *   b.audit.refusedActions();
+ *   // → [ { action: "orders.Shipped", attempts: 1 } ]
+ */
+function getRefusedActions() {
+  var out = [];
+  refusedActions.forEach(function (attempts, action) {
+    out.push({ action: action, attempts: attempts });
+  });
+  if (overflowedRefusals > 0) {
+    out.push({ action: "(overflow)", attempts: overflowedRefusals });
+  }
+  return out;
+}
+
 function _validateAction(action) {
   if (typeof action !== "string" || !/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(action)) {
     throw new Error(
@@ -415,6 +517,9 @@ function _validateAction(action) {
  * continuing (consent grants, break-glass unseals, change-control
  * approvals). For request hot paths where best-effort is acceptable,
  * prefer safeEmit().
+ *
+ * One call appends exactly one row. The append's own storage work runs with
+ * audit's self-emission suppressed, as described on `b.audit.safeEmit`.
  *
  * @opts
  *   actor:     { userId, ip, userAgent, sessionId },
@@ -464,22 +569,28 @@ async function record(event) {
       // catches it drop-silent so the request that emitted can't be crashed.
       if (_externalStore && _externalStoreMode === "redirect" &&
           typeof _externalStore.record === "function") {
-        await safeAsync.withTimeout(
-          Promise.resolve().then(function () { return _externalStore.record(logical); }),
-          EXTERNAL_STORE_TIMEOUT_MS,
-          { name: "audit.redirectRecord" }
-        );
+        await dbRoleContext.runAsAuditChainWrite(function () {
+          return safeAsync.withTimeout(
+            Promise.resolve().then(function () { return _externalStore.record(logical); }),
+            EXTERNAL_STORE_TIMEOUT_MS,
+            { name: "audit.redirectRecord" }
+          );
+        });
         return logical;
       }
-      var appended = await _chainWriter.append(logical);
+      var appended = await dbRoleContext.runAsAuditChainWrite(function () {
+        return _chainWriter.append(logical);
+      });
       // Mirrors the row to the immutable external store. Drop-silent.
       if (_externalStore && typeof _externalStore.record === "function") {
         try {
-          await safeAsync.withTimeout(
-            Promise.resolve().then(function () { return _externalStore.record(appended); }),
-            EXTERNAL_STORE_TIMEOUT_MS,
-            { name: "audit.shadowRecord" }
-          );
+          await dbRoleContext.runAsAuditChainWrite(function () {
+            return safeAsync.withTimeout(
+              Promise.resolve().then(function () { return _externalStore.record(appended); }),
+              EXTERNAL_STORE_TIMEOUT_MS,
+              { name: "audit.shadowRecord" }
+            );
+          });
         } catch (e) {
           var isTimeout = e && (e.code === "ETIMEDOUT" || /timeout/i.test(e.message || ""));
           try {
@@ -543,6 +654,19 @@ async function record(event) {
  *
  * Pass `null` (or `{ record: null }`) to unregister and revert to
  * chain-only mode.
+ *
+ * Audit's own reads and writes of its own tables do not emit, which is what
+ * keeps a chain write from auditing itself, and `record` is called inside that
+ * suppression. Your persistence needs to be: a store that writes through
+ * `b.externalDb` would otherwise emit `system.externaldb.query` on every write,
+ * have that handed straight back to it, and write again.
+ *
+ * The same suppression is inherited by anything long-lived you build in there.
+ * A keepalive, a listener or a retry timer armed inside `record` is suppressed
+ * for the life of the process, and every audit event it emits afterwards is
+ * dropped with no error and no row. Arm it when the store is constructed,
+ * which is outside any chain write, or arm it inside
+ * `b.audit.outsideSelfEmitSuppression`.
  *
  * Redirect mode — `useStore({ record, replaceChain: true })`: a
  * consumer that owns its own database + audit layer and does NOT use
@@ -628,6 +752,15 @@ function useStore(store) {
  * each record their own `audit.read`. Plain-field criteria translate into
  * derived-hash equality where the column is sealed.
  *
+ * The `audit.read` row is the only row the read itself adds, since its own
+ * storage queries run with audit's self-emission suppressed, as described on
+ * `b.audit.safeEmit`. Unsealing the rows it returns is outside that
+ * suppression, so a sealed cell that will not open still records
+ * `system.crypto.unseal_failed`, and a tuple that trips the unseal rate cap
+ * still records the `denied`-outcome `system.crypto.unseal_rate_exceeded`. A
+ * read that cannot unseal what it returns is the event an auditor is looking
+ * for.
+ *
  * @opts
  *   from:         number | Date | string,   // recordedAt >=
  *   to:           number | Date | string,   // recordedAt <=
@@ -712,7 +845,9 @@ async function _queryCluster(criteria) {
   if (criteria.offset != null) qb.offset(criteria.offset);
 
   var built = qb.toSql();
-  var rows = await clusterStorage.executeAll(built.sql, built.params);
+  var rows = await dbRoleContext.runAsAuditChainWrite(function () {
+    return clusterStorage.executeAll(built.sql, built.params);
+  });
   return rows.map(function (row) { return cryptoField.unsealRow("audit_log", row); });
 }
 
@@ -789,6 +924,10 @@ function _checkpointPayload(atMonotonicCounter, atRowHash, createdAt) {
  * Returns the inserted checkpoint row, or `null` when the chain is
  * empty / `skipIfUnchanged` and the tip hasn't advanced.
  *
+ * The operation appends no audit row of its own, so the counter it reports
+ * anchoring is still the tip when it returns. Its reads and writes run with
+ * audit's self-emission suppressed, as described on `b.audit.safeEmit`.
+ *
  * @opts
  *   skipIfUnchanged: boolean,   // null-return when tip didn't move
  *
@@ -804,6 +943,10 @@ function _dbGenerationOrNull() {
 }
 
 async function checkpoint(opts) {
+  opts = opts || {};
+  validateOpts.optionalBoolean(opts.skipIfUnchanged,
+    "audit.checkpoint: opts.skipIfUnchanged (anything other than a boolean was read for its " +
+    "truthiness, so a checkpoint an operator asked for was skipped)");
   var dbGenAtEntry = _dbGenerationOrNull();
   try {
     return await _checkpointOnDatabase(opts, dbGenAtEntry);
@@ -825,7 +968,9 @@ async function _checkpointOnDatabase(opts, dbGenAtEntry) {
   var tip = await _chainWriter.withChainLock(null, function () {
     return safeAsync.withTimeout(
       safeAsync.asyncRetry(function () {
-        return clusterStorage.executeOne(tipReadBuilt.sql, tipReadBuilt.params);
+        return dbRoleContext.runAsAuditChainWrite(function () {
+          return clusterStorage.executeOne(tipReadBuilt.sql, tipReadBuilt.params);
+        });
       }),
       FRAMEWORK_SQL_TIMEOUT_MS,
       { name: "audit.checkpoint.readTip" }
@@ -979,7 +1124,7 @@ async function verifyCheckpoints() {
 
 function _toMs(value) {
   if (typeof value === "number") return value;
-  if (value instanceof Date)     return value.getTime();
+  if (nodeTypes.isDate(value))   return value.getTime();
   if (typeof value === "string") {
     var ms = Date.parse(value);
     if (isNaN(ms)) throw new Error("invalid date: " + value);
@@ -1004,6 +1149,10 @@ function _toMs(value) {
  * Returns `{ ok: true, rowsVerified }` on a clean chain, or
  * `{ ok: false, rowsVerified, breakAt, reason }` at the first break.
  *
+ * The walk appends no audit row of its own, so `rowsVerified` describes the
+ * chain as it stood when the walk began and repeating the call over an idle
+ * chain gives the same answer.
+ *
  * @opts
  *   from:  number,   // start counter (incremental verify after a known-good checkpoint)
  *   to:    number,   // end counter
@@ -1021,7 +1170,9 @@ async function verify(opts) {
       return safeAsync.withTimeout(
         safeAsync.asyncRetry(function () {
           /* c8 ignore next -- auditChain.verifyChain always invokes this reader with a params array from the sql builder; the `|| []` is a defensive fallback that is never taken. */
-          return clusterStorage.executeAll(sql, params || []);
+          return dbRoleContext.runAsAuditChainWrite(function () {
+            return clusterStorage.executeAll(sql, params || []);
+          });
         }),
         FRAMEWORK_SQL_TIMEOUT_MS,
         { name: "audit.verifyChain" }
@@ -1101,6 +1252,9 @@ function _ensureHandler() {
  * `emit` is the lower-level surface the framework's own bound-actor
  * wrapper uses.
  *
+ * An event emitted while audit is reading or writing its own tables is
+ * dropped and counted, as described on `b.audit.safeEmit`.
+ *
  * @example
  *   b.audit.emit({
  *     actor:    { userId: "u-42" },
@@ -1110,7 +1264,66 @@ function _ensureHandler() {
  *   });
  */
 function emit(event) {
+  if (_suppressSelfEmit(event)) return;
   _ensureHandler().emit(event);
+}
+
+/**
+ * @primitive b.audit.outsideSelfEmitSuppression
+ * @signature b.audit.outsideSelfEmitSuppression(fn)
+ * @since     0.20.37
+ * @status    stable
+ * @related   b.audit.useStore, b.audit.safeEmit
+ *
+ * Run `fn` with audit's self-emit suppression lifted, and return whatever it
+ * returns. Use it to build something long-lived from inside a `record` on a
+ * store registered with `b.audit.useStore`.
+ *
+ * While audit writes its own chain it suppresses emissions, so a chain write
+ * does not audit itself into a loop. That suppression is inherited by whatever
+ * runs inside it, including a resource that outlives the call: a keepalive, a
+ * listener or a retry timer a store arms inside its own `record` is suppressed
+ * for the life of the process, and every audit event it emits afterwards is
+ * dropped with no error and no row. Arm such a resource when the store is
+ * constructed, which is outside any chain write, or arm it inside this
+ * wrapper.
+ *
+ * Wrap only the arming. A store's own persistence belongs inside the
+ * suppression: if its writes go through `b.externalDb`, each one emits
+ * `system.externaldb.query`, which is handed back to the store, which writes
+ * again.
+ *
+ * An `fn` that is not a function raises a `TypeError` naming this primitive.
+ *
+ * @example
+ *   var heartbeat = null;
+ *   b.audit.useStore({
+ *     replaceChain: true,
+ *     record: async function (row) {
+ *       if (heartbeat === null) {
+ *         heartbeat = b.audit.outsideSelfEmitSuppression(function () {
+ *           return setInterval(function () { ledger.ping(); }, 30000);
+ *         });
+ *       }
+ *       await ledger.append(row);
+ *     },
+ *   });
+ */
+function outsideSelfEmitSuppression(fn) {
+  if (typeof fn !== "function") {
+    throw new TypeError("b.audit.outsideSelfEmitSuppression(fn): fn must be a function");
+  }
+  return dbRoleContext.outsideAuditChainWrite(fn);
+}
+
+function _suppressSelfEmit(event) {
+  if (!dbRoleContext.isAuditChainWrite()) return false;
+  try {
+    observability.safeEvent("audit.self_emit_suppressed", 1, {
+      action: (event && typeof event.action === "string") ? event.action : "(none)",
+    });
+  } catch (_e) { /* hot-path sink — drop-silent by design */ }
+  return true;
 }
 
 // Outcome normalization — drop-silent on a strict `outcome` mismatch
@@ -1185,7 +1398,22 @@ function _normalizeAction(action) {
  * collapse to {success, failure, denied} ("ok" → "success", "error" →
  * "failure", "refused" → "denied"). Actor / reason / metadata pass
  * through `b.redact.redact()` so connection strings, JWTs, PEM blocks,
- * AWS keys, and SSNs are scrubbed before they reach the chain.
+ * AWS keys, and SSNs are scrubbed before they reach the chain. When
+ * redaction itself throws (for example on a metadata getter that throws),
+ * the row is still written with its action, resource and outcome, an empty
+ * actor, `reason` set to `b.redact.MARKER`, and `metadata` set to
+ * `{ redactionFailed: b.redact.MARKER }`.
+ *
+ * An emission made while audit is reading or writing its own tables is
+ * dropped, and counted as the observability event
+ * `audit.self_emit_suppressed` with the action that was dropped. In cluster
+ * mode the chain write runs through `b.externalDb`, which audits every query
+ * it issues, so without this an append would emit an event that becomes
+ * another append. The suppression covers that storage call and nothing else:
+ * it is scoped to the call tree of audit's own reads and writes, so an
+ * emission from a request running at the same time is unaffected, and so is
+ * one from work an audit operation performs around its storage, such as
+ * unsealing the rows a read returns or signing a checkpoint.
  *
  * @opts
  *   actor:     { userId, ip, userAgent, sessionId },
@@ -1207,6 +1435,12 @@ function _normalizeAction(action) {
 function safeEmit(event) {
   if (!event || typeof event !== "object") return;
   if (typeof event.action !== "string") return;
+  if (_suppressSelfEmit(event)) return;
+  var normalizedAction = _normalizeAction(event.action);
+  if (!_actionIsEmittable(normalizedAction)) {
+    _recordRefusedAction(event.action);
+    return;
+  }
   try {
     var actor = event.actor || {};
     var reason = event.reason || null;
@@ -1215,11 +1449,15 @@ function safeEmit(event) {
       actor = redact.redact(actor);
       if (reason !== null) reason = redact.redact(reason);
       if (metadata !== null) metadata = redact.redact(metadata);
-    } catch (_e) { /* fall through with original values */ }
+    } catch (_e) {
+      actor = {};
+      if (reason !== null) reason = redact.MARKER;
+      if (metadata !== null) metadata = { redactionFailed: redact.MARKER };
+    }
     // rejection to escape — but this is a drop-silent sink on the request
     var emitted = _ensureHandler().emit({
       actor:     actor,
-      action:    _normalizeAction(event.action),
+      action:    normalizedAction,
       resource:  event.resource || null,
       outcome:   _normalizeOutcome(event.outcome),
       reason:    reason,
@@ -1273,7 +1511,7 @@ function safeEmit(event) {
  *   // → safeEmit({ action: "gdpr.ropa.activity_added", outcome: "success",
  *   //             metadata: { activityId: id } })
  *
- *   var emitGate = b.audit.namespaced("guardSql.gate");
+ *   var emitGate = b.audit.namespaced("guardsql.gate");
  *   emitGate("refused", "denied", { route: r }, { actor: ctx.actor });  // per-call actor
  */
 function namespaced(prefix, opts) {
@@ -1460,7 +1698,7 @@ function generateActorBindingTriggerSql(opts) {
   var roleMatch = qRoleMapFn
     ? "  IF " + qRoleMapFn + "(NEW." + qColumn + ") IS DISTINCT FROM current_user THEN\n"
     : "  IF NEW." + qColumn + " IS DISTINCT FROM current_user THEN\n";
-  // honored. allow:hand-rolled-sql — this is migration-script generation,
+  // allow:hand-rolled-sql — this is migration-script generation, not a framework-state DML path; every identifier is quoted through safeSql.quoteIdentifier and the table name resolves via frameworkSchema.tableName
   var up =
     "CREATE OR REPLACE FUNCTION " + qFn + "() RETURNS trigger AS $$\n" +   // allow:hand-rolled-sql
     "BEGIN\n" +
@@ -1598,8 +1836,10 @@ module.exports = {
   registerNamespace:    registerNamespace,
   record:               record,
   useStore:             useStore,
+  outsideSelfEmitSuppression: outsideSelfEmitSuppression,
   emit:                 emit,
   safeEmit:             safeEmit,
+  refusedActions:       getRefusedActions,
   namespaced:           namespaced,
   applyPosture:         applyPosture,
   activePosture:        activePosture,

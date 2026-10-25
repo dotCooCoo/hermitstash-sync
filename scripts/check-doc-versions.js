@@ -52,7 +52,6 @@ function sourcesOfTruth(repoRoot) {
     throw new Error('vendor/MANIFEST.json: packages.blamejs.version is missing');
   }
   const blamejsVersion = blamejs.version;
-  const blamejsMinor = blamejsVersion.split('.').slice(0, 2).join('.');
 
   const pkg = readJson(path.join(repoRoot, 'package.json'));
   const nodeRange = (pkg.engines && typeof pkg.engines.node === 'string') ? pkg.engines.node : '';
@@ -61,7 +60,7 @@ function sourcesOfTruth(repoRoot) {
     throw new Error(`package.json engines.node ("${nodeRange}") is not a plain floor like ">=24.19.0"`);
   }
 
-  return { blamejsVersion, blamejsMinor, nodeFloor };
+  return { blamejsVersion, nodeFloor };
 }
 
 // Each rule: an anchored literal regex (global, ONE capture group = the version
@@ -72,7 +71,6 @@ function sourcesOfTruth(repoRoot) {
 function rulesFor(s) {
   return [
     { label: 'vendored blamejs version', re: /\(on blamejs v(\d+\.\d+\.\d+)\)/g, expect: s.blamejsVersion },
-    { label: 'blamejs minor line',       re: /matching v(\d+\.\d+)\.x blamejs/g, expect: s.blamejsMinor },
     { label: 'Node.js runtime floor',    re: /Node\.js (\d+\.\d+\.\d+)\+/g,      expect: s.nodeFloor },
   ];
 }

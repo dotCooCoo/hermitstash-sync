@@ -23,7 +23,10 @@
 # Prerequisites:
 #   - gh CLI authenticated (gh auth login)
 #   - gpg key (optional — run: gpg --full-generate-key)
-#   - Node.js 22+ with esbuild and postject via npx
+#   - Node.js at the version package.json engines.node names (release.yml pins
+#     the same one); the build embeds it. The script runs `npm ci
+#     --ignore-scripts` itself, which installs the esbuild and postject
+#     versions package-lock.json pins.
 #   - VIRUSTOTAL_API_KEY env var (optional — free key from virustotal.com)
 #
 # Environment:
@@ -78,7 +81,16 @@ if git rev-parse "${TAG}" >/dev/null 2>&1; then
 fi
 
 # ---- Step 1: Build SEA ----
+# The SEA embeds the running Node, and which shared libraries the binary links
+# depends on that Node build, so the build refuses any version other than the
+# one package.json engines.node names.
+WANT_NODE="v$(node -p "require('./package.json').engines.node.replace(/^>=/, '')")"
+if [ "$(node --version)" != "${WANT_NODE}" ]; then
+  echo "ERROR: build with Node.js ${WANT_NODE#v} (the version package.json engines.node and release.yml name); found $(node --version)."
+  exit 1
+fi
 echo "[1/8] Building SEA binary..."
+npm ci --ignore-scripts
 node build/build-sea.js
 echo ""
 

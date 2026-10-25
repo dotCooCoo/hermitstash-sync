@@ -149,7 +149,7 @@ function _renderInput(field) {
         "'.pattern must be a pre-compiled RegExp; got " +
         (typeof field.pattern) + ". Wrap the source string with `RegExp` at config time.");
     }
-    guardRegex.assertSafe(field.pattern, "forms: field[" + field.name + "].pattern");
+    guardRegex.assertSafe(_wholeValuePattern(field.pattern), "forms: field[" + field.name + "].pattern");
     attrs.push('pattern="' + escapeAttribute(field.pattern.source) + '"');
   }
   if (field.min !== undefined)        attrs.push('min="' + escapeAttribute(field.min) + '"');
@@ -337,8 +337,17 @@ function _assertFieldSpec(f) {
         "'.pattern must be a pre-compiled RegExp; got " +
         (typeof f.pattern) + ". Wrap the source string with `RegExp` at config time.");
     }
-    guardRegex.assertSafe(f.pattern, "forms: field[" + f.name + "].pattern");
+    guardRegex.assertSafe(_wholeValuePattern(f.pattern), "forms: field[" + f.name + "].pattern");
   }
+}
+
+function _wholeValuePattern(pattern) {
+  // allow:dynamic-regex: anchors an operator pattern to the whole value; render and validate screen this anchored form with guardRegex.assertSafe
+  return new RegExp("^(?:" + pattern.source + ")$", pattern.flags.replace(/[gym]/g, ""));
+}
+
+function _patternMatchesWholeValue(pattern, value) {
+  return _wholeValuePattern(pattern).test(value);
 }
 
 /**
@@ -447,7 +456,7 @@ function validate(spec, body) {
         errors[f.name] = (f.label || f.name) + " must be at most " + f.maxlength + " characters";
         continue;
       }
-      if (f.pattern && !f.pattern.test(coerced)) {
+      if (f.pattern && !_patternMatchesWholeValue(f.pattern, coerced)) {
         errors[f.name] = f.errorMessages && f.errorMessages.pattern
           ? f.errorMessages.pattern
           : (f.label || f.name) + " has an invalid format";

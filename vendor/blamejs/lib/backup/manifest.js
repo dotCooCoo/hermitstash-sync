@@ -1,11 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) blamejs contributors
 "use strict";
+/**
+ * @module b.backupManifest
+ * @nav    Production
+ * @title  Backup Manifest
+ * @slug   backup-manifest
+ *
+ * @intro
+ *   The document a restore reads before it touches a single encrypted file:
+ *   which framework version wrote the bundle, when, the sealed vault key and
+ *   its salt, and an entry per file with its digest.
+ *
+ *   Every path in and out of the manifest validates it. Creating, serializing
+ *   and parsing all run the same check, so a manifest that cannot be
+ *   validated is never written and never acted on. The failure lists every
+ *   invalid field at once rather than the first.
+ *
+ *   A manifest is signed over its canonical form, with the signature held
+ *   outside the bytes that are signed, so a reader can verify the document it
+ *   has rather than a re-serialization of it. That is what lets a restore
+ *   prove the bundle is the one this deployment wrote and not a substituted
+ *   one.
+ *
+ * @card
+ *   The validated, signable document a restore reads first: the framework
+ *   version, the sealed vault key, and a digest per file, checked on the way
+ *   in and on the way out.
+ */
 
+var nodeCrypto = require("node:crypto");
+var atomicFile = require("../atomic-file");
 var C = require("../constants");
 var lazyRequire = require("../lazy-require");
 var safeBuffer = require("../safe-buffer");
 var safeJson = require("../safe-json");
+var validateOpts = require("../validate-opts");
 var { FrameworkError } = require("../framework-error");
 
 // audit-sign is loaded lazily — manifest.js is consumed by both the
@@ -24,6 +54,9 @@ class BackupManifestError extends FrameworkError {
 
 var FORMAT_VERSION = 1;
 var FRAMEWORK_NAME = "blamejs";
+var KEY_SCHEME_BUNDLE = "argon2id-hkdf-sha3-512-path-digest";
+var BUNDLE_SALT_HEX_LENGTH = 64;
+var MAX_MANIFEST_BYTES = C.BYTES.mib(64);
 var VALID_KINDS = { "raw": 1, "vault-sealed": 1, "plaintext": 1 };
 var SHA3_512_HEX_LENGTH = 128;
 function _isHex(s, evenLength) {
@@ -72,6 +105,34 @@ function _validateFileEntry(f, idx, errors) {
   }
 }
 
+/**
+ * @primitive b.backupManifest.validate
+ * @signature b.backupManifest.validate(manifest)
+ * @since     0.1.96
+ * @status    stable
+ * @related   b.backupManifest.create, b.backupManifest.parse
+ *
+ * Check a manifest and answer `{ ok, errors }`. `errors` names every invalid
+ * field rather than stopping at the first, so one call tells an operator
+ * everything wrong with a manifest.
+ *
+ * It requires the format version and framework name this build writes, a
+ * non-empty framework version, an ISO-8601 `createdAt`, a hex `vaultKeySalt`,
+ * a base64 `vaultKeyEnc` and a `files` array, and `aadBound` to be a boolean
+ * when it is there at all. `create`, `serialize` and `parse` all run this,
+ * which is why an invalid manifest is neither written nor acted on.
+ *
+ * `aadBound` is checked here and not only at `create`, because a manifest
+ * read off disk carrying `aadBound: "true"` would otherwise pass, lose the
+ * field on the next `serialize`, and be restored as though the bundle were
+ * not AAD-bound, which surfaces as a decryption failure rather than a
+ * refusal.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   b.backupManifest.validate({ version: 1 });
+ *   // → { ok: false, errors: [ … every missing field … ] }
+ */
 function validate(manifest) {
   var errors = [];
   if (!manifest || typeof manifest !== "object") {
@@ -94,6 +155,9 @@ function validate(manifest) {
   }
   if (!_isBase64(manifest.vaultKeyEnc)) {
     errors.push("vaultKeyEnc: required base64 string");
+  }
+  if (manifest.aadBound !== undefined && typeof manifest.aadBound !== "boolean") {
+    errors.push("aadBound: must be a boolean when present");
   }
   if (!Array.isArray(manifest.files)) {
     errors.push("files: required array");
@@ -118,6 +182,16 @@ function validate(manifest) {
         seenEnc[f.encryptedPath] = true;
       }
     }
+  }
+  if (manifest.keyScheme !== undefined && manifest.keyScheme !== KEY_SCHEME_BUNDLE) {
+    errors.push("keyScheme: must be '" + KEY_SCHEME_BUNDLE + "' when present, got " + JSON.stringify(manifest.keyScheme));
+  }
+  if (manifest.keyScheme === KEY_SCHEME_BUNDLE) {
+    if (!_isHex(manifest.bundleSalt, true) || manifest.bundleSalt.length !== BUNDLE_SALT_HEX_LENGTH) {
+      errors.push("bundleSalt: required " + BUNDLE_SALT_HEX_LENGTH + "-character hex string with keyScheme");
+    }
+  } else if (manifest.bundleSalt !== undefined) {
+    errors.push("bundleSalt: only valid with keyScheme '" + KEY_SCHEME_BUNDLE + "'");
   }
   if (manifest.metadata !== undefined &&
       (manifest.metadata === null || typeof manifest.metadata !== "object" || Array.isArray(manifest.metadata))) {
@@ -148,6 +222,66 @@ function validate(manifest) {
   return { ok: errors.length === 0, errors: errors };
 }
 
+/**
+ * @primitive b.backupManifest.create
+ * @signature b.backupManifest.create(opts?)
+ * @since     0.1.96
+ * @status    stable
+ * @related   b.backupManifest.serialize, b.backupManifest.sign, b.backupBundle.create
+ *
+ * Build a manifest object. The format version and framework name are this
+ * build's, `frameworkVersion` defaults to the running version and `createdAt`
+ * to now, so a manifest records the build that wrote it rather than what a
+ * caller claims.
+ *
+ * `vaultKeySalt` and `vaultKeyEnc` carry the sealed vault key, and `files` is
+ * the per-entry list. The result is validated before it is returned, so an
+ * incomplete manifest raises `backup-manifest/invalid` here rather than at
+ * restore time.
+ *
+ * `metadata` is copied rather than referenced. `aadBound`, `keyScheme` and
+ * `bundleSalt` are recorded only when supplied, which keeps a manifest from
+ * claiming a scheme the bundle does not use. `aadBound` must be a boolean,
+ * raising `backup-manifest/bad-input` otherwise: anything else was read as
+ * false, so a bundle whose entries are AAD-bound recorded that it was not and
+ * a restore would not know to apply the binding.
+ *
+ * @opts
+ *   frameworkVersion: string,   // default: the running framework version
+ *   createdAt:        string,   // ISO-8601; default: now
+ *   vaultKeySalt:     string,   // hex
+ *   vaultKeyEnc:      string,   // base64
+ *   files:            array,    // per-file entries
+ *   metadata:         object,   // copied into the manifest
+ *   aadBound:         boolean,  // recorded only when true
+ *   keyScheme:        string,   // recorded only when supplied
+ *   bundleSalt:       string,   // recorded only when supplied
+ *
+ * Each `files` entry needs `relativePath`, `encryptedPath`, `size`,
+ * `encryptedSize`, a 128-character hex `checksum` (the SHA3-512 of the
+ * plaintext), a hex `salt`, and a `kind` of `raw`, `vault-sealed` or
+ * `plaintext`. The two paths must be relative, with no `..`, no leading
+ * separator and no colon, so a manifest cannot direct a restore outside its
+ * destination or at an NTFS data stream.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var bytes = Buffer.from("the contents");
+ *   var manifest = b.backupManifest.create({
+ *     vaultKeySalt: "a1b2c3",
+ *     vaultKeyEnc:  "QUJDRA==",
+ *     files: [{
+ *       relativePath:  "app.db",
+ *       encryptedPath: "files/app.db.enc",
+ *       size:          bytes.length,
+ *       encryptedSize: bytes.length + 40,
+ *       checksum:      b.backupCrypto.checksum(bytes),
+ *       salt:          b.backupCrypto.newSalt(),
+ *       kind:          "raw",
+ *     }],
+ *   });
+ *   manifest.frameworkVersion;     // → the version that wrote it
+ */
 function create(opts) {
   opts = opts || {};
   var manifest = {
@@ -164,7 +298,14 @@ function create(opts) {
   if (opts.metadata && typeof opts.metadata === "object" && !Array.isArray(opts.metadata)) {
     manifest.metadata = Object.assign({}, opts.metadata);
   }
+  validateOpts.optionalBoolean(opts.aadBound,
+    "create: opts.aadBound (anything else was read as false, so a bundle whose " +
+    "entries are AAD-bound recorded that it was not, and a restore would not " +
+    "know to apply the binding)",
+    BackupManifestError, "backup-manifest/bad-input");
   if (opts.aadBound === true) manifest.aadBound = true;
+  if (opts.keyScheme !== undefined) manifest.keyScheme = opts.keyScheme;
+  if (opts.bundleSalt !== undefined) manifest.bundleSalt = opts.bundleSalt;
   var v = validate(manifest);
   if (!v.ok) {
     throw new BackupManifestError("backup-manifest/invalid",
@@ -195,6 +336,8 @@ function _canonical(manifest, includeSignature) {
   };
   if (manifest.metadata) canonical.metadata = manifest.metadata;
   if (manifest.aadBound === true) canonical.aadBound = true;
+  if (manifest.keyScheme !== undefined) canonical.keyScheme = manifest.keyScheme;
+  if (manifest.bundleSalt !== undefined) canonical.bundleSalt = manifest.bundleSalt;
   if (includeSignature && manifest.signature) {
     canonical.signature = {
       algorithm:   manifest.signature.algorithm,
@@ -207,17 +350,143 @@ function _canonical(manifest, includeSignature) {
   return canonical;
 }
 
+/**
+ * @primitive b.backupManifest.signingPayload
+ * @signature b.backupManifest.signingPayload(manifest)
+ * @since     0.8.44
+ * @status    stable
+ * @related   b.backupManifest.sign, b.backupManifest.verifySignature
+ *
+ * The exact bytes a manifest's signature covers: its canonical form with the
+ * signature block left out, as JSON with a trailing newline.
+ *
+ * A signer and a verifier both read this, so neither re-derives the payload
+ * from its own idea of the field order. The signature block is excluded
+ * because a signature cannot cover itself.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var payload = b.backupManifest.signingPayload(manifest);
+ *   payload.endsWith("\n");        // → true
+ */
 function signingPayload(manifest) {
   return JSON.stringify(_canonical(manifest, false), null, 2) + "\n";
 }
 
+/**
+ * @primitive b.backupManifest.serialize
+ * @signature b.backupManifest.serialize(manifest)
+ * @since     0.1.96
+ * @status    stable
+ * @related   b.backupManifest.parse, b.backupManifest.create
+ *
+ * Render a manifest as the JSON text written to disk, signature block
+ * included, with a trailing newline.
+ *
+ * The manifest is validated first, so `backup-manifest/invalid` is raised
+ * before anything is written. A rendered manifest above the size every reader
+ * accepts raises `backup-manifest/too-large` naming the file count, since the
+ * fix is to split the include list across more than one backup rather than to
+ * raise a limit the readers do not share.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var text = b.backupManifest.serialize(manifest);
+ *   b.backupManifest.parse(text).createdAt === manifest.createdAt;   // → true
+ */
 function serialize(manifest) {
   var v = validate(manifest);
   if (!v.ok) {
     throw new BackupManifestError("backup-manifest/invalid",
       "serialize: " + v.errors.join("; "));
   }
-  return JSON.stringify(_canonical(manifest, true), null, 2) + "\n";
+  var text = JSON.stringify(_canonical(manifest, true), null, 2) + "\n";
+  var byteLength = Buffer.byteLength(text, "utf8");
+  if (byteLength > MAX_MANIFEST_BYTES) {
+    throw new BackupManifestError("backup-manifest/too-large",
+      "serialize: the manifest for " + manifest.files.length + " files is " + byteLength +
+      " bytes, above the " + MAX_MANIFEST_BYTES + "-byte limit every manifest reader applies; " +
+      "split the include list across more than one backup");
+  }
+  return text;
+}
+
+/**
+ * @primitive b.backupManifest.readFile
+ * @signature b.backupManifest.readFile(manifestPath, opts?)
+ * @since     0.20.31
+ * @status    stable
+ * @related   b.backupManifest.readBuffer, b.backupManifest.parse
+ *
+ * Read a manifest from disk and return the validated object.
+ *
+ * The read is bounded at the manifest size limit, so a file that grew past it
+ * is refused rather than loaded, and the bytes are read through a descriptor
+ * that cannot be swapped between the check and the read.
+ *
+ * `errorFor` is a function, not an error class: it is called as
+ * `errorFor(kind, detail)` with the reason the read failed, one of `enoent`,
+ * `symlink`, `too-large`, `toctou`, `short-read` or `integrity`. Return an
+ * error and it is thrown; return nothing and the default is. This is how a
+ * restore surfaces a manifest read under its own code, and it is the same
+ * callback `readBuffer` takes.
+ *
+ * @opts
+ *   errorFor: object,   // function (kind, detail) returning the error to throw
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var manifest = b.backupManifest.readFile("./backups/2026-10-06/manifest.json");
+ *   manifest.files.length;
+ */
+function readFile(manifestPath, opts) {
+  opts = opts || {};
+  return parse(atomicFile.fdSafeReadSync(manifestPath, {
+    maxBytes: MAX_MANIFEST_BYTES, encoding: "utf8", errorFor: opts.errorFor,
+  }));
+}
+
+/**
+ * @primitive b.backupManifest.readBuffer
+ * @signature b.backupManifest.readBuffer(bytes, opts?)
+ * @since     0.20.31
+ * @status    stable
+ * @related   b.backupManifest.verifyBytes
+ *
+ * Read a manifest a caller already holds as bytes, under the same size limit
+ * `b.backupManifest.readFile` applies to one on disk. A storage backend whose
+ * manifest arrives from an object store has no path to hand to `readFile`,
+ * and calling `parse` on bytes it measured itself would put a second copy of
+ * the limit in the caller.
+ *
+ * Throws `backup-manifest/bad-input` when `bytes` is not a Buffer, and
+ * `backup-manifest/too-large` when the bytes exceed the limit
+ * `b.backupManifest.serialize` enforces on the writer. Parsing then throws
+ * `backup-manifest/bad-json` when the bytes are not valid JSON, and
+ * `backup-manifest/invalid` when they parse but do not match the v1 schema.
+ *
+ * @opts
+ *   errorFor: function,  // build the caller's own error class
+ *
+ * @example
+ *   var manifest = b.backupManifest.readBuffer(bytes);
+ *   manifest.files.length;                            // → 3
+ */
+function readBuffer(bytes, opts) {
+  opts = opts || {};
+  if (!Buffer.isBuffer(bytes)) {
+    throw new BackupManifestError("backup-manifest/bad-input",
+      "readBuffer: bytes must be a Buffer");
+  }
+  if (bytes.length > MAX_MANIFEST_BYTES) {
+    if (typeof opts.errorFor === "function") {
+      throw opts.errorFor("too-large", { size: bytes.length, max: MAX_MANIFEST_BYTES });
+    }
+    throw new BackupManifestError("backup-manifest/too-large",
+      "readBuffer: manifest is " + bytes.length + " bytes, above the " +
+      MAX_MANIFEST_BYTES + "-byte limit");
+  }
+  return parse(bytes.toString("utf8"));
 }
 
 function _signPayload(payload, who) {
@@ -255,20 +524,29 @@ function _verifyPayloadAgainstBlock(payload, sig, opts) {
   if (typeof sig.value !== "string" || sig.value.length === 0) {
     return { ok: false, reason: "signature.value is required" };
   }
-  var derivedFingerprint = null;
-  try {
-    var signerForFp = auditSign();
-    if (signerForFp && typeof signerForFp.fingerprintOf === "function") {
-      derivedFingerprint = signerForFp.fingerprintOf(sig.publicKey);
-    }
-  } catch (fpErr) {
-    return { ok: false, reason: "could not derive fingerprint from publicKey: " +
-      ((fpErr && fpErr.message) || String(fpErr)) };
+  var signer = auditSign();
+  if (signer.SUPPORTED_SIGNING_ALGS.indexOf(sig.algorithm) === -1) {
+    return { ok: false, reason: "signature.algorithm '" + sig.algorithm + "' is not an audit-sign algorithm (" +
+      signer.SUPPORTED_SIGNING_ALGS.join(", ") + ")" };
+  }
+  var keyObject;
+  try { keyObject = nodeCrypto.createPublicKey(sig.publicKey); }
+  catch (_e) {
+    return { ok: false, reason: "signature.publicKey is not a readable public key" };
+  }
+  if (keyObject.asymmetricKeyType !== sig.algorithm) {
+    return { ok: false, reason: "signature.publicKey is a " + keyObject.asymmetricKeyType +
+      " key, not the " + sig.algorithm + " key signature.algorithm names" };
+  }
+  if (typeof signer.fingerprintOf !== "function") {
+    return { ok: false, reason: "a signature is trusted by the fingerprint of its key, which requires audit-sign.fingerprintOf (unavailable)" };
+  }
+  var derivedFingerprint;
+  try { derivedFingerprint = signer.fingerprintOf(sig.publicKey); }
+  catch (e) {
+    return { ok: false, reason: "could not derive fingerprint from publicKey: " + ((e && e.message) || String(e)) };
   }
   if (typeof opts.expectedFingerprint === "string" && opts.expectedFingerprint.length > 0) {
-    if (derivedFingerprint === null) {
-      return { ok: false, reason: "fingerprint pinning requires audit-sign.fingerprintOf (unavailable)" };
-    }
     if (derivedFingerprint !== opts.expectedFingerprint) {
       return {
         ok: false,
@@ -277,36 +555,40 @@ function _verifyPayloadAgainstBlock(payload, sig, opts) {
         fingerprint: derivedFingerprint,
       };
     }
+  } else {
+    var trustedKey;
+    try { trustedKey = signer.getPublicKeyByFingerprint(derivedFingerprint); }
+    catch (_e) {
+      return { ok: false, reason: "no trusted signing key: pass opts.expectedFingerprint, or initialize " +
+        "b.auditSign so its active and rotated keys are trusted", fingerprint: derivedFingerprint };
+    }
+    if (trustedKey === null) {
+      return { ok: false, reason: "publicKey fingerprint=" + derivedFingerprint +
+        " is not the active or a rotated audit-sign key", fingerprint: derivedFingerprint };
+    }
   }
-  var sigBuf;
-  try { sigBuf = Buffer.from(sig.value, "base64"); }
-  catch (_e) {
+  if (!safeBuffer.isCanonicalBase64(sig.value)) {
     return { ok: false, reason: "signature.value is not valid base64" };
   }
+  var sigBuf = Buffer.from(sig.value, "base64");
   var ok;
   try {
-    var signer = auditSign();
-    if (signer && typeof signer.verify === "function") {
-      ok = signer.verify(payload, sigBuf, sig.publicKey);
-    } else {
-      ok = require("node:crypto").verify(null,
-        Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8"), sig.publicKey, sigBuf);
-    }
+    ok = nodeCrypto.verify(null, Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8"), keyObject, sigBuf);
   } catch (e) {
     return {
       ok:          false,
       reason:      "verify threw: " + ((e && e.message) || String(e)),
-      fingerprint: sig.fingerprint,
+      fingerprint: derivedFingerprint,
     };
   }
   if (!ok) {
     return {
       ok:          false,
       reason:      "signature did not verify under provided publicKey",
-      fingerprint: derivedFingerprint || sig.fingerprint,
+      fingerprint: derivedFingerprint,
     };
   }
-  return { ok: true, fingerprint: derivedFingerprint || sig.fingerprint };
+  return { ok: true, fingerprint: derivedFingerprint };
 }
 
 /**
@@ -320,8 +602,9 @@ function _verifyPayloadAgainstBlock(payload, sig, opts) {
  * detached `signature` block over the manifest's canonical bytes (the
  * serialization WITHOUT the signature field, so appending it doesn't change
  * the signed payload). Validates the manifest against the v1 schema first;
- * throws `backup-manifest/invalid` on a malformed manifest and
- * `backup-manifest/no-signer` when `b.auditSign.init()` hasn't run. For a
+ * throws `backup-manifest/invalid` on a malformed manifest,
+ * `backup-manifest/no-signer` when `b.auditSign.init()` hasn't run, and
+ * `backup-manifest/sign-failed` when the signer rejects the payload. For a
  * schema-agnostic alternative see `signBytes`.
  *
  * @example
@@ -353,9 +636,11 @@ function sign(manifest) {
  * manifest format reuses the same post-quantum signing keypair + fingerprint
  * pinning without adopting the framework schema.
  *
- * `canonicalBytes` is a Buffer (signed verbatim) or a string (signed as UTF-8).
+ * `canonicalBytes` is a Buffer (signed verbatim) or a string (signed as UTF-8);
+ * any other type throws `backup-manifest/bad-input`.
  * Returns `{ algorithm, publicKey, fingerprint, value, signedAt }`. Requires
- * `b.auditSign.init()` (throws `backup-manifest/no-signer` otherwise).
+ * `b.auditSign.init()` (throws `backup-manifest/no-signer` otherwise), and
+ * throws `backup-manifest/sign-failed` when the signer rejects the payload.
  *
  * @example
  *   var sig = b.backupManifest.signBytes(myCanonicalHeaderBuffer);
@@ -380,14 +665,21 @@ function signBytes(canonicalBytes) {
  * @related   b.backupManifest.sign, b.backupManifest.verifyBytes
  *
  * Verify a signed v1 backup manifest's detached `signature` block over its
- * canonical bytes. Returns `{ ok, reason?, fingerprint? }` — never throws — so
- * a caller decides whether a missing / mismatched signature is fatal. Pass
- * `opts.expectedFingerprint` to pin the active audit-sign key and refuse a
- * manifest signed under a different (rotated) key. For a schema-agnostic
- * alternative see `verifyBytes`.
+ * canonical bytes. Returns `{ ok, reason?, fingerprint? }` and does not throw,
+ * so a caller decides whether a missing or mismatched signature is fatal.
+ *
+ * The signature is trusted only under a known key. With
+ * `opts.expectedFingerprint`, the fingerprint computed from
+ * `signature.publicKey` must equal it. Without a pin, that key must be the
+ * active or a rotated `b.auditSign` key, and a process that has not run
+ * `b.auditSign.init()` gets `ok: false`. `signature.algorithm` must be one of
+ * `b.auditSign.SUPPORTED_SIGNING_ALGS` and must name the type of
+ * `signature.publicKey`. The `fingerprint` in the result is the one computed
+ * from the key, never the block's own `fingerprint` field. For a
+ * schema-agnostic alternative see `verifyBytes`.
  *
  * @opts
- *   expectedFingerprint: string,   // refuse a manifest whose fingerprint differs
+ *   expectedFingerprint: string,   // trust only the key with this fingerprint
  *
  * @example
  *   var v = b.backupManifest.verifySignature(manifest,
@@ -413,14 +705,15 @@ function verifySignature(manifest, opts) {
  *
  * Verify caller-supplied canonical bytes against a detached signature block
  * produced by `signBytes()` — the schema-agnostic counterpart of
- * `verifySignature()`. Returns `{ ok, reason?, fingerprint? }`. Pass
- * `opts.expectedFingerprint` to pin the active audit-sign key and refuse a
- * block signed under a different (rotated / historical) key. Falls back to
- * `node:crypto.verify` when audit-sign isn't initialized, so a downstream
- * verifier process can check a signature without holding the signing key.
+ * `verifySignature()`. Returns `{ ok, reason?, fingerprint? }`, and applies the
+ * same key trust as `verifySignature()`: the key must match
+ * `opts.expectedFingerprint`, or be the active or a rotated `b.auditSign` key.
+ * A verifier process that does not hold the signing key passes
+ * `expectedFingerprint`; without it and without `b.auditSign.init()`, the
+ * result is `ok: false`.
  *
  * @opts
- *   expectedFingerprint: string,   // refuse a block whose fingerprint differs
+ *   expectedFingerprint: string,   // trust only the key with this fingerprint
  *
  * @example
  *   var v = b.backupManifest.verifyBytes(headerBytes, sigBlock,
@@ -434,18 +727,38 @@ function verifyBytes(canonicalBytes, signatureBlock, opts) {
   return _verifyPayloadAgainstBlock(canonicalBytes, signatureBlock, opts);
 }
 
+/**
+ * @primitive b.backupManifest.parse
+ * @signature b.backupManifest.parse(jsonStr)
+ * @since     0.1.96
+ * @status    stable
+ * @related   b.backupManifest.serialize, b.backupManifest.validate
+ *
+ * Parse manifest text and return the validated object. Accepts a string or a
+ * Buffer; anything else raises `backup-manifest/bad-input`.
+ *
+ * The JSON is parsed through the bounded, prototype-safe parser, so a
+ * manifest carrying `__proto__` or exceeding the size limit is refused rather
+ * than materialized: `backup-manifest/bad-json` for text that will not parse,
+ * `backup-manifest/invalid` for a document that parses but is not a manifest.
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var manifest = b.backupManifest.parse(text);
+ *   manifest.framework;           // → the framework name that wrote it
+ */
 function parse(jsonStr) {
   if (typeof jsonStr !== "string" && !Buffer.isBuffer(jsonStr)) {
     throw new BackupManifestError("backup-manifest/bad-input",
       "parse: argument must be a string or Buffer");
   }
   var s = Buffer.isBuffer(jsonStr) ? jsonStr.toString("utf8") : jsonStr;
-  var obj;
-  try { obj = safeJson.parse(s, { maxBytes: C.BYTES.mib(16) }); }
-  catch (e) {
-    throw new BackupManifestError("backup-manifest/bad-json",
-      "parse: not valid JSON: " + ((e && e.message) || String(e)));
-  }
+  var obj = safeJson.parseTyped(s, {
+    maxBytes:   MAX_MANIFEST_BYTES,
+    errorClass: BackupManifestError,
+    code:       "backup-manifest/bad-json",
+    label:      "parse: not valid JSON",
+  });
   var v = validate(obj);
   if (!v.ok) {
     throw new BackupManifestError("backup-manifest/invalid",
@@ -459,6 +772,8 @@ module.exports = {
   validate:             validate,
   serialize:            serialize,
   parse:                parse,
+  readFile:             readFile,
+  readBuffer:           readBuffer,
   sign:                 sign,
   signBytes:            signBytes,
   signingPayload:       signingPayload,
@@ -466,6 +781,8 @@ module.exports = {
   verifyBytes:          verifyBytes,
   FORMAT_VERSION:       FORMAT_VERSION,
   FRAMEWORK_NAME:       FRAMEWORK_NAME,
+  KEY_SCHEME_BUNDLE:    KEY_SCHEME_BUNDLE,
+  MAX_MANIFEST_BYTES:   MAX_MANIFEST_BYTES,
   VALID_KINDS:          VALID_KINDS,
   BackupManifestError:  BackupManifestError,
 };

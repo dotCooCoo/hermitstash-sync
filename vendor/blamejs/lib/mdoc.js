@@ -51,6 +51,7 @@
  */
 
 var nodeCrypto = require("node:crypto");
+var nodeTypes = require("node:util").types;
 var C = require("./constants");
 var cbor = require("./cbor");
 var cose = require("./cose");
@@ -86,7 +87,7 @@ function _validityMs(v, name) {
   throw new MdocError("mdoc/bad-validity", "mdoc: validityInfo." + name + " is missing or malformed");
 }
 
-function _mapGet(m, k) { return m instanceof Map ? m.get(k) : (m ? m[k] : undefined); }
+function _mapGet(m, k) { return nodeTypes.isMap(m) ? m.get(k) : (m ? m[k] : undefined); }
 
 /**
  * @primitive b.mdoc.verifyIssuerSigned
@@ -106,12 +107,22 @@ function _mapGet(m, k) { return m instanceof Map ? m.get(k) : (m ? m[k] : undefi
  * disclosed element's digest is matched against the Mobile Security
  * Object (a mismatch or absence is refused). Pass
  * <code>opts.trustAnchorsPem</code> to also verify the issuer
- * certificate chain.
+ * certificate chain. A document-signer key that
+ * <code>b.crypto.compromisedKey</code> reports throws
+ * <code>cose/compromised-key</code>, and a chain through a trust anchor or
+ * certificate whose key is compromised throws
+ * <code>mdoc/compromised-key</code>. An MSO <code>deviceKey</code> that
+ * <code>b.crypto.compromisedKey</code> reports also throws
+ * <code>mdoc/compromised-key</code>. A <code>deviceKey</code> that
+ * <code>b.cose.importKey</code> cannot read is returned unchanged.
  *
  * @opts
  *   {
  *     algorithms:      string[],  // required — accepted COSE alg names (ES256/384/512, EdDSA)
  *     trustAnchorsPem: string|string[], // optional issuer roots — enables chain + validity verification
+ *     allowUntrustedIssuer: boolean,  // default false — accept the x5chain signer certificate without
+ *                                     // authenticating it; with it unset, omitting trustAnchorsPem
+ *                                     // raises mdoc/trust-anchors-required
  *     expectedDocType: string,    // require the MSO docType to match (e.g. "org.iso.18013.5.1.mDL")
  *     at:              Date,      // validity instant (default now); must be a valid Date
  *     maxBytes:        number,    // forwarded to b.cbor.decode
@@ -155,7 +166,7 @@ async function verifyIssuerSigned(issuerSigned, opts) {
     throw new MdocError("mdoc/no-cert", "mdoc.verifyIssuerSigned: issuerAuth has no x5chain certificate (label 33)");
   }
   var signerCert;
-  try { signerCert = new nodeCrypto.X509Certificate(chain[0]); }
+  try { signerCert = bCrypto._certificateFromDer(chain[0]); }
   catch (e) {
     throw new MdocError("mdoc/bad-cert", "mdoc.verifyIssuerSigned: x5chain certificate is not valid DER: " + ((e && e.message) || e));
   }
@@ -186,7 +197,7 @@ async function verifyIssuerSigned(issuerSigned, opts) {
   }
 
   var vi = _mapGet(mso, "validityInfo");
-  if (!(vi instanceof Map) && (!vi || typeof vi !== "object")) {
+  if (!nodeTypes.isMap(vi) && (!vi || typeof vi !== "object")) {
     throw new MdocError("mdoc/malformed", "mdoc.verifyIssuerSigned: MSO has no validityInfo");
   }
   var nowMs = at.getTime();
@@ -197,13 +208,13 @@ async function verifyIssuerSigned(issuerSigned, opts) {
 
   var valueDigests = _mapGet(mso, "valueDigests");
   var out = {};
-  if (nameSpaces instanceof Map) {
+  if (nodeTypes.isMap(nameSpaces)) {
     var nsNames = Array.from(nameSpaces.keys());
     for (var ni = 0; ni < nsNames.length; ni += 1) {
       var ns = nsNames[ni];
       var items = nameSpaces.get(ns);
       var nsDigests = _mapGet(valueDigests, ns);
-      if (!Array.isArray(items) || !(nsDigests instanceof Map)) {
+      if (!Array.isArray(items) || !nodeTypes.isMap(nsDigests)) {
         throw new MdocError("mdoc/malformed", "mdoc.verifyIssuerSigned: namespace '" + ns + "' has no matching valueDigests");
       }
       out[ns] = {};
@@ -244,6 +255,7 @@ async function verifyIssuerSigned(issuerSigned, opts) {
 
   var deviceKeyInfo = _mapGet(mso, "deviceKeyInfo");
   var deviceKey = deviceKeyInfo ? _mapGet(deviceKeyInfo, "deviceKey") : undefined;
+  if (deviceKey !== undefined) _refuseCompromisedDeviceKey(deviceKey);
 
   return {
     docType:      docType,
@@ -280,6 +292,8 @@ async function verifyIssuerSigned(issuerSigned, opts) {
  * OpenID4VP — defines it). The MAC variant (<code>deviceMac</code> /
  * COSE_Mac0, used in proximity flows with a reader ephemeral key) is not
  * yet supported and is refused with <code>mdoc/device-mac-unsupported</code>.
+ * A device key that <code>b.crypto.compromisedKey</code> reports, in any of
+ * its accepted forms, throws <code>cose/compromised-key</code>.
  *
  * @opts
  *   {
@@ -314,7 +328,7 @@ async function verifyDeviceAuth(opts) {
   var deviceKeyObj;
   if (opts.deviceKey && typeof opts.deviceKey === "object" && typeof opts.deviceKey.asymmetricKeyType === "string") {
     deviceKeyObj = opts.deviceKey;
-  } else if (opts.deviceKey instanceof Map || (opts.deviceKey && typeof opts.deviceKey === "object")) {
+  } else if (nodeTypes.isMap(opts.deviceKey) || (opts.deviceKey && typeof opts.deviceKey === "object")) {
     deviceKeyObj = cose.importKey(opts.deviceKey);
   } else if (typeof opts.deviceKey === "string") {
     deviceKeyObj = opts.deviceKey;
@@ -322,7 +336,7 @@ async function verifyDeviceAuth(opts) {
     throw new MdocError("mdoc/no-device-key", "mdoc.verifyDeviceAuth: opts.deviceKey is required (a COSE_Key or KeyObject)");
   }
 
-  var ds = (Buffer.isBuffer(opts.deviceSigned) || opts.deviceSigned instanceof Uint8Array)
+  var ds = nodeTypes.isUint8Array(opts.deviceSigned)
     ? cbor.decode(_bytes(opts.deviceSigned, "deviceSigned"), decodeOpts) : opts.deviceSigned;
   var deviceNameSpaces = _mapGet(ds, "nameSpaces");
   var deviceAuth = _mapGet(ds, "deviceAuth");
@@ -341,7 +355,7 @@ async function verifyDeviceAuth(opts) {
     throw new MdocError("mdoc/no-device-signature", "mdoc.verifyDeviceAuth: deviceAuth has no deviceSignature");
   }
 
-  var st = (Buffer.isBuffer(opts.sessionTranscript) || opts.sessionTranscript instanceof Uint8Array)
+  var st = nodeTypes.isUint8Array(opts.sessionTranscript)
     ? cbor.decode(_bytes(opts.sessionTranscript, "sessionTranscript"), decodeOpts) : opts.sessionTranscript;
 
   var deviceAuthentication = ["DeviceAuthentication", st, opts.docType, deviceNameSpaces];
@@ -359,9 +373,9 @@ async function verifyDeviceAuth(opts) {
   var deviceNamespaces = {};
   try {
     var dns = cbor.decode(deviceNameSpaces.value, decodeOpts);
-    if (dns instanceof Map) {
+    if (nodeTypes.isMap(dns)) {
       dns.forEach(function (items, ns) {
-        deviceNamespaces[ns] = items instanceof Map ? Object.fromEntries(items) : items;
+        deviceNamespaces[ns] = nodeTypes.isMap(items) ? Object.fromEntries(items) : items;
       });
     }
   } catch (_e) { /* device-released namespaces are optional + advisory */ }
@@ -369,37 +383,28 @@ async function verifyDeviceAuth(opts) {
   return { docType: opts.docType, alg: out.alg, deviceNamespaces: deviceNamespaces };
 }
 
+function _refuseCompromisedDeviceKey(deviceKey) {
+  try { cose.importKey(deviceKey); }
+  catch (e) {
+    if (e && e.code === "cose/compromised-key") {
+      throw new MdocError("mdoc/compromised-key", "mdoc.verifyIssuerSigned: the MSO deviceKey is refused: " + e.message);
+    }
+  }
+}
+
 function _verifyChain(chainDer, anchorsPem, at) {
-  var anchors = anchorsPem.map(function (p) { return new nodeCrypto.X509Certificate(p); });
-  var pool = chainDer.map(function (d) { return new nodeCrypto.X509Certificate(d); });
-  var current = pool[0];
-  var atMs = at.getTime();
-  var steps = 0;
-  while (steps <= pool.length + 1) {
-    _assertValidAt(current, atMs);
-    for (var a = 0; a < anchors.length; a += 1) {
-      if (_issued(anchors[a], current)) { _assertValidAt(anchors[a], atMs); return; }
-      if (current.fingerprint256 === anchors[a].fingerprint256) return;
-    }
-    var parent = null;
-    for (var p = 0; p < pool.length; p += 1) {
-      if (pool[p].fingerprint256 !== current.fingerprint256 && _issued(pool[p], current)) { parent = pool[p]; break; }
-    }
-    if (!parent) {
-      throw new MdocError("mdoc/untrusted-chain", "mdoc.verifyIssuerSigned: issuer certificate does not chain to a supplied trust anchor");
-    }
-    current = parent;
-    steps += 1;
-  }
-  throw new MdocError("mdoc/chain-loop", "mdoc.verifyIssuerSigned: certificate chain did not terminate");
-}
-function _issued(issuer, subject) {
-  return x509Chain.issuerValidlyIssued(issuer, subject);
-}
-function _assertValidAt(cert, atMs) {
-  if (atMs < cert.validFromDate.getTime() || atMs > cert.validToDate.getTime()) {
-    throw new MdocError("mdoc/cert-expired", "mdoc.verifyIssuerSigned: certificate '" + cert.subject + "' is not valid at the asserted time");
-  }
+  var anchors = anchorsPem.map(function (p) { return bCrypto._x509(p); });
+  var pool = chainDer.map(function (d) { return bCrypto._certificateFromDer(d); });
+  var res = x509Chain.resolveChain(pool[0], pool, anchors, { validAt: x509Chain._validAt(at) });
+  var refusal = x509Chain._chainRefusal(res, {
+    compromised:      "mdoc/compromised-key",
+    invalidCert:      "mdoc/cert-expired",
+    pathlen:          "mdoc/chain-pathlen-exceeded",
+    nameconstraint:   "mdoc/name-constraint-violation",
+    untrusted:        "mdoc/untrusted-chain",
+    untrustedMessage: "issuer certificate does not chain to a supplied trust anchor",
+  }, { leaf: pool[0], pool: pool, anchors: anchors });
+  if (refusal !== null) throw new MdocError(refusal.code, "mdoc.verifyIssuerSigned: " + refusal.message);
 }
 
 module.exports = {

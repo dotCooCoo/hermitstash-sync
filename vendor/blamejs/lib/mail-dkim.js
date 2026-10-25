@@ -49,6 +49,7 @@ var validateOpts = require("./validate-opts");
 var ARC_AMS_REUSE = require("./mail-arc-reuse-token");
 var C           = require("./constants");
 var networkDnsResolver = lazyRequire(function () { return require("./network-dns-resolver"); });
+var bCrypto     = require("./crypto");
 var { FrameworkError } = require("./framework-error");
 
 class DkimError extends FrameworkError {
@@ -61,6 +62,10 @@ class DkimError extends FrameworkError {
 }
 
 var ALLOWED_ALGORITHMS = ["rsa-sha256", "ed25519-sha256"];
+var ALGORITHM_KEY_TYPES = Object.freeze({
+  "rsa-sha256":     "rsa",
+  "ed25519-sha256": "ed25519",
+});
 var ALLOWED_CANON = [
   "relaxed/relaxed",
   "simple/simple",
@@ -75,7 +80,7 @@ var RSA_LEGACY_MIN_BITS = 1024;
 
 function _canonHeaderRelaxed(name, value) {
   var unfolded = structuredFields.unfoldHeaderContinuations(value);
-  var trimmed = unfolded.replace(/[ \t]+/g, " ").replace(/^[ \t]+|[ \t]+$/g, "");
+  var trimmed = unfolded.replace(/[ \t]+/g, " ").replace(/^ | $/g, "");
   return name.toLowerCase() + ":" + trimmed + "\r\n";
 }
 
@@ -249,13 +254,24 @@ function create(opts) {
   var auditOn = opts.audit !== false;
   var keyObject;
   try {
-    keyObject = typeof opts.privateKey === "string" || Buffer.isBuffer(opts.privateKey)
-      ? nodeCrypto.createPrivateKey({ key: opts.privateKey, format: "pem" })
-      : opts.privateKey;
+    if (opts.privateKey instanceof nodeCrypto.KeyObject) keyObject = opts.privateKey;
+    else if (typeof opts.privateKey === "string" || Buffer.isBuffer(opts.privateKey)) {
+      keyObject = nodeCrypto.createPrivateKey({ key: opts.privateKey, format: "pem" });
+    } else keyObject = nodeCrypto.createPrivateKey(opts.privateKey);
   } catch (e) {
     throw new DkimError("dkim/bad-private-key",
       "privateKey could not be parsed: " + ((e && e.message) || String(e)));
   }
+  var wantKeyType = ALGORITHM_KEY_TYPES[algorithm];
+  var haveKeyType = keyObject.asymmetricKeyType;
+  if (haveKeyType !== wantKeyType) {
+    throw new DkimError("dkim/key-algorithm-mismatch",
+      "algorithm '" + algorithm + "' signs with a " + wantKeyType + " key, but " +
+      "privateKey is " + haveKeyType + " (RFC 6376 section 3.3.3, RFC 8463 section 3)");
+  }
+  bCrypto.assertNotCompromised(keyObject, {
+    errorClass: DkimError, code: "dkim/compromised-key", label: "privateKey",
+  });
 
   function _emit(action, info) {
     if (!auditOn) return;
@@ -300,24 +316,9 @@ function create(opts) {
     sigTags.push("b=");
     var unsignedSigValue = sigTags.join("; ");
 
-    var headerNamesLc = parsedHeaders.map(function (h) { return h.name.toLowerCase(); });
-    var missingHeaders = [];
-    var canonicalizedHeaders = "";
-    for (var j = 0; j < headersToSign.length; j++) {
-      var wantLc = headersToSign[j].toLowerCase();
-      var idx = -1;
-      for (var k = 0; k < headerNamesLc.length; k++) {
-        if (headerNamesLc[k] === wantLc) idx = k;
-      }
-      if (idx === -1) {
-        missingHeaders.push(headersToSign[j]);
-        continue;
-      }
-      var h = parsedHeaders[idx];
-      canonicalizedHeaders += canonHeader === "simple"
-        ? _canonHeaderSimple(h.name, h.value)
-        : _canonHeaderRelaxed(h.name, h.value);
-    }
+    var _selected = _canonicalizeSignedHeaders(parsedHeaders, headersToSign, canonHeader);
+    var canonicalizedHeaders = _selected.canonicalized;
+    var missingHeaders = _selected.absent;
     if (missingHeaders.length > 0 && auditOn) {
       try {
         audit().safeEmit({
@@ -370,9 +371,20 @@ function create(opts) {
   };
 }
 
-function _parseDkimTagList(value) {
+function _parseDkimTagPairs(value) {
   var pairs = structuredFields.parseTagList(value,
     { unfold: true, stripValueWs: true, lowerKey: false });
+  var seen = Object.create(null);
+  for (var i = 0; i < pairs.length; i += 1) {
+    if (seen[pairs[i][0]] === true) return null;
+    seen[pairs[i][0]] = true;
+  }
+  return pairs;
+}
+
+function _parseDkimTagList(value) {
+  var pairs = _parseDkimTagPairs(value);
+  if (pairs === null) return null;
   var tags = {};
   for (var i = 0; i < pairs.length; i += 1) tags[pairs[i][0]] = pairs[i][1];
   return tags;
@@ -396,20 +408,32 @@ function _parseDkimNumericDate(raw) {
 }
 
 function _selectorTxtToKeyTags(txtRecords) {
-  var joined = "";
-  if (Array.isArray(txtRecords)) {
-    for (var i = 0; i < txtRecords.length; i += 1) {
-      var rec = txtRecords[i];
-      joined = Array.isArray(rec) ? rec.join("") : String(rec);
-      if (joined.indexOf("v=DKIM1") === 0 || joined.indexOf("p=") !== -1) break;
+  var records = Array.isArray(txtRecords) ? txtRecords : [txtRecords];
+  var sawRecord = false;
+  var withoutKey = null;
+  for (var i = 0; i < records.length; i += 1) {
+    var rec = records[i];
+    var joined = Array.isArray(rec) ? rec.join("") : String(rec == null ? "" : rec);
+    if (joined.length === 0) continue;
+    sawRecord = true;
+    var pairs = _parseDkimTagPairs(joined);
+    if (pairs === null) continue;
+    var versionAt = -1;
+    for (var k = 0; k < pairs.length; k += 1) {
+      if (pairs[k][0] === "v") { versionAt = k; break; }
     }
-  } else {
-    joined = String(txtRecords || "");
+    if (versionAt > 0 || (versionAt === 0 && pairs[0][1] !== "DKIM1")) continue;
+    var tags = {};
+    for (var t = 0; t < pairs.length; t += 1) tags[pairs[t][0]] = pairs[t][1];
+    if (Object.prototype.hasOwnProperty.call(tags, "p")) return tags;
+    if (withoutKey === null) withoutKey = tags;
   }
-  if (joined.length === 0) {
+  if (withoutKey !== null) return withoutKey;
+  if (!sawRecord) {
     throw new DkimError("dkim/key-not-found", "DKIM key record is empty");
   }
-  return _parseDkimTagList(joined);
+  throw new DkimError("dkim/key-not-found",
+    "no DKIM key record at the selector starts with v=DKIM1 or omits v= (RFC 6376 §3.6.1)");
 }
 
 var DKIM_KEY_CACHE = new Map();
@@ -468,6 +492,51 @@ function _pemFromB64KeyMaterial(b64) {
   return pem;
 }
 
+function _importKeyRecord(p, label, algorithm, minRsaBits) {
+  var wantKeyType = Object.prototype.hasOwnProperty.call(ALGORITHM_KEY_TYPES, algorithm)
+    ? ALGORITHM_KEY_TYPES[algorithm] : null;
+  if (wantKeyType === null) {
+    return { key: null, warnings: [], verdict: { result: "permerror",
+      errors: [label + ": unsupported algorithm '" + algorithm + "'"] } };
+  }
+  var keyObj;
+  try { keyObj = nodeCrypto.createPublicKey(_pemFromB64KeyMaterial(p)); }
+  catch (e) {
+    return { key: null, warnings: [], verdict: { result: "permerror",
+      errors: [label + " parse failed: " + ((e && e.message) || String(e))] } };
+  }
+  if (keyObj.asymmetricKeyType !== wantKeyType) {
+    return { key: null, warnings: [], verdict: { result: "permerror",
+      errors: [label + " type " + keyObj.asymmetricKeyType + " does not match a=" + algorithm +
+               ", which needs " + wantKeyType + " (RFC 6376 §3.3, RFC 8463 §3)"] } };
+  }
+  var found;
+  try { found = bCrypto.compromisedKey(keyObj); }
+  catch (e2) {
+    return { key: null, warnings: [], verdict: { result: "permerror",
+      errors: [label + " could not be checked: " + ((e2 && e2.message) || String(e2))] } };
+  }
+  if (found !== null) {
+    return { key: null, warnings: [], verdict: { result: "fail",
+      errors: [label + " is a compromised key: " + found.reason] } };
+  }
+  var warnings = [];
+  if (wantKeyType === "rsa") {
+    var floor = (typeof minRsaBits === "number" && isFinite(minRsaBits) && minRsaBits >= RSA_LEGACY_MIN_BITS)
+      ? Math.floor(minRsaBits) : RSA_MIN_BITS;
+    var modBits = (keyObj.asymmetricKeyDetails && keyObj.asymmetricKeyDetails.modulusLength) || 0;
+    if (modBits < floor) {
+      return { key: null, warnings: [], verdict: { result: "fail",
+        errors: [label + " is too small: RSA " + modBits + " bits (minimum " + floor +
+                 "; RFC 8301 §3.2 requires 1024 and recommends 2048)"] } };
+    }
+    if (modBits < RSA_WEAK_BITS) {
+      warnings.push("rsa-key-weak: " + modBits + " bits (< " + RSA_WEAK_BITS + ")");
+    }
+  }
+  return { key: keyObj, warnings: warnings, verdict: null };
+}
+
 async function _fetchDkimKey(domain, selector, dnsLookup) {
   var qname = selector + "._domainkey." + domain;
   var cached = _cacheGet(qname);
@@ -487,6 +556,36 @@ async function _fetchDkimKey(domain, selector, dnsLookup) {
   var tags = _selectorTxtToKeyTags(records);
   _cachePut(qname, tags);
   return tags;
+}
+
+function _canonicalizeSignedHeaders(parsedHeaders, headerNames, canonHeader, excludeIndex) {
+  var lcNames = parsedHeaders.map(function (h) { return h.name.toLowerCase(); });
+  var skip = (typeof excludeIndex === "number") ? excludeIndex : -1;
+  var consumed = Object.create(null);
+  var canonicalized = "";
+  var absent = [];
+  for (var j = 0; j < headerNames.length; j += 1) {
+    var orig = headerNames[j];
+    var want = String(orig == null ? "" : orig).toLowerCase();
+    if (want.length === 0) continue;
+    var already = consumed[want] || 0;
+    var found = -1;
+    var seen = 0;
+    for (var k = lcNames.length - 1; k >= 0; k -= 1) {
+      if (k === skip) continue;
+      if (lcNames[k] === want) {
+        seen += 1;
+        if (seen === already + 1) { found = k; break; }
+      }
+    }
+    if (found === -1) { absent.push(orig); continue; }
+    consumed[want] = already + 1;
+    var h = parsedHeaders[found];
+    canonicalized += canonHeader === "simple"
+      ? _canonHeaderSimple(h.name, h.value)
+      : _canonHeaderRelaxed(h.name, h.value);
+  }
+  return { canonicalized: canonicalized, absent: absent };
 }
 
 function _findDkimSignatureHeaders(parsedHeaders) {
@@ -563,7 +662,7 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
   if (actualBh !== expectedBh) {
     return { result: "fail", errors: ["body hash mismatch"] };
   }
-  if (lcap !== undefined && !verifyOpts.acceptBodyLengthLimit) {
+  if (lcap !== undefined && verifyOpts.acceptBodyLengthLimit !== true) {
     var fullCanon = canonBody === "simple" ? _canonBodySimple(body) : _canonBodyRelaxed(body);
     if (lcap < Buffer.byteLength(fullCanon, "latin1")) {
       return { result: "fail",
@@ -579,18 +678,9 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
     return { result: "permerror",
              errors: ["DKIM-Signature h= tag does not include 'from' (RFC 6376 §3.5)"] };
   }
-  var lcNames = parsedHeaders.map(function (h) { return h.name.toLowerCase(); });
-  var canonicalizedHeaders = "";
-  for (var j = 0; j < headerNames.length; j += 1) {
-    var want = headerNames[j];
-    if (want.length === 0) continue;
-    var idx = lcNames.lastIndexOf(want);
-    if (idx === -1) continue;
-    var h = parsedHeaders[idx];
-    canonicalizedHeaders += canonHeader === "simple"
-      ? _canonHeaderSimple(h.name, h.value)
-      : _canonHeaderRelaxed(h.name, h.value);
-  }
+  var canonicalizedHeaders = _canonicalizeSignedHeaders(
+    parsedHeaders, headerNames, canonHeader,
+    typeof sigHeader.index === "number" ? sigHeader.index : -1).canonicalized;
   var unsignedSigValue = _stripBTagValue(sigHeader.value);
   var sigCanonName = verifyOpts.arcAmsReuse ? "ARC-Message-Signature" : sigHeader.name;
   canonicalizedHeaders += canonHeader === "simple"
@@ -601,39 +691,19 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
   if (typeof sigB64 !== "string") {
     return { result: "permerror", errors: ["DKIM-Signature missing b="] };
   }
-  var sigBuf = Buffer.from(sigB64, "base64");
-  var pem = _pemFromB64KeyMaterial(keyTags.p);
-  var keyObj;
-  try { keyObj = nodeCrypto.createPublicKey(pem); }
-  catch (e) {
-    return { result: "permerror",
-             errors: ["DKIM key parse failed: " + ((e && e.message) || String(e))] };
+  if (!safeBuffer.isCanonicalBase64(sigB64)) {
+    return { result: "permerror", errors: ["DKIM-Signature b= is not base64 (RFC 6376 §3.5)"] };
   }
-
-  var nodeAlgo = algorithm === "rsa-sha256"     ? "sha256" :
-                 algorithm === "ed25519-sha256" ? null     : null;
+  var sigBuf = Buffer.from(sigB64, "base64");
   if (algorithm !== "rsa-sha256" && algorithm !== "ed25519-sha256") {
     return { result: "permerror",
              errors: ["unsupported DKIM algorithm '" + algorithm + "'"] };
   }
-
-  var operatorMinBits = (typeof verifyOpts.minRsaBits === "number" &&
-                          isFinite(verifyOpts.minRsaBits) &&
-                          verifyOpts.minRsaBits >= RSA_LEGACY_MIN_BITS)
-                         ? Math.floor(verifyOpts.minRsaBits)
-                         : RSA_MIN_BITS;
-  var warnings = [];
-  if (algorithm === "rsa-sha256" && keyObj.asymmetricKeyType === "rsa") {
-    var modBits = (keyObj.asymmetricKeyDetails && keyObj.asymmetricKeyDetails.modulusLength) || 0;
-    if (modBits > 0 && modBits < operatorMinBits) {
-      return { result: "fail",
-               errors: ["RSA key too small: " + modBits + " bits (minimum " + operatorMinBits +
-                        " — RFC 8301bis + 2024 bulk-sender)"] };
-    }
-    if (modBits > 0 && modBits < RSA_WEAK_BITS) {
-      warnings.push("rsa-key-weak: " + modBits + " bits (< " + RSA_WEAK_BITS + ")");
-    }
-  }
+  var nodeAlgo = algorithm === "rsa-sha256" ? "sha256" : null;
+  var imported = _importKeyRecord(keyTags.p, "DKIM key", algorithm, verifyOpts.minRsaBits);
+  if (imported.verdict) return imported.verdict;
+  var keyObj = imported.key;
+  var warnings = imported.warnings.slice();
   if (sigTags.l !== undefined) {
     warnings.push("l-tag-present: append-after-signature exposure (RFC 6376 §8.2)");
   }
@@ -654,6 +724,53 @@ function _verifySingleSignature(rfc822, parsedHeaders, sigHeader, keyTags, sigTa
 var DKIM_CLOCK_SKEW_MS_MAX = C.TIME.hours(24);
 var DKIM_CLOCK_SKEW_MS_DEFAULT = C.TIME.minutes(5);
 
+/**
+ * @primitive b.mail.dkim.verify
+ * @signature b.mail.dkim.verify(rfc822, opts?)
+ * @since     0.7.31
+ * @status    stable
+ * @compliance soc2
+ * @related   b.mail.dkim.bootstrap
+ *
+ * Verify every `DKIM-Signature` on an RFC 5322 message against the public key
+ * each one names in DNS. Resolves an **array**, one entry per signature it
+ * examined, each `{ result, errors }` where `result` is `"pass"`, `"fail"`,
+ * `"none"`, `"permerror"` or `"temperror"`. A message carrying no signature
+ * resolves a single `"none"` entry rather than an empty array, so a caller
+ * reads the same shape either way. A message carrying more signatures than
+ * `maxSignatures` resolves a single `"policy"` entry and no signature is
+ * checked.
+ *
+ * Two refusals are on by default and are the reason to prefer this over a bare
+ * signature check. A signature whose `l=` tag covers less than the canonical
+ * body fails, because the bytes past that length are unsigned and anyone can
+ * append to them after the fact (RFC 6376 §8.2). And an RSA key below 2048 bits
+ * fails, above the 1024 RFC 8301 §3.2 permits.
+ *
+ * The selector key must be the type the signature's `a=` tag names: an RSA key
+ * for `rsa-sha256` and an Ed25519 key for `ed25519-sha256`. Any other key is a
+ * `"permerror"` whose error reads `DKIM key type <type> does not match a=<alg>`,
+ * whatever the record's `k=` tag says. A selector key that
+ * `b.crypto.compromisedKey` reports fails the signature with the error
+ * `DKIM key is a compromised key: <reason>`, and one that
+ * `b.crypto.compromisedKey` cannot read is a `"permerror"` whose error reads
+ * `DKIM key could not be checked: <reason>`.
+ *
+ * @opts
+ *   dnsLookup:             function,   // (name, type) → records, for the key TXT lookup; defaults to the framework resolver
+ *   clockSkewMs:           number,     // tolerance on a signature's t= and x= tags; default 5 minutes, ceiling 24 hours
+ *   maxSignatures:         number,     // how many signatures are examined; default 8, ceiling 16, at least 1. A message may carry more than anyone wants to verify
+ *   minRsaBits:            number,     // refuse an RSA key below this; default 2048. A value under 1024 is ignored and 2048 used, since RFC 8301 §3.2 makes 1024 the floor
+ *   acceptBodyLengthLimit: boolean,    // accept a signature whose l= tag leaves body content unsigned; default false
+ *   audit:                 boolean,    // false turns off the b.audit emission; on otherwise
+ *
+ * @example
+ *   var b = require("blamejs");
+ *   var results = await b.mail.dkim.verify(
+ *     "From: a@example.com\r\nSubject: x\r\n\r\nbody\r\n", { audit: false });
+ *   results[0].result;   // → "none"
+ *   results[0].errors;   // → [ "no DKIM-Signature headers" ]
+ */
 async function verify(rfc822, opts) {
   if ((!Buffer.isBuffer(rfc822) && typeof rfc822 !== "string") || rfc822.length === 0) {
     throw new DkimError("dkim/bad-input",
@@ -679,6 +796,12 @@ async function verify(rfc822, opts) {
   } else {
     clockSkewMs = Math.floor(opts.clockSkewMs);
   }
+
+  validateOpts.optionalBoolean(opts.acceptBodyLengthLimit,
+    "mail.dkim.verify: opts.acceptBodyLengthLimit (accepts a signature whose l= " +
+    "tag leaves body content unsigned; a non-boolean read as true would turn off " +
+    "the RFC 6376 section 8.2 append-after-signature check)",
+    DkimError, "dkim/bad-accept-body-length-limit");
 
   var maxSignatures = DKIM_MAX_SIGNATURES_PER_MESSAGE;
   if (opts.maxSignatures !== undefined) {
@@ -726,6 +849,11 @@ async function verify(rfc822, opts) {
   var results = [];
   for (var i = 0; i < sigHeaders.length; i += 1) {
     var sigTags = _parseDkimTagList(sigHeaders[i].value);
+    if (sigTags === null) {
+      results.push({ d: null, s: null, alg: null, result: "permerror",
+        errors: ["DKIM-Signature repeats a tag name (RFC 6376 §3.2)"] });
+      continue;
+    }
     var d = sigTags.d;
     var s = sigTags.s;
     var alg = sigTags.a;
@@ -856,7 +984,7 @@ function dualSigner(opts) {
  * Default algorithm is `ed25519-sha256` (RFC 8463): smaller DNS record,
  * faster signing, modern crypto. Operators with receivers that don't yet
  * support Ed25519 pass `algorithm: "rsa-sha256"` for RFC 6376 (defaults
- * to 2048-bit RSA per RFC 8301 §3.1 guidance — opt up with `rsaBits`).
+ * to 2048-bit RSA, the size RFC 8301 §3.2 recommends; opt up with `rsaBits`).
  * Passing `algorithm: "dual"` mints BOTH keypairs and returns a
  * `b.mail.dkim.dualSigner`-shaped signer that emits two DKIM-Signature
  * headers (one per alg) for max receiver compat per RFC 8463 §3 dual-
@@ -867,7 +995,7 @@ function dualSigner(opts) {
  *   selector:   string,           // required — RFC 6376 §3.1 selector (the `s1` in s1._domainkey.example.com)
  *   algorithm:  "ed25519-sha256" | "rsa-sha256" | "dual",
  *                                  // default: "ed25519-sha256"
- *   rsaBits:    number,           // RSA-only; default 2048; refused below 1024 (RFC 8301 §3.1)
+ *   rsaBits:    number,           // RSA-only; default 2048; refused below 1024 (RFC 8301 §3.2)
  *   rsaSelector: string,          // dual-only; selector for the RSA key (defaults to selector + "-rsa")
  *
  * @example
@@ -920,8 +1048,8 @@ function bootstrap(opts) {
     if (typeof bits !== "number" || !isFinite(bits) || bits < RSA_LEGACY_MIN_BITS || (bits % 1) !== 0) {
       throw new DkimError("dkim/bad-rsa-bits",
         "b.mail.dkim.bootstrap: opts.rsaBits must be an integer >= " + RSA_LEGACY_MIN_BITS +
-        " (RFC 8301 §3.1 floor; default " + RSA_MIN_BITS +
-        " per RFC 8301bis + 2024 bulk-sender)");
+        " (RFC 8301 §3.2 requires 1024; the default is " + RSA_MIN_BITS +
+        ", the size §3.2 recommends)");
     }
     return _bootstrapSingle("rsa-sha256", opts.domain, opts.selector, bits);
   }
@@ -1026,6 +1154,9 @@ module.exports = {
   bootstrap:   bootstrap,
   verify:      verify,
   _resetDkimKeyCacheForTest: _resetDkimKeyCacheForTest,
+  _selectKeyRecordTags:      _selectorTxtToKeyTags,
+  _importKeyRecord:          _importKeyRecord,
+  _parseTagList:             _parseDkimTagList,
   dualSigner:  dualSigner,
   DkimError:   DkimError,
   RSA_MIN_BITS:               RSA_MIN_BITS,
@@ -1034,6 +1165,7 @@ module.exports = {
   DKIM_MAX_SIGNATURES_PER_MESSAGE_CEILING: DKIM_MAX_SIGNATURES_PER_MESSAGE_CEILING,
   DKIM_CLOCK_SKEW_MS_MAX:     DKIM_CLOCK_SKEW_MS_MAX,
   canonHeaderRelaxed:         _canonHeaderRelaxed,
+  canonicalizeSignedHeaders:  _canonicalizeSignedHeaders,
   _canonHeaderRelaxedForTest: _canonHeaderRelaxed,
   _canonBodyRelaxedForTest:   _canonBodyRelaxed,
   _canonBodySimpleForTest:    _canonBodySimple,

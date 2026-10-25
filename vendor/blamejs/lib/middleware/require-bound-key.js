@@ -6,6 +6,7 @@ var C = require("../constants");
 var defineClass = require("../framework-error").defineClass;
 var lazyRequire = require("../lazy-require");
 var validateOpts = require("../validate-opts");
+var requireMtls = require("./require-mtls");
 var denyResponse = require("./deny-response").denyResponse;
 
 var bCrypto = lazyRequire(function () { return require("../crypto"); });
@@ -45,9 +46,30 @@ function _timingSafeStringEqual(a, b) {
  * JSON identifying which check failed; audits the api-key id (not
  * the secret) on every decision.
  *
+ * For a key with `peerCertFingerprints`, it refuses a pinned certificate
+ * with HTTP 403 and reason `compromised-key` when `req.peerCert`'s chain
+ * carries a compromised key (`b.crypto.compromisedKey`). When `req.peerCert`
+ * is the socket's own peer certificate on a socket the TLS layer
+ * authorized, the gate walks that chain as `b.network.tls.checkClientChains`
+ * does, up to the first trust anchor in the listener's `ca`, and judges the
+ * certificates on the walk and the anchor. A chain that reaches no anchor is
+ * refused with HTTP 403 and reason `client-chain-unverifiable`, or
+ * `resumed-chain-unverifiable` on a resumed session. Node 24 shows a
+ * listener only the client's leaf, so on Node 24 a client certificate issued
+ * by an intermediate CA that the listener's `ca` does not list is refused
+ * that way. A certificate set from another source, such as one a
+ * TLS-terminating proxy forwarded, is judged by the chain its
+ * `issuerCertificate` links carry.
+ *
+ * A record's `ownerId` names the principal the key acts for, and
+ * `b.apiKey.create().verify()` returns one. It rides on `req.apiKey`,
+ * which is where `b.requestHelpers.extractActorContext` reads the
+ * principal an audit row records, so a key with no owner leaves the
+ * row naming nobody rather than naming the key.
+ *
  * @opts
  *   {
- *     resolver:                async function(apiKey): { id, scopes, boundFields, peerCertFingerprints } | null,  // required
+ *     resolver:                async function(apiKey): { id, ownerId, scopes, boundFields, peerCertFingerprints } | null,  // required
  *     requiredScopes:          string[],
  *     getBoundField:           Record<string, function(req): string|null>,
  *     tolerateMissingPeerCert: boolean,
@@ -63,7 +85,9 @@ function _timingSafeStringEqual(a, b) {
  *   var app = b.router.create();
  *   app.post("/webhook", b.middleware.requireBoundKey({
  *     resolver: async function (apiKey) {
- *       if (apiKey === "valid-key") return { id: "k1", scopes: ["webhook.ingest"], boundFields: {} };
+ *       if (apiKey === "valid-key") {
+ *         return { id: "k1", ownerId: "partner-acme", scopes: ["webhook.ingest"], boundFields: {} };
+ *       }
  *       return null;
  *     },
  *     requiredScopes: ["webhook.ingest"],
@@ -103,6 +127,11 @@ function create(opts) {
     ? opts.auditAction : "auth.require_bound_key";
   var errorMessage = typeof opts.errorMessage === "string" && opts.errorMessage.length > 0
     ? opts.errorMessage : "api key required";
+  validateOpts.optionalBoolean(opts.tolerateMissingPeerCert,
+    "middleware.requireBoundKey: opts.tolerateMissingPeerCert (anything other than a boolean " +
+    "was read as its truthiness, so the string \"false\" served a request carrying no client " +
+    "certificate for a key pinned to one)",
+    RequireBoundKeyError, "require-bound-key/bad-opt");
   var tolerateMissingPeerCert = !!opts.tolerateMissingPeerCert;
   var onDeny = typeof opts.onDeny === "function" ? opts.onDeny : null;
   var problemMode = opts.problemDetails === true;
@@ -224,11 +253,20 @@ function create(opts) {
         return _refuse(req, res, 403, "peer-cert-not-pinned", {
           fingerprint: fpColon, keyId: record.id || null,
         });
+      } else {
+        var chainRefusal = requireMtls._peerChainRefusal(req.peerCert, req.socket || req.connection || null);
+        if (chainRefusal !== null) {
+          return _refuse(req, res, 403, chainRefusal, {
+            fingerprint: fpColon, keyId: record.id || null,
+          });
+        }
       }
     }
 
     req.apiKey = {
       id:           record.id || null,
+      ownerId:      (typeof record.ownerId === "string" && record.ownerId.length > 0)
+        ? record.ownerId : null,
       scopes:       keyScopes.slice(),
       boundFields:  Object.assign({}, registered),
     };

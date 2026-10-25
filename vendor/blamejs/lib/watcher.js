@@ -2,6 +2,37 @@
 // Copyright (c) blamejs contributors
 "use strict";
 /**
+ * @module b.watcher
+ * @nav    Filesystem
+ * @title  Watcher
+ * @slug   watcher
+ *
+ * @intro
+ *   Watch a directory tree and get one event shape whatever the kernel
+ *   underneath reports.
+ *
+ *   Each platform describes a change differently. Linux inotify sends
+ *   "rename" and "change" and can send "change" before the write has
+ *   finished. macOS FSEvents coalesces creates, deletes and moves into
+ *   one "rename". Windows sends both "rename" and "change" for a single
+ *   create. The watcher settles a burst, stats the path afterwards to see
+ *   what actually happened, and calls <code>onChange</code> or
+ *   <code>onDelete</code> once.
+ *
+ *   It follows no symbolic link when it stats, so a link planted inside
+ *   the tree cannot walk the watcher out of it.
+ *
+ *   It is for rebuilds, reloads and cache busts. <code>fs.watch</code> is
+ *   best-effort on every kernel and drops events under load, so nothing
+ *   that has to know about every change should be built on it.
+ *
+ * @card
+ *   Watch a directory tree and receive one event shape across Linux, macOS
+ *   and Windows, with bursts settled and the real outcome read back from
+ *   the filesystem. For rebuilds and reloads, not for audit.
+ */
+
+/**
  * b.watcher — recursive filesystem-watch primitive with cross-platform
  * event normalization.
  *
@@ -49,6 +80,7 @@
 
 var nodeFs   = require("node:fs");
 var nodePath = require("node:path");
+var C        = require("./constants");
 var lazyRequire = require("./lazy-require");
 var validateOpts = require("./validate-opts");
 var safeMountInfo = require("./safe-mount-info");
@@ -254,6 +286,66 @@ function _lstatLongPathSafe(fullPath) {
   return nodeFs.lstatSync(fullPath);
 }
 
+/**
+ * @primitive b.watcher.create
+ * @signature b.watcher.create(opts)
+ * @since     0.8.45
+ * @status    stable
+ * @related   b.bundler.create, b.staticServe.create
+ *
+ * Start watching `root` and answer the handle to stop it. The handle
+ * carries `stop()`, `root` as it was resolved, and `mode`, which is the
+ * backend that ended up running.
+ *
+ * `onChange` receives `{ type, relativePath, fullPath, size, mtime }` and
+ * `onDelete` receives the first three, where `type` is `"file"` or
+ * `"dir"`. `onError` receives anything the backend reports, including the
+ * one-time notice that a kernel too old for a recursive watch has fallen
+ * back to watching the top directory alone.
+ *
+ * `mode` picks the backend. `"fs"` uses `fs.watch`. `"poll"` walks the
+ * tree on an interval, for a filesystem where watching does not work, such
+ * as a network mount; it reads at most `pollMaxFiles` entries so a large
+ * tree cannot turn a poll into a sweep of everything. `"auto"` reads the
+ * mount table and picks poll for FUSE, 9p, virtiofs, NFS, SMB and vboxsf,
+ * and for a bind mount inside a container. Leaving it out picks per platform.
+ *
+ * A watcher keeps the process alive under either backend until `close()`,
+ * so a program whose only work is watching does not exit. The poll backend
+ * used to leave the process free to exit while `fs.watch` held it open,
+ * which made lifetime under `"auto"` depend on the filesystem. The poll walk
+ * yields to the event loop between directories and the next walk is timed
+ * from the end of the last one, so a tree that takes longer than
+ * `pollIntervalMs` to read does not starve the rest of the process.
+ *
+ * `debounceMs` is how long a burst is allowed to settle before one event
+ * goes out. `maxPending` bounds the events held while settling, so a tree
+ * being rewritten wholesale cannot grow the queue without limit.
+ *
+ * @opts
+ *   root:           string,     // directory to watch; required
+ *   mode:           string,     // "fs", "poll" or "auto"; default "fs"
+ *   ignore:         string[],   // path patterns to skip
+ *   ignoreCaseFold: boolean,    // default false — match ignore patterns case-insensitively
+ *   debounceMs:     number,     // burst settle time; default 100
+ *   maxPending:     number,     // events held while settling; default 10000
+ *   pollIntervalMs: number,     // poll backend interval; default 1000
+ *   pollMaxFiles:   number,     // poll backend entry ceiling; default 50000
+ *   onChange:       function,   // ({ type, relativePath, fullPath, size, mtime })
+ *   onDelete:       function,   // ({ type, relativePath, fullPath })
+ *   onError:        function,   // (err)
+ *   audit:          boolean,    // default true
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var w = b.watcher.create({
+ *     root:     "./src",
+ *     ignore:   ["node_modules", ".git"],
+ *     onChange: function (ev) { rebuild(ev.relativePath); },
+ *     onDelete: function (ev) { forget(ev.relativePath); },
+ *   });
+ *   w.stop();
+ */
 function create(opts) {
   _validateOpts(opts);
 
@@ -367,13 +459,15 @@ function create(opts) {
   }
 
   var pollTimer    = null;
+  var keepAlive    = null;
   var pollSnapshot = null;
 
-  function _walkPollTree() {
+  function* _pollTreeSteps() {
     var snapshot = new Map();
     var fileCount = 0;
     var stack = [""];
     while (stack.length > 0) {
+      yield;
       var relDir = stack.pop();
       var absDir = relDir === "" ? root : nodePath.join(root, relDir);
       var entries;
@@ -416,11 +510,42 @@ function create(opts) {
     return snapshot;
   }
 
-  function _pollTick() {
+  function _walkPollTree() {
+    var it = _pollTreeSteps();
+    var step = it.next();
+    while (!step.done) step = it.next();
+    return step.value;
+  }
+
+  async function _walkPollTreeYielding() {
+    var it = _pollTreeSteps();
+    var step = it.next();
+    while (!step.done) {
+      await new Promise(function (resolve) { setImmediate(resolve); });
+      if (stopped) return null;
+      step = it.next();
+    }
+    return step.value;
+  }
+
+  async function _pollTick() {
+    if (stopped) return;
+    var next;
+    try { next = await _walkPollTreeYielding(); }
+    catch (e) { _safeError(e); return; }
+    _applyPollSnapshot(next);
+  }
+
+  function _pollTickSync() {
     if (stopped) return;
     var next;
     try { next = _walkPollTree(); }
     catch (e) { _safeError(e); return; }
+    _applyPollSnapshot(next);
+  }
+
+  function _applyPollSnapshot(next) {
+    if (next === null) return;
     if (pollSnapshot === null) {
       pollSnapshot = next;
       return;
@@ -438,14 +563,21 @@ function create(opts) {
     pollSnapshot = next;
   }
 
+  function _armPollTimer() {
+    if (stopped) return;
+    pollTimer = setTimeout(function () {
+      _pollTick().then(_armPollTimer, function (e) { _safeError(e); _armPollTimer(); });
+    }, pollIntervalMs);
+    if (typeof pollTimer.unref === "function") pollTimer.unref();
+  }
+
   if (mode === "poll") {
     try { pollSnapshot = _walkPollTree(); }
     catch (e) {
       throw new WatcherError("watcher/start-failed",
         "watcher.create: initial poll walk failed: " + ((e && e.message) || String(e)));
     }
-    pollTimer = setInterval(_pollTick, pollIntervalMs);                                            // allow:timer-no-unref-unrefed-below — .unref() called immediately below; timer doesn't pin the event loop
-    if (typeof pollTimer.unref === "function") pollTimer.unref();
+    _armPollTimer();
   } else {
     try {
       watcherHandle = nodeFs.watch(root, { recursive: true, persistent: true }, function (eventType, filename) {
@@ -470,6 +602,8 @@ function create(opts) {
     }
   }
 
+  keepAlive = setInterval(function () {}, C.TIME.hours(1));                                        // allow:timer-no-unref-process-pinning — pins the loop on purpose; close() clears it
+
   if (autoDecision) {
     _safeEmitAudit("watcher.mode_auto_decision", {
       root:        root,
@@ -493,15 +627,19 @@ function create(opts) {
       watcherHandle = null;
     }
     if (pollTimer) {
-      try { clearInterval(pollTimer); } catch (_e) { /* best-effort */ }
+      try { clearTimeout(pollTimer); } catch (_e) { /* best-effort */ }
       pollTimer = null;
+    }
+    if (keepAlive) {
+      try { clearInterval(keepAlive); } catch (_e) { /* best-effort */ }
+      keepAlive = null;
     }
     _safeEmitAudit("watcher.stopped", { root: root, mode: mode, eventCount: eventCount });
   }
 
   function _flushForTest() {
     if (mode === "poll" && !stopped) {
-      try { _pollTick(); }
+      try { _pollTickSync(); }
       catch (_e) { /* tests assert via the operator's onChange callback */ }
     }
     var snapshot = Array.from(pending.entries());

@@ -103,11 +103,14 @@
  *   RFC 5321 §4.1.1.1 HELO/EHLO validation + RFC 8601 §2.7.6 FCrDNS check. Composes b.network.dns.resolver for PTR + forward lookups. Verdict carries shape + FCrDNS pass/fail + generic-rDNS flag for MX listener policy. Operator-configurable selfNames, genericRdnsPatterns, fcrdnsRequiredFor.
  */
 
+var net                = require("node:net");
+var nodeTypes          = require("node:util").types;
 var { defineClass }    = require("./framework-error");
 var lazyRequire        = require("./lazy-require");
 var ipUtils            = require("./ip-utils");
 var gateContract       = require("./gate-contract");
 var guardRegex         = require("./guard-regex");
+var ssrfGuard          = require("./ssrf-guard");
 
 var audit              = lazyRequire(function () { return require("./audit"); });
 
@@ -168,7 +171,10 @@ var LOCALHOST_REFUSED = Object.freeze({
  *
  * Evaluate a peer's HELO / EHLO identity claim. Returns a verdict
  * shape the MX listener consumes to drive accept / reject /
- * score-tag policy.
+ * score-tag policy. An IPv4-mapped `ctx.ip` (`::ffff:203.0.113.42`, the form
+ * a dual-stack listener reports for an IPv4 sender) is evaluated as the IPv4
+ * address: it matches the literal `[203.0.113.42]`, and FCrDNS checks its
+ * `in-addr.arpa` name against A records.
  *
  * @opts
  *   profile:               "strict" | "balanced" | "permissive",
@@ -189,7 +195,8 @@ var LOCALHOST_REFUSED = Object.freeze({
  */
 async function evaluate(ctx, opts) {
   opts = opts || {};
-  var profile = gateContract.resolveProfileName(opts, COMPLIANCE_POSTURES, DEFAULT_PROFILE);
+  var profile = gateContract.resolveProfileName(opts, COMPLIANCE_POSTURES, DEFAULT_PROFILE,
+    { errorClass: MailHeloError, codePrefix: "mail-helo", label: "mail.helo.evaluate" });
   if (!Object.prototype.hasOwnProperty.call(PROFILES, profile)) {
     throw new MailHeloError("mail-helo/bad-profile",
       "evaluate: unknown profile '" + profile + "'");
@@ -202,10 +209,12 @@ async function evaluate(ctx, opts) {
   if (Array.isArray(opts.genericRdnsPatterns)) {
     for (var gi = 0; gi < opts.genericRdnsPatterns.length; gi += 1) {
       var gre = opts.genericRdnsPatterns[gi];
-      if (gre instanceof RegExp) {
-        guardRegex.assertSafe(gre, "mail.helo.evaluate: genericRdnsPatterns[" + gi + "]",
-          MailHeloError, "mail-helo/unsafe-pattern");
+      var greLabel = "mail.helo.evaluate: genericRdnsPatterns[" + gi + "]";
+      if (!nodeTypes.isRegExp(gre)) {
+        throw new MailHeloError("mail-helo/bad-pattern", greLabel + " must be a RegExp; got " + typeof gre);
       }
+      guardRegex.assertSafe(gre, greLabel, MailHeloError, "mail-helo/unsafe-pattern");
+      guardRegex.assertStateless(gre, greLabel, MailHeloError, "mail-helo/stateful-pattern");
     }
   }
 
@@ -221,6 +230,7 @@ async function evaluate(ctx, opts) {
     throw new MailHeloError("mail-helo/bad-input",
       "evaluate: ctx.ip must be a non-empty string");
   }
+  var ip = net.isIP(ctx.ip) !== 0 ? ssrfGuard.canonicalizeHost(ctx.ip) : ctx.ip;
 
   var claimed = ctx.claimedName.trim();
   if (Buffer.byteLength(claimed, "utf8") > caps.maxBytes) {
@@ -233,10 +243,10 @@ async function evaluate(ctx, opts) {
   var v4Lit = claimed.match(ipUtils.IPV4_ADDR_LITERAL_RE);
   var v6Lit = claimed.match(ADDR_LIT_V6_RE);
   if (v4Lit) {
-    if (v4Lit[1] !== ctx.ip) {
+    if (v4Lit[1] !== ip) {
       return _emit(auditImpl, "literal-mismatch", {
         shape:  "address-literal-v4",
-        reason: "address-literal '" + v4Lit[1] + "' does not match connection IP '" + ctx.ip + "' (RFC 5321 §4.1.1.1)",
+        reason: "address-literal '" + v4Lit[1] + "' does not match connection IP '" + ip + "' (RFC 5321 §4.1.1.1)",
       });
     }
     return _emit(auditImpl, "accept", {
@@ -245,12 +255,10 @@ async function evaluate(ctx, opts) {
     });
   }
   if (v6Lit) {
-    var claimedHex = ipUtils.expandIpv6Hex(v6Lit[1]);
-    var ipHex      = ipUtils.expandIpv6Hex(ctx.ip);
-    if (!claimedHex || !ipHex || claimedHex !== ipHex) {
+    if (net.isIP(v6Lit[1]) !== 6 || !ssrfGuard._sameAddress(v6Lit[1], ip)) {
       return _emit(auditImpl, "literal-mismatch", {
         shape:  "address-literal-v6",
-        reason: "IPv6 address-literal '" + v6Lit[1] + "' does not match connection IP '" + ctx.ip + "' (RFC 5321 §4.1.3)",
+        reason: "IPv6 address-literal '" + v6Lit[1] + "' does not match connection IP '" + ip + "' (RFC 5321 §4.1.3)",
       });
     }
     return _emit(auditImpl, "accept", {
@@ -303,7 +311,7 @@ async function evaluate(ctx, opts) {
     }
   }
 
-  var ipKind = ipUtils.expandIpv6Hex(ctx.ip) ? "v6" : "v4";
+  var ipKind = ipUtils.expandIpv6Hex(ip) ? "v6" : "v4";
   var needFcrdns = ctx.resolver && fcrdnsRequiredFor.indexOf(ipKind) !== -1;
   if (!needFcrdns) {
     var generic = _checkGenericRdns(opts.genericRdnsPatterns, [claimed]);
@@ -318,7 +326,7 @@ async function evaluate(ctx, opts) {
     return rv;
   }
 
-  var fcrdnsResult = await _runFcrdns(ctx.ip, ctx.resolver);
+  var fcrdnsResult = await _runFcrdns(ip, ctx.resolver);
   var rv2 = {
     action:      fcrdnsResult.passed ? "accept" : "soft-fail-fcrdns",
     shape:       "domain",
@@ -394,18 +402,14 @@ function _reverseName(ip) {
 }
 
 function _ipEqual(a, b) {
-  if (a === b) return true;
-  var ha = ipUtils.expandIpv6Hex(a);
-  var hb = ipUtils.expandIpv6Hex(b);
-  if (ha && hb) return ha === hb;
-  return false;
+  return a === b || ssrfGuard._sameAddress(a, b);
 }
 
 function _checkGenericRdns(extraPatterns, names) {
   var patterns = GENERIC_RDNS_PATTERNS.slice();
   if (Array.isArray(extraPatterns)) {
     for (var p = 0; p < extraPatterns.length; p += 1) {
-      if (extraPatterns[p] instanceof RegExp) patterns.push(extraPatterns[p]);
+      if (nodeTypes.isRegExp(extraPatterns[p])) patterns.push(extraPatterns[p]);
     }
   }
   for (var n = 0; n < names.length; n += 1) {
@@ -456,7 +460,7 @@ var compliancePosture = gateContract.makePostureAccessor(COMPLIANCE_POSTURES);
 module.exports = {
   evaluate:                evaluate,
   compliancePosture:       compliancePosture,
-  PROFILES:                PROFILES,
+  PROFILES:                gateContract.freezePolicy(PROFILES),
   COMPLIANCE_POSTURES:     COMPLIANCE_POSTURES,
   GENERIC_RDNS_PATTERNS:   GENERIC_RDNS_PATTERNS,
   MailHeloError:           MailHeloError,

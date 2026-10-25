@@ -194,6 +194,37 @@ describe('ws-client fix: close() teardown leak (#13)', () => {
   });
 });
 
+describe('ws-client: a connection the server drops without a Close frame', () => {
+  const servers = [];
+  after(() => { for (const s of servers) { try { s.close(); } catch { /* ignore */ } } });
+
+  it('emits close 1006 and schedules a reconnect at once, without an error event', async () => {
+    const srv = await startWsHandshakeServer({});
+    servers.push(srv);
+    const ws = new WsClient({ server: 'http://127.0.0.1:' + srv.port }, 'k');
+    await openOnce(ws, () => ws.connect('bundle', 0));
+    const dropped = ws._b;
+    let closeInfo = null;
+    const errors = [];
+    ws.on('error', (e) => { errors.push(e); });
+    ws.on('close', (code, reason) => { if (!closeInfo) closeInfo = { code, reason }; });
+
+    // The server goes away: its sockets close and no Close frame is sent.
+    srv.close();
+    const deadline = Date.now() + 3000;
+    while (!closeInfo && Date.now() < deadline) await sleep(25);
+
+    assert.ok(closeInfo, 'the wrapper reported the dropped connection within 3 s');
+    assert.equal(closeInfo.code, 1006);
+    assert.deepEqual(errors.map((e) => e.code), [], 'a lost connection is not reported as an error');
+    assert.equal(ws._b, null, 'the dropped client was detached');
+    assert.notEqual(ws._reconnectTimer, null, 'a reconnect is scheduled');
+    ws.close();
+    await sleep(1400);
+    assert.equal(dropped._pingTimer, null, 'the dropped client stopped its ping interval');
+  });
+});
+
 describe('ws-client fix: message delivered after _closing is dropped (#14)', () => {
   const servers = [];
   after(() => { for (const s of servers) { try { s.close(); } catch { /* ignore */ } } });

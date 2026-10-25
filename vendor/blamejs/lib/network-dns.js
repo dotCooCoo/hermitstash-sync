@@ -16,24 +16,23 @@ var safeBuffer = require("./safe-buffer");
 var publicSuffix = require("./public-suffix");
 var safeUrl = require("./safe-url");
 var validateOpts = require("./validate-opts");
+var ipUtils = require("./ip-utils");
 var { defineClass } = require("./framework-error");
 var { boundedMap } = require("./bounded-map");
 
-var DNS_TRANSIENT_CODES = {
-  "dns/lookup-timeout":       true,
-  "dns/system-failed":        true,
-  "dns/resolve-failed":       true,
-  "dns/reverse-failed":       true,
-  "dns/doh-http":             true,
-  "dns/doh-failed":           true,
-  "dns/dot-handshake-failed": true,
-  "dns/dot-failed":           true,
-  "dns/ddr-not-discovered":   true,
-};
-function _dnsErrorIsPermanent(code) {
-  return !Object.prototype.hasOwnProperty.call(DNS_TRANSIENT_CODES, code);
-}
-var DnsError = defineClass("DnsError", { permanentClassifier: _dnsErrorIsPermanent });
+var DnsError = defineClass("DnsError", {
+  transientCodes: [
+    "dns/lookup-timeout",
+    "dns/system-failed",
+    "dns/resolve-failed",
+    "dns/reverse-failed",
+    "dns/doh-http",
+    "dns/doh-failed",
+    "dns/dot-handshake-failed",
+    "dns/dot-failed",
+    "dns/ddr-not-discovered",
+  ],
+});
 
 var DNS_QTYPE_AAAA   = 28;
 var IPV6_ADDR_BYTES  = C.BYTES.bytes(16);
@@ -64,7 +63,8 @@ var STATE = {
 var DEFAULT_DOH_URL = "https://cloudflare-dns.com/dns-query";
 
 var LOCAL_SUFFIXES = [".localhost", ".local", ".test", ".invalid",
-                      ".internal", ".intranet", ".lan", ".home", ".corp"];
+                      ".internal", ".intranet", ".lan", ".home", ".corp",
+                      ".home.arpa"];
 
 function _labelsOf(host) {
   var labels = String(host).split(".");
@@ -94,13 +94,14 @@ function _validateHostShape(host, primitive) {
 
 function _isLocalFormHost(host) {
   if (typeof host !== "string" || host.length === 0) return true;
-  host = _labelsOf(host).join(".");
-  if (host === "localhost") return true;
+  var labels = _labelsOf(host);
+  host = labels.join(".");
   if (net.isIP(host)) return true;
-  var lc = host.toLowerCase();
+  if (labels.length === 1) return true;
+  var dotted = "." + host.toLowerCase();
   for (var i = 0; i < LOCAL_SUFFIXES.length; i += 1) {
-    if (lc.length > LOCAL_SUFFIXES[i].length &&
-        lc.slice(-LOCAL_SUFFIXES[i].length) === LOCAL_SUFFIXES[i]) {
+    if (dotted.length >= LOCAL_SUFFIXES[i].length &&
+        dotted.slice(-LOCAL_SUFFIXES[i].length) === LOCAL_SUFFIXES[i]) {
       return true;
     }
   }
@@ -112,7 +113,7 @@ function _ensureSecureDefault() {
   var override = safeEnv.readVar("BLAMEJS_DNS_TRANSPORT");
   if (override === "system") { STATE.systemResolver = true; return; }
   if (override === "dot") {
-    STATE.dot = { host: "1.1.1.1", port: 853, servername: "1.1.1.1", ca: null };
+    STATE.dot = { host: "1.1.1.1", port: 853, identity: networkTls().identityFor("1.1.1.1"), ca: null };
     return;
   }
   STATE.doh = { url: DEFAULT_DOH_URL, method: null, ca: null };
@@ -272,9 +273,65 @@ function useDnsOverHttps(opts) {
     throw new DnsError("dns/bad-doh-ca",
       "dns.useDnsOverHttps: ca must be a PEM string, Buffer, or array of either");
   }
+  _assertResolverCa(opts.ca, "dns.useDnsOverHttps: ca");
   STATE.doh = { url: url, method: method, ca: opts.ca || null };
   _clearCache();
   observability().safeEvent("network.dns.doh.set", 1, { url: url, method: method || "auto" });
+}
+
+function _assertResolverCa(ca, label) {
+  networkTls()._assertCaNotCompromised(ca, { errorClass: DnsError, code: "dns/compromised-key", label: label });
+}
+
+function _withTrustAnchors(opts, ca) {
+  var anchors = networkTls()._clientTrustAnchors(ca || undefined);
+  if (anchors !== undefined) opts.ca = anchors;
+  return opts;
+}
+
+function _resolverTrustOpts(ca) {
+  var identity = networkTls()._withCompromisedChainCheck(undefined, ca || undefined);
+  return _withTrustAnchors({ checkServerIdentity: identity }, ca);
+}
+
+var DOH_AGENT = { agent: null };
+var DOH_AGENT_IDLE_MS = C.TIME.seconds(5);
+
+function _dohAgent() {
+  if (DOH_AGENT.agent === null) {
+    var agentOpts = {
+      keepAlive:           true,
+      scheduling:          "lifo",
+      timeout:             DOH_AGENT_IDLE_MS,
+      checkServerIdentity: networkTls()._withCompromisedChainCheck(),
+    };
+    var globalOptions = https.globalAgent && https.globalAgent.options;
+    if (globalOptions && globalOptions.proxyEnv) agentOpts.proxyEnv = globalOptions.proxyEnv;
+    // allow:outbound-tls-posture: every DoH request through this agent merges the live posture
+    DOH_AGENT.agent = new https.Agent(agentOpts);
+  }
+  return DOH_AGENT.agent;
+}
+
+function _destroyDohAgent() {
+  if (DOH_AGENT.agent !== null) {
+    DOH_AGENT.agent.destroy();
+    DOH_AGENT.agent = null;
+  }
+}
+
+function _dohTrustOpts(ca) {
+  return _withTrustAnchors({ agent: _dohAgent() }, ca);
+}
+
+function _dohRequest(reqOpts, ca, onResponse) {
+  return https.request(Object.assign({}, reqOpts, networkTls().outboundPosture(), _dohTrustOpts(ca)), onResponse);
+}
+
+function _transportFailure(e, code, prefix) {
+  var detail = (e && e.message) || String(e);
+  if (e && e.code === "tls/compromised-key") return new DnsError("dns/compromised-key", prefix + detail);
+  return new DnsError(code, prefix + detail);
 }
 
 function activeDohEndpoint() {
@@ -297,10 +354,15 @@ function useDnsOverTls(opts) {
     throw new DnsError("dns/bad-dot-ca",
       "dns.useDnsOverTls: ca must be a PEM string, Buffer, or array of either");
   }
+  _assertResolverCa(opts.ca, "dns.useDnsOverTls: ca");
+  var dotHost = ipUtils.dialHost(opts.host);
+  var identity = networkTls().identityFor(dotHost, opts.servername, {
+    label: "dns.useDnsOverTls: opts.servername", errorClass: DnsError, code: "dns/bad-dot-servername",
+  });
   STATE.dot = {
-    host:       opts.host,
+    host:       dotHost,
     port:       opts.port || 853,
-    servername: opts.servername || opts.host,
+    identity:   identity,
     ca:         opts.ca || null,
   };
   _resetDotPool();
@@ -469,15 +531,14 @@ async function _dohLookup(host, family) {
   var u = safeUrl.parse(STATE.doh.url, { allowedProtocols: safeUrl.ALLOW_HTTP_TLS });
   return new Promise(function (resolve, reject) {
     var reqOpts = Object.assign({
-      hostname:   u.hostname,
+      hostname:   ipUtils.dialHost(u.hostname),
       port:       u.port || 443,
       path:       u.pathname + u.search,
       method:     usePost ? "POST" : "GET",
       headers:    {
         "accept": "application/dns-message",
       },
-    }, networkTls().outboundPosture());
-    if (STATE.doh.ca) reqOpts.ca = STATE.doh.ca;
+    }, networkTls().outboundPosture(), _dohTrustOpts(STATE.doh.ca));
     if (usePost) {
       reqOpts.headers["content-type"]   = "application/dns-message";
       reqOpts.headers["content-length"] = enc.buf.length;
@@ -510,7 +571,7 @@ async function _dohLookup(host, family) {
         } catch (e) { reject(e); }
       });
     });
-    req.on("error", function (e) { reject(new DnsError("dns/doh-failed", "DoH request failed: " + e.message)); });
+    req.on("error", function (e) { reject(_transportFailure(e, "dns/doh-failed", "DoH request failed: ")); });
     _armRequestTimeout(req, STATE.lookupTimeoutMs, host, reject);
     if (usePost) req.write(enc.buf);
     req.end();
@@ -527,13 +588,12 @@ async function _dohLookupSecure(host, family) {
   var u = safeUrl.parse(STATE.doh.url, { allowedProtocols: safeUrl.ALLOW_HTTP_TLS });
   return new Promise(function (resolve, reject) {
     var reqOpts = Object.assign({
-      hostname:   u.hostname,
+      hostname:   ipUtils.dialHost(u.hostname),
       port:       u.port || 443,
       path:       u.pathname + u.search,
       method:     usePost ? "POST" : "GET",
       headers:    { "accept": "application/dns-message" },
-    }, networkTls().outboundPosture());
-    if (STATE.doh.ca) reqOpts.ca = STATE.doh.ca;
+    }, networkTls().outboundPosture(), _dohTrustOpts(STATE.doh.ca));
     if (usePost) {
       reqOpts.headers["content-type"]   = "application/dns-message";
       reqOpts.headers["content-length"] = enc.buf.length;
@@ -566,7 +626,7 @@ async function _dohLookupSecure(host, family) {
         } catch (e) { reject(e); }
       });
     });
-    req.on("error", function (e) { reject(new DnsError("dns/doh-failed", "DoH request failed: " + e.message)); });
+    req.on("error", function (e) { reject(_transportFailure(e, "dns/doh-failed", "DoH request failed: ")); });
     _armRequestTimeout(req, STATE.lookupTimeoutMs, host, reject);
     if (usePost) req.write(enc.buf);
     req.end();
@@ -601,9 +661,7 @@ function _dotConnect() {
   var connectOpts = Object.assign({
     host:       STATE.dot.host,
     port:       STATE.dot.port,
-    servername: STATE.dot.servername,
-  }, networkTls().outboundPosture());
-  if (STATE.dot.ca) connectOpts.ca = STATE.dot.ca;
+  }, STATE.dot.identity, networkTls().outboundPosture(), _resolverTrustOpts(STATE.dot.ca));
   var sock = nodeTls.connect(connectOpts);
   if (STATE.lookupTimeoutMs > 0) {
     sock.setTimeout(STATE.lookupTimeoutMs, function () {
@@ -638,9 +696,8 @@ async function _dotLookup(host, family) {
       ready:      new Promise(function (res, rej) {
         sock.once("secureConnect", function () { res(); });
         sock.once("error", function (e) {
-          rej(new DnsError("dns/dot-handshake-failed",
-            "DoT TLS handshake to " + STATE.dot.host + ":" + STATE.dot.port +
-            " failed: " + ((e && e.message) || String(e))));
+          rej(_transportFailure(e, "dns/dot-handshake-failed",
+            "DoT TLS handshake to " + STATE.dot.host + ":" + STATE.dot.port + " failed: "));
         });
       }),
     };
@@ -803,13 +860,12 @@ async function _dohRawQuery(host, qtype) {
   var u = safeUrl.parse(STATE.doh.url, { allowedProtocols: safeUrl.ALLOW_HTTP_TLS });
   return new Promise(function (resolve, reject) {
     var reqOpts = Object.assign({
-      hostname:   u.hostname,
+      hostname:   ipUtils.dialHost(u.hostname),
       port:       u.port || 443,
       path:       u.pathname + u.search,
       method:     usePost ? "POST" : "GET",
       headers:    { "accept": "application/dns-message" },
-    }, networkTls().outboundPosture());
-    if (STATE.doh.ca) reqOpts.ca = STATE.doh.ca;
+    }, networkTls().outboundPosture(), _dohTrustOpts(STATE.doh.ca));
     if (usePost) {
       reqOpts.headers["content-type"]   = "application/dns-message";
       reqOpts.headers["content-length"] = enc.buf.length;
@@ -841,7 +897,7 @@ async function _dohRawQuery(host, qtype) {
         } catch (e) { reject(e); }
       });
     });
-    req.on("error", function (e) { reject(new DnsError("dns/doh-failed", "DoH request failed: " + e.message)); });
+    req.on("error", function (e) { reject(_transportFailure(e, "dns/doh-failed", "DoH request failed: ")); });
     _armRequestTimeout(req, STATE.lookupTimeoutMs, host, reject);
     if (usePost) req.write(enc.buf);
     req.end();
@@ -865,9 +921,8 @@ async function _dotRawQuery(host, qtype) {
       ready:      new Promise(function (res, rej) {
         sock.once("secureConnect", function () { res(); });
         sock.once("error", function (e) {
-          rej(new DnsError("dns/dot-handshake-failed",
-            "DoT TLS handshake to " + STATE.dot.host + ":" + STATE.dot.port +
-            " failed: " + ((e && e.message) || String(e))));
+          rej(_transportFailure(e, "dns/dot-handshake-failed",
+            "DoT TLS handshake to " + STATE.dot.host + ":" + STATE.dot.port + " failed: "));
         });
       }),
     };
@@ -1203,6 +1258,33 @@ async function _querySvcbLike(host, qtype, opts) {
  * implementing forward-compat can still read them. Malformed rdata
  * throws `DnsError` with code `dns/svcb-malformed`.
  *
+ * Resolving the query raises every refusal that step can make: `dns/bad-host`
+ * for a name that is not host-shaped, `dns/bad-transport` for a `transport`
+ * outside the three above, `dns/transport-unavailable` when the chosen
+ * transport is not configured, `dns/no-system-resolvers` when the system has
+ * none, `dns/bad-reply` for a reply it cannot parse, and `dns/no-result` when
+ * the name resolves to nothing. `dns/unsupported-type`, `dns/wrong-family` and
+ * `dns/resolve-failed` are raised by `b.network.dns.resolve` and by the
+ * protocol resolver, neither of which this query goes through.
+ *
+ * The transport rejects rather than throwing, so these arrive as a rejected
+ * promise: `dns/doh-failed` for a DoH request that errors, `dns/doh-http` for a
+ * non-2xx DoH reply, `dns/doh-too-large` for a DoH body over 256 KiB,
+ * `dns/dot-handshake-failed` and `dns/dot-failed` for a DoT session that cannot
+ * start or that errors, `dns/system-failed` for a system-resolver query that
+ * errors, and `dns/lookup-timeout` when the lookup exceeds its budget. A DoH or
+ * DoT server whose certificate chain carries a compromised key fails the query
+ * with `dns/compromised-key`. When the resolver has no `ca`, the DoH or DoT
+ * connection does not trust a certificate in Node's default CA store whose key
+ * is compromised (one added through `NODE_EXTRA_CA_CERTS`, for example), so a
+ * server whose chain ends at that certificate fails certificate verification
+ * with `dns/doh-failed` or `dns/dot-handshake-failed`. A DoH or DoT server
+ * whose chain reaches no trust anchor of the connection (see
+ * `b.network.tls.applyToContext`) fails with `dns/doh-failed` or
+ * `dns/dot-handshake-failed` as well. DoH requests go through Node's
+ * environment proxy (`HTTPS_PROXY` and `NO_PROXY`) when `NODE_USE_ENV_PROXY`
+ * or `--use-env-proxy` is set.
+ *
  * @opts
  *   {
  *     transport: "doh" | "dot" | "system",
@@ -1269,7 +1351,25 @@ var _designatedResolvers = null;
  * encrypted transport too.
  *
  * Throws `DnsError` with code `dns/ddr-not-discovered` when the
- * resolver does not publish DDR records.
+ * resolver does not publish DDR records, `dns/bad-host` when `name` is
+ * not a non-empty host-shaped string, and `dns/bad-opt` when
+ * `insecureSystemResolverOnly` is not a boolean, so a caller that meant to
+ * widen the discovery is refused rather than kept on the narrow path.
+ *
+ * The underlying SVCB query raises its own refusals through this call:
+ * `dns/bad-transport`, `dns/transport-unavailable`, `dns/no-system-resolvers`,
+ * `dns/bad-reply` and `dns/svcb-malformed`. Its `dns/no-result` does NOT reach
+ * the caller: a resolver that publishes nothing is the
+ * `dns/ddr-not-discovered` case, and this primitive translates it.
+ * `dns/unsupported-type`, `dns/wrong-family` and `dns/resolve-failed` are
+ * raised by `b.network.dns.resolve` and by the protocol resolver, neither of
+ * which this call goes through.
+ *
+ * The transport's own failures arrive as a rejected promise here too:
+ * `dns/doh-failed`, `dns/doh-http`, `dns/doh-too-large`,
+ * `dns/dot-handshake-failed`, `dns/dot-failed`, `dns/system-failed`,
+ * `dns/lookup-timeout` and `dns/compromised-key`, each as described on
+ * `b.network.dns.querySvcb`.
  *
  * @opts
  *   {
@@ -1289,6 +1389,11 @@ async function discoverEncrypted(opts) {
     throw new DnsError("dns/bad-host",
       "dns.discoverEncrypted: name must be a non-empty string");
   }
+  validateOpts.optionalBoolean(opts.insecureSystemResolverOnly,
+    "dns.discoverEncrypted: opts.insecureSystemResolverOnly (whether discovery is asked of " +
+    "the system resolver only; a value that is not a boolean was read as true, so a caller " +
+    "that meant to widen the discovery kept the narrow insecure path)",
+    DnsError, "dns/bad-opt");
   var insecureOnly = opts.insecureSystemResolverOnly !== false;
   var transport = insecureOnly ? "system" : undefined;
   name = _validateHostShape(name, "dns.discoverEncrypted");
@@ -1377,6 +1482,14 @@ async function discoverEncrypted(opts) {
  * empty, and `dns/dnr-malformed` if an entry is missing its required
  * transport-specific fields.
  *
+ * Each accepted entry is then configured as a resolver, which validates it:
+ * `dns/bad-doh-url`, `dns/bad-doh-method`, `dns/bad-doh-provider` and
+ * `dns/bad-doh-ca` for a DoH entry, and `dns/bad-dot-host`, `dns/bad-dot-port`,
+ * `dns/bad-dot-servername` and `dns/bad-dot-ca` for a DoT entry, and
+ * `dns/compromised-key` for either when its `ca` holds a certificate with a
+ * compromised key. A list that is well-formed but whose
+ * entries do not configure is refused rather than partially applied.
+ *
  * @example
  *   var b = require("@blamejs/core");
  *   var found = await b.network.dns.discoverEncrypted();
@@ -1425,7 +1538,7 @@ function useDesignatedResolvers(list) {
         useDnsOverTls({
           host:       v.host,
           port:       v.port || 853,
-          servername: v.servername || v.host,
+          servername: v.servername,   // allow:tls-servername-not-dialed (useDnsOverTls passes it through identityFor)
           ca:         v.ca || null,
         });
       }
@@ -1467,9 +1580,18 @@ async function _dualStack(queryFn, host, family) {
   }
   var first  = STATE.resultOrder === "ipv6first" ? 6 : 4;
   var second = first === 4 ? 6 : 4;
-  var firstResult  = await _withTimeout(queryFn(host, first), STATE.lookupTimeoutMs, host).catch(function () { return []; });
-  var secondResult = await _withTimeout(queryFn(host, second), STATE.lookupTimeoutMs, host).catch(function () { return []; });
-  return (firstResult || []).concat(secondResult || []);
+  var firstErr = null;
+  var secondErr = null;
+  var firstResult  = await _withTimeout(queryFn(host, first), STATE.lookupTimeoutMs, host)
+    .catch(function (e) { firstErr = e; return []; });
+  var secondResult = await _withTimeout(queryFn(host, second), STATE.lookupTimeoutMs, host)
+    .catch(function (e) { secondErr = e; return []; });
+  var addrs = (firstResult || []).concat(secondResult || []);
+  if (addrs.length === 0) {
+    var queryErr = firstErr !== null ? firstErr : secondErr;
+    if (queryErr !== null) throw queryErr;
+  }
+  return addrs;
 }
 
 async function lookup(host, opts) {
@@ -1642,6 +1764,7 @@ function _resetForTest() {
   _designatedResolvers = null;
   _clearCache();
   _resetDotPool();
+  _destroyDohAgent();
 }
 
 /**
@@ -1701,6 +1824,10 @@ function isNullMx(mxRecords) {
  * IANA-assigned number; `known: false` for unassigned numbers
  * (operators decide whether unassigned == deprecated for their
  * threat model). Returns `null` for non-integer / non-finite input.
+ * The registry's Reserved range 123-251 is reported as
+ * `{ name: "Reserved", deprecated: true, known: true }`. Algorithm 0
+ * (DELETE) is the CDS / CDNSKEY delete signal of RFC 8078 and is
+ * reported as deprecated, since nothing signs or validates with it.
  *
  * Operators auditing inbound DNSSEC chain-of-trust evidence call
  * this on each link's algorithm number and refuse the validation
@@ -1718,7 +1845,9 @@ function isNullMx(mxRecords) {
  *   // → { algorithm: 13, name: "ECDSAP256SHA256", deprecated: false, ... }
  */
 
+// registry: https://www.iana.org/assignments/dns-sec-alg-numbers/dns-sec-alg-numbers.xhtml
 var DNSKEY_ALGORITHMS = Object.freeze({
+  0:   { name: "DELETE",             deprecated: true,  reason: "Delete DS signal for CDS/CDNSKEY (RFC 8078); not a signing or validation algorithm" },
   1:   { name: "RSAMD5",             deprecated: true,  reason: "MD5 broken; deprecated for zone signing (RFC 6725 §2.2)" },
   2:   { name: "DH",                 deprecated: true,  reason: "Diffie-Hellman key (RFC 2539) — never widely deployed; superseded by signature algorithms" },
   3:   { name: "DSA",                deprecated: true,  reason: "DSA MUST NOT be used for signing or validation (RFC 9904 Table 2)" },
@@ -1735,6 +1864,9 @@ var DNSKEY_ALGORITHMS = Object.freeze({
   14:  { name: "ECDSAP384SHA384",    deprecated: false, reason: "current — RFC 6605" },
   15:  { name: "ED25519",            deprecated: false, reason: "current — RFC 8080" },
   16:  { name: "ED448",              deprecated: false, reason: "current — RFC 8080" },
+  17:  { name: "SM2SM3",             deprecated: false, reason: "RFC 9563 (informational); signing MAY, validation MAY" },
+  18:  { name: "MLDSA44",            deprecated: false, reason: "draft-westerbaan-dnssec-mldsa-03 (informational); signing MAY, validation MAY" },
+  23:  { name: "ECC-GOST12",         deprecated: false, reason: "RFC 9558 (informational); signing MAY, validation MAY" },
   252: { name: "INDIRECT",           deprecated: true,  reason: "Reserved indirect-keys placeholder (RFC 4034 §A.1) — not usable for signing/verification" },
   253: { name: "PRIVATEDNS",         deprecated: false, reason: "Private algorithm identified by domain name (RFC 4034 §A.1.1) — operators using this assume the private algorithm itself is acceptable" },
   254: { name: "PRIVATEOID",         deprecated: false, reason: "Private algorithm identified by OID (RFC 4034 §A.1.2) — operators using this assume the private algorithm itself is acceptable" },
@@ -1753,7 +1885,11 @@ var DNSKEY_ALGORITHMS = Object.freeze({
  * flagging SHA-1 (digest type 1) as deprecated per RFC 9905 §4.
  *
  * Returns `{ digestType, name, deprecated, reason, known }` for any
- * IANA-assigned number; `null` for non-integer input.
+ * IANA-assigned number; `null` for non-integer input. The registry's
+ * Reserved range 128-252 is reported as `{ name: "Reserved",
+ * deprecated: true, known: true }` and 253-254 as `{ name: "Private Use",
+ * deprecated: false, known: true }` (RFC 9904). Other numbers report
+ * `known: false`.
  *
  * @example
  *   var v = b.network.dns.classifyDsDigestType(1);
@@ -1764,6 +1900,7 @@ var DNSKEY_ALGORITHMS = Object.freeze({
  *   // → { digestType: 2, name: "SHA-256", deprecated: false, ... }
  */
 
+// registry: https://www.iana.org/assignments/ds-rr-types/ds-rr-types.xhtml
 var DS_DIGEST_TYPES = Object.freeze({
   0: { name: "Reserved",            deprecated: true,  reason: "Reserved (RFC 3658) — not for production use" },
   1: { name: "SHA-1",               deprecated: true,  reason: "SHA-1 deprecated (RFC 9905 §4)" },
@@ -1771,14 +1908,31 @@ var DS_DIGEST_TYPES = Object.freeze({
   3: { name: "GOST R 34.11-94",     deprecated: true,  reason: "MUST NOT be used for delegation (RFC 9904 Table 3); superseded by GOST 2012 in RFC 9558" },
   4: { name: "SHA-384",             deprecated: false, reason: "current — RFC 6605 §6" },
   5: { name: "GOST R 34.11-2012",   deprecated: false, reason: "current — RFC 9558 §3" },
-  6: { name: "SM3",                 deprecated: false, reason: "current — RFC 9558 §3 (Chinese national standard)" },
+  6: { name: "SM3",                 deprecated: false, reason: "RFC 9563 (informational; Chinese national standard); delegation MAY, validation MAY" },
 });
+
+var DNSKEY_ALGORITHM_RANGES = Object.freeze([
+  { from: 123, to: 251, name: "Reserved", deprecated: true, reason: "Reserved (RFC 4034, RFC 6014)" },
+]);
+
+var DS_DIGEST_TYPE_RANGES = Object.freeze([
+  { from: 128, to: 252, name: "Reserved",    deprecated: true,  reason: "Reserved (RFC 9904)" },
+  { from: 253, to: 254, name: "Private Use", deprecated: false, reason: "Reserved for Private Use (RFC 9904)" },
+]);
+
+function _registryRow(table, ranges, n) {
+  if (Object.prototype.hasOwnProperty.call(table, n)) return table[n];
+  for (var i = 0; i < ranges.length; i += 1) {
+    if (n >= ranges[i].from && n <= ranges[i].to) return ranges[i];
+  }
+  return null;
+}
 
 function classifyDnskeyAlgorithm(algorithm) {
   if (!numericBounds.isFiniteInt(algorithm)) {
     return null;
   }
-  var row = DNSKEY_ALGORITHMS[algorithm];
+  var row = _registryRow(DNSKEY_ALGORITHMS, DNSKEY_ALGORITHM_RANGES, algorithm);
   if (!row) {
     return {
       algorithm:  algorithm,
@@ -1801,7 +1955,7 @@ function classifyDsDigestType(digestType) {
   if (!numericBounds.isFiniteInt(digestType)) {
     return null;
   }
-  var row = DS_DIGEST_TYPES[digestType];
+  var row = _registryRow(DS_DIGEST_TYPES, DS_DIGEST_TYPE_RANGES, digestType);
   if (!row) {
     return {
       digestType: digestType,
@@ -1818,6 +1972,22 @@ function classifyDsDigestType(digestType) {
     reason:     row.reason,
     known:      true,
   };
+}
+
+function _resolveUdpTarget(host) {
+  var bare = ipUtils.dialHost(host);
+  var fam = net.isIP(bare);
+  if (fam !== 0) return Promise.resolve({ address: bare, family: fam });
+  return new Promise(function (resolve, reject) {
+    dns.lookup(bare, { all: true }, function (err, addrs) {
+      if (err) return reject(err);
+      if (!Array.isArray(addrs) || addrs.length === 0) {
+        return reject(new DnsError("dns/system-failed", "no address for " + bare));
+      }
+      var v4 = addrs.find(function (a) { return a.family === 4; });
+      resolve(v4 || addrs[0]);
+    });
+  });
 }
 
 module.exports = {
@@ -1851,11 +2021,15 @@ module.exports = {
   clearCache:                  _clearCache,
   DnsError:                    DnsError,
   _encodeDnsQuery:             _encodeDnsQuery,
+  _dohRequest:                 _dohRequest,
   _validateHostShape:          _validateHostShape,
+  _isLocalFormHostForTest:     _isLocalFormHost,
+  _dualStackForTest:           _dualStack,
   _validateLdh:                _validateLdh,
   _parseSvcbRdata:             _parseSvcbRdata,
   _decodeDnsAnswerRaw:         _decodeDnsAnswerRaw,
   _readDnsName:                _readDnsName,
+  _resolveUdpTarget:           _resolveUdpTarget,
   _stateForTest:               _stateForTest,
   _resetForTest:               _resetForTest,
   _designatedResolversForTest: _designatedResolversForTest,

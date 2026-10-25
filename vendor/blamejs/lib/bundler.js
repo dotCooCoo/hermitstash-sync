@@ -177,7 +177,7 @@ function _validateEngine(eng) {
  * @signature b.bundler.create(opts)
  * @since     0.4.0
  * @status    stable
- * @related   b.static.serve
+ * @related   b.staticServe.create
  *
  * Build a content-hashed asset pipeline for a fixed set of named
  * entries. The returned object exposes `build()` (one-shot rebuild,
@@ -370,35 +370,37 @@ function create(opts) {
     if (debounceTimer && typeof debounceTimer.unref === "function") debounceTimer.unref();
   }
 
+  function _watchEntry(name, callback) {
+    var entryPath = _resolveEntry(entries[name]);
+    var dir = nodePath.dirname(entryPath);
+    var base = nodePath.basename(entryPath);
+    var w;
+    try {
+      w = watchFn(dir, { persistent: false }, function (eventType, filename) {
+        if (filename && String(filename) === base) {
+          _scheduleRebuild(name, callback);
+        }
+      });
+    } catch (e) {
+      _logVia("warn", "could not watch " + dir,
+        { error: (e && e.message) || String(e) });
+      return;
+    }
+    if (w && typeof w.on === "function") {
+      w.on("error", function (err) {
+        _logVia("warn", "watcher error",
+          { dir: dir, error: (err && err.message) || String(err) });
+      });
+    }
+    watchers.push(w);
+  }
+
   function watch(callback) {
     if (watching) return;
     watching = true;
     var names = Object.keys(entries);
     for (var i = 0; i < names.length; i++) {
-      (function (name) {
-        var entryPath = _resolveEntry(entries[name]);
-        var dir = nodePath.dirname(entryPath);
-        var base = nodePath.basename(entryPath);
-        var w;
-        try {
-          w = watchFn(dir, { persistent: false }, function (eventType, filename) {
-            if (filename && String(filename) === base) {
-              _scheduleRebuild(name, callback);
-            }
-          });
-        } catch (e) {
-          _logVia("warn", "could not watch " + dir,
-            { error: (e && e.message) || String(e) });
-          return;
-        }
-        if (w && typeof w.on === "function") {
-          w.on("error", function (err) {
-            _logVia("warn", "watcher error",
-              { dir: dir, error: (err && err.message) || String(err) });
-          });
-        }
-        watchers.push(w);
-      })(names[i]);
+      _watchEntry(names[i], callback);
     }
   }
 

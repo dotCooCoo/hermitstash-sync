@@ -2,6 +2,7 @@
 // Copyright (c) blamejs contributors
 "use strict";
 var nodeCrypto = require("node:crypto");
+var nodeTypes = require("node:util").types;
 var safeBuffer = require("../safe-buffer");
 var C = require("../constants");
 var requestHelpers = require("../request-helpers");
@@ -43,6 +44,14 @@ function _validateBucketName(name) {
 }
 
 var _xmlEscape = template.escapeHtml;
+
+function _xmlElements(tag, values) {
+  var out = "";
+  values.forEach(function (v) {
+    out += "<" + tag + ">" + _xmlEscape(v) + "</" + tag + ">";
+  });
+  return out;
+}
 
 function _md5Base64(buf) {
   return nodeCrypto.createHash("md5").update(buf).digest("base64");
@@ -180,21 +189,13 @@ function _buildCorsXml(rules) {
     }
     body += "<CORSRule>";
     if (rule.id !== undefined) body += "<ID>" + _xmlEscape(rule.id) + "</ID>";
-    rule.allowedOrigins.forEach(function (o) {
-      body += "<AllowedOrigin>" + _xmlEscape(o) + "</AllowedOrigin>";
-    });
-    rule.allowedMethods.forEach(function (m) {
-      body += "<AllowedMethod>" + _xmlEscape(m) + "</AllowedMethod>";
-    });
+    body += _xmlElements("AllowedOrigin", rule.allowedOrigins);
+    body += _xmlElements("AllowedMethod", rule.allowedMethods);
     if (Array.isArray(rule.allowedHeaders)) {
-      rule.allowedHeaders.forEach(function (h) {
-        body += "<AllowedHeader>" + _xmlEscape(h) + "</AllowedHeader>";
-      });
+      body += _xmlElements("AllowedHeader", rule.allowedHeaders);
     }
     if (Array.isArray(rule.exposeHeaders)) {
-      rule.exposeHeaders.forEach(function (h) {
-        body += "<ExposeHeader>" + _xmlEscape(h) + "</ExposeHeader>";
-      });
+      body += _xmlElements("ExposeHeader", rule.exposeHeaders);
     }
     if (rule.maxAgeSeconds !== undefined) {
       if (typeof rule.maxAgeSeconds !== "number" || rule.maxAgeSeconds < 0) {
@@ -276,7 +277,7 @@ function _validateRetention(opts) {
       "mode must be one of " + OBJECT_LOCK_MODES.join(", ") +
       "; got " + JSON.stringify(opts.mode), true);
   }
-  if (!(opts.retainUntil instanceof Date) || isNaN(opts.retainUntil.getTime())) {
+  if (!nodeTypes.isDate(opts.retainUntil) || isNaN(opts.retainUntil.getTime())) {
     throw _err("objectstore/invalid-retention",
       "retainUntil must be a valid Date instance", true);
   }
@@ -350,14 +351,8 @@ function create(config) {
   var endpoint = config.endpoint || ("https://s3." + config.region + ".amazonaws.com");
   if (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
   var pathStyle = !!(config.pathStyle || config.forcePathStyle);
-  var allowedProtocols = config.allowedProtocols || safeUrl.ALLOW_HTTP_TLS;
-  var allowInternal    = config.allowInternal != null ? config.allowInternal : null;
-  safeUrl.parse(endpoint, {
-    allowedProtocols: allowedProtocols,
-    errorClass:       ObjectStoreError,
-  });
-  var reqOpts = { timeoutMs: config.timeoutMs, allowedProtocols: allowedProtocols };
-  if (allowInternal !== null) reqOpts.allowInternal = allowInternal;
+  var { allowedProtocols, reqOpts } = sharedRequest.resolveTransport(
+    config.allowedProtocols, config.allowInternal, [endpoint], config.timeoutMs);
 
   var audit         = config.audit         || null;
   var observability = config.observability || null;
@@ -402,7 +397,7 @@ function create(config) {
   }
 
   function _objectUrl(name, key, query) {
-    var encKey = key.split("/").map(function (s) { return sigv4.awsUriEncode(s, true); }).join("/");
+    var encKey = sigv4.encodeObjectKeyPath(key);
     var uo = _internalUrl(endpoint, allowedProtocols);
     if (pathStyle) {
       uo.pathname = "/" + name + "/" + encKey;

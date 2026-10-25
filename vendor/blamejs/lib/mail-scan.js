@@ -81,6 +81,7 @@
 
 var net           = require("node:net");
 var safeBuffer    = require("./safe-buffer");
+var ipUtils       = require("./ip-utils");
 var C                 = require("./constants");
 var { defineClass }   = require("./framework-error");
 var lazyRequire       = require("./lazy-require");
@@ -102,6 +103,8 @@ var DEFAULT_ICAP_SERVICE = "srv_clamav";
 var CLAMAV_LENGTH_PREFIX_BYTES = 4;
 
 var CLAMAV_CHUNK_BYTES = 65536;
+
+var ICAP_CHUNK_BYTES = 65536;
 
 var REPLY_EXCERPT_CHARS = 200;
 
@@ -315,6 +318,15 @@ var ALLOWED_PROTOCOLS = Object.freeze({
  *     reader could not classify. `errorMessage` carries the daemon's own
  *     words, truncated to 200 characters.
  *
+ * Building the handle throws rather than returning a verdict:
+ * `mail-scan/bad-opts` for an `opts` that is not an object,
+ * `mail-scan/bad-host` for a missing or empty `host`,
+ * `mail-scan/bad-port` for a `port` outside [1, 65535],
+ * `mail-scan/bad-protocol` for a `protocol` other than the two above,
+ * `mail-scan/bad-service` for an empty ICAP `service`,
+ * `mail-scan/bad-profile` for an unknown `profile`, and
+ * `mail-scan/bad-timeout` for a `timeoutMs` that is not a positive integer.
+ *
  * @opts
  *   host:          string — required. ICAP / clamd hostname or IP.
  *   port:          number — required. ICAP port (default 1344) /
@@ -356,7 +368,8 @@ function create(opts) {
     validateOpts.requireNonEmptyString(service, "mail.scan.create.service",
       MailScanError, "mail-scan/bad-service");
   }
-  var profile = gateContract.resolveProfileName(opts, COMPLIANCE_POSTURES, DEFAULT_PROFILE);
+  var profile = gateContract.resolveProfileName(opts, COMPLIANCE_POSTURES, DEFAULT_PROFILE,
+    { errorClass: MailScanError, codePrefix: "mail-scan", label: "mail.scan.create" });
   if (!Object.prototype.hasOwnProperty.call(PROFILES, profile)) {
     throw new MailScanError("mail-scan/bad-profile",
       "mail.scan.create.profile: unknown '" + profile + "' (valid: strict / balanced / permissive)");
@@ -427,7 +440,7 @@ function create(opts) {
     return new Promise(function (resolve, reject) {
       var sock = (scanOpts._socket && typeof scanOpts._socket.write === "function")
         ? scanOpts._socket
-        : net.createConnection({ host: opts.host, port: opts.port });
+        : net.createConnection({ host: ipUtils.dialHost(opts.host), port: opts.port });
 
       var collector = safeBuffer.boundedChunkCollector({
         maxBytes:   caps.maxResponseBytes,
@@ -479,26 +492,47 @@ function create(opts) {
         messageBytes.length + "\r\n\r\n";
       var resBodyOffset = Buffer.byteLength(httpHdr, "ascii");
       var icapHdr =
-        "RESPMOD icap://" + opts.host + ":" + opts.port + "/" + service + " ICAP/1.0\r\n" +
-        "Host: " + opts.host + "\r\n" +
+        "RESPMOD icap://" + ipUtils.hostPort(opts.host, opts.port) + "/" + service + " ICAP/1.0\r\n" +
+        "Host: " + ipUtils.authorityHost(opts.host) + "\r\n" +
         "Allow: 204\r\n" +
         "Encapsulated: res-hdr=0, res-body=" + resBodyOffset + "\r\n" +
         "\r\n";
+      var bodyOff = 0;
+      function pumpIcap() {
+        if (done) return;
+        try {
+          while (bodyOff < messageBytes.length) {
+            var endOff = Math.min(bodyOff + ICAP_CHUNK_BYTES, messageBytes.length);
+            var accepted = sock.write(messageBytes.slice(bodyOff, endOff));
+            bodyOff = endOff;
+            if (accepted === false) {
+              sock.once("drain", pumpIcap);
+              return;
+            }
+          }
+          sock.write("\r\n0\r\n\r\n");
+          if (typeof sock.end === "function") sock.end();
+        } catch (e) {
+          if (done) return;
+          done = true;
+          clearTimeout(to);
+          reject(new MailScanError("mail-scan/transport",
+            "mail.scan.scan: ICAP write error: " + (e && e.message || e)));
+        }
+      }
+
       try {
         sock.write(icapHdr);
         sock.write(httpHdr);
-        var lenHex = messageBytes.length.toString(16);
-        sock.write(lenHex + "\r\n");
-        sock.write(messageBytes);
-        sock.write("\r\n0\r\n\r\n");
-        if (typeof sock.end === "function") sock.end();
+        sock.write(messageBytes.length.toString(16) + "\r\n");
       } catch (e) {
-        if (done) return;
         done = true;
         clearTimeout(to);
         reject(new MailScanError("mail-scan/transport",
           "mail.scan.scan: ICAP write error: " + (e && e.message || e)));
+        return;
       }
+      pumpIcap();
     });
   }
 
@@ -506,7 +540,7 @@ function create(opts) {
     return new Promise(function (resolve, reject) {
       var sock = (scanOpts && scanOpts._socket && typeof scanOpts._socket.write === "function")
         ? scanOpts._socket
-        : net.createConnection({ host: opts.host, port: opts.port });
+        : net.createConnection({ host: ipUtils.dialHost(opts.host), port: opts.port });
       var collector = safeBuffer.boundedChunkCollector({
         maxBytes:   caps.maxResponseBytes,
         errorClass: MailScanError,
@@ -522,14 +556,33 @@ function create(opts) {
           "mail.scan.scan: clamav-instream timeout after " + timeoutMs + "ms"));
       }, timeoutMs);
 
-      sock.on("error", function (e) {
-        if (done) return;
+      var socketError = null;
+
+      function resolveIfReplied() {
+        if (done) return true;
+        var buffered = _bufferedClamVerdict(collector);
+        if (buffered === null) return false;
         done = true;
         clearTimeout(to);
-        var buffered = _bufferedClamVerdict(collector);
-        if (buffered !== null) { resolve(buffered); return; }
+        resolve(buffered);
+        return true;
+      }
+
+      sock.on("error", function (e) {
+        if (done) return;
+        socketError = e;
+        resolveIfReplied();
+      });
+
+      sock.on("close", function () {
+        if (done) return;
+        if (resolveIfReplied()) return;
+        if (socketError === null) return;
+        done = true;
+        clearTimeout(to);
         reject(new MailScanError("mail-scan/transport",
-          "mail.scan.scan: clamav socket error: " + (e && e.message || e)));
+          "mail.scan.scan: clamav socket error: " +
+          (socketError && socketError.message || socketError)));
       });
 
       sock.on("data", function (chunk) {
@@ -551,28 +604,45 @@ function create(opts) {
           _stripTrailingEol(collector.result().toString("utf8"))));
       });
 
+      var off = 0;
+      function pump() {
+        if (done) return;
+        try {
+          while (off < messageBytes.length) {
+            var endOff = Math.min(off + CLAMAV_CHUNK_BYTES, messageBytes.length);
+            var lenBuf = Buffer.alloc(CLAMAV_LENGTH_PREFIX_BYTES);
+            lenBuf.writeUInt32BE(endOff - off, 0);
+            sock.write(lenBuf);
+            var accepted = sock.write(messageBytes.slice(off, endOff));
+            off = endOff;
+            if (accepted === false) {
+              sock.once("drain", pump);
+              return;
+            }
+          }
+          var term = Buffer.alloc(CLAMAV_LENGTH_PREFIX_BYTES);
+          term.writeUInt32BE(0, 0);
+          sock.write(term);
+          if (typeof sock.end === "function") sock.end();
+        } catch (e) {
+          if (done) return;
+          done = true;
+          clearTimeout(to);
+          reject(new MailScanError("mail-scan/transport",
+            "mail.scan.scan: clamav write error: " + (e && e.message || e)));
+        }
+      }
+
       try {
         sock.write("zINSTREAM\0");
-        var off = 0;
-        while (off < messageBytes.length) {
-          var endOff = Math.min(off + CLAMAV_CHUNK_BYTES, messageBytes.length);
-          var lenBuf = Buffer.alloc(CLAMAV_LENGTH_PREFIX_BYTES);
-          lenBuf.writeUInt32BE(endOff - off, 0);
-          sock.write(lenBuf);
-          sock.write(messageBytes.slice(off, endOff));
-          off = endOff;
-        }
-        var term = Buffer.alloc(CLAMAV_LENGTH_PREFIX_BYTES);
-        term.writeUInt32BE(0, 0);
-        sock.write(term);
-        if (typeof sock.end === "function") sock.end();
       } catch (e) {
-        if (done) return;
         done = true;
         clearTimeout(to);
         reject(new MailScanError("mail-scan/transport",
           "mail.scan.scan: clamav write error: " + (e && e.message || e)));
+        return;
       }
+      pump();
     });
   }
 
@@ -638,7 +708,7 @@ function _emitAudit(auditImpl, action, outcome, metadata) {
 module.exports = {
   create:               create,
   compliancePosture:    compliancePosture,
-  PROFILES:             PROFILES,
+  PROFILES:             gateContract.freezePolicy(PROFILES),
   COMPLIANCE_POSTURES:  COMPLIANCE_POSTURES,
   ALLOWED_PROTOCOLS:    ALLOWED_PROTOCOLS,
   MailScanError:        MailScanError,

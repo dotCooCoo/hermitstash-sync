@@ -99,9 +99,13 @@ var DEFAULT_PATHS = {
   issuance:     "issuance.json",
   revokedGeneration: "revoked-generation",
   algorithm:    "ca.algorithm",
+  crlNumber:    "ca.crl-number",
+  crlPublished: "ca.crl-number.published",
 };
 
 var VALID_SEAL_MODES = { required: 1, disabled: 1 };
+
+var PREFLIGHT_CRL_NUMBER = 1;
 
 function _absoluteOrUnderDataDir(dataDir, p) {
   return nodePath.isAbsolute(p) ? p : nodePath.join(dataDir, p);
@@ -119,6 +123,8 @@ function _resolvePaths(dataDir, paths) {
     issuance:     _absoluteOrUnderDataDir(dataDir, p.issuance),
     revokedGeneration: _absoluteOrUnderDataDir(dataDir, p.revokedGeneration),
     algorithm:    _absoluteOrUnderDataDir(dataDir, p.algorithm),
+    crlNumber:    _absoluteOrUnderDataDir(dataDir, p.crlNumber),
+    crlPublished: _absoluteOrUnderDataDir(dataDir, p.crlPublished),
   };
 }
 
@@ -176,7 +182,7 @@ function _dnGeneration(subj) {
 function parseGeneration(certPem) {
   if (typeof certPem !== "string" && !Buffer.isBuffer(certPem)) return 0;
   try {
-    var cert = new nodeCrypto.X509Certificate(certPem);
+    var cert = bCrypto()._x509(certPem);
     /* c8 ignore next -- defensive: a successfully-parsed X.509 certificate always exposes a subject DN */
     var subj = cert.subject || "";
     var gen = _dnGeneration(subj);
@@ -277,7 +283,7 @@ function _labelForCaKeyType(caKeyPem) {
 
 function _certAlgorithm(certPem) {
   try {
-    var cert = new nodeCrypto.X509Certificate(certPem);
+    var cert = bCrypto()._x509(certPem);
     var pub = cert.publicKey;
     /* c8 ignore next -- the "" fallback is defensive: a parsed public key always reports a non-empty asymmetricKeyType */
     var type = String(pub.asymmetricKeyType || "").toLowerCase();
@@ -309,15 +315,21 @@ function _writeStoreCapped(path, serialized, writeOpts, fullCode, label) {
 
 function _sameCert(pemA, pemB) {
   try {
-    return new nodeCrypto.X509Certificate(pemA).raw.equals(new nodeCrypto.X509Certificate(pemB).raw);
+    return bCrypto()._x509(pemA).raw.equals(bCrypto()._x509(pemB).raw);
   } catch (_e) {
     return Buffer.from(pemA).equals(Buffer.from(pemB));
   }
 }
 
+function _assertCaKeyNotCompromised(certPem, label) {
+  var cert;
+  try { cert = bCrypto()._x509(certPem); } catch (_e) { return; }
+  bCrypto().assertNotCompromised(cert, { errorClass: MtlsCaError, code: "mtls-ca/compromised-key", label: label });
+}
+
 function _caPairConsistent(certPem, keyPem) {
   try {
-    var certSpki = new nodeCrypto.X509Certificate(certPem).publicKey.export({ type: "spki", format: "der" });
+    var certSpki = bCrypto()._x509(certPem).publicKey.export({ type: "spki", format: "der" });
     var keySpki = nodeCrypto.createPublicKey(keyPem).export({ type: "spki", format: "der" });
     return Buffer.from(certSpki).equals(Buffer.from(keySpki));
   } catch (_e) {
@@ -337,7 +349,8 @@ function create(opts) {
   }
   var paths = _resolvePaths(opts.dataDir, opts.paths);
   [paths.caKey, paths.caKeySealed, paths.caCert, paths.caCertPrev,
-   paths.revocations, paths.crl, paths.issuance, paths.revokedGeneration].forEach(function (p) {
+   paths.revocations, paths.crl, paths.issuance, paths.revokedGeneration,
+   paths.crlNumber, paths.crlPublished].forEach(function (p) {
     var dir = nodePath.dirname(p);
     if (!nodeFs.existsSync(dir)) nodeFs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   });
@@ -448,6 +461,7 @@ function create(opts) {
       throw new MtlsCaError("mtls-ca/bad-commit",
         "commit requires opts.caKeyPem and opts.caCertPem (PEM strings)");
     }
+    _assertCaKeyNotCompromised(opts2.caCertPem, "the CA certificate being committed");
     if (opts2.retainPrevious !== undefined && typeof opts2.retainPrevious !== "boolean") {
       throw new MtlsCaError("mtls-ca/bad-retain-previous",
         "commit opts.retainPrevious must be a boolean when provided (got " +
@@ -712,7 +726,8 @@ function create(opts) {
     var _now = Date.now();
     try {
       await engine.generateCrl({ caCertPem: caCertPem, caKeyPem: caKeyPem, revocations: [],
-        thisUpdate: new Date(_now), nextUpdate: new Date(_now + C.TIME.days(1)) });
+        thisUpdate: new Date(_now), nextUpdate: new Date(_now + C.TIME.days(1)),
+        crlNumber: PREFLIGHT_CRL_NUMBER });
     } catch (e) {
       throw new MtlsCaError("mtls-ca/ca-cannot-sign-crl",
         "commit: the bundled engine cannot sign a CRL under the committed CA (its key usage likely omits cRLSign): " +
@@ -733,7 +748,7 @@ function create(opts) {
     }
     if (usesDefaultEngine) {
       var _commitCert = null, _commitKey = null;
-      try { _commitCert = new nodeCrypto.X509Certificate(opts2.caCertPem); } catch (_ce) { _commitCert = null; }
+      try { _commitCert = bCrypto()._x509(opts2.caCertPem); } catch (_ce) { _commitCert = null; }
       try { _commitKey = nodeCrypto.createPrivateKey(opts2.caKeyPem); } catch (_ke) { _commitKey = null; }
       if (_commitCert === null || _commitKey === null) {
         throw new MtlsCaError("mtls-ca/bad-commit",
@@ -772,6 +787,7 @@ function create(opts) {
         "not correspond to the private key) — refusing to publish a mismatched CA the next initCA() would reject; " +
         "supply a certificate and key from the same CA");
     }
+    _assertCaKeyNotCompromised(opts2.caCertPem, "commit: the CA certificate's key");
     return atomicFile.lock(paths.caCert, async function () {
       _reconcileCommitJournalLocked();
       if (usesDefaultEngine) { await _assertCommittedCaUsable(opts2.caCertPem, opts2.caKeyPem); }
@@ -975,6 +991,7 @@ function create(opts) {
         "the stored CA certificate and private key did not become a matching pair after re-reading " +
         "(a rotation may still be publishing, or the store is corrupt) — retry issuance");
     }
+    _assertCaKeyNotCompromised(certPem, "the stored CA certificate (" + paths.caCert + ")");
     _assertPinMatchesStoredCa(certPem, keyPem);
     return { caCertPem: certPem, caKeyPem: keyPem, algorithm: caAlgorithm };
   }
@@ -1047,7 +1064,7 @@ function create(opts) {
   function _certIdentity(certPem) {
     var serialNumber = null;
     try {
-      serialNumber = _normalizeSerial(new nodeCrypto.X509Certificate(certPem).serialNumber);
+      serialNumber = _normalizeSerial(bCrypto()._x509(certPem).serialNumber);
     } catch (_e) {
       serialNumber = null;
     }
@@ -1179,6 +1196,47 @@ function create(opts) {
     }
     var n = parseInt(trimmed, 10);
     return n;
+  }
+  function _readCrlCounter(file, what) {
+    if (!nodeFs.existsSync(file)) return 0;
+    var raw;
+    try {
+      raw = atomicFile.fdSafeReadSync(file, { maxBytes: 64, encoding: "utf8" });
+    } catch (e) {
+      throw new MtlsCaError("mtls-ca/crl-number-unreadable",
+        "the " + what + " (" + file + ") exists but is unreadable (" +
+        /* c8 ignore next -- String(e) fallback unreachable: a thrown fs Error always has a .message */
+        ((e && e.message) || String(e)) + ") — refusing to sign a CRL that could repeat an issued number");
+    }
+    var trimmed = String(raw).trim();
+    if (!/^\d+$/.test(trimmed)) {
+      throw new MtlsCaError("mtls-ca/crl-number-unreadable",
+        "the " + what + " (" + file + ") is malformed — refusing to sign a CRL that could repeat " +
+        "an issued number");
+    }
+    var parsed = parseInt(trimmed, 10);
+    var stripped = trimmed.replace(/^0+(?=\d)/, "");
+    if (!Number.isSafeInteger(parsed) || String(parsed) !== stripped) {
+      throw new MtlsCaError("mtls-ca/crl-number-unreadable",
+        "the " + what + " (" + file + ") holds " + stripped + ", which this reader cannot " +
+        "carry exactly — refusing to sign a CRL whose number would be a rounded copy of one " +
+        "already issued");
+    }
+    return parsed;
+  }
+  function _allocateCrlNumber() {
+    var allocated = 0;
+    return atomicFile.lock(paths.crlNumber, function () {
+      var previous = _readCrlCounter(paths.crlNumber, "CRL number");
+      if (previous >= Number.MAX_SAFE_INTEGER) {
+        throw new MtlsCaError("mtls-ca/crl-number-exhausted",
+          "the CRL number (" + paths.crlNumber + ") has reached " + previous + ", the largest " +
+          "value this reader carries exactly, so the next CRL could not take a higher one — " +
+          "rotate the CA rather than reissuing a number a client has already seen");
+      }
+      allocated = previous + 1;
+      atomicFile.writeSync(paths.crlNumber, String(allocated) + "\n", { mode: 0o600 });
+    }).then(function () { return allocated; });
   }
   function _bumpRevokedWatermark(n) {
     if (typeof revocationStore.bumpGenerationWatermark === "function") {
@@ -1516,12 +1574,14 @@ function create(opts) {
     var thisUpdate = opts3.thisUpdate || new Date(nowMs);
     var nextUpdate = opts3.nextUpdate ||
                      new Date(nowMs + C.TIME.days(7));
+    var crlNumber = await _allocateCrlNumber();
     var crlPem = await engine.generateCrl({
       caCertPem:   ca.caCertPem,
       caKeyPem:    ca.caKeyPem,
       revocations: revocations,
       thisUpdate:  thisUpdate,
       nextUpdate:  nextUpdate,
+      crlNumber:   crlNumber,
     });
     if (typeof crlPem !== "string" || crlPem.length === 0) {
       throw new MtlsCaError("mtls-ca/bad-engine-output",
@@ -1535,6 +1595,8 @@ function create(opts) {
           return;
         }
         var _writeCrl = function () {
+          if (_readCrlCounter(paths.crlPublished, "published CRL number") >= crlNumber) return;
+          atomicFile.writeSync(paths.crlPublished, String(crlNumber) + "\n", { mode: 0o600 });
           atomicFile.writeSync(paths.crl, crlPem, { fileMode: 0o644 });
           persisted = true;
         };
@@ -1715,6 +1777,7 @@ function create(opts) {
     if (bundle === null) bundle = cur ? [cur] : [];
     var journalRoot = _journalRetainedRoot();
     if (journalRoot && bundle.indexOf(journalRoot) === -1) bundle.push(journalRoot);
+    bundle.forEach(function (root) { _assertCaKeyNotCompromised(root, "a trust-bundle root"); });
     return bundle;
   }
   function loadTrustBundle() {

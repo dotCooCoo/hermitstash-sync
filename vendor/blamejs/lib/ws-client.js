@@ -2,6 +2,39 @@
 // Copyright (c) blamejs contributors
 "use strict";
 
+/**
+ * @module b.wsClient
+ * @nav    Network
+ * @title  WebSocket Client
+ * @slug   ws-client
+ *
+ * @intro
+ *   Open a WebSocket to somewhere else and hold it open. This is the
+ *   outbound half: <code>b.websocket</code> accepts connections,
+ *   <code>b.wsClient</code> makes them.
+ *
+ *   An outbound connection is a request this server makes on behalf of
+ *   whoever asked for it, so the target is screened against server-side
+ *   request forgery before the socket opens. One that resolves to a
+ *   loopback, link-local or private address is refused unless the caller
+ *   opts out, because a URL taken from a webhook registration or a
+ *   tenant's configuration should not be able to reach the metadata
+ *   service.
+ *
+ *   Everything a peer sends is bounded. A message, a single frame and the
+ *   number of fragments a message may arrive in each have a ceiling, so a
+ *   peer cannot grow this process's memory by never finishing a message.
+ *
+ *   The connection is kept alive with a ping and a pong deadline, so a
+ *   peer that stops answering is treated as gone rather than left holding
+ *   a socket. Reconnection backs off.
+ *
+ * @card
+ *   Open and hold an outbound WebSocket, with the target screened against
+ *   server-side request forgery, every inbound size bounded, and a
+ *   ping-pong deadline that notices a peer that has stopped answering.
+ */
+
 var net          = require("node:net");
 var nodeUrl      = require("node:url");
 var nodeCrypto   = require("node:crypto");
@@ -9,6 +42,7 @@ var { EventEmitter } = require("node:events");
 
 var lazyRequire    = require("./lazy-require");
 var validateOpts   = require("./validate-opts");
+var ipUtils        = require("./ip-utils");
 var numericBounds  = require("./numeric-bounds");
 var safeAsync      = require("./safe-async");
 var safeBuffer     = require("./safe-buffer");
@@ -25,6 +59,7 @@ var { defineClass } = require("./framework-error");
 var WS_TRANSIENT_CODES = {
   "ws-client/handshake-timeout": true,
   "ws-client/pong-timeout":      true,
+  "ws-client/connection-lost":   true,
 };
 
 function _wsErrorIsPermanent(code, statusCode) {
@@ -41,6 +76,8 @@ var WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 var DEFAULT_PING_MS    = C.TIME.seconds(30);
 var DEFAULT_PONG_MS    = C.TIME.seconds(60);
 var DEFAULT_MAX_BYTES  = C.BYTES.mib(8);
+var MIN_FRAGMENT_ACCOUNTING_BYTES = 64;
+var MAX_FRAGMENTS_FLOOR = 8192;
 var DEFAULT_MAX_FRAME  = C.BYTES.mib(8);
 var DEFAULT_HANDSHAKE_TIMEOUT_MS = C.TIME.seconds(15);
 var DEFAULT_RECONNECT_BASE_MS    = C.TIME.seconds(1) / 2;
@@ -56,6 +93,7 @@ var OPCODE_PONG   = 0x0A;
 
 var CLOSE_NORMAL          = 1000;
 var CLOSE_GOING_AWAY      = 1001;
+var CLOSE_PROTOCOL_ERROR  = 1002;
 var CLOSE_ABNORMAL        = 1006;
 
 function _isPermanentError(err) {
@@ -101,11 +139,132 @@ function _parseUrl(target) {
   return parsed;
 }
 
+function _identityForDial(tlsOpts, host) {
+  networkTls()._assertCaNotCompromised(tlsOpts ? tlsOpts.ca : undefined, {
+    errorClass: WsClientError, code: "ws-client/compromised-key", label: "wsClient.connect: tlsOpts.ca",
+  });
+  return networkTls().identityFor(host, tlsOpts ? tlsOpts.servername : undefined, {
+    label: "wsClient.connect: tlsOpts.servername", errorClass: WsClientError, code: "ws-client/bad-opt",
+  });
+}
+
+/**
+ * @primitive b.wsClient.connect
+ * @signature b.wsClient.connect(target, opts?)
+ * @since     0.7.114
+ * @status    stable
+ * @compliance soc2
+ * @related   b.websocket.handleUpgrade, b.ssrfGuard.classify
+ *
+ * Answer the client for a WebSocket to `target`. It returns immediately,
+ * before the socket is open: the client is an `EventEmitter` carrying
+ * `send(data)`, `ping(payload?)` and `close(code?, reason?)`, and
+ * the connection is reported through its events.
+ *
+ * `send(data)` sends a string as a text frame, a Buffer as a binary frame
+ * and any other value as its JSON text in a text frame. It throws
+ * `ws-client/not-open` before `open`, `ws-client/payload-too-big` past
+ * `maxMessageBytes`, and `ws-client/bad-opt` when given a second argument.
+ * `close(code)` sends 1000 when `code` is omitted and throws a `TypeError`
+ * for any other value `b.websocket.isValidCloseCode` refuses, including
+ * `0`, `null` and a numeric string. A server that closes with such a
+ * code, or with a one-byte close payload, is answered with close code 1002
+ * and reported as `ws-client/bad-close-code` on `error`.
+ *
+ * It emits `open`, `message` with `(data, isBinary)`, `close` with
+ * `(code, reason)`, `error`, and `reconnecting` with
+ * `{ attempt, delayMs }`. Attach an `error` listener before anything else:
+ * every connection failure arrives there rather than as a throw, and an
+ * `error` an `EventEmitter` has no listener for takes the process down.
+ *
+ * The options are checked before the client is returned, so a malformed
+ * call throws instead of reporting on `error`: `ws-client/bad-url-for` and
+ * `ws-client/bad-tls-opts-for` when those are not functions,
+ * `ws-client/bad-handshake-guid` for an empty `handshakeGuid`,
+ * `ws-client/bad-subprotocol` for an entry of `subprotocols` that is not a
+ * non-empty string, and `ws-client/bad-opt` when `pingMs`, `pongMs`,
+ * `maxMessageBytes`, `maxFrameBytes`, `maxFragments` or
+ * `handshakeTimeoutMs` is not a positive integer.
+ *
+ * A wss:// dial sends the URL host as SNI when it is a name and sends no
+ * SNI for an IP literal; the certificate is then checked against the
+ * address. `tlsOpts.servername` overrides the name. A servername that is not
+ * a non-empty string, or one that is an IP address other than the URL host,
+ * throws `ws-client/bad-opt`; the same values returned by `tlsOptsFor` are
+ * reported as `ws-client/bad-opt` on `error` before the attempt dials.
+ *
+ * A `tlsOpts.ca` holding a certificate whose key is compromised (see
+ * `b.crypto.compromisedKey`) throws `ws-client/compromised-key`, and the
+ * same `ca` returned by `tlsOptsFor` is reported with that code on `error`
+ * before the attempt dials. A wss:// server whose certificate chain carries a
+ * compromised key before or at the trust anchor it reaches is reported as
+ * `tls/compromised-key` on `error` before the upgrade request is sent, and a
+ * chain that reaches no anchor in `tlsOpts.ca` (Node's default CA store
+ * without one) as `tls/server-chain-unverifiable` (see
+ * `b.network.tls.applyToContext`). `tlsOpts.checkServerIdentity` still runs
+ * after that chain check.
+ *
+ * The target is screened before the socket opens, and one resolving to an
+ * address the SSRF guard refuses raises `error` instead of connecting,
+ * naming the range it landed in. `allowInternal: true` waives that, which
+ * is for a target the operator wrote rather than one a request supplied.
+ *
+ * `maxMessageBytes`, `maxFrameBytes` and `maxFragments` bound what a peer
+ * can make this process hold. `pingMs` and `pongMs` set the keep-alive and
+ * the deadline for an answer; a missed pong raises
+ * `ws-client/pong-timeout`, which is transient and so reconnects rather
+ * than giving up.
+ *
+ * `parse: "json"` or a `parser` function turns each text message into a
+ * value before `message` fires; a payload that does not parse raises
+ * `ws-client/json-parse` or `ws-client/parser-failed` on `error` rather
+ * than reaching a handler half-read. A binary message reaches `message` as
+ * a Buffer without passing through `parse` or `parser`.
+ *
+ * `urlFor` and `tlsOptsFor` are called per attempt, so a reconnect can
+ * pick up a rotated token or a new endpoint instead of replaying the one
+ * the first attempt used.
+ *
+ * A `target` whose scheme is not `ws:` or `wss:` throws `ws-client/bad-url`. A
+ * `reconnect` that is not `false`, `null` or an object throws
+ * `ws-client/bad-reconnect`, and one carrying an unknown key or a `baseMs` or
+ * `maxMs` that is not a positive integer throws `ws-client/bad-reconnect-opt`.
+ *
+ * @opts
+ *   subprotocols:       string[],  // offered in Sec-WebSocket-Protocol
+ *   headers:            object,    // sent with the upgrade request
+ *   origin:             string,    // Origin header value
+ *   tlsOpts:            object,    // TLS options for a wss target
+ *   tlsOptsFor:         function,  // (attempt) → TLS options, per attempt
+ *   urlFor:             function,  // (attempt) → target URL, per attempt
+ *   handshakeGuid:      string,    // GUID mixed into Sec-WebSocket-Accept; default the RFC 6455 one
+ *   allowInternal:      boolean,   // default false — waive the SSRF screen
+ *   pingMs:             number,    // keep-alive interval
+ *   pongMs:             number,    // deadline for a pong before the peer is gone
+ *   handshakeTimeoutMs: number,    // ceiling on the upgrade
+ *   maxMessageBytes:    number,    // ceiling on one reassembled message
+ *   maxFrameBytes:      number,    // ceiling on one frame
+ *   maxFragments:       number,    // fragments one message may arrive in
+ *   permessageDeflate:  boolean,   // negotiate the compression extension
+ *   reconnect:          object,    // backoff for reconnection
+ *   parse:              string,    // "json" to parse each message
+ *   parser:             function,  // (text) → value; called for text frames only
+ *   audit:              boolean,   // default true
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var ws = b.wsClient.connect("wss://feed.example/stream", {
+ *     subprotocols: ["v1"], parse: "json",
+ *   });
+ *   ws.on("error",   function (err) { log(err); });
+ *   ws.on("message", function (msg) { handle(msg); });
+ *   ws.on("open",    function () { ws.send(JSON.stringify({ subscribe: "ticks" })); });
+ */
 function connect(target, opts) {
   opts = opts || {};
   validateOpts(opts, [
     "subprotocols", "headers", "tlsOpts", "pingMs", "pongMs",
-    "maxMessageBytes", "maxFrameBytes",
+    "maxMessageBytes", "maxFrameBytes", "maxFragments",
     "handshakeTimeoutMs", "reconnect",
     "permessageDeflate", "audit", "origin",
     "handshakeGuid", "allowInternal",
@@ -130,6 +289,7 @@ function connect(target, opts) {
   }
 
   var parsed = _parseUrl(target);
+  _identityForDial(opts.tlsOpts, ipUtils.dialHost(parsed.hostname));
 
   var subprotocols = Array.isArray(opts.subprotocols) ? opts.subprotocols.slice() : [];
   for (var sp = 0; sp < subprotocols.length; sp += 1) {
@@ -139,7 +299,7 @@ function connect(target, opts) {
     }
   }
   numericBounds.requireAllPositiveFiniteIntIfPresent(opts,
-    ["pingMs", "pongMs", "maxMessageBytes", "maxFrameBytes", "handshakeTimeoutMs"],
+    ["pingMs", "pongMs", "maxMessageBytes", "maxFrameBytes", "maxFragments", "handshakeTimeoutMs"],
     "wsClient.connect", WsClientError, "ws-client/bad-opt");
   var pingMs = (typeof opts.pingMs === "number") ? opts.pingMs : DEFAULT_PING_MS;
   var pongMs = (typeof opts.pongMs === "number") ? opts.pongMs : DEFAULT_PONG_MS;
@@ -161,6 +321,7 @@ function connect(target, opts) {
     pingMs:             pingMs,
     pongMs:             pongMs,
     maxMessageBytes:    maxMessageBytes,
+    maxFragments:       opts.maxFragments,
     maxFrameBytes:      maxFrameBytes,
     handshakeTimeoutMs: handshakeTimeoutMs,
     reconnectOpts:      reconnectOpts,
@@ -219,7 +380,12 @@ class WsClient extends EventEmitter {
     this._fragmentChunks   = [];
     this._fragmentOpcode   = null;
     this._fragmentRsv1     = false;
+    this._maxFragments     = (typeof this._opts.maxFragments === "number" && this._opts.maxFragments > 0)
+      ? this._opts.maxFragments
+      : Math.max(MAX_FRAGMENTS_FLOOR, Math.ceil(
+          (this._opts.maxMessageBytes || DEFAULT_MAX_BYTES) / MIN_FRAGMENT_ACCOUNTING_BYTES));
     this._closed           = false;
+    this._torndown         = false;
     this._negotiatedSubprotocol = null;
     this._negotiatedDeflate = false;
     this._negotiatedWindowBits = 15;
@@ -248,6 +414,7 @@ class WsClient extends EventEmitter {
         dialTlsOpts = Object.assign({}, opts.tlsOpts || {}, override);
       }
     }
+    _identityForDial(dialTlsOpts, ipUtils.dialHost(dialParsed.hostname));
     var probeProto = dialParsed.protocol === "wss:" ? "https:" : "http:";
     var probeUrl = new nodeUrl.URL(probeProto + "//" + dialParsed.host + dialParsed.pathname + dialParsed.search);
     var probe = await ssrfGuard.checkUrl(probeUrl, {
@@ -268,7 +435,7 @@ class WsClient extends EventEmitter {
     var dialTlsOpts = this._dialTlsOpts || this._opts.tlsOpts;
     var port = parsed.port ? parseInt(parsed.port, 10) :
                (parsed.protocol === "wss:" ? 443 : 80);
-    var host = parsed.hostname;
+    var host = ipUtils.dialHost(parsed.hostname);
 
     var effectiveTls = null;
 
@@ -311,9 +478,9 @@ class WsClient extends EventEmitter {
       }, networkTls().outboundPosture(), dialTlsOpts || {});
       networkTls()._stripUnreachableCertCompression(tlsOpts, dialTlsOpts);
       effectiveTls = tlsOpts;
-      if (!tlsOpts.servername && !net.isIP(ssrfGuard.canonicalizeHost(host))) {
-        tlsOpts.servername = host;
-      }
+      delete tlsOpts.servername;
+      Object.assign(tlsOpts, _identityForDial(dialTlsOpts, host));
+      tlsOpts.checkServerIdentity = networkTls()._withCompromisedChainCheck(tlsOpts.checkServerIdentity, tlsOpts.ca);
       if (lookup) tlsOpts.lookup = lookup;
       socket = tls.connect(tlsOpts);
     } else {
@@ -323,9 +490,17 @@ class WsClient extends EventEmitter {
     }
     this._socket = socket;
     socket.on("error", _onError);
+    var _onSocketEnd = function () {
+      if (self._torndown || self._closed) return;
+      if (self._readyState === "closed" || self._readyState === "closing") return;
+      self._handleSocketError(new WsClientError("ws-client/connection-lost",
+        "peer closed the connection without a Close frame"));
+    };
+    socket.once("close", _onSocketEnd);
 
     var connectEvent = parsed.protocol === "wss:" ? "secureConnect" : "connect";
     socket.once(connectEvent, function () {
+      socket.once("end", _onSocketEnd);
       try { self._sendHandshake(); }
       catch (e) { self._handleSocketError(e); }
     });
@@ -340,7 +515,7 @@ class WsClient extends EventEmitter {
   _sendHandshake() {
     var opts = this._opts;
     var self = this;
-    var parsed = opts.parsedUrl;
+    var parsed = this._dialParsed || opts.parsedUrl;
     var key = _generateKey();
     this._secKey = key;
 
@@ -502,7 +677,7 @@ class WsClient extends EventEmitter {
           outcome: "success",
           actor:   null,
           metadata: {
-            host:               this._opts.parsedUrl.host,
+            host:               this._dialedHost(),
             subprotocol:        negotiatedSubprotocol,
             deflate:            this._negotiatedDeflate,
             serverWindowBits:   this._negotiatedWindowBits,
@@ -568,6 +743,21 @@ class WsClient extends EventEmitter {
     }
     if (frame.opcode === OPCODE_CLOSE) {
       var code = CLOSE_NORMAL, reason = "";
+      var badClose = null;
+      if (frame.payload.length === 1) {
+        badClose = "close frame payload must be 0 or at least 2 bytes (RFC 6455 §5.5.1)";
+      } else if (frame.payload.length >= 2 && !websocket().isValidCloseCode(frame.payload.readUInt16BE(0))) {
+        badClose = "close code " + frame.payload.readUInt16BE(0) +
+          " may not be sent in a Close frame (RFC 6455 §7.4)";
+      }
+      if (badClose !== null) {
+        var protoErr = Buffer.alloc(2);
+        protoErr.writeUInt16BE(CLOSE_PROTOCOL_ERROR, 0);
+        this._readyState = "closing";
+        this._sendFrame(OPCODE_CLOSE, protoErr, { fin: true });
+        this._handleSocketError(new WsClientError("ws-client/bad-close-code", badClose));
+        return;
+      }
       if (frame.payload.length >= 2) {
         code = frame.payload.readUInt16BE(0);
         var reasonBytes = frame.payload.subarray(2);
@@ -598,6 +788,15 @@ class WsClient extends EventEmitter {
       if (this._fragmentOpcode == null) {
         this._handleSocketError(new WsClientError("ws-client/protocol-error",
           "received continuation opcode with no prior text/binary frame"));
+        return;
+      }
+      if (this._fragmentChunks.length >= this._maxFragments) {
+        this._fragmentChunks = [];
+        this._fragmentOpcode = null;
+        this._fragmentRsv1   = false;
+        this._fragmentBytes  = 0;
+        this._handleSocketError(new WsClientError("ws-client/message-too-big",
+          "incoming message exceeds the maximum fragment count (" + this._maxFragments + ")"));
         return;
       }
       this._fragmentChunks.push(frame.payload);
@@ -690,12 +889,16 @@ class WsClient extends EventEmitter {
     return null;
   }
 
-  send(data, opts) {
+  send(data) {
     if (this._readyState !== "open") {
       throw new WsClientError("ws-client/not-open",
         "send: socket is not open (readyState=" + this._readyState + ")");
     }
-    opts = opts || {};
+    if (arguments.length > 1 && arguments[1] !== undefined) {
+      throw new WsClientError("ws-client/bad-opt",
+        "send: takes one argument; a string is sent as a text frame, a Buffer as a binary frame, " +
+        "any other value as JSON text");
+    }
     var isBinary = Buffer.isBuffer(data);
     var payload;
     if (isBinary) {
@@ -718,6 +921,11 @@ class WsClient extends EventEmitter {
   }
 
   close(code, reason) {
+    if (code === undefined) code = CLOSE_NORMAL;
+    if (!websocket().isValidCloseCode(code)) {
+      throw new TypeError("wsClient close: code " + code + " may not be sent in a Close frame " +
+        "(RFC 6455 7.4); use 1000-1003, 1007-1014 or 3000-4999");
+    }
     this._cancelReconnect();
     if (this._readyState === "closed" || this._readyState === "closing") {
       this._closed = true;
@@ -750,8 +958,14 @@ class WsClient extends EventEmitter {
     setTimeout(function () { self._teardown(code, reason, false); }, 1000).unref();
   }
 
+  _dialedHost() {
+    var parsed = this._dialParsed || this._opts.parsedUrl;
+    return parsed ? parsed.host : null;
+  }
+
   _teardown(code, reason, willReconnect) {
-    if (this._closed && !willReconnect) return;
+    if (this._torndown && !willReconnect) return;
+    this._torndown = !willReconnect;
     this._closed = !willReconnect;
     if (this._socket && !this._socket.destroyed) {
       try { this._socket.destroy(); } catch (_e) { /* drop-silent */ }
@@ -768,7 +982,7 @@ class WsClient extends EventEmitter {
           action:  "wsclient.closed",
           outcome: "success",
           actor:   null,
-          metadata: { code: code, reason: reason, host: this._opts.parsedUrl.host },
+          metadata: { code: code, reason: reason, host: this._dialedHost() },
         });
       } catch (_e) { /* drop-silent */ }
     }
@@ -790,7 +1004,7 @@ class WsClient extends EventEmitter {
           outcome: "failure",
           actor:   null,
           metadata: {
-            host:     this._opts.parsedUrl.host,
+            host:     this._dialedHost(),
             code:     err && err.code || "unknown",
             message:  err && err.message || String(err),
             attempt:  this._reconnectAttempt,

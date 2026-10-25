@@ -180,8 +180,10 @@ describe('Certificate Renewal', { timeout: 30000 }, function () {
     });
 
     it('rejects with invalid API key', async function () {
+      // An unknown key authenticates no one, so the sync guard answers 401; 429
+      // when earlier requests used up this route's limit.
       var res = await renewRequest({ auth: 'Bearer fake_invalid_key' });
-      assert.ok(res.statusCode === 403 || res.statusCode === 429, 'Bad key -> ' + res.statusCode);
+      assert.ok(res.statusCode === 401 || res.statusCode === 429, 'Bad key -> ' + res.statusCode);
     });
 
     it('rejects with empty Bearer token', async function () {

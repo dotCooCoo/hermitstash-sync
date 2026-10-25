@@ -46,7 +46,7 @@ First-time setup needs two env vars:
   HERMITSTASH_ENROLLMENT_CODE e.g. HSTASH-XXXX-XXXX-XXXX
 
 Example:
-  docker run -d \\
+  docker run -d --restart unless-stopped \\
     -e HERMITSTASH_SERVER_URL=https://hermitstash.example.com \\
     -e HERMITSTASH_ENROLLMENT_CODE=HSTASH-XXXX-XXXX-XXXX \\
     -v hermitstash-sync-config:${CONFIG_DIR} \\

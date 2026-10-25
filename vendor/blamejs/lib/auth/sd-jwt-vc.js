@@ -64,12 +64,73 @@ function _ecKeyParam(algorithm, key) {
   return key;
 }
 
+function _toKeyObjectOrSelf(key, kind) {
+  if (key instanceof nodeCrypto.KeyObject || !key) return key;
+  if (typeof globalThis.CryptoKey === "function" && key instanceof globalThis.CryptoKey) {
+    try { return nodeCrypto.KeyObject.from(key); }
+    catch (_e) { return key; }
+  }
+  var input = (typeof key === "object" && !Buffer.isBuffer(key) && key.kty)
+    ? { key: key, format: "jwk" } : key;
+  try {
+    return kind === "private" ? nodeCrypto.createPrivateKey(input) : nodeCrypto.createPublicKey(input);
+  } catch (_e) { return key; }
+}
+
+function _defaultAlgForKey(key, where) {
+  if (!key) return DEFAULT_ALG;
+  var keyObj = _toKeyObjectOrSelf(key, "private");
+  if (!(keyObj instanceof nodeCrypto.KeyObject)) {
+    throw new AuthError("auth-sd-jwt-vc/unsupported-key",
+      where + " could not be read as a private key; pass a KeyObject, a PEM string or a private JWK");
+  }
+  var kty = keyObj.asymmetricKeyType;
+  var curve = keyObj.asymmetricKeyDetails ? keyObj.asymmetricKeyDetails.namedCurve : null;
+  if (kty === "ec" && curve === "prime256v1") return "ES256";
+  if (kty === "ec" && curve === "secp384r1") return "ES384";
+  if (kty === "ed25519" || kty === "ed448") return "EdDSA";
+  if (kty === "ml-dsa-65") return "ML-DSA-65";
+  if (kty === "ml-dsa-87") return "ML-DSA-87";
+  throw new AuthError("auth-sd-jwt-vc/unsupported-key",
+    where + " is " + (curve ? kty + " (" + curve + ")" : kty) + ", which none of the supported algorithms " +
+    SUPPORTED_ALGS.join(", ") + " signs with");
+}
+
+function _refuseCompromised(keyObj, label) {
+  return bCrypto.assertNotCompromised(keyObj, {
+    errorClass: AuthError, code: "auth-sd-jwt-vc/compromised-key", label: label,
+  });
+}
+
+function _assertKeyNotCompromised(key, kind, label) {
+  var keyObj = _toKeyObjectOrSelf(key, kind);
+  if (keyObj instanceof nodeCrypto.KeyObject && keyObj.type !== "secret") _refuseCompromised(keyObj, label);
+  return key;
+}
+
+function _importJwk(jwk, label) {
+  return bCrypto.importPublicJwk(jwk, {
+    errorClass:      AuthError,
+    code:            "auth-sd-jwt-vc/bad-key",
+    compromisedCode: "auth-sd-jwt-vc/compromised-key",
+    messagePrefix:   label + ": ",
+  });
+}
+
+function _algBoundKey(key, kind, algorithm, label) {
+  return jwtExternal._assertJwsAlgKey(algorithm, _toKeyObjectOrSelf(key, kind), {
+    errorClass: AuthError, code: "auth-sd-jwt-vc/alg-key-mismatch",
+    compromisedCode: "auth-sd-jwt-vc/compromised-key", label: label,
+  });
+}
+
 function _signJwt(header, payload, privateKey, algorithm) {
   var headerStr = _b64uEncode(safeJson.stringify(header));
   var payloadStr = _b64uEncode(safeJson.stringify(payload));
   var signingInput = headerStr + "." + payloadStr;
   var sigAlgo = _resolveSigAlgo(algorithm);
-  var sig = nodeCrypto.sign(sigAlgo, Buffer.from(signingInput, "ascii"), _ecKeyParam(algorithm, privateKey));
+  var keyObj = _algBoundKey(privateKey, "private", algorithm, "sdJwtVc.sign");
+  var sig = nodeCrypto.sign(sigAlgo, Buffer.from(signingInput, "ascii"), _ecKeyParam(algorithm, keyObj));
   return signingInput + "." + sig.toString("base64url");
 }
 
@@ -82,7 +143,8 @@ function _verifyJwt(token, publicKey, algorithm) {
   var signingInput = parts[0] + "." + parts[1];
   var sig = _b64uDecodeBuf(parts[2]);
   var sigAlgo = _resolveSigAlgo(algorithm);
-  var ok = nodeCrypto.verify(sigAlgo, Buffer.from(signingInput, "ascii"), _ecKeyParam(algorithm, publicKey), sig);
+  var keyObj = _algBoundKey(publicKey, "public", algorithm, "sdJwtVc.verify");
+  var ok = nodeCrypto.verify(sigAlgo, Buffer.from(signingInput, "ascii"), _ecKeyParam(algorithm, keyObj), sig);
   if (!ok) {
     throw new AuthError("auth-sd-jwt-vc/bad-signature",
       "JWT signature verification failed");
@@ -108,6 +170,57 @@ function _resolveSigAlgo(algorithm) {
   }
 }
 
+var NON_DISCLOSABLE_CLAIMS = {
+  iss: 1, sub: 1, aud: 1, iat: 1, nbf: 1, exp: 1, jti: 1,
+  vct: 1, cnf: 1, _sd: 1, _sd_alg: 1, status: 1,
+};
+
+/**
+ * @primitive b.auth.sdJwtVc.issue
+ * @signature b.auth.sdJwtVc.issue(opts)
+ * @since     0.7.107
+ * @status    stable
+ * @related   b.auth.sdJwtVc.verify, b.auth.sdJwtVc.issuer.create
+ *
+ * Signs an SD-JWT VC and returns `{ token, jwt, disclosures, payload,
+ * header }`. Each claim named in `selectivelyDisclosed` becomes a disclosure
+ * whose digest is listed in `_sd`; the other claims stay in the signed
+ * payload. `iss`, `sub`, `aud`, `iat`, `nbf`, `exp`, `jti`, `vct`, `cnf`,
+ * `_sd`, `_sd_alg` and `status` cannot be selectively disclosed. A
+ * `holderKey` is written to `cnf.jwk`.
+ *
+ * An `issuerKey` or `holderKey` that `b.crypto.compromisedKey` reports is
+ * refused with `auth-sd-jwt-vc/compromised-key`. The other codes it raises
+ * are `auth-sd-jwt-vc/bad-opts`, `auth-sd-jwt-vc/unsupported-key`,
+ * `auth-sd-jwt-vc/unsupported-alg`, `auth-sd-jwt-vc/bad-hash`,
+ * `auth-sd-jwt-vc/no-key`, `auth-sd-jwt-vc/unknown-claim`,
+ * `auth-sd-jwt-vc/protected-claim-not-disclosable`, `auth-sd-jwt-vc/bad-cnf`
+ * (a `holderKey` that is not a readable public JWK) and
+ * `auth-sd-jwt-vc/alg-key-mismatch`.
+ *
+ * @opts
+ *   {
+ *     issuer:                string,     // iss claim
+ *     subject?:              string,     // sub claim
+ *     vct:                   string,     // credential type
+ *     claims:                object,     // the credential claims
+ *     selectivelyDisclosed?: string[],   // claim names issued as disclosures
+ *     issuerKey:             KeyObject | string | object, // private key, PEM, or private JWK
+ *     algorithm?:            string,     // ES256, ES384, EdDSA, ML-DSA-87 or ML-DSA-65; default from issuerKey
+ *     hashAlg?:              string,     // sha-256, sha-512, sha3-256 or sha3-512; default sha3-512
+ *     ttlMs?:                number,     // default 30 days
+ *     issuedAt?:             number,     // milliseconds; default now
+ *     holderKey?:            object,     // public JWK bound as cnf.jwk
+ *     extraHeader?:          object,     // more JOSE header members, e.g. kid
+ *   }
+ *
+ * @example
+ *   var vc = b.auth.sdJwtVc.issue({
+ *     issuer: "https://issuer.example", vct: "https://issuer.example/vct/pid",
+ *     claims: { given_name: "Alice", age_over_18: true },
+ *     selectivelyDisclosed: ["given_name"], issuerKey: issuerPrivateKey,
+ *   });
+ */
 function issue(opts) {
   validateOpts.requireObject(opts, "auth.sdJwtVc.issue", AuthError);
   validateOpts(opts, [
@@ -126,7 +239,7 @@ function issue(opts) {
       "issue: claims must be a plain object");
   }
 
-  var algorithm = opts.algorithm || DEFAULT_ALG;
+  var algorithm = opts.algorithm || _defaultAlgForKey(opts.issuerKey, "issue: issuerKey");
   if (SUPPORTED_ALGS.indexOf(algorithm) === -1) {
     throw new AuthError("auth-sd-jwt-vc/unsupported-alg",
       "issue: algorithm must be one of " + SUPPORTED_ALGS.join(", "));
@@ -150,6 +263,16 @@ function issue(opts) {
     throw new AuthError("auth-sd-jwt-vc/unknown-claim",
       "issue: selectivelyDisclosed includes claim(s) not present in claims: " +
       unknownSdNames.join(", "));
+  }
+  var protectedSdNames = sdNames.filter(function (n) {
+    return Object.prototype.hasOwnProperty.call(NON_DISCLOSABLE_CLAIMS, n);
+  });
+  if (protectedSdNames.length > 0) {
+    throw new AuthError("auth-sd-jwt-vc/protected-claim-not-disclosable",
+      "issue: these claims stay in the plain payload because a verifier reads them for a " +
+      "security gate (issuer, validity window, holder binding, type, revocation status); a " +
+      "dropped disclosure would bypass that gate, so they cannot be selectively disclosed: " +
+      protectedSdNames.join(", "));
   }
 
   var disclosures = [];
@@ -187,6 +310,12 @@ function issue(opts) {
       throw new AuthError("auth-sd-jwt-vc/bad-cnf",
         "issue: holderKey must be a JWK with kty");
     }
+    bCrypto.importPublicJwk(opts.holderKey, {
+      errorClass:      AuthError,
+      code:            "auth-sd-jwt-vc/bad-cnf",
+      compromisedCode: "auth-sd-jwt-vc/compromised-key",
+      messagePrefix:   "issue: holderKey: ",
+    });
     payload.cnf = { jwk: opts.holderKey };
   }
   var header = Object.assign({}, opts.extraHeader || {}, {
@@ -258,7 +387,7 @@ function present(opts) {
   }
 
   if (opts.audience && opts.nonce && opts.holderKey) {
-    var algorithm = opts.algorithm || DEFAULT_ALG;
+    var algorithm = opts.algorithm || _defaultAlgForKey(opts.holderKey, "present: holderKey");
     if (SUPPORTED_ALGS.indexOf(algorithm) === -1) {
       throw new AuthError("auth-sd-jwt-vc/unsupported-alg",
         "present: algorithm must be one of " + SUPPORTED_ALGS.join(", "));
@@ -291,6 +420,77 @@ function present(opts) {
   };
 }
 
+/**
+ * @primitive b.auth.sdJwtVc.verify
+ * @signature b.auth.sdJwtVc.verify(presentation, opts)
+ * @since     0.7.107
+ * @status    stable
+ * @related   b.auth.sdJwtVc.issue, b.auth.oid4vp.verifier.create
+ *
+ * Verifies an SD-JWT VC presentation and resolves to `{ valid, claims,
+ * disclosedClaims, issuerHeader, issuerPayload, holderKey, kbValidated,
+ * keyAttestationClaims }`. The issuer signature is checked with the key
+ * `issuerKeyResolver(header)` returns, every disclosure must match an `_sd`
+ * digest, and a key-binding JWT, when present, is checked against `cnf.jwk`,
+ * `audience`, `nonce` and the presentation's `sd_hash`. A credential with a
+ * `status` claim is checked with `statusListResolver`.
+ *
+ * An issuer key or a `cnf.jwk` holder key that `b.crypto.compromisedKey`
+ * reports is refused with `auth-sd-jwt-vc/compromised-key`. The `cnf.jwk` key
+ * is checked whether or not a key-binding JWT is presented, so `holderKey` in
+ * a successful result is never a compromised key. The other codes it raises
+ * are `auth-sd-jwt-vc/bad-opt`, `auth-sd-jwt-vc/no-token`,
+ * `auth-sd-jwt-vc/no-resolver`, `auth-sd-jwt-vc/malformed`,
+ * `auth-sd-jwt-vc/malformed-jwt`, `auth-sd-jwt-vc/bad-header`,
+ * `auth-sd-jwt-vc/unsupported-alg`, `auth-sd-jwt-vc/bad-typ`,
+ * `auth-sd-jwt-vc/unknown-crit`, `auth-sd-jwt-vc/key-not-found`,
+ * `auth-sd-jwt-vc/bad-key` (a JWK that cannot be imported),
+ * `auth-sd-jwt-vc/alg-key-mismatch`, `auth-sd-jwt-vc/bad-signature`,
+ * `auth-sd-jwt-vc/header-roundtrip-mismatch`,
+ * `auth-sd-jwt-vc/bad-clock-skew`, `auth-sd-jwt-vc/iat-future`,
+ * `auth-sd-jwt-vc/missing-exp`, `auth-sd-jwt-vc/expired`,
+ * `auth-sd-jwt-vc/not-yet-valid`, `auth-sd-jwt-vc/wrong-vct`,
+ * `auth-sd-jwt-vc/iss-mismatch`, `auth-sd-jwt-vc/bad-hash`,
+ * `auth-sd-jwt-vc/disclosure-mismatch`, `auth-sd-jwt-vc/disclosure-replay`,
+ * `auth-sd-jwt-vc/protected-claim-shadow`, `auth-sd-jwt-vc/no-cnf`,
+ * `auth-sd-jwt-vc/bad-kb-header`, `auth-sd-jwt-vc/bad-kb-typ`,
+ * `auth-sd-jwt-vc/missing-replay-binding`, `auth-sd-jwt-vc/wrong-audience`,
+ * `auth-sd-jwt-vc/wrong-nonce`, `auth-sd-jwt-vc/sd-hash-mismatch`,
+ * `auth-sd-jwt-vc/kb-iat-future`,
+ * `auth-sd-jwt-vc/no-attestation-verifier`,
+ * `auth-sd-jwt-vc/attestation-verify-failed`,
+ * `auth-sd-jwt-vc/attestation-empty`,
+ * `auth-sd-jwt-vc/missing-key-attestation`, `auth-sd-jwt-vc/missing-kb`,
+ * `auth-sd-jwt-vc/bad-status`, `auth-sd-jwt-vc/status-check-required`,
+ * `auth-sd-jwt-vc/status-resolver-failed`,
+ * `auth-sd-jwt-vc/status-resolver-bad-return` and
+ * `auth-sd-jwt-vc/revoked`. A JWK that does not match the `alg` raises
+ * `auth-jwt-external/alg-kty-mismatch`, `auth-jwt-external/alg-crv-mismatch`
+ * or `auth-jwt-external/bad-jwk`.
+ *
+ * @opts
+ *   {
+ *     issuerKeyResolver:       function,  // async (header) → issuer public key (KeyObject, PEM or JWK)
+ *     audience?:               string,    // required with a key-binding JWT
+ *     nonce?:                  string,    // required with a key-binding JWT
+ *     now?:                    number,    // milliseconds; default Date.now()
+ *     expectedVct?:            string,
+ *     expectedIssuer?:         string,
+ *     maxClockSkewSec?:        number,    // default 60
+ *     requireKeyBinding?:      boolean,   // refuse a presentation without a key-binding JWT; default false
+ *     requireExp?:             boolean,   // refuse a credential without exp; default false
+ *     keyAttestationVerifier?: function,  // async ({ jwt, holderKey, audience, nonce }) → attestation claims
+ *     requireKeyAttestation?:  boolean,   // default false
+ *     statusListResolver?:     function,  // async ({ idx, uri }) → integer status, 0 = valid
+ *   }
+ *
+ * @example
+ *   var result = await b.auth.sdJwtVc.verify(presentation, {
+ *     issuerKeyResolver: async function () { return issuerPublicJwk; },
+ *     audience: "https://verifier.example", nonce: sessionNonce, requireKeyBinding: true,
+ *   });
+ *   var over18 = result.claims.age_over_18;
+ */
 async function verify(presentation, opts) {
   validateOpts.requireObject(opts, "auth.sdJwtVc.verify", AuthError);
   validateOpts(opts, [
@@ -298,7 +498,22 @@ async function verify(presentation, opts) {
     "now", "expectedVct", "expectedIssuer", "maxClockSkewSec",
     "requireKeyBinding", "requireExp",
     "keyAttestationVerifier", "requireKeyAttestation",
+    "statusListResolver",
   ], "auth.sdJwtVc.verify");
+  validateOpts.optionalBoolean(opts.requireExp,
+    "auth.sdJwtVc.verify: opts.requireExp (whether a credential with no finite exp claim " +
+    "is refused; anything other than a boolean was read as false, which accepted a " +
+    "credential that never expires)",
+    AuthError, "auth-sd-jwt-vc/bad-opt");
+  validateOpts.optionalBoolean(opts.requireKeyAttestation,
+    "auth.sdJwtVc.verify: opts.requireKeyAttestation (whether a key attestation this caller " +
+    "cannot verify is refused; anything other than a boolean was read as false, which " +
+    "accepted the presentation unverified)",
+    AuthError, "auth-sd-jwt-vc/bad-opt");
+  validateOpts.optionalBoolean(opts.requireKeyBinding,
+    "auth.sdJwtVc.verify: opts.requireKeyBinding (whether a presentation must carry a key " +
+    "binding JWT; anything other than a boolean was read as false)",
+    AuthError, "auth-sd-jwt-vc/bad-opt");
 
   if (typeof presentation !== "string" || presentation.length === 0) {
     throw new AuthError("auth-sd-jwt-vc/no-token",
@@ -364,7 +579,7 @@ async function verify(presentation, opts) {
       !Buffer.isBuffer(issuerKey) &&
       typeof issuerKey.kty === "string") {
     jwtExternal._assertAlgKtyMatch(alg, issuerKey);
-    issuerKey = bCrypto.importPublicJwk(issuerKey);
+    issuerKey = _importJwk(issuerKey, "verify: issuer key");
   }
   var jwtParsed = _verifyJwt(jwt, issuerKey, alg);
   if (safeJson.stringify(headerObj) !== safeJson.stringify(jwtParsed.header)) {
@@ -382,13 +597,18 @@ async function verify(presentation, opts) {
     throw new AuthError("auth-sd-jwt-vc/iat-future",
       "verify: iat is in the future (clock skew?)");
   }
-  if (opts.requireExp === true && typeof jwtParsed.payload.exp !== "number") {
+  if (opts.requireExp === true && !numericBounds.isFiniteNumericDate(jwtParsed.payload.exp)) {
     throw new AuthError("auth-sd-jwt-vc/missing-exp",
-      "verify: requireExp is set but the credential has no numeric exp claim");
+      "verify: requireExp is set but the credential has no finite-NumericDate exp claim");
   }
-  if (typeof jwtParsed.payload.exp === "number" && jwtParsed.payload.exp < nowSec - skew) {
+  if (jwtParsed.payload.exp !== undefined &&
+      (!numericBounds.isFiniteNumericDate(jwtParsed.payload.exp) || jwtParsed.payload.exp < nowSec - skew)) {
     throw new AuthError("auth-sd-jwt-vc/expired",
-      "verify: token is expired");
+      "verify: token is expired or exp is not a finite NumericDate");
+  }
+  if (typeof jwtParsed.payload.nbf === "number" && jwtParsed.payload.nbf > nowSec + skew) {
+    throw new AuthError("auth-sd-jwt-vc/not-yet-valid",
+      "verify: token is not yet valid (nbf is in the future)");
   }
   if (opts.expectedVct && jwtParsed.payload.vct !== opts.expectedVct) {
     throw new AuthError("auth-sd-jwt-vc/wrong-vct",
@@ -410,10 +630,7 @@ async function verify(presentation, opts) {
       "verify: _sd_alg \"" + hashAlg + "\" not supported");
   }
   var sdDigests = Array.isArray(jwtParsed.payload._sd) ? jwtParsed.payload._sd : [];
-  var PROTECTED_CLAIM_NAMES = {
-    iss: 1, sub: 1, aud: 1, iat: 1, nbf: 1, exp: 1, jti: 1,
-    vct: 1, cnf: 1, _sd: 1, _sd_alg: 1, status: 1,
-  };
+  var PROTECTED_CLAIM_NAMES = NON_DISCLOSABLE_CLAIMS;
   var seenDigests = Object.create(null);
   var disclosedClaims = {};
   for (var i = 0; i < disclosureParts.length; i++) {
@@ -440,9 +657,11 @@ async function verify(presentation, opts) {
 
   var kbValidated = false;
   var holderKey = null;
+  var holderKeyObj = null;
   var keyAttestationClaims = null;
   if (jwtParsed.payload.cnf && jwtParsed.payload.cnf.jwk) {
     holderKey = jwtParsed.payload.cnf.jwk;
+    holderKeyObj = _importJwk(holderKey, "verify: cnf holder key");
   }
   if (maybeKbJwt) {
     if (!holderKey) {
@@ -455,6 +674,13 @@ async function verify(presentation, opts) {
       throw new AuthError("auth-sd-jwt-vc/bad-kb-header",
         "verify: malformed KB-JWT header: " + e.message);
     }
+    if (kbHeaderObj.crit !== undefined && kbHeaderObj.crit !== null) {
+      if (!Array.isArray(kbHeaderObj.crit) || kbHeaderObj.crit.length > 0) {
+        throw new AuthError("auth-sd-jwt-vc/unknown-crit",
+          "verify: KB-JWT carries 'crit' extension list — sd-jwt-vc does not " +
+          "support any critical extensions and refuses per RFC 7515 §4.1.11");
+      }
+    }
     if (kbHeaderObj.typ !== "kb+jwt") {
       throw new AuthError("auth-sd-jwt-vc/bad-kb-typ",
         "verify: KB-JWT typ must be \"kb+jwt\"");
@@ -465,7 +691,6 @@ async function verify(presentation, opts) {
         "verify: KB-JWT alg unsupported");
     }
     jwtExternal._assertAlgKtyMatch(kbAlg, holderKey);
-    var holderKeyObj = bCrypto.importPublicJwk(holderKey);
     var kbParsed = _verifyJwt(maybeKbJwt, holderKeyObj, kbAlg);
     if (typeof opts.audience !== "string" || opts.audience.length === 0 ||
         typeof opts.nonce !== "string" || opts.nonce.length === 0) {
@@ -531,6 +756,39 @@ async function verify(presentation, opts) {
       "verify: KB-JWT required (requireKeyBinding=true) but not present");
   }
 
+  var statusClaim = jwtParsed.payload.status;
+  if (statusClaim !== undefined && statusClaim !== null) {
+    var sl = (statusClaim && typeof statusClaim === "object") ? statusClaim.status_list : null;
+    if (!sl || typeof sl !== "object" ||
+        !numericBounds.isNonNegativeFiniteInt(sl.idx) ||
+        typeof sl.uri !== "string" || sl.uri.length === 0) {
+      throw new AuthError("auth-sd-jwt-vc/bad-status",
+        "verify: credential status.status_list must carry a non-negative integer idx and a non-empty uri");
+    }
+    if (typeof opts.statusListResolver !== "function") {
+      throw new AuthError("auth-sd-jwt-vc/status-check-required",
+        "verify: credential carries a status claim (it is revocable) but no statusListResolver was " +
+        "supplied. Pass opts.statusListResolver({ idx, uri }) returning the integer status (0 = valid) " +
+        "so a revoked credential is not accepted unchecked.");
+    }
+    var statusValue;
+    try {
+      statusValue = await opts.statusListResolver({ idx: sl.idx, uri: sl.uri });
+    } catch (e) {
+      throw new AuthError("auth-sd-jwt-vc/status-resolver-failed",
+        "verify: statusListResolver threw: " + ((e && e.message) || String(e)));
+    }
+    if (!numericBounds.isNonNegativeFiniteInt(statusValue)) {
+      throw new AuthError("auth-sd-jwt-vc/status-resolver-bad-return",
+        "verify: statusListResolver must return a non-negative integer status (0 = valid) for the credential index");
+    }
+    if (statusValue !== 0) {
+      throw new AuthError("auth-sd-jwt-vc/revoked",
+        "verify: credential status is " + statusValue +
+        " (non-zero means revoked or suspended per Token Status List); rejected");
+    }
+  }
+
   var resolved = Object.assign({}, jwtParsed.payload);
   delete resolved._sd;
   delete resolved._sd_alg;
@@ -562,5 +820,6 @@ module.exports = {
   DEFAULT_ALG:         DEFAULT_ALG,
   DEFAULT_HASH_ALG:    DEFAULT_HASH_ALG,
   _hashDisclosure:     _hashDisclosure,
+  _assertKeyNotCompromised: _assertKeyNotCompromised,
   _safeBufferRef:      safeBuffer,
 };

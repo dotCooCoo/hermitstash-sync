@@ -43,6 +43,7 @@
  *   Graceful shutdown orchestrator — drain in-flight requests, flush audit, close DB, release the cluster lease, then exit.
  */
 
+var nodeTypes = require("node:util").types;
 var safeAsync = require("./safe-async");
 var numericBounds = require("./numeric-bounds");
 var pidProbe = require("./pid-probe");
@@ -193,6 +194,10 @@ function create(opts) {
     return result;
   }
 
+  function _phaseInSpan(phase, budgetMs) {
+    return function (s) { return _runPhase(phase, budgetMs, s); };
+  }
+
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     draining = true;
@@ -206,9 +211,8 @@ function create(opts) {
         var perPhaseBudget = remainingPhases > 0 ? Math.floor(remainingMs / remainingPhases) : remainingMs;
         var phaseResult;
         if (tracing && typeof tracing.tap === "function") {
-          phaseResult = await tracing.tap("shutdown." + phases[i].name, null, function (s) {
-            return _runPhase(phases[i], perPhaseBudget, s);
-          });
+          phaseResult = await tracing.tap("shutdown." + phases[i].name, null,
+            _phaseInSpan(phases[i], perPhaseBudget));
         } else {
           phaseResult = await _runPhase(phases[i], perPhaseBudget, null);
         }
@@ -225,7 +229,7 @@ function create(opts) {
         var exitCode = (process.exitCode !== undefined && process.exitCode !== 0)
           ? process.exitCode : (allOk ? 0 : 1);
         setImmediate(function () {
-          // allow:process-exit-operator-optin — operator opted into exitAfterPhases,
+          // allow:process-exit-operator-optin — the operator opted into exitAfterPhases, which delegates the process lifecycle to the orchestrator
           process.exit(exitCode);
         });
       }
@@ -273,7 +277,8 @@ function create(opts) {
       shutdown().finally(function () { process.exitCode = process.exitCode || 1; });
     };
     unhandledRejHandler = function (reason) {
-      uncaughtHandler(reason instanceof Error ? reason : new Error(String(reason)), "unhandledRejection");
+      uncaughtHandler(nodeTypes.isNativeError(reason) ? reason : new Error(String(reason)),
+        "unhandledRejection");
     };
     process.on("uncaughtException", uncaughtHandler);
     process.on("unhandledRejection", unhandledRejHandler);
@@ -405,6 +410,10 @@ function standardPhases(components) {
       run:  function () {
         return new Promise(function (resolve) {
           components.server.close(function () { resolve(); });
+          if (typeof components.server.closeIdleConnections === "function") {
+            try { components.server.closeIdleConnections(); }
+            catch (_e) { /* best-effort */ }
+          }
         });
       },
       timeoutMs: C.TIME.seconds(10),

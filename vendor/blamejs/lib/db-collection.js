@@ -45,6 +45,8 @@
  *   only — range / LIKE require a real column with an index.
  */
 
+var nodeTypes    = require("node:util").types;
+var canonicalJson = require("./canonical-json");
 var lazyRequire  = require("./lazy-require");
 var safeJson     = require("./safe-json");
 var validateOpts = require("./validate-opts");
@@ -262,12 +264,24 @@ function collection(name, opts) {
     return _columnsCache;
   }
 
+  function _requireJsonForm(value, where) {
+    if (value === null || typeof value !== "object") return;
+    if (typeof value.toJSON === "function") return;
+    var noForm = canonicalJson._noJsonFormName(value);
+    if (noForm !== null) {
+      throw new TypeError("collection(" + name + "): " + where + " is " + noForm +
+        ", which JSON.stringify writes as {}; the value would be stored empty. " +
+        "Convert it to a plain object or array first");
+    }
+  }
+
   function _stringifyJsonCols(row) {
     if (jsonCols.length === 0) return row;
     _columns();
     var out = Object.assign({}, row);
     jsonCols.forEach(function (c) {
       if (out[c] !== undefined && out[c] !== null && typeof out[c] !== "string") {
+        _requireJsonForm(out[c], "'" + c + "'");
         out[c] = JSON.stringify(out[c]);
       }
     });
@@ -282,6 +296,7 @@ function collection(name, opts) {
       var hasExtras = false;
       Object.keys(writeDoc).forEach(function (k) {
         if (cols.indexOf(k) === -1) {
+          _requireJsonForm(writeDoc[k], "'" + k + "'");
           extras[k] = writeDoc[k];
           hasExtras = true;
           delete writeDoc[k];
@@ -368,7 +383,7 @@ function collection(name, opts) {
     for (var i = 0; i < keys.length; i += 1) {
       var k = keys[i];
       var v = query[k];
-      if (v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date)) {
+      if (v !== null && typeof v === "object" && !Array.isArray(v) && !nodeTypes.isDate(v)) {
         var opKeys = Object.keys(v);
         for (var j = 0; j < opKeys.length; j += 1) {
           var op = opKeys[j];
@@ -401,6 +416,7 @@ function collection(name, opts) {
                 }
                 builder.where(k, "=", val);
               } else {
+                // eslint-disable-next-line no-loop-func -- whereGroup calls this callback synchronously, so k and val cannot change while it runs
                 builder.whereGroup(function (g) { g.like(k, val); });
               }
               break;
@@ -516,10 +532,15 @@ function collection(name, opts) {
             }
             var nextOverflow = Object.assign({}, existing);
             if (overflowChanges) {
-              Object.keys(overflowChanges).forEach(function (k) { nextOverflow[k] = overflowChanges[k]; });
+              var ocKeys = Object.keys(overflowChanges);
+              for (var oci = 0; oci < ocKeys.length; oci += 1) {
+                nextOverflow[ocKeys[oci]] = overflowChanges[ocKeys[oci]];
+              }
             }
             if (overflowDeletes) {
-              overflowDeletes.forEach(function (k) { delete nextOverflow[k]; });
+              for (var odi = 0; odi < overflowDeletes.length; odi += 1) {
+                delete nextOverflow[overflowDeletes[odi]];
+              }
             }
             var pkCol = "_id";
             if (rows[ri][pkCol] === undefined) {
@@ -529,7 +550,10 @@ function collection(name, opts) {
             var qWrite = db().from(name).where(pkCol, "=", rows[ri][pkCol]);
             var writeChanges = {};
             writeChanges[overflow] = JSON.stringify(nextOverflow);
-            Object.keys(realChanges).forEach(function (k) { writeChanges[k] = realChanges[k]; });
+            var rcKeys = Object.keys(realChanges);
+            for (var rci = 0; rci < rcKeys.length; rci += 1) {
+              writeChanges[rcKeys[rci]] = realChanges[rcKeys[rci]];
+            }
             if (qWrite.updateOne(_stringifyJsonCols(writeChanges))) changed += 1;
           }
         } else {

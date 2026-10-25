@@ -42,6 +42,7 @@
  *     b.session.useStore(sessionStore);
  */
 
+var externalDb   = require("./external-db");
 var frameworkSchema = require("./framework-schema");
 var localDbThin  = require("./local-db-thin");
 var sql          = require("./sql");
@@ -64,7 +65,9 @@ function _sessionSchemaSql() {
   ], SQL_OPTS).sql;
   var idxUser = sql.createIndex(table + "_userIdHash_idx", table, ["userIdHash"], SQL_OPTS).sql;
   var idxExp  = sql.createIndex(table + "_expiresAt_idx", table, ["expiresAt"], SQL_OPTS).sql;
-  return [create + ";", idxUser + ";", idxExp + ";"].join("\n");
+  var idxIdle = sql.createIndex(table + "_lastActivity_idx", table, ["lastActivity"], SQL_OPTS).sql;
+  var idxAbs  = sql.createIndex(table + "_createdAt_idx", table, ["createdAt"], SQL_OPTS).sql;
+  return [create + ";", idxUser + ";", idxExp + ";", idxIdle + ";", idxAbs + ";"].join("\n");
 }
 
 /**
@@ -86,6 +89,9 @@ function _sessionSchemaSql() {
  * fight the main DB's WAL fsync + encrypted-at-rest re-flush cycle.
  * The adapter creates the schema on first open, so no manual migration
  * is required.
+ *
+ * An `opts` that is not an object throws `session-stores/bad-opts`, and a
+ * missing or empty `file` throws `session-stores/bad-file`.
  *
  * @opts
  *   {
@@ -116,7 +122,7 @@ function localDbThinStore(opts) {
   function execute(sql, params) {
     params = params || [];
     var stmt = handle.prepare(sql);
-    if (/^\s*SELECT\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
+    if (externalDb._statementReturnsRows(sql)) {
       var rows = stmt.all.apply(stmt, params);
       return Promise.resolve({ rows: rows, rowCount: rows.length });
     }

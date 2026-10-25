@@ -38,6 +38,7 @@
  *   enforcement. Composes b.cose + b.cbor.
  */
 
+var nodeTypes = require("node:util").types;
 var cose = require("./cose");
 var cbor = require("./cbor");
 var C = require("./constants");
@@ -82,7 +83,9 @@ function _readTagHead(buf) {
  * claims). Standard claims are mapped to their integer labels; custom
  * claims (string or integer keys) are kept as given. <code>exp</code>
  * / <code>nbf</code> / <code>iat</code> must be integer NumericDates
- * (seconds since the epoch).
+ * (seconds since the epoch). A <code>privateKey</code> that
+ * <code>b.crypto.compromisedKey</code> reports throws
+ * <code>cose/compromised-key</code>.
  *
  * @opts
  *   {
@@ -139,7 +142,9 @@ async function sign(claims, opts) {
  * a passed <code>exp</code> (with <code>clockSkewSec</code> tolerance),
  * a not-yet-valid <code>nbf</code>, and — when requested — an
  * <code>iss</code> / <code>aud</code> mismatch are refused. Accepts a
- * CWT-tag-61-wrapped or bare COSE_Sign1.
+ * CWT-tag-61-wrapped or bare COSE_Sign1. A verification key that
+ * <code>b.crypto.compromisedKey</code> reports throws
+ * <code>cose/compromised-key</code>.
  *
  * @opts
  *   {
@@ -158,7 +163,7 @@ async function sign(claims, opts) {
  *   // → { claims: { iss, sub, exp, scope }, raw: Map, protectedHeaders: Map }
  */
 async function verify(cwt, opts) {
-  if (!Buffer.isBuffer(cwt) && !(cwt instanceof Uint8Array)) {
+  if (!nodeTypes.isUint8Array(cwt)) {
     throw new CwtError("cwt/bad-input", "cwt.verify: cwt must be a Buffer / Uint8Array");
   }
   validateOpts.requireObject(opts, "cwt.verify", CwtError);

@@ -48,6 +48,7 @@
  *   debug-status policy, and profile pinning.
  */
 
+var nodeTypes = require("node:util").types;
 var cwt = require("./cwt");
 var bCrypto = require("./crypto");
 var pick = require("./pick");
@@ -75,7 +76,7 @@ var STD_NAME = { 1: "iss", 2: "sub", 3: "aud", 4: "exp", 5: "nbf", 6: "iat", 7: 
 
 function _toBuf(x) {
   if (Buffer.isBuffer(x)) return x;
-  if (x instanceof Uint8Array) return Buffer.from(x);
+  if (nodeTypes.isUint8Array(x)) return Buffer.from(x);
   if (typeof x === "string") return Buffer.from(x, "utf8");
   return null;
 }
@@ -103,7 +104,9 @@ function _nonceMatches(claimValue, expected) {
  * RFC 9711 integer labels; <code>dbgstat</code> accepts the enum name
  * (<code>"disabled-since-boot"</code>) or its integer. Standard CWT
  * claims (<code>iss</code> / <code>exp</code> / …) pass through to
- * <code>b.cwt.sign</code>.
+ * <code>b.cwt.sign</code>. A <code>privateKey</code> that
+ * <code>b.crypto.compromisedKey</code> reports throws
+ * <code>cose/compromised-key</code>.
  *
  * @opts
  *   {
@@ -155,7 +158,9 @@ async function sign(claims, opts) {
  * (when supplied — the freshness/anti-replay binding),
  * <code>requireDebugDisabled</code> refuses a non-disabled
  * <code>dbgstat</code>, and <code>expectedProfile</code> pins
- * <code>eat_profile</code>.
+ * <code>eat_profile</code>. An attester key that
+ * <code>b.crypto.compromisedKey</code> reports throws
+ * <code>cose/compromised-key</code>.
  *
  * @opts
  *   {
@@ -178,6 +183,11 @@ async function sign(claims, opts) {
  */
 async function verify(eat, opts) {
   validateOpts.requireObject(opts, "eat.verify", EatError);
+  validateOpts.optionalBoolean(opts.requireDebugDisabled,
+    "eat.verify: opts.requireDebugDisabled (whether a token whose dbgstat does not say " +
+    "debugging is permanently disabled is refused; anything other than a boolean was read " +
+    "as false, which accepted a debuggable device under a caller that asked for the opposite)",
+    EatError, "eat/bad-opts");
   var out = await cwt.verify(eat, {
     algorithms: opts.algorithms, publicKey: opts.publicKey, keyResolver: opts.keyResolver,
     expectedIssuer: opts.expectedIssuer, expectedAudience: opts.expectedAudience,

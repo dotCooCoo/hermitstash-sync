@@ -424,6 +424,8 @@ var initialized = false;
 var backends = {};
 var defaultBackend = null;
 var dbRoleBackends = {};
+var _constructedPools = [];
+var _initializing = false;
 
 class Pool {
   constructor(name, config) {
@@ -434,8 +436,10 @@ class Pool {
     this.idle = [];
     this.active = 0;
     this.waiters = [];
+    this._admitting = false;
     this._reaper = safeAsync.repeating(this._reapIdle.bind(this),
       C.TIME.seconds(10), { name: "external-db-reaper" });
+    if (_initializing) _constructedPools.push(this);
   }
 
   async acquire() {
@@ -444,16 +448,19 @@ class Pool {
       this.active += 1;
       return entry.client;
     }
+    var self = this;
     if (this.active < this.config.max) {
       this.active += 1;
       try {
-        return await this.connect();
+        return await dbRoleContext.outsideAuditChainWrite(function () {
+          return self.connect();
+        });
       } catch (e) {
         this.active -= 1;
+        this.admitWaiting();
         throw e;
       }
     }
-    var self = this;
     var waitStartedAt = Date.now();
     return new Promise(function (resolve, reject) {
       self.waiters.push({
@@ -484,6 +491,20 @@ class Pool {
     if (this.waiters.length > 0) {
       var w = this.waiters.shift();
       this.acquire().then(w.resolve, w.reject);
+    }
+  }
+
+  admitWaiting() {
+    if (this._admitting === true) return;
+    this._admitting = true;
+    try {
+      while (this.waiters.length > 0 &&
+             (this.idle.length > 0 || this.active < this.config.max)) {
+        var w = this.waiters.shift();
+        this.acquire().then(w.resolve, w.reject);
+      }
+    } finally {
+      this._admitting = false;
     }
   }
 
@@ -532,10 +553,11 @@ class Pool {
  *
  * Register one or more app-data backends. Each backend declares its
  * `connect` / `query` driver hooks plus optional pooling, classification,
- * residency, retry, and replica configuration. Throws synchronously on
- * malformed input (missing hooks, unknown dialect, residency mismatch
- * against `db.getDataResidency()`, dotted GUC names that fail
- * identifier validation).
+ * residency, retry, and replica configuration. Throws
+ * `external-db/invalid-config` synchronously on malformed input (missing
+ * hooks, unknown dialect, residency mismatch against
+ * `db.getDataResidency()`, dotted GUC names that fail identifier
+ * validation).
  *
  * Boot-time residency check: when `db.getDataResidency().region` is set,
  * any backend serving `personal` (or `*`) data must carry a
@@ -551,6 +573,9 @@ class Pool {
  * `requireTls` is used exactly as supplied, with no transport check.
  * Mandated for cardholder data by PCI-DSS v4.0 Req 4 and for ePHI by
  * HIPAA §164.312(e).
+ *
+ * A statement routed to a backend whose `residencyTag` disagrees with the
+ * region `db.getDataResidency()` reports throws `external-db/residency-mismatch`.
  *
  * @opts
  *   backends:        { [name]: BackendConfig },   // required; one or more named backends
@@ -597,6 +622,50 @@ class Pool {
  *   });
  */
 function init(opts) {
+  _initializing = true;
+  try {
+    return _init(opts);
+  } catch (e) {
+    if (!initialized) {
+      _drainAllPools().forEach(function (drain) {
+        try { safeAsync.containRejection(drain()); }
+        catch (_e) { /* best effort on a failing path */ }
+      });
+    }
+    throw e;
+  } finally {
+    _initializing = false;
+  }
+}
+
+function _drainAllPools() {
+  var pools = _constructedPools.splice(0, _constructedPools.length);
+  var thunks = [];
+  for (var i = 0; i < pools.length; i += 1) {
+    thunks.push(pools[i].drain.bind(pools[i]));
+  }
+  backends = {};
+  return thunks;
+}
+
+function _defaultTxHook(queryFn, statement) {
+  return function (client) { return queryFn(client, statement, []); };
+}
+
+function _applicationNameConnect(connectFn, queryFn, appName) {
+  var quotedAppName = "'" + appName.replace(/'/g, "''") + "'";
+  return async function () {
+    var client = await connectFn();
+    try {
+      await queryFn(client, "SET application_name TO " + quotedAppName, []);   // allow:hand-rolled-sql: Postgres session SET (no table; not a b.sql verb)
+    } catch (_e) {
+      void _e;
+    }
+    return client;
+  };
+}
+
+function _init(opts) {
   if (initialized) return;
   if (!opts || !opts.backends) throw new Error("externalDb.init({ backends }) is required");
 
@@ -658,18 +727,7 @@ function init(opts) {
     var rawQuery   = cfg.query;
     var connectFn = rawConnect;
     if (dialect === "postgres" && applicationName !== null) {
-      connectFn = (function (cn, qn, appName) {
-        var quotedAppName = "'" + appName.replace(/'/g, "''") + "'";
-        return async function () {
-          var client = await cn();
-          try {
-            await qn(client, "SET application_name TO " + quotedAppName, []);   // allow:hand-rolled-sql — Postgres session SET (no table; not a b.sql verb)
-          } catch (_e) {
-            void _e;
-          }
-          return client;
-        };
-      })(rawConnect, rawQuery, applicationName);
+      connectFn = _applicationNameConnect(rawConnect, rawQuery, applicationName);
     }
     var poolCfg = Object.assign({}, cfg, { connect: connectFn });
     backends[name] = {
@@ -679,9 +737,9 @@ function init(opts) {
       pool:            new Pool(name, poolCfg),
       query:           cfg.query,
       ping:            cfg.ping || null,
-      beginTx:         cfg.beginTx  || function (client) { return cfg.query(client, "BEGIN", []); },
-      commit:          cfg.commit   || function (client) { return cfg.query(client, "COMMIT", []); },
-      rollback:        cfg.rollback || function (client) { return cfg.query(client, "ROLLBACK", []); },
+      beginTx:         cfg.beginTx  || _defaultTxHook(rawQuery, "BEGIN"),
+      commit:          cfg.commit   || _defaultTxHook(rawQuery, "COMMIT"),
+      rollback:        cfg.rollback || _defaultTxHook(rawQuery, "ROLLBACK"),
       supportsTransactions: supportsTransactions,
       hasInteractiveHooks:  hasInteractiveHooks,
       batch:                hasBatch ? cfg.batch : null,
@@ -693,7 +751,7 @@ function init(opts) {
       retryConfig:     cfg.retry || null,
       replicas:        _buildReplicas(name, cfg),
       replicaIdx:      0,
-      replicaFallbackToPrimary: cfg.replicaFallbackToPrimary !== false,
+      replicaFallbackToPrimary: _replicaFallback(name, cfg),
     };
   }
 
@@ -759,6 +817,14 @@ function _declaresTls(cfg) {
     return _TLS_GUARANTEED_SSLMODES[cfg.sslmode.toLowerCase()] === true;
   }
   return false;
+}
+
+function _replicaFallback(name, cfg) {
+  validateOpts.optionalBoolean(cfg.replicaFallbackToPrimary,
+    "backend '" + name + "': replicaFallbackToPrimary (anything other than a boolean was read " +
+    "as true, so a read stayed free to reach the primary for an operator who turned that off)",
+    ExternalDbError, "external-db/invalid-config");
+  return cfg.replicaFallbackToPrimary !== false;
 }
 
 function _assertConnectionTls(name, cfg) {
@@ -893,6 +959,11 @@ function supportsTransactions(opts) {
  * SQLSTATE 28000 / 28P01 / 42501 as `db.auth.failed` audit rows for
  * SOC2 forensic walks.
  *
+ * A query that `b.audit` issues against its own tables emits no audit event,
+ * since in cluster mode the audit chain lives in this backend and the event
+ * would become another chain row. `b.audit.safeEmit` documents the
+ * suppression and the observability counter that reports it.
+ *
  * Backend selection precedence: `opts.backend` (explicit) →
  * `opts.classification` (first backend serving the class) → ALS-bound
  * dbRole + `dbRoleBackends` map (set by `b.middleware.dbRoleFor` or
@@ -1006,6 +1077,20 @@ async function query(sql, params, opts) {
  * sessions (no isolation, no rollback). Supply interactive
  * `beginTx`/`commit`/`rollback` hooks or a `batch` adapter on the backend
  * instead of shipping a silently non-atomic block.
+ *
+ * A `fn` that is not a function throws `external-db/invalid-fn`. A
+ * `deadlockRetries` that is not a non-negative integer, or a
+ * `rowResidencyTag` supplied as anything but a non-empty string, throws
+ * `external-db/invalid-opt` before `BEGIN` is issued. A `sessionGucs` value
+ * that is not a string, finite number or boolean throws
+ * `external-db/invalid-session-gucs`.
+ *
+ * Picking the backend raises every refusal that step can make:
+ * `external-db/not-initialized` before `b.externalDb.init()`,
+ * `external-db/unknown-backend` for a `backend` name that was never
+ * registered, `external-db/no-backend-for-classification` when none serves the
+ * `classification` asked for, and `external-db/classification-mismatch` when
+ * the named backend does not serve it.
  *
  * @opts
  *   backend?:                    string,                       // explicit backend name
@@ -1239,17 +1324,11 @@ function listBackends() {
  *   });
  */
 async function shutdown() {
-  if (!initialized) return;
-  for (var name in backends) {
-    try { await backends[name].pool.drain(); } catch (_e) { /* best effort */ }
-    var bk = backends[name];
-    if (bk && bk.replicas) {
-      for (var i = 0; i < bk.replicas.length; i++) {
-        try { await bk.replicas[i].pool.drain(); } catch (_e) { /* best effort */ }
-      }
-    }
+  var drains = _drainAllPools();
+  for (var i = 0; i < drains.length; i += 1) {
+    try { await drains[i](); } catch (_e) { /* best effort */ }
   }
-  backends = {};
+  if (!initialized) return;
   defaultBackend = null;
   initialized = false;
 }
@@ -1717,16 +1796,9 @@ var write = {
 };
 
 function _resetForTest() {
-  Object.keys(backends).forEach(function (n) {
-    try { backends[n].pool.drain(); }
-    catch (e) { log.debug("test-reset pool drain failed", { backend: n, error: e.message }); }
-    var bk = backends[n];
-    if (bk && bk.replicas) {
-      bk.replicas.forEach(function (r) {
-        try { r.pool.drain(); }
-        catch (e2) { log.debug("test-reset replica drain failed", { backend: n, error: e2.message }); }
-      });
-    }
+  _constructedPools.splice(0, _constructedPools.length).forEach(function (p) {
+    try { p.drain(); }
+    catch (e) { log.debug("test-reset pool drain failed", { pool: p && p.name, error: e.message }); }
   });
   backends = {};
   defaultBackend = null;
@@ -1785,6 +1857,7 @@ function configurePool(backendName, opts) {
     throw _err("external-db/invalid-config", "configurePool: min must be <= max", true);
   }
   Object.assign(bk.pool.config, opts);
+  bk.pool.admitWaiting();
 }
 
 function _connectAs(rawConnect, query, opts) {
@@ -1795,7 +1868,7 @@ function _connectAs(rawConnect, query, opts) {
     throw _err("external-db/invalid-config", "connectAs: query must be a function", true);
   }
   opts = opts || {};
-  var allowed = ["role", "searchPath", "applicationName", "statementTimeoutMs", "gucs"];
+  var allowed = ["role", "searchPath", "applicationName", "statementTimeoutMs", "gucs", "close"];
   for (var k in opts) {
     if (!Object.prototype.hasOwnProperty.call(opts, k)) continue;
     if (allowed.indexOf(k) === -1) {
@@ -1829,6 +1902,8 @@ function _connectAs(rawConnect, query, opts) {
   if (opts.gucs !== undefined && (typeof opts.gucs !== "object" || opts.gucs === null)) {
     throw _err("external-db/invalid-config", "connectAs: gucs must be an object", true);
   }
+  var closeFn = validateOpts.optionalFunction(opts.close, "connectAs: close", ExternalDbError,
+    "external-db/invalid-config") || null;
   if (opts.gucs) {
     for (var gname in opts.gucs) {
       safeSql.validateIdentifier(gname, { allowReserved: true });
@@ -1880,10 +1955,27 @@ function _connectAs(rawConnect, query, opts) {
         await query(client, stmts[i], []);
       }
     } catch (e) {
+      _disposeFailedClient(client, e, closeFn);
       throw e;
     }
     return client;
   };
+}
+
+function _disposeFailedClient(client, err, closeFn) {
+  try {
+    if (closeFn) {
+      safeAsync.containRejection(closeFn(client, err));
+    } else if (client && typeof client.release === "function") {
+      client.release(err instanceof Error ? err : new Error(String(err)));
+    } else if (client && typeof client.end === "function") {
+      safeAsync.containRejection(client.end());
+    } else if (client && typeof client.destroy === "function") {
+      client.destroy();
+    }
+  } catch (_disposeErr) {
+    void _disposeErr;
+  }
 }
 
 /**
@@ -1900,6 +1992,18 @@ function _connectAs(rawConnect, query, opts) {
  * at boot rather than per acquired client. Returns the wrapped
  * `connect` function suitable for a backend's `connect` hook.
  *
+ * When one of the SET statements fails (a role that is not granted, a
+ * GUC name the server does not recognize), the wrapped `connect` rejects
+ * with that error and disposes the client so it does not hold a slot in
+ * the driver's pool. By default it calls `client.release(err)`, which
+ * pg-pool treats as "destroy this connection", or `client.end()` /
+ * `client.destroy()` when the client has no `release`. Pass `close` to
+ * dispose the client another way. The wrapped `connect` starts the
+ * disposal and rejects without waiting for it to finish, so an `end()`
+ * or `close` that never settles does not hold back the rejection. A
+ * failure while disposing is ignored and the SET error is the one the
+ * caller sees.
+ *
  * @opts
  *   query:               function,    // required — the backend's query function (used to issue SET statements)
  *   role?:               string,      // SQL identifier; runs SET ROLE "<role>"
@@ -1907,6 +2011,7 @@ function _connectAs(rawConnect, query, opts) {
  *   applicationName?:    string,      // appears in pg_stat_activity
  *   statementTimeoutMs?: number,      // positive integer; SET statement_timeout TO <ms>
  *   gucs?:               { [name]: string|number },   // raw GUC bindings; finite numbers required for numeric values
+ *   close?:              function,    // (client, err) disposes a client whose SETs failed; default client.release(err), else client.end()
  *
  * @example
  *   var pg = require("pg");
@@ -2096,6 +2201,10 @@ async function assertRoleHardening(opts) {
     });
     return { declared: opts.declaredRoles.slice(), observed: [], unrecognized: [], missing: [] };
   }
+  validateOpts.optionalBoolean(opts.ignoreSystem,
+    "externalDb.assertRoleHardening: opts.ignoreSystem (anything other than a boolean was read " +
+    "as true, so the built-in roles stayed out of the report for a caller who asked to see them)",
+    ExternalDbError, "external-db/invalid-config");
   var ignoreSystem = opts.ignoreSystem !== false;
   var rows;
   try {

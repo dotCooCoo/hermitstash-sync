@@ -2,6 +2,7 @@
 // Copyright (c) blamejs contributors
 "use strict";
 var nodeCrypto = require("node:crypto");
+var nodeTypes = require("node:util").types;
 var _pkiToolkit = require("../vendor/blamejs-pki.cjs");
 var bCrypto = require("../crypto");
 var attestationRoots = require("./webauthn-attestation-roots");
@@ -73,6 +74,15 @@ function _requireString(v, name) {
   }
 }
 
+function _requireBooleanIfPresent(v, name, consequence) {
+  if (v === undefined || v === null) return;
+  if (typeof v !== "boolean") {
+    throw new AuthError("auth-passkey/bad-" + name,
+      name + " must be a boolean; anything else was read as false, which " + consequence +
+      ", got " + typeof v);
+  }
+}
+
 var ALLOWED_EXTENSION_KEYS = Object.freeze({
   prf:        1,
   largeBlob:  1,
@@ -112,6 +122,8 @@ async function startRegistration(opts) {
   _requireString(opts.userName, "userName");
 
   var sel = opts.authenticatorSelection || {};
+  _requireBooleanIfPresent(sel.requireResidentKey, "requireResidentKey",
+    "asked the authenticator for a resident key as a preference rather than a requirement");
   var algorithms = _resolveAllowedAlgorithms(opts.allowedAlgorithms);
   var residentKey = sel.residentKey ||
     (sel.requireResidentKey === true ? "required" : "preferred");
@@ -209,8 +221,7 @@ function _storedKeyBytes(stored) {
 }
 
 function _coseKeyObject(stored) {
-  if (stored && typeof stored === "object" && !Buffer.isBuffer(stored) &&
-      !(stored instanceof Uint8Array)) {
+  if (stored && typeof stored === "object" && !nodeTypes.isUint8Array(stored)) {
     return stored;
   }
   try {
@@ -220,6 +231,109 @@ function _coseKeyObject(stored) {
     throw new AuthError("auth-passkey/bad-credential-key",
       "credential.publicKey is not a decodable COSE key: " + ((e && e.message) || e));
   }
+}
+
+var COSE_EC2_JWK_CURVE = Object.freeze({ 1: "P-256", 2: "P-384", 3: "P-521" });
+var COSE_OKP_JWK_CURVE = Object.freeze({ 6: "Ed25519", 7: "Ed448" });
+
+function _b64u(bytes) {
+  return Buffer.from(bytes).toString("base64url");
+}
+
+function _coseKeyJwk(cose) {
+  if (!cose || typeof cose !== "object") return null;
+  var kty = Number(cose.kty);
+  var crv = Number(cose.crv);
+  if (kty === 2 && COSE_EC2_JWK_CURVE[crv] &&
+      nodeTypes.isUint8Array(cose.x) && nodeTypes.isUint8Array(cose.y)) {
+    return { kty: "EC", crv: COSE_EC2_JWK_CURVE[crv], x: _b64u(cose.x), y: _b64u(cose.y) };
+  }
+  if (kty === 3 && nodeTypes.isUint8Array(cose.n) && nodeTypes.isUint8Array(cose.e)) {
+    return { kty: "RSA", n: _b64u(cose.n), e: _b64u(cose.e) };
+  }
+  if (kty === 1 && COSE_OKP_JWK_CURVE[crv] && nodeTypes.isUint8Array(cose.x)) {
+    return { kty: "OKP", crv: COSE_OKP_JWK_CURVE[crv], x: _b64u(cose.x) };
+  }
+  return null;
+}
+
+function _refuseCompromised(material, label, unreadableCode) {
+  try {
+    bCrypto.assertNotCompromised(material, {
+      errorClass: AuthError, code: "auth-passkey/compromised-key", label: label,
+    });
+  } catch (e) {
+    if (e && e.isAuthError === true) throw e;
+    throw new AuthError(unreadableCode, label + " could not be read: " + ((e && e.message) || e));
+  }
+}
+
+function _refuseCompromisedCoseKey(cose, label) {
+  var jwk = _coseKeyJwk(cose);
+  if (jwk !== null) _refuseCompromised(jwk, label, "auth-passkey/bad-credential-key");
+}
+
+function _requireChainLength(count, label) {
+  var limit = _pki().constants.LIMITS.WEBAUTHN_X5C_MAX_CERTS;
+  if (count > limit) {
+    throw new AuthError("auth-passkey/bad-att-stmt",
+      label + " carries " + count + " certificates, above the " + limit + " the verifier parses");
+  }
+}
+
+function _refuseCompromisedX5c(attStmt) {
+  var pki = _pki();
+  var x5cN = pki.cbor.read.mapGet(attStmt, "x5c");
+  if (!x5cN || x5cN.majorType !== 4 || !x5cN.children) return;
+  _requireChainLength(x5cN.children.length, "an attestation certificate chain");
+  for (var i = 0; i < x5cN.children.length; i += 1) {
+    var der;
+    try { der = Buffer.from(pki.cbor.read.byteString(x5cN.children[i])); }
+    catch (_e) {
+      throw new AuthError("auth-passkey/bad-att-stmt",
+        "attestation certificate [" + i + "] is not a byte string");
+    }
+    _refuseCompromised(der, "attestation certificate [" + i + "]", "auth-passkey/bad-att-stmt");
+  }
+}
+
+function _safetyNetHeader(attStmt) {
+  var pki = _pki();
+  var responseN = pki.cbor.read.mapGet(attStmt, "response");
+  if (!responseN) return null;
+  try {
+    var segs = Buffer.from(pki.cbor.read.byteString(responseN)).toString("utf8").split(".");
+    if (segs.length !== 3) return null;
+    var header = pki.jose.parseJson(pki.jose.base64url.decode(segs[0]));
+    return header && typeof header === "object" && !Array.isArray(header) ? header : null;
+  } catch (_e) { return null; }
+}
+
+function _refuseCompromisedSafetyNetX5c(attStmt) {
+  var header = _safetyNetHeader(attStmt);
+  if (header === null || header.alg !== "RS256" || !Array.isArray(header.x5c)) return;
+  _requireChainLength(header.x5c.length, "the SafetyNet certificate chain");
+  var maxBytes = _pki().constants.LIMITS.SAFETYNET_CERT_MAX_BYTES;
+  for (var i = 0; i < header.x5c.length; i += 1) {
+    var entry = header.x5c[i];
+    if (typeof entry !== "string") {
+      throw new AuthError("auth-passkey/bad-att-stmt", "the SafetyNet x5c entry " + i + " is not a string");
+    }
+    var der = Buffer.from(entry, "base64");
+    if (Math.floor(entry.length * 3 / 4) > maxBytes || der.toString("base64") !== entry) {
+      throw new AuthError("auth-passkey/bad-att-stmt",
+        "the SafetyNet x5c entry " + i + " is not canonical base64 within " + maxBytes + " bytes");
+    }
+    _refuseCompromised(der, "attestation certificate [" + i + "]", "auth-passkey/bad-att-cert");
+  }
+}
+
+function _refuseCompromisedAttestationChain(attestationObject) {
+  var att;
+  try { att = _pki().webauthn.parseAttestationObject(attestationObject); }
+  catch (_e) { return; }
+  if (att.fmt === "android-safetynet") _refuseCompromisedSafetyNetX5c(att.attStmt);
+  else _refuseCompromisedX5c(att.attStmt);
 }
 
 function _refuse(ceremony, e) {
@@ -246,7 +360,7 @@ function _authenticatorExtensions(raw) {
 }
 
 function _plainFromCbor(value) {
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value;
+  if (nodeTypes.isUint8Array(value)) return value;
   if (Array.isArray(value)) return value.map(_plainFromCbor);
   if (value instanceof Map) {
     var out = _plainObject();
@@ -380,7 +494,7 @@ function _requireCredentialType(response) {
 }
 
 function _parseCertificate(pem) {
-  return new nodeCrypto.X509Certificate(pem);
+  return bCrypto._x509(pem);
 }
 
 function _resolveRootCertificates(value, shipped) {
@@ -396,13 +510,15 @@ function _resolveRootCertificates(value, shipped) {
       throw new AuthError("auth-passkey/bad-attestation-roots",
         "attestation root [" + i + "] must be a PEM certificate string");
     }
+    var root;
     try {
-      _parseCertificate(value[i]);
+      root = _parseCertificate(value[i]);
     } catch (e) {
       throw new AuthError("auth-passkey/bad-attestation-roots",
         "attestation root [" + i + "] is not a readable X.509 certificate: " +
         ((e && e.message) || e));
     }
+    _refuseCompromised(root, "attestation root [" + i + "]", "auth-passkey/bad-attestation-roots");
   }
   return value;
 }
@@ -450,7 +566,7 @@ function _challengeBytes(value) {
 
 function _snapshotValue(value) {
   if (value === null || typeof value !== "object") return value;
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value;
+  if (nodeTypes.isUint8Array(value)) return value;
   if (Array.isArray(value)) return value.map(_snapshotValue);
   if (Object.getPrototypeOf(value) !== Object.prototype &&
       Object.getPrototypeOf(value) !== null) {
@@ -542,6 +658,82 @@ function _validateExpectedOrigin(value) {
     "expectedOrigin must be a non-empty string or array of strings");
 }
 
+/**
+ * @primitive b.auth.passkey.verifyRegistration
+ * @signature b.auth.passkey.verifyRegistration(opts)
+ * @since     0.1.58
+ * @status    stable
+ * @related   b.auth.passkey.verifyAuthentication, b.auth.passkey.compareBackupState, b.auth.fidoMds3.fetch
+ *
+ * Verifies a WebAuthn registration response against the challenge, origin
+ * and RP ID the ceremony issued, and verifies its attestation statement.
+ * It resolves to `{ verified, registrationInfo, backupEligible,
+ * backupState }`. `registrationInfo.credential` holds the credential `id`,
+ * the COSE `publicKey` bytes and the `counter` to store for
+ * `verifyAuthentication`. A `packed`, `fido-u2f` or `android-safetynet`
+ * statement whose signature does not verify resolves to `verified: false`
+ * with `registrationInfo: null`.
+ *
+ * A compromised key (`b.crypto.compromisedKey`) is refused with
+ * `auth-passkey/compromised-key` in three places: the credential public key
+ * the response registers, every certificate of the attestation `x5c` chain
+ * (for `android-safetynet`, the chain in the JWS header), and every
+ * certificate in `attestationRoots` and `safetyNetRoots`. An attestation
+ * chain of more than ten certificates is refused with
+ * `auth-passkey/bad-att-stmt` before any certificate in it is read.
+ *
+ * Missing or malformed options throw `auth-passkey/missing-opts`,
+ * `auth-passkey/missing-response`, `auth-passkey/missing-expectedChallenge`,
+ * `auth-passkey/missing-expectedOrigin`, `auth-passkey/missing-expectedRPID`,
+ * `auth-passkey/bad-expectedChallenge`, `auth-passkey/bad-algorithm`,
+ * `auth-passkey/bad-requireAttestation`,
+ * `auth-passkey/bad-requireAttestationAnchor`,
+ * `auth-passkey/bad-safetynet-max-age` or
+ * `auth-passkey/bad-attestation-roots`. A response field that is not
+ * canonical base64url throws `auth-passkey/bad-response`, and a `type` other
+ * than `"public-key"` throws `auth-passkey/bad-credential-type`. The
+ * cross-origin policy throws `auth-passkey/unreadable-client-data` or
+ * `auth-passkey/cross-origin-ceremony`. An attestation object that cannot be
+ * read throws `auth-passkey/bad-attestation-object`, and a `compound`
+ * statement throws `auth-passkey/unsupported-attestation-format`. A SafetyNet
+ * response that cannot be read or carries no readable timestamp throws
+ * `auth-passkey/safetynet-unreadable`, one older than `safetyNetMaxAgeMs` or
+ * dated in the future throws `auth-passkey/safetynet-stale`, and a SafetyNet
+ * certificate that cannot be decoded throws `auth-passkey/bad-att-cert`. A
+ * credential key that cannot be read throws
+ * `auth-passkey/bad-credential-key`. `requireAttestationAnchor` refuses with
+ * `auth-passkey/attestation-not-anchored` and `requireAttestation` with
+ * `auth-passkey/attestation-required`. A response that states neither `id`
+ * nor `rawId` throws `auth-passkey/missing-credential-id`, and one whose
+ * `id` or `rawId` differs from the attested credential ID throws
+ * `auth-passkey/credential-id-mismatch`. Every other refusal comes from the
+ * WebAuthn verifier and carries its code with the `webauthn/` prefix
+ * replaced by `auth-passkey/`.
+ *
+ * @opts
+ *   response:                 object,           // the PublicKeyCredential JSON the browser returned
+ *   expectedChallenge:        string,           // base64url challenge from startRegistration
+ *   expectedOrigin:           string|string[],  // origin(s) the ceremony may run on
+ *   expectedRPID:             string,           // RP ID the credential is scoped to
+ *   requireUserVerification:  boolean,          // default: true
+ *   requireAttestation:       boolean,          // refuse None and Self attestation. default: false
+ *   requireAttestationAnchor: boolean,          // refuse an x5c chain that reaches no root. default: false
+ *   attestationRoots:         string[],         // PEM roots replacing the shipped ones for x5c formats
+ *   safetyNetRoots:           string[],         // PEM roots replacing the shipped Google SafetyNet roots
+ *   safetyNetMaxAgeMs:        number,           // default: 60000
+ *   requireCtsProfileMatch:   boolean,          // SafetyNet ctsProfileMatch must be true. default: true
+ *   allowedAlgorithms:        number[],         // COSE algorithm ids. default: [-8, -7, -257]
+ *   allowCrossOrigin:         boolean|string[], // true, or the top origins allowed to embed the ceremony
+ *
+ * @example
+ *   var rv = await b.auth.passkey.verifyRegistration({
+ *     response:          req.body,
+ *     expectedChallenge: req.session.passkeyChallenge,
+ *     expectedOrigin:    "https://example.com",
+ *     expectedRPID:      "example.com",
+ *   });
+ *   // → { verified: true, registrationInfo: { credential: { id, publicKey, counter }, ... }, ... }
+ */
 async function verifyRegistration(opts) {
   if (!opts) throw new AuthError("auth-passkey/missing-opts", "opts is required");
   if (!opts.response) {
@@ -553,6 +745,10 @@ async function verifyRegistration(opts) {
 
   _requireCredentialType(opts.response);
   _refuseCrossOrigin(opts.response, opts, "registration");
+  _requireBooleanIfPresent(opts.requireAttestation, "requireAttestation",
+    "registered an authenticator that presented no attestation");
+  _requireBooleanIfPresent(opts.requireAttestationAnchor, "requireAttestationAnchor",
+    "registered an attestation that chains to no known root");
   var regAlgorithms = _resolveAllowedAlgorithms(opts.allowedAlgorithms);
   var reportedRegRpId = opts.expectedRPID;
   var reportedRegType = opts.response.type;
@@ -599,6 +795,7 @@ async function verifyRegistration(opts) {
       _resolveSafetyNetMaxAge(opts.safetyNetMaxAgeMs), Date.now());
   }
   var requireAnchor = opts.requireAttestationAnchor === true;
+  _refuseCompromisedAttestationChain(attestationObject);
 
   var att;
   try {
@@ -623,6 +820,7 @@ async function verifyRegistration(opts) {
     }
     throw _refuse("registration response", e);
   }
+  _refuseCompromisedCoseKey(_coseKeyObject(att.credentialPublicKeyBytes), "the credential public key");
 
   if (requireAnchor && regAnchorPlan.hasChain && !att.anchoredTo) {
     throw new AuthError("auth-passkey/attestation-not-anchored",
@@ -631,6 +829,18 @@ async function verifyRegistration(opts) {
       "supply attestationRoots for this deployment's authenticators, or " +
       "check the credential's AAGUID against FIDO metadata with " +
       "b.auth.fidoMds3");
+  }
+
+  if (opts.requireAttestation === true &&
+      (att.attestationType === "None" || att.attestationType === "Self")) {
+    throw new AuthError("auth-passkey/attestation-required",
+      "requireAttestation is set but the credential presented " +
+      att.attestationType + " attestation, which does not attest the " +
+      "authenticator model -- a None or Self statement carries no manufacturer " +
+      "proof to anchor. Accept it only for authenticators whose model you do " +
+      "not need to verify, or provision authenticators that emit a Basic / " +
+      "AttCA / AnonCA attestation (pair with requireAttestationAnchor + " +
+      "attestationRoots to also anchor its chain)");
   }
 
   var regFlags = att.flags || {};
@@ -757,7 +967,7 @@ function _b64urlExtInput(value, name, maxBytes) {
     }
     return value.toString("base64url");
   }
-  if (value instanceof Uint8Array) {
+  if (nodeTypes.isUint8Array(value)) {
     if (typeof maxBytes === "number" && safeBuffer.byteLengthOf(value) > maxBytes) {
       throw new AuthError("auth-passkey/extension-input-too-large",
         name + " length " + value.length + " exceeds " + maxBytes + " bytes");
@@ -808,7 +1018,7 @@ function _largeBlobExt(args) {
       "extensions.largeBlob read must be a boolean");
   }
   if (args.write !== undefined && args.write !== null) {
-    if (!Buffer.isBuffer(args.write) && !(args.write instanceof Uint8Array)) {
+    if (!nodeTypes.isUint8Array(args.write)) {
       throw new AuthError("auth-passkey/bad-largeblob-write",
         "extensions.largeBlob write must be a Uint8Array / Buffer");
     }
@@ -834,7 +1044,7 @@ function _credBlobExt(args) {
   var buf;
   if (Buffer.isBuffer(args.blob)) {
     buf = args.blob;
-  } else if (args.blob instanceof Uint8Array) {
+  } else if (nodeTypes.isUint8Array(args.blob)) {
     buf = Buffer.from(args.blob);
   } else {
     throw new AuthError("auth-passkey/bad-credblob",
@@ -853,6 +1063,62 @@ var extensions = {
   credBlob:  _credBlobExt,
 };
 
+/**
+ * @primitive b.auth.passkey.verifyAuthentication
+ * @signature b.auth.passkey.verifyAuthentication(opts)
+ * @since     0.1.58
+ * @status    stable
+ * @related   b.auth.passkey.verifyRegistration, b.auth.passkey.compareBackupState
+ *
+ * Verifies a WebAuthn assertion against the stored credential and the
+ * challenge, origin and RP ID the ceremony issued. It resolves to
+ * `{ verified, authenticationInfo, backupEligible, backupState }`; store
+ * `authenticationInfo.newCounter` as the credential's counter. An assertion
+ * whose signature does not verify resolves to `verified: false` with
+ * `authenticationInfo: null`.
+ *
+ * A stored credential public key that is compromised
+ * (`b.crypto.compromisedKey`) is refused with `auth-passkey/compromised-key`
+ * before the signature is checked, so a credential registered before the
+ * key was known to be compromised stops signing in.
+ *
+ * Missing or malformed options throw `auth-passkey/missing-opts`,
+ * `auth-passkey/missing-response`, `auth-passkey/missing-expectedChallenge`,
+ * `auth-passkey/missing-expectedOrigin`, `auth-passkey/missing-expectedRPID`,
+ * `auth-passkey/missing-credential`, `auth-passkey/missing-counter`,
+ * `auth-passkey/bad-counter`, `auth-passkey/bad-expectedChallenge` or
+ * `auth-passkey/bad-algorithm`. A stored `publicKey` that is not a readable
+ * COSE key throws `auth-passkey/bad-credential-key`. A response field that
+ * is not canonical base64url throws `auth-passkey/bad-response`, and a
+ * `type` other than `"public-key"` throws `auth-passkey/bad-credential-type`.
+ * A response that states neither `id` nor `rawId` throws
+ * `auth-passkey/missing-credential-id`, and one whose `id` or `rawId`
+ * differs from `credential.id` throws `auth-passkey/credential-id-mismatch`. The cross-origin policy throws
+ * `auth-passkey/unreadable-client-data` or
+ * `auth-passkey/cross-origin-ceremony`. Every other refusal comes from the
+ * WebAuthn verifier and carries its code with the `webauthn/` prefix
+ * replaced by `auth-passkey/`.
+ *
+ * @opts
+ *   response:                object,           // the PublicKeyCredential JSON the browser returned
+ *   expectedChallenge:       string,           // base64url challenge from startAuthentication
+ *   expectedOrigin:          string|string[],  // origin(s) the ceremony may run on
+ *   expectedRPID:            string,           // RP ID the credential is scoped to
+ *   credential:              object,           // { id, publicKey, counter } as stored at registration
+ *   requireUserVerification: boolean,          // default: true
+ *   allowedAlgorithms:       number[],         // COSE algorithm ids. default: [-8, -7, -257]
+ *   allowCrossOrigin:        boolean|string[], // true, or the top origins allowed to embed the ceremony
+ *
+ * @example
+ *   var rv = await b.auth.passkey.verifyAuthentication({
+ *     response:          req.body,
+ *     expectedChallenge: req.session.passkeyChallenge,
+ *     expectedOrigin:    "https://example.com",
+ *     expectedRPID:      "example.com",
+ *     credential:        { id: row.credentialId, publicKey: row.publicKey, counter: row.counter },
+ *   });
+ *   // → { verified: true, authenticationInfo: { newCounter, ... }, ... }
+ */
 async function verifyAuthentication(opts) {
   if (!opts) throw new AuthError("auth-passkey/missing-opts", "opts is required");
   if (!opts.response) {
@@ -892,13 +1158,15 @@ async function verifyAuthentication(opts) {
   var reportedClientExtensions = _snapshotValue(opts.response.clientExtensionResults);
   var authAlgorithms = _resolveAllowedAlgorithms(opts.allowedAlgorithms);
   var inner = opts.response.response || {};
+  var storedKey = _coseKeyObject(opts.credential.publicKey);
+  _refuseCompromisedCoseKey(storedKey, "the stored credential public key");
   var assertion;
   try {
     assertion = await _pki().webauthn.verifyAssertion({
       authenticatorData:   _wireBytes(inner.authenticatorData, "authenticatorData"),
       clientDataJSON:      _wireBytes(inner.clientDataJSON, "clientDataJSON"),
       signature:           _wireBytes(inner.signature, "signature"),
-      credentialPublicKey: _coseKeyObject(opts.credential.publicKey),
+      credentialPublicKey: storedKey,
       previousSignCount:   counter,
       expectedChallenge:   _challengeBytes(opts.expectedChallenge),
       expectedOrigin:      opts.expectedOrigin,

@@ -53,6 +53,7 @@
 
 var nodeFs = require("node:fs");
 var nodePath = require("node:path");
+var nodeTypes = require("node:util").types;
 var nodeCrypto = require("node:crypto");
 var numericBounds = require("./numeric-bounds");
 var atomicFile = require("./atomic-file");
@@ -63,6 +64,7 @@ var safeJson = require("./safe-json");
 var { URL: NodeUrl } = require("node:url");
 var C = require("./constants");
 var standaloneVerifier = require("./self-update-standalone-verifier");
+var bCrypto = require("./crypto");
 var { boot } = require("./log");
 var { defineClass } = require("./framework-error");
 
@@ -216,6 +218,8 @@ function _validatePollOpts(opts) {
       if (value instanceof RegExp) {
         guardRegex.assertSafe(value, "selfUpdate: assetPattern",
           SelfUpdateError, "selfupdate/unsafe-asset-pattern");
+        guardRegex.assertStateless(value, "selfUpdate: assetPattern",
+          SelfUpdateError, "selfupdate/stateful-asset-pattern");
       }
     },
     signaturePattern: function (value) {
@@ -226,6 +230,8 @@ function _validatePollOpts(opts) {
       if (value instanceof RegExp) {
         guardRegex.assertSafe(value, "selfUpdate: signaturePattern",
           SelfUpdateError, "selfupdate/unsafe-sig-pattern");
+        guardRegex.assertStateless(value, "selfUpdate: signaturePattern",
+          SelfUpdateError, "selfupdate/stateful-sig-pattern");
       }
     },
     maxBytes: function (value) {
@@ -564,9 +570,19 @@ function _validateVerifyOpts(opts) {
  * (no verifier divergence between the install-pipeline and installed
  * paths). Reports the asset's hash alongside the verified flag for SBOM /
  * audit correlation; the supported digest algorithms are sha3-512
- * (default), sha-256, sha-512, and shake256. Throws SelfUpdateError on a
- * missing file, a verify-time exception, or a signature that does not
- * verify.
+ * (default), sha-256, sha-512, and shake256.
+ *
+ * An `opts` that is not an object throws `selfupdate/bad-opts`. A missing
+ * `assetPath`, `signaturePath` or `pubkeyPem` throws
+ * `selfupdate/bad-asset-path`, `selfupdate/bad-signature-path` or
+ * `selfupdate/bad-pubkey`. A `hashAlgo` outside the four listed throws
+ * `selfupdate/bad-hash-algo`, and a `maxBytes` that is not a positive
+ * integer throws `selfupdate/bad-max-bytes`. A `pubkeyPem` that is a
+ * compromised key (`b.crypto.compromisedKey`) throws
+ * `selfupdate/compromised-key` before the asset is read. A missing or
+ * oversized asset or signature file throws `selfupdate/read-failed`, a
+ * signature that does not verify throws `selfupdate/signature-mismatch`,
+ * and any other verifier failure throws `selfupdate/verify-failed`.
  *
  * @opts
  *   assetPath:     string,   // required — path to the downloaded asset
@@ -596,13 +612,36 @@ function _mapStandaloneKind(kind) {
       return "selfupdate/read-failed";
     case "verify-failed":
       return "selfupdate/signature-mismatch";
+    case "compromised-key":
+      return "selfupdate/compromised-key";
     default:
       return "selfupdate/verify-failed";
   }
 }
 
+function _refuseCompromisedPubkey(opts) {
+  var found = null;
+  var readable = true;
+  try { found = bCrypto.compromisedKey(opts.pubkeyPem); }
+  catch (_e) { readable = false; }
+  if (!readable) {
+    var keyObj;
+    try { keyObj = nodeCrypto.createPublicKey(opts.pubkeyPem); }
+    catch (_e2) { return; }
+    try { found = bCrypto.compromisedKey(keyObj); }
+    catch (_e3) { return; }
+  }
+  if (found === null) return;
+  _safeAuditEmit("selfupdate.verify.failed", "denied", {
+    assetPath: opts.assetPath, signaturePath: opts.signaturePath, reason: "compromised-key",
+  });
+  throw new SelfUpdateError("selfupdate/compromised-key",
+    "selfUpdate.verify: opts.pubkeyPem is a compromised key: " + found.reason);
+}
+
 async function verify(opts) {
   _validateVerifyOpts(opts);
+  _refuseCompromisedPubkey(opts);
   var alg = opts.hashAlgo || DEFAULT_HASH_ALG;
   var maxBytes = typeof opts.maxBytes === "number" ? opts.maxBytes : C.BYTES.gib(1);
   var extraDigests = (alg === "sha3-512" || alg === "sha-256") ? [] : [alg];
@@ -683,7 +722,7 @@ async function _safeRollback(backupTo, to, hadOriginal) {
     await _relocateFile(backupTo, to, 0o600);
     return null;
   } catch (re) {
-    var err = re instanceof Error ? re : new Error(String(re));
+    var err = nodeTypes.isNativeError(re) ? re : new Error(String(re));
     _safeAuditEmit("selfupdate.swap.rollback_failed", "denied", {
       to: to, backupTo: backupTo,
       reason: "rollback-restore-failed",
@@ -1072,7 +1111,7 @@ async function beginProbation(opts) {
  * @example
  *   // in the new binary, after startup health checks pass:
  *   var r = await b.selfUpdate.confirmHealthy({ to: "/opt/app/app.bin" });
- *   r.cleared;   // → true (marker removed)
+ *   r.cleared;   // → true where a pending-update marker was there to remove
  */
 async function confirmHealthy(opts) {
   _validateConfirmOpts(opts);

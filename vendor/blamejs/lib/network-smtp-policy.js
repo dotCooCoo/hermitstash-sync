@@ -7,6 +7,7 @@ var dnsPromises = dns.promises;
 var nodeCrypto = require("node:crypto");
 var zlib = require("node:zlib");
 var asn1 = require("./asn1-der");
+var x509Chain = require("./x509-chain");
 var lazyRequire = require("./lazy-require");
 var networkDnsResolver = lazyRequire(function () { return require("./network-dns-resolver"); });
 var validateOpts = require("./validate-opts");
@@ -19,9 +20,13 @@ var { SmtpPolicyError } = require("./framework-error");
 
 var httpClient = lazyRequire(function () { return require("./http-client"); });
 var cache = lazyRequire(function () { return require("./cache"); });
+var networkTls = lazyRequire(function () { return require("./network-tls"); });
 
 var DEFAULT_POLICY_CACHE_MS = C.TIME.minutes(60);
 var MAX_POLICY_BYTES = C.BYTES.kib(64);
+var STS_VERSION_GRAMMAR = Object.freeze({ requireNextField: true, nameIgnoresCase: true });
+var TLSRPT_VERSION_GRAMMAR = Object.freeze({ requireNextField: true });
+var STS_ID_RE = /^[A-Za-z0-9]{1,32}$/;
 
 var _stsCache = null;
 function _getStsCache() {
@@ -61,21 +66,73 @@ function _parseStsPolicy(text) {
   return policy;
 }
 
-async function _fetchStsTxt(domain, dnsLookup) {
+async function _fetchStsTxt(domain, dnsLookup, resolver) {
   var records = await networkDnsResolver().safeResolveTxt("_mta-sts." + domain, {
     dnsLookup:    dnsLookup,
+    resolver:     resolver,
     errorFactory: function (code, msg) { return new SmtpPolicyError(code, msg); },
     code:         "smtp/mta-sts-txt-lookup-failed",
   });
   if (!Array.isArray(records)) return null;
+  var matches = [];
   for (var i = 0; i < records.length; i += 1) {
     var rec = Array.isArray(records[i]) ? records[i].join("") : records[i];
-    if (typeof rec !== "string") continue;
-    if (rec.indexOf("v=STSv1") === -1) continue;
-    var idMatch = /\bid=([A-Za-z0-9]{1,32})/.exec(rec);
-    return { record: rec, id: idMatch ? idMatch[1] : null };
+    if (structuredFields.recordVersionMatches(rec, "v", "STSv1", STS_VERSION_GRAMMAR)) matches.push(rec);
+  }
+  if (matches.length !== 1) return null;
+  var pairs = structuredFields.parseTagList(matches[0], { lowerKey: false });
+  for (var p = 0; p < pairs.length; p += 1) {
+    if (pairs[p][0] !== "id") continue;
+    var id = pairs[p][1];
+    if (typeof id !== "string" || id.length > 32 || !STS_ID_RE.test(id)) return null;
+    return { record: matches[0], id: id };
   }
   return null;
+}
+
+function _policyTtlMs(maxAgeSec) {
+  if (typeof maxAgeSec !== "number" || !isFinite(maxAgeSec) || maxAgeSec <= 0) {
+    return DEFAULT_POLICY_CACHE_MS;
+  }
+  var hourSec = C.TIME.hours(1) / C.TIME.seconds(1);
+  var ceilingSec = C.TIME.weeks(52) / C.TIME.seconds(1);
+  return Math.max(hourSec, Math.min(ceilingSec, maxAgeSec)) * C.TIME.seconds(1);
+}
+
+function _policyUnexpired(policy) {
+  if (!policy || typeof policy.fetchedAt !== "number" || !isFinite(policy.fetchedAt)) return false;
+  var maxAgeSec = policy.max_age;
+  var lifetimeMs = (typeof maxAgeSec === "number" && isFinite(maxAgeSec) && maxAgeSec >= 0)
+    ? Math.min(maxAgeSec * C.TIME.seconds(1), C.TIME.weeks(52))
+    : DEFAULT_POLICY_CACHE_MS;
+  return Date.now() < policy.fetchedAt + lifetimeMs;
+}
+
+async function _fetchStsPolicy(lcDomain, id, client) {
+  var url = "https://mta-sts." + lcDomain + "/.well-known/mta-sts.txt";
+  safeUrl.parse(url, { allowedProtocols: safeUrl.ALLOW_HTTP_TLS });
+  var res;
+  try {
+    res = await (client || httpClient()).request({                                                   // allow:raw-outbound-http-framework-internal — the framework httpClient or an operator-supplied client, with SSRF and DNS-pin checks applied by the framework wrapper
+      method:             "GET",
+      url:                url,
+      maxBytes:           MAX_POLICY_BYTES,
+      timeoutMs:          C.TIME.seconds(10),
+      servername:         networkTls().sniFor("mta-sts." + lcDomain),
+      rejectUnauthorized: true,
+    });
+  } catch (_e) {
+    return null;
+  }
+  if (res.statusCode === C.HTTP.STATUS.NOT_FOUND) return null;
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    throw new SmtpPolicyError("smtp/mta-sts-fetch-failed",
+      "MTA-STS fetch returned " + res.statusCode + " for " + url);
+  }
+  var parsed = _parseStsPolicy(res.body.toString("utf8"));
+  parsed.id = id;
+  parsed.fetchedAt = Date.now();
+  return parsed;
 }
 
 async function mtaStsFetch(domain, opts) {
@@ -84,46 +141,39 @@ async function mtaStsFetch(domain, opts) {
       "mtaSts.fetch: domain must be a non-empty string");
   }
   opts = opts || {};
+  validateOpts(opts, ["dnsLookup", "resolver", "httpClient"], "mtaSts.fetch");
   var lcDomain = domain.toLowerCase();
-  var txt = await _fetchStsTxt(lcDomain, opts.dnsLookup);
-  if (!txt) return null;
+  var store = _getStsCache();
+  var policyKey = "policy|" + lcDomain;
+  var cached = await store.get(policyKey);
+  if (cached === undefined || !_policyUnexpired(cached)) cached = null;
 
-  var cacheKey = lcDomain + "|" + (txt.id || "noid");
-  return await _getStsCache().wrap(cacheKey, async function () {
-    var url = "https://mta-sts." + lcDomain + "/.well-known/mta-sts.txt";
-    safeUrl.parse(url, { allowedProtocols: safeUrl.ALLOW_HTTP_TLS });
-    var res;
-    try {
-      res = await httpClient().request({
-        method:             "GET",
-        url:                url,
-        maxBytes:           MAX_POLICY_BYTES,
-        timeoutMs:          C.TIME.seconds(10),
-        servername:         "mta-sts." + lcDomain,
-        rejectUnauthorized: true,
-      });
-    } catch (_e) {
-      return null;
-    }
-    if (res.statusCode === C.HTTP.STATUS.NOT_FOUND) return null;
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw new SmtpPolicyError("smtp/mta-sts-fetch-failed",
-        "MTA-STS fetch returned " + res.statusCode + " for " + url);
-    }
-    var parsed = _parseStsPolicy(res.body.toString("utf8"));
-    parsed.id = txt.id || null;
-    parsed.fetchedAt = Date.now();
-    var maxAgeSec = parsed.max_age;
-    if (typeof maxAgeSec === "number" && isFinite(maxAgeSec) && maxAgeSec > 0) {
-      var hourSec = C.TIME.hours(1) / C.TIME.seconds(1);
-      var ceilingSec = C.TIME.weeks(52) / C.TIME.seconds(1);
-      var clamped = Math.max(hourSec, Math.min(ceilingSec, maxAgeSec));
-      parsed._cacheTtlMs = clamped * C.TIME.seconds(1);
-    } else {
-      parsed._cacheTtlMs = DEFAULT_POLICY_CACHE_MS;
-    }
-    return parsed;
-  });
+  var txt;
+  try { txt = await _fetchStsTxt(lcDomain, opts.dnsLookup, opts.resolver); }
+  catch (e) {
+    if (cached) return cached;
+    throw e;
+  }
+  if (!txt) return cached;
+  if (cached && cached.id === txt.id) return cached;
+
+  var missKey = "miss|" + lcDomain + "|" + txt.id;
+  if (await store.get(missKey) !== undefined) return cached;
+  var fresh;
+  try {
+    fresh = await store.wrap("fetch|" + lcDomain + "|" + txt.id, function () {
+      return _fetchStsPolicy(lcDomain, txt.id, opts.httpClient);
+    }, { ttlMs: 0 });
+  } catch (e2) {
+    if (cached) return cached;
+    throw e2;
+  }
+  if (fresh === null) {
+    await store.set(missKey, true, { ttlMs: DEFAULT_POLICY_CACHE_MS });
+    return cached;
+  }
+  await store.set(policyKey, fresh, { ttlMs: _policyTtlMs(fresh.max_age) });
+  return fresh;
 }
 
 function mtaStsMatchMx(mxHost, mxList) {
@@ -221,54 +271,6 @@ function daneRecordShape(rec) {
   };
 }
 
-function _extractIssuerDer(certDer) {
-  var top;
-  try { top = asn1.readNode(certDer); }
-  catch (_e) { return null; }
-  if (top.tag !== asn1.TAG.SEQUENCE) return null;
-  var children;
-  try { children = asn1.readSequence(top.value); }
-  catch (_e) { return null; }
-  if (children.length === 0) return null;
-  var tbs = children[0];
-  var tbsKids;
-  try { tbsKids = asn1.readSequence(tbs.value); }
-  catch (_e) { return null; }
-  var idx = 0;
-  if (tbsKids.length > 0 &&
-      tbsKids[0].tagClass === asn1.TAG_CLASS.CONTEXT_SPECIFIC &&
-      tbsKids[0].tag === 0) {
-    idx = 1;
-  }
-  var issuerIdx = idx + 2;
-  if (issuerIdx >= tbsKids.length) return null;
-  return tbsKids[issuerIdx].raw;
-}
-
-function _extractSubjectDer(certDer) {
-  var top;
-  try { top = asn1.readNode(certDer); }
-  catch (_e) { return null; }
-  if (top.tag !== asn1.TAG.SEQUENCE) return null;
-  var children;
-  try { children = asn1.readSequence(top.value); }
-  catch (_e) { return null; }
-  if (children.length === 0) return null;
-  var tbs = children[0];
-  var tbsKids;
-  try { tbsKids = asn1.readSequence(tbs.value); }
-  catch (_e) { return null; }
-  var idx = 0;
-  if (tbsKids.length > 0 &&
-      tbsKids[0].tagClass === asn1.TAG_CLASS.CONTEXT_SPECIFIC &&
-      tbsKids[0].tag === 0) {
-    idx = 1;
-  }
-  var subjectIdx = idx + 4;
-  if (subjectIdx >= tbsKids.length) return null;
-  return tbsKids[subjectIdx].raw;
-}
-
 function _extractSubjectPublicKeyInfo(certDer) {
   var top;
   try { top = asn1.readNode(certDer); }
@@ -325,6 +327,96 @@ function _matchTlsaAgainstCert(rec, certDer) {
   return null;
 }
 
+function _daneKeyRefusal(tlsaIndex, certIndex, keySource, what) {
+  var label = what || "cert[" + certIndex + "]";
+  var found;
+  try { found = bCrypto.compromisedKey(keySource); }
+  catch (e) {
+    return { tlsaIndex: tlsaIndex, certIndex: certIndex, reason: "dane-unreadable-key",
+      note: "the public key of " + label + " could not be read: " + ((e && e.message) || String(e)) };
+  }
+  if (found === null) return null;
+  return { tlsaIndex: tlsaIndex, certIndex: certIndex, reason: "dane-compromised-key",
+    note: label + " carries a compromised key: " + found.reason };
+}
+
+function _daneAnchorPath(parsedCerts, anchorIndex, searches) {
+  if (Object.prototype.hasOwnProperty.call(searches, anchorIndex)) return searches[anchorIndex];
+  var pool = [];
+  for (var m = 1; m < parsedCerts.length; m += 1) {
+    if (m !== anchorIndex && parsedCerts[m]) pool.push(parsedCerts[m]);
+  }
+  searches[anchorIndex] = x509Chain.resolveChain(parsedCerts[0], pool, [parsedCerts[anchorIndex]]);
+  return searches[anchorIndex];
+}
+
+function _daneAnchorPathError(tlsaIndex, anchorIndex, parsedCerts, usageName, prefix, searches) {
+  var anchor = parsedCerts[anchorIndex];
+  if (!anchor) {
+    return { tlsaIndex: tlsaIndex, certIndex: anchorIndex, reason: prefix + "-unparseable-anchor",
+      note: "TLSA matched cert[" + anchorIndex + "] as a " + usageName + " anchor but it is not parseable X.509, so no path to it can be validated (RFC 7672 §3.1.1)" };
+  }
+  var res = _daneAnchorPath(parsedCerts, anchorIndex, searches);
+  if (res.ok) return null;
+  if (res.reason === "compromised" && res.compromisedCert) {
+    var keyError = _daneKeyRefusal(tlsaIndex, anchorIndex, res.compromisedCert,
+      "the certificate '" + res.compromisedCert.subject + "' on the path from the leaf to cert[" + anchorIndex + "]");
+    if (keyError) return keyError;
+  }
+  return { tlsaIndex: tlsaIndex, certIndex: anchorIndex, reason: prefix + "-path-not-validated",
+    note: "TLSA matched cert[" + anchorIndex + "] but no cryptographically validated path runs from the leaf to it (RFC 7672 §3.1.1; resolveChain reason=" + res.reason + ")" };
+}
+
+/**
+ * @primitive b.network.smtp.policy.dane.verifyChain
+ * @signature b.network.smtp.policy.dane.verifyChain(certChain, tlsaRecords, opts?)
+ * @since     0.7.38
+ * @status    stable
+ * @related   b.network.dns.dane.matchCertificate, b.x509Chain.resolveChain
+ *
+ * Matches the certificate chain an SMTP peer presented against the peer's
+ * TLSA records (RFC 7672). `certChain` holds the DER of each certificate,
+ * leaf first, and `tlsaRecords` holds records in the shape
+ * `b.network.smtp.policy.dane.tlsa` returns. A DANE-EE (3) record is
+ * matched against the leaf. A DANE-TA (2) record is matched against the
+ * later certificates, and a match counts only when a signature-verified
+ * path runs from the leaf through the other supplied certificates to the
+ * matched one. PKIX-TA (0) and PKIX-EE (1) records count only when
+ * `opts.allowPkixModes` is true. A PKIX-TA match needs the same verified
+ * path as a DANE-TA match, and every PKIX match carries
+ * `pkixPathRequired: true`: the caller still validates the chain against
+ * its own trust store.
+ *
+ * Returns `{ ok, matches, errors }`. `ok` is true when at least one record
+ * matched. Each entry in `errors` carries `tlsaIndex`, `reason` and, for
+ * most reasons, `certIndex` and `note`. The reasons are:
+ * `dane-compromised-key` when the matched certificate, the leaf, or a
+ * certificate on the path from the leaf to a matched anchor carries a key
+ * that `b.crypto.compromisedKey` reports, such as an ECDSA key whose
+ * private scalar is 1 or a listed leaked key; `dane-unreadable-key` when
+ * such a certificate's key could not be read to make that check;
+ * `dane-ta-path-not-validated` or `pkix-ta-path-not-validated` when no
+ * verified path reaches the matched anchor; `dane-ta-unparseable-leaf`,
+ * `pkix-ta-unparseable-leaf`, `dane-ta-unparseable-anchor` or
+ * `pkix-ta-unparseable-anchor` when a certificate a trust-anchor match
+ * needs does not parse as X.509; `pkix-modes-not-allowed` for a PKIX
+ * record without `opts.allowPkixModes`; and `unsupported-usage` for any
+ * other usage value. A DANE-EE or PKIX-EE match on a leaf that node:crypto
+ * cannot parse is judged on the subjectPublicKeyInfo the leaf carries, and
+ * is refused as `dane-unreadable-key` when that key cannot be read either.
+ * The path to one matched anchor is searched once per call, however many
+ * records match it.
+ *
+ * Throws `smtp/dane-bad-chain` when `certChain` is not a non-empty array
+ * of Buffers, and `smtp/dane-bad-tlsa` when `tlsaRecords` is not an array.
+ *
+ * @opts
+ *   allowPkixModes: boolean,  // default: false; count PKIX-TA / PKIX-EE matches
+ *
+ * @example
+ *   var rv = b.network.smtp.policy.dane.verifyChain([leafDer, issuerDer], records);
+ *   // → { ok: true, matches: [ { tlsaIndex: 0, certIndex: 0, usage: "DANE-EE", mtype: "SHA-256" } ], errors: [] }
+ */
 function daneVerifyChain(certChain, tlsaRecords, opts) {
   if (!Array.isArray(certChain) || certChain.length === 0) {
     throw new SmtpPolicyError("smtp/dane-bad-chain",
@@ -343,44 +435,42 @@ function daneVerifyChain(certChain, tlsaRecords, opts) {
   opts = opts || {};
   var allowPkixModes = opts.allowPkixModes === true;
 
+  var parsedCerts = certChain.map(function (der) {
+    try { return bCrypto._certificateFromDer(der); }
+    catch (_e) { return null; }
+  });
+
   var matches = [];
   var errors = [];
+  var anchorSearches = Object.create(null);
   for (var t = 0; t < tlsaRecords.length; t += 1) {
     var rec = tlsaRecords[t];
     var usage = rec.usage;
-    if (usage === 2) {
+    if (usage === 2 || (usage === 0 && allowPkixModes)) {
+      var taName = usage === 2 ? "DANE-TA" : "PKIX-TA";
+      var taPrefix = usage === 2 ? "dane-ta" : "pkix-ta";
+      if (!parsedCerts[0]) {
+        errors.push({ tlsaIndex: t, reason: taPrefix + "-unparseable-leaf",
+          note: taName + " (RFC 7672 §3.1.1) requires a validated path from the leaf, but cert[0] is not parseable X.509" });
+        continue;
+      }
       for (var i = 1; i < certChain.length; i += 1) {
         var rv = _matchTlsaAgainstCert(rec, certChain[i]);
         if (!rv) continue;
-        var taSubject = _extractSubjectDer(certChain[i]);
-        var childIssuer = _extractIssuerDer(certChain[i - 1]);
-        if (!taSubject || !childIssuer) {
-          matches.push({ tlsaIndex: t, certIndex: i, usage: "DANE-TA",
-            mtype: rv.mtype, chainOrderUnverified: true });
-          break;
-        }
-        if (taSubject.equals(childIssuer)) {
-          matches.push({ tlsaIndex: t, certIndex: i, usage: "DANE-TA", mtype: rv.mtype });
-          break;
-        }
-        errors.push({ tlsaIndex: t, certIndex: i,
-          reason: "dane-ta-chain-order-mismatch",
-          note: "TLSA record matched cert[" + i + "] but its Subject does not equal the Issuer of cert[" + (i - 1) + "] (RFC 7672 §3.1.1 chain-order check)" });
+        var pathError = _daneAnchorPathError(t, i, parsedCerts, taName, taPrefix, anchorSearches);
+        if (pathError) { errors.push(pathError); continue; }
+        var taMatch = { tlsaIndex: t, certIndex: i, usage: taName, mtype: rv.mtype };
+        if (usage === 0) taMatch.pkixPathRequired = true;
+        matches.push(taMatch);
+        break;
       }
-    } else if (usage === 3) {
+    } else if (usage === 3 || (usage === 1 && allowPkixModes)) {
       var rvEe = _matchTlsaAgainstCert(rec, certChain[0]);
-      if (rvEe) matches.push({ tlsaIndex: t, certIndex: 0, usage: "DANE-EE", mtype: rvEe.mtype });
-    } else if ((usage === 0 || usage === 1) && allowPkixModes) {
-      var pkixIdx = usage === 1 ? 0 : -1;
-      if (pkixIdx === 0) {
-        var rvPe = _matchTlsaAgainstCert(rec, certChain[0]);
-        if (rvPe) matches.push({ tlsaIndex: t, certIndex: 0, usage: "PKIX-EE", mtype: rvPe.mtype, pkixPathRequired: true });
-      } else {
-        for (var j = 1; j < certChain.length; j += 1) {
-          var rvPa = _matchTlsaAgainstCert(rec, certChain[j]);
-          if (rvPa) { matches.push({ tlsaIndex: t, certIndex: j, usage: "PKIX-TA", mtype: rvPa.mtype, pkixPathRequired: true }); break; }
-        }
-      }
+      var eeRefusal = rvEe ? _daneKeyRefusal(t, 0, parsedCerts[0] || _extractSubjectPublicKeyInfo(certChain[0]),
+        parsedCerts[0] ? null : "the subjectPublicKeyInfo of cert[0], which is not parseable X.509") : null;
+      if (eeRefusal) errors.push(eeRefusal);
+      else if (rvEe && usage === 3) matches.push({ tlsaIndex: t, certIndex: 0, usage: "DANE-EE", mtype: rvEe.mtype });
+      else if (rvEe) matches.push({ tlsaIndex: t, certIndex: 0, usage: "PKIX-EE", mtype: rvEe.mtype, pkixPathRequired: true });
     } else if (usage === 0 || usage === 1) {
       errors.push({ tlsaIndex: t, reason: "pkix-modes-not-allowed",
         note: "PKIX-TA / PKIX-EE require opts.allowPkixModes + an external PKIX validator (RFC 7672 §3.1.1)" });
@@ -450,18 +540,19 @@ async function tlsRptFetchPolicy(domain, opts) {
   var qname = "_smtp._tls." + domain;
   var records = await networkDnsResolver().safeResolveTxt(qname, {
     dnsLookup:    opts.dnsLookup,
+    resolver:     opts.resolver,
     errorFactory: function (code, msg) { return new SmtpPolicyError(code, msg); },
     code:         "smtp/tls-rpt-lookup-failed",
   });
   if (records === null) return null;
-  var joined = "";
+  var matches = [];
   for (var i = 0; i < (records || []).length; i += 1) {
     var rec = records[i];
     var s = Array.isArray(rec) ? rec.join("") : String(rec);
-    if (/^v=TLSRPTv1\b/i.test(s)) { joined = s; break; }
+    if (structuredFields.recordVersionMatches(s, "v", "TLSRPTv1", TLSRPT_VERSION_GRAMMAR)) matches.push(s);
   }
-  if (joined.length === 0) return null;
-  var pairs = structuredFields.parseTagList(joined);
+  if (matches.length !== 1) return null;
+  var pairs = structuredFields.parseTagList(matches[0]);
   var rua = [];
   for (var p = 0; p < pairs.length; p += 1) {
     if (pairs[p][0] === "rua") {
@@ -499,7 +590,7 @@ async function tlsRptSubmit(report, opts) {
     try {
       if (/^https:\/\//i.test(uri)) {
         entry.kind = "https";
-        // allow:raw-outbound-http-framework-internal — `client` is the framework httpClient
+        // allow:raw-outbound-http-framework-internal — `client` is the framework httpClient or an operator-supplied test mock, with SSRF and DNS-pin checks already applied through the framework wrapper
         var rv = await client.request({
           method:  "POST",
           url:     uri,
@@ -574,12 +665,12 @@ function tlsRptParseReport(body, opts) {
     }
   }
 
-  var report;
-  try { report = safeJson.parse(bodyBuf.toString("utf8"), { maxBytes: TLS_RPT_MAX_REPORT_BYTES }); }
-  catch (e) {
-    throw new SmtpPolicyError("smtp/tls-rpt-bad-json",
-      "tlsRpt.parseReport: JSON parse failed: " + ((e && e.message) || String(e)));
-  }
+  var report = safeJson.parseTyped(bodyBuf.toString("utf8"), {
+    maxBytes:   TLS_RPT_MAX_REPORT_BYTES,
+    errorClass: SmtpPolicyError,
+    code:       "smtp/tls-rpt-bad-json",
+    label:      "tlsRpt.parseReport: JSON parse failed",
+  });
   if (!report || typeof report !== "object") {
     throw new SmtpPolicyError("smtp/tls-rpt-bad-shape",
       "tlsRpt.parseReport: report must be an object");

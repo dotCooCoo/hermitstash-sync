@@ -2,8 +2,10 @@
 // Copyright (c) blamejs contributors
 "use strict";
 var C = require("./constants");
+var numericBounds = require("./numeric-bounds");
 var { generateToken } = require("./crypto");
 var externalDb = require("./external-db");
+var dbRoleContext = require("./db-role-context");
 var frameworkSchema = require("./framework-schema");
 var lazyRequire = require("./lazy-require");
 var { ClusterProviderError } = require("./framework-error");
@@ -51,7 +53,9 @@ function create(config) {
   }
 
   function _q(sql, params) {
-    return externalDb.query(sql, params || [], { backend: backendName });
+    return dbRoleContext.runAsAuditChainWrite(function () {
+      return externalDb.query(sql, params || [], { backend: backendName });
+    });
   }
 
   function _run(builder) {
@@ -206,7 +210,7 @@ function create(config) {
       .where("scope", "leader"));
     if (!result.rows || result.rows.length === 0) return null;
     var row = result.rows[0];
-    if (Number(row.expiresAt) < Date.now()) return null;
+    if (numericBounds.finiteTimestamp(row.expiresAt) < Date.now()) return null;
     return {
       nodeId:           row.nodeId,
       leaseExpiresAt:   Number(row.expiresAt),

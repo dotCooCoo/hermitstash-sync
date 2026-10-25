@@ -2,6 +2,35 @@
 // Copyright (c) blamejs contributors
 "use strict";
 
+/**
+ * @module b.migrations
+ * @nav    Data
+ * @title  Migrations
+ * @slug   migrations
+ *
+ * @intro
+ *   Apply the schema changes a directory of migration files describes, in
+ *   order, once each, and record which ones have run.
+ *
+ *   Two things make that safe to run at boot on more than one node. Every
+ *   applied migration is written to a table, so a second start does not
+ *   run it again. And the run takes a lock in the database first, so two
+ *   nodes starting together do not both apply the same change to the same
+ *   schema; the second waits and then finds there is nothing left to do.
+ *
+ *   A lock whose holder died would otherwise stop every later boot, so one
+ *   older than <code>staleAfterMs</code> is taken over.
+ *
+ *   File names are checked against a fixed pattern, so what runs is the
+ *   ordered set the directory declares rather than whatever is sitting
+ *   there.
+ *
+ * @card
+ *   Apply a directory of schema migrations in order, once each, recording
+ *   what ran. A database lock keeps two nodes booting together from
+ *   applying the same change twice, and a dead holder's lock is taken over.
+ */
+
 var nodePath = require("node:path");
 var moduleLoader = require("./module-loader");
 var atomicFile = require("./atomic-file");
@@ -188,6 +217,87 @@ function _loadMigration(file, dir) {
 
 var _txn = dbSchema.runInTransaction;
 
+function _refuseAsyncStep(fn, name) {
+  if (dbSchema.isAsyncFunction(fn)) {
+    throw new MigrationError("migrations/async-step",
+      name + "(db) is an async function; a migration's " + name + "(db) must be a synchronous function, " +
+      "so it was not run", true);
+  }
+}
+
+function _upStep(conn, mod, file) {
+  _refuseAsyncStep(mod.up, "up");
+  return function () {
+    if (dbSchema.containThenable(mod.up(conn))) {
+      throw new MigrationError("migrations/async-step",
+        "up(db) returned a promise; a migration's up(db) must be a synchronous function", true);
+    }
+    var insQ = sql.insert(_migrationsTable(), _sqlOpts(conn))
+      .values({ name: file, description: mod.description || "",
+                appliedAt: new Date().toISOString() }).toSql();
+    var insStmt = conn.prepare(insQ.sql);
+    insStmt.run.apply(insStmt, insQ.params);
+  };
+}
+
+function _downStep(conn, mod, file) {
+  _refuseAsyncStep(mod.down, "down");
+  return function () {
+    if (dbSchema.containThenable(mod.down(conn))) {
+      throw new MigrationError("migrations/async-step",
+        "down(db) returned a promise; a migration's down(db) must be a synchronous function", true);
+    }
+    var delQ = sql.delete(_migrationsTable(), _sqlOpts(conn)).where("name", file).toSql();
+    var delStmt = conn.prepare(delQ.sql);
+    delStmt.run.apply(delStmt, delQ.params);
+  };
+}
+
+/**
+ * @primitive b.migrations.create
+ * @signature b.migrations.create(opts)
+ * @since     0.1.73
+ * @status    stable
+ * @compliance soc2, sox-404
+ * @related   b.db.init, b.externalDb.transaction
+ *
+ * Open the runner over a directory and answer the handle to work it. The
+ * handle carries `up()`, which applies every migration not yet recorded;
+ * `down()`, which reverses the last one applied; `status()`, which answers
+ * what has run and what has not; and `dir`.
+ *
+ * A file is a migration when its name matches `<number>-<name>.js`, and
+ * the number orders the run. Anything else in the directory is skipped, so
+ * an editor backup or a note does not become a schema change.
+ *
+ * `up()` takes a row lock in the database before it reads the applied set,
+ * so two nodes booting together do not apply the same file twice: the
+ * second waits, then finds nothing outstanding. A lock left behind by a
+ * process that died is taken over once it is older than `staleAfterMs`,
+ * since otherwise one crash would stop every later boot.
+ *
+ * Each step runs inside a synchronous transaction, so a migration's
+ * `up(db)` and `down(db)` must be synchronous functions. An `async`
+ * step is not called: the run fails with `migrations/up-failed` or
+ * `migrations/down-failed` and the migration's recorded state does not
+ * change. A plain step that returns a promise fails the run the same
+ * way after its synchronous writes are rolled back; any work its
+ * promise performs afterward runs outside any transaction.
+ *
+ * A missing or empty `opts.dir` throws `migrations/no-dir` when `create`
+ * is called.
+ *
+ * @opts
+ *   dir:          string,   // directory holding the migration files; required
+ *   db:           object,   // database handle; defaults to b.db
+ *   staleAfterMs: number,   // when a held lock may be taken over
+ *
+ * @example
+ *   var b = require("@blamejs/core");
+ *   var m = b.migrations.create({ dir: "./migrations" });
+ *   m.status();   // → what has run and what has not
+ *   m.up();       // → applies 001-create-users.js, then 002-add-index.js
+ */
 function create(opts) {
   opts = opts || {};
   validateOpts(opts, ["dir", "db", "staleAfterMs"], "b.migrations");
@@ -238,14 +348,7 @@ function create(opts) {
         if (appliedSet.has(file)) { skipped.push(file); continue; }
         var mod = _loadMigration(file, dir);
         try {
-          _txn(conn, function () {
-            mod.up(conn);
-            var insQ = sql.insert(_migrationsTable(), _sqlOpts(conn))
-              .values({ name: file, description: mod.description || "",
-                        appliedAt: new Date().toISOString() }).toSql();
-            var insStmt = conn.prepare(insQ.sql);
-            insStmt.run.apply(insStmt, insQ.params);
-          });
+          _txn(conn, _upStep(conn, mod, file));
         } catch (e) {
           throw new MigrationError("migrations/up-failed",
             "migration '" + file + "' failed: " + ((e && e.message) || String(e)),
@@ -284,12 +387,7 @@ function create(opts) {
             true);
         }
         try {
-          _txn(conn, function () {
-            mod.down(conn);
-            var delQ = sql.delete(_migrationsTable(), _sqlOpts(conn)).where("name", file).toSql();
-            var delStmt = conn.prepare(delQ.sql);
-            delStmt.run.apply(delStmt, delQ.params);
-          });
+          _txn(conn, _downStep(conn, mod, file));
         } catch (e) {
           throw new MigrationError("migrations/down-failed",
             "rollback of '" + file + "' failed: " + ((e && e.message) || String(e)),
