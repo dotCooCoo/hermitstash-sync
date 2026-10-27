@@ -1,0 +1,29 @@
+{
+  "version": "1.1.5",
+  "date": "2026-10-27",
+  "headline": "Pre-built binaries and the container image move to Node.js 24.22.1, which fixes CVE-2026-111497",
+  "summary": "The binaries and the container image now embed Node.js 24.22.1. That release fixes CVE-2026-111497, an out-of-bounds write in the Brotli decoder bundled with Node.js. A from-source install now requires Node.js 24.22.1 or newer. Upgrade with the in-daemon auto-update, `deploy/update.sh`, or `docker pull`.",
+  "sections": [
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "Embedded runtime moves to Node.js 24.22.1",
+          "body": "Node.js 24.22.1 fixes CVE-2026-111497, an out-of-bounds write in the bundled Brotli decoder that crafted input can use to crash the process or run code. The sync client sends `Accept-Encoding: identity` on HTTP requests and uses only deflate on the WebSocket, so it does not pass server data to the Brotli decoder. Node.js 24.22.1 also ships OpenSSL 3.5.9."
+        }
+      ]
+    },
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "From-source installs require Node.js 24.22.1",
+          "body": "`engines.node` and the boot-time version check now require 24.22.1. On an older runtime, `hermitstash-sync` exits with status 78 and prints the required version. The container image builds and verifies the binary on `node:24.22.1-slim`, pinned by digest. Pre-built binaries carry their own runtime and do not depend on the Node.js installed on the machine."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "Node.js 24.22.1 release", "url": "https://nodejs.org/en/blog/release/v24.22.1" }
+  ]
+}

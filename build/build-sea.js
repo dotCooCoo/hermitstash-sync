@@ -5,7 +5,7 @@
  * Build a Node.js Single Executable Application (SEA)
  *
  * Prerequisites:
- *   - Node.js 24.21.0+ (matches package.json engines.node; the build embeds this runtime)
+ *   - Node.js 24.22.1+ (matches package.json engines.node; the build embeds this runtime)
  *   - `npm ci --ignore-scripts`, which installs the esbuild and postject
  *     versions package-lock.json pins
  *

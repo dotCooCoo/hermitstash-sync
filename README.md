@@ -73,7 +73,7 @@ All connections use PQC TLS with TLS 1.3 minimum and a hybrid group list (`SecP3
 
 ## Requirements
 
-- Node.js 24.21.0+ (ships OpenSSL 3.5.8; also covers `node:sqlite` and the OpenSSL 3.5 PQC groups)
+- Node.js 24.22.1+ (ships OpenSSL 3.5.9; also covers `node:sqlite` and the OpenSSL 3.5 PQC groups)
 - HermitStash server v1.9.19+ with sync features enabled. v1.9.19 ships blamejs v0.8.43+ which emits 0xE2-magic envelopes; this client (on blamejs v0.21.4) requires that posture. Servers below v1.9.19 still on the 0xE1 envelope are not compatible.
 - File rename uses a per-session api-encrypt envelope that binds the request fields into the AEAD. It works with a server built on blamejs v0.20.1 or later (HermitStash v1.15.7 and later). Upload, download, metadata, delete, and the WebSocket sync stream do not use the envelope.
 
@@ -595,7 +595,7 @@ Download the latest release from the [Releases page](https://github.com/dotCooCo
 ### Building locally
 
 ```bash
-# Requires Node.js 24.21.0+
+# Requires Node.js 24.22.1+
 npm ci --ignore-scripts
 node build/build-sea.js
 ```
