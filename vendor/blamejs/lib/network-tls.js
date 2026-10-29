@@ -16,6 +16,7 @@ var C = require("./constants");
 var safeBuffer = require("./safe-buffer");
 var safeJson = require("./safe-json");
 var ipUtils = require("./ip-utils");
+var publicSuffix = require("./public-suffix");
 var validateOpts = require("./validate-opts");
 var lazyRequire = require("./lazy-require");
 var safeAsync = require("./safe-async");
@@ -589,8 +590,44 @@ function _reachesTls13(opts) {
   return !VERSION_PINNED_METHOD_RE.test(method);
 }
 
-function _stripUnreachableCertCompression(merged, caller) {
+function _refuseUnsafeCertCompression(list, ErrorClass, label) {
+  if (!Array.isArray(list) || list.indexOf("brotli") === -1) return;
+  var refusal = C._brotliRefusal(process.versions.node);
+  if (refusal === null) return;
+  throw new ErrorClass("tls/unsafe-cert-compression",
+    label + ": certificateCompression lists \"brotli\", and " + refusal.decoder + " writes out of bounds " +
+    "on a crafted stream (CVE-2026-111497), which a TLS peer reaches during the handshake; " +
+    refusal.remedy + ", or leave brotli out of the list");
+}
+
+function _certCompressionOptIn(list, ErrorClass, label, code) {
+  if (list === undefined) return undefined;
+  var badCode = code || "tls/bad-cert-compression";
+  if (!Array.isArray(list)) {
+    throw new ErrorClass(badCode,
+      label + ": certificateCompression must be an array of algorithm names (pass [] for none)");
+  }
+  _refuseUnsafeCertCompression(list, ErrorClass, label);
+  var supported = C.TLS_CERT_COMPRESSION();
+  for (var i = 0; i < list.length; i += 1) {
+    if (typeof list[i] !== "string" || supported.indexOf(list[i]) === -1) {
+      throw new ErrorClass(badCode,
+        label + ": certificateCompression algorithm " + JSON.stringify(list[i]) +
+        " is not supported by this runtime (supported: " +
+        (supported.length ? supported.join(", ") : "none") + ")");
+    }
+    if (list.indexOf(list[i]) !== i) {
+      throw new ErrorClass(badCode,
+        label + ": certificateCompression names " + JSON.stringify(list[i]) +
+        " more than once; list each algorithm once");
+    }
+  }
+  return list.slice();
+}
+
+function _stripUnreachableCertCompression(merged, caller, label) {
   if (!merged || typeof merged !== "object") return merged;
+  _certCompressionOptIn(merged.certificateCompression, NetworkTlsError, label || "tls options");
   if (_reachesTls13(merged)) return merged;
   if (caller && typeof caller === "object" &&
       caller.certificateCompression !== undefined) return merged;
@@ -678,8 +715,9 @@ var APPLY_TO_CONTEXT_ROLES = Object.freeze(["server", "client"]);
  * Copy `opts.base` and add the framework's TLS posture to the copy: the
  * trust anchors registered with `b.network.tls.addCa` (and the system roots
  * after `b.network.tls.useSystemTrust(true)`) as `ca`, the key-exchange
- * group string as `ecdhCurve`, and the RFC 8879 certificate-compression
- * algorithms when the options can reach TLS 1.3. Pass the result to
+ * group string as `ecdhCurve`. It adds no RFC 8879 certificate-compression
+ * algorithms; `base.certificateCompression` is checked and kept as given.
+ * Pass the result to
  * `tls.createServer`, `https.createServer` or `tls.createSecureContext` for
  * a listener, or, with `role: "client"`, to `tls.connect` or
  * `new https.Agent`.
@@ -729,6 +767,41 @@ var APPLY_TO_CONTEXT_ROLES = Object.freeze(["server", "client"]);
  * anchor this way is refused with `tls/server-chain-unverifiable`, which
  * includes a server that sends an expired alternate issuer or a decoy root
  * ahead of the path OpenSSL verified.
+ *
+ * Before the chain walk, the check reads the host the way the WHATWG URL
+ * host parser does, after the full UTS46 mapping that `url.domainToASCII`
+ * applies. It refuses with `tls/non-canonical-ip-host` a host that the
+ * resolver or a URL parser reads as an IPv4 address but that is not written
+ * as a dotted-decimal address: octal or hex parts (`0177.0.0.1`,
+ * `0x7f.0.0.1`), fewer than four parts (`127.1`), a single number
+ * (`2130706433`), a trailing dot (`127.0.0.1.`), fullwidth digits or dots,
+ * or an address followed by a code point that UTS46 removes, such as U+00AD
+ * (soft hyphen) or U+200B (zero width space). Any host whose last label,
+ * after that mapping, is all digits or `0x` followed by hex digits counts.
+ * It refuses with `tls/bad-host` a host other than an IP literal that
+ * carries an ASCII control character, white space or `%`, or an empty label
+ * (`127.0.0.1..`, `a..b`, `.example.com`), or that
+ * `b.publicSuffix.canonicalDomain` returns `""` for: a code point that
+ * `url.domainToASCII` refuses, a character other than a letter, digit,
+ * hyphen, dot or underscore after that mapping, a label over 63 octets, or a
+ * name over 253 octets. Neither `base.checkServerIdentity` nor Node's matcher
+ * runs for either kind of host, on any Node release. The check reads both the
+ * name Node checks the certificate against (the `servername`, or the host when
+ * no `servername` is set) and the `host` the dial connected to, so a dial to
+ * `127.1` with `servername: "example.com"` is refused with
+ * `tls/non-canonical-ip-host` as well.
+ *
+ * The result carries RFC 8879 certificate compression only when
+ * `base.certificateCompression` lists algorithms. With it on, OpenSSL
+ * decompresses the peer's `Certificate` message before the chain is
+ * verified. A `base.certificateCompression` that is not an array, that
+ * names an algorithm outside `b.network.tls.certificateCompressionAlgorithms()`,
+ * or that names an algorithm twice throws `tls/bad-cert-compression`. One that lists `"brotli"` throws
+ * `tls/unsafe-cert-compression` on a Node release without the fix for
+ * CVE-2026-111497 (24.x older than 24.22.1, 26.x older than 26.12.1, and
+ * every 23.x and 25.x release), and on a Node built against a shared Brotli
+ * library older than 1.2.1. The Brotli decoder there writes out of bounds on
+ * a crafted stream, and a TLS peer reaches it during the handshake.
  *
  * A dial whose trust the walk cannot read (a prebuilt `secureContext` when
  * the result has no `ca`, or a `pfx`, whose CA certificates Node trusts) is
@@ -794,6 +867,9 @@ function applyToContext(opts) {
       (typeof role === "string" ? JSON.stringify(role) : String(role)));
   }
   var base = Object.assign({}, opts.base || {});
+  var certCompression = _certCompressionOptIn(base.certificateCompression, TlsTrustError,
+    "tls.applyToContext: base", "tls/bad-cert-compression");
+  if (certCompression !== undefined) base.certificateCompression = certCompression;
   var caStrings = STATE.cas.map(function (e) { return e.pem; });
   if (STATE.systemTrust) caStrings = caStrings.concat(_keptSystemRoots());
   if (caStrings.length > 0) {
@@ -823,10 +899,6 @@ function applyToContext(opts) {
     base.ecdhCurve = outboundPosture().ecdhCurve; // allow:listener-group-preference: role client writes the offer order of an outbound dial
   }
   if (base.groups !== undefined) delete base.groups;
-  if (base.certificateCompression === undefined && _reachesTls13(base)) {
-    var certAlgs = C.TLS_CERT_COMPRESSION();
-    if (certAlgs.length > 0) base.certificateCompression = certAlgs.slice();
-  }
   return base;
 }
 
@@ -1066,6 +1138,12 @@ function buildOptions(opts) {
   if (opts.sni !== undefined) {
     validateOpts.requireNonEmptyString(opts.sni, "buildOptions: sni",
       NetworkTlsError, "network-tls/bad-tls-options");
+    if (_dialHostForm(opts.sni) === "malformed") {
+      throw new NetworkTlsError("network-tls/bad-tls-options",
+        "buildOptions: sni " + JSON.stringify(opts.sni) + " is not a valid host name: it carries a " +
+        "control character, white space, %, an empty label, or a character or length a host name " +
+        "cannot have");
+    }
     var sniIdentity = _identityOf(opts.sni);
     if (sniIdentity.servername === undefined) {
       throw new NetworkTlsError("network-tls/bad-tls-options",
@@ -1075,29 +1153,10 @@ function buildOptions(opts) {
     Object.assign(out, sniIdentity);
   }
 
-  var supportedCompression = certificateCompressionAlgorithms();
-  if (opts.certificateCompression === undefined) {
-    if (supportedCompression.length > 0) out.certificateCompression = supportedCompression;
-  } else {
-    if (!Array.isArray(opts.certificateCompression)) {
-      throw new NetworkTlsError("network-tls/bad-tls-options",
-        "buildOptions: certificateCompression must be an array of algorithm " +
-        "names (pass [] to advertise none)");
-    }
-    validateOpts.optionalNonEmptyStringArray(opts.certificateCompression,
-      "buildOptions: certificateCompression", NetworkTlsError,
-      "network-tls/bad-tls-options");
-    opts.certificateCompression.forEach(function (name) {
-      if (supportedCompression.indexOf(name) === -1) {
-        throw new NetworkTlsError("network-tls/bad-tls-options",
-          "buildOptions: certificateCompression algorithm " + JSON.stringify(name) +
-          " is not supported by this runtime (supported: " +
-          (supportedCompression.length ? supportedCompression.join(", ") : "none") + ")");
-      }
-    });
-    if (opts.certificateCompression.length > 0) {
-      out.certificateCompression = opts.certificateCompression.slice();
-    }
+  var certCompression = _certCompressionOptIn(opts.certificateCompression, NetworkTlsError,
+    "buildOptions", "network-tls/bad-tls-options");
+  if (certCompression !== undefined && certCompression.length > 0) {
+    out.certificateCompression = certCompression;
   }
   return out;
 }
@@ -1109,32 +1168,45 @@ function buildOptions(opts) {
  * @status    stable
  * @related   b.network.tls.connectWithEch, b.pqcAgent.create
  *
- * The RFC 8879 certificate-compression algorithms this runtime can
- * decompress, newest-runtime order, as a fresh array you own.
+ * The RFC 8879 certificate-compression algorithms an operator may list in a
+ * `certificateCompression` option on this runtime, newest-runtime order, as
+ * a fresh array you own. It is a copy of `b.constants.TLS_CERT_COMPRESSION()`.
  *
- * Certificate compression shrinks the TLS `Certificate` message — on a
- * post-quantum deployment the largest thing on the wire during a handshake,
- * since an ML-DSA-87 signature alone runs about 4.6 KB before any public key
- * or chain. Every outbound path the framework ships already advertises this
- * list, and `b.router` advertises it inbound; call this directly only when
- * you are assembling `tls.connect` options yourself and want to narrow the
- * list or check what the runtime supports.
+ * Certificate compression is off by default. `b.router`'s `listen()`,
+ * `b.mail.server.tls.context`, `b.httpClient`, `b.pqcAgent.create`,
+ * `b.network.tls.applyToContext`, `b.network.tls.buildOptions`,
+ * `b.network.tls.outboundPosture` and the protocol clients built on them
+ * advertise no algorithm unless the caller passes `certificateCompression`.
+ * With compression on, OpenSSL decompresses the peer's `Certificate` message
+ * during the handshake, before the chain is verified: a listener with
+ * `requestCert` decompresses any client's certificate, including with
+ * `rejectUnauthorized: false`, and a dial decompresses the certificate the
+ * server, or anyone on the path, sends. A list that is not an array, that
+ * names an algorithm outside this array, or that names an algorithm twice is
+ * refused with `tls/bad-cert-compression`
+ * (`network-tls/bad-tls-options` from `b.network.tls.buildOptions`).
  *
- * Compressing the certificate is not the record-layer compression that CRIME
- * attacked: the `Certificate` message is public, fixed, and not
- * attacker-influenced, so its compressed length reveals nothing about a
- * secret and no attacker-chosen plaintext shares a compression context with
- * one.
+ * On a Node release without the fix for CVE-2026-111497 (24.x older than
+ * 24.22.1, 26.x older than 26.12.1, and every 23.x and 25.x release), and on
+ * a Node built against a shared Brotli library older than 1.2.1, the array
+ * leaves out `"brotli"`. The Brotli decoder there writes out of bounds on a
+ * crafted stream. An explicit `certificateCompression` that lists `"brotli"`
+ * is refused there with `tls/unsafe-cert-compression`.
  *
- * Returns an empty array on a runtime that does not implement the extension,
- * which reads naturally as "advertise nothing".
+ * Certificate compression shrinks the TLS `Certificate` message. On a
+ * post-quantum deployment that message is the largest one on the wire during
+ * a handshake: an ML-DSA-87 signature alone runs about 4.6 KB before any
+ * public key or chain.
+ *
+ * Returns an empty array on a runtime that does not implement the extension.
  *
  * @example
  *   b.network.tls.certificateCompressionAlgorithms();
- *   // -> ["zlib", "brotli", "zstd"]
+ *   // -> ["zlib", "brotli", "zstd"] on Node 26.12.1
+ *   // -> ["zlib", "zstd"] on Node 24.21.0
  *
- *   // Narrow what an outbound connection will accept.
- *   var opts = b.network.tls.buildOptions({ certificateCompression: ["brotli"] });
+ *   // Turn on zstd for one outbound connection.
+ *   var opts = b.network.tls.buildOptions({ certificateCompression: ["zstd"] });
  */
 function certificateCompressionAlgorithms() {
   return C.TLS_CERT_COMPRESSION().slice();
@@ -1165,13 +1237,17 @@ function certificateCompressionAlgorithms() {
  * Call it per connection rather than caching the result, or an operator's
  * later narrowing will not reach the wire.
  *
+ * The posture has no `certificateCompression`, so a dial built from it
+ * advertises no RFC 8879 certificate compression and never decompresses the
+ * server's certificate. See `b.network.tls.certificateCompressionAlgorithms`
+ * for turning it on.
+ *
  * @example
  *   // Restrict every outbound handshake to the NIST-curve hybrids.
  *   b.network.tls.preferredGroups.set(["SecP256r1MLKEM768", "SecP384r1MLKEM1024"]);
  *   b.network.tls.outboundPosture();
  *   // → { minVersion: "TLSv1.3",
- *   //     ecdhCurve: "SecP256r1MLKEM768:SecP384r1MLKEM1024",
- *   //     certificateCompression: ["zlib", "brotli", "zstd"] }
+ *   //     ecdhCurve: "SecP256r1MLKEM768:SecP384r1MLKEM1024" }
  */
 function outboundPosture() {
   var posture = { minVersion: "TLSv1.3" };
@@ -1179,8 +1255,6 @@ function outboundPosture() {
   posture.ecdhCurve = (Array.isArray(shares) && shares.length > 0) // allow:listener-group-preference: the outbound offer order
     ? shares.join(":")
     : C.TLS_GROUP_CURVE_STR;
-  var certAlgs = C.TLS_CERT_COMPRESSION();
-  if (certAlgs.length > 0) posture.certificateCompression = certAlgs;
   return posture;
 }
 
@@ -1394,7 +1468,10 @@ function _connectAndCheckOcsp(opts, requireStapled) {
     var dialHost = ipUtils.dialHost(opts.host);
     var identity = _identityFor(dialHost, opts.servername, "ocsp.connect: servername",
       TlsTrustError, "tls/bad-servername");
+    var certCompression;
     try {
+      certCompression = _certCompressionOptIn(opts.certificateCompression, TlsTrustError,
+        "ocsp.connect: opts", "tls/bad-cert-compression");
       _assertCaNotCompromised(opts.ca, {
         errorClass: TlsTrustError, code: "tls/compromised-key", label: "ocsp.connect: ca",
       });
@@ -1404,6 +1481,8 @@ function _connectAndCheckOcsp(opts, requireStapled) {
     }
     var connectOpts = Object.assign(outboundPosture(), opts,
       { requestOCSP: true });
+    delete connectOpts.certificateCompression;
+    if (certCompression !== undefined) connectOpts.certificateCompression = certCompression;
     delete connectOpts.servername;
     if (dialHost !== undefined) connectOpts.host = dialHost;
     Object.assign(connectOpts, identity);
@@ -2084,12 +2163,132 @@ async function fetchOcspResponse(opts) {
 }
 
 var ocsp = Object.freeze({
+  /**
+   * @primitive b.network.tls.ocsp.connect
+   * @signature b.network.tls.ocsp.connect(opts)
+   * @since     0.7.26
+   * @status    stable
+   * @related   b.network.tls.ocsp.requireStapled, b.network.tls.ocsp.requireGood,
+   *            b.network.tls.outboundPosture
+   *
+   * Open a TLS connection that asks the server for a stapled OCSP response,
+   * close it once the handshake completes, and resolve with
+   * `{ authorized, ocspBytes, peerCert }`. `ocspBytes` is the stapled
+   * response, or `null` when the server stapled none, and `peerCert` is the
+   * server's certificate with its issuer chain.
+   *
+   * The dial starts from `b.network.tls.outboundPosture()`, and the other
+   * options in `opts` are passed to `tls.connect`. The connection advertises
+   * RFC 8879 certificate compression only when `opts.certificateCompression`
+   * lists algorithms from `b.network.tls.certificateCompressionAlgorithms()`.
+   * With it on, OpenSSL decompresses the server's `Certificate` message
+   * before the chain is verified.
+   *
+   * The promise rejects before the dial with `tls/bad-cert-compression` when
+   * `certificateCompression` is not an array, has an entry that is not a
+   * string, names an algorithm outside
+   * `b.network.tls.certificateCompressionAlgorithms()`, or names an algorithm
+   * twice. It rejects with `tls/unsafe-cert-compression` when the list names
+   * `"brotli"` on a Node release without the fix for CVE-2026-111497 (24.x
+   * older than 24.22.1, 26.x older than 26.12.1, and every 23.x and 25.x
+   * release) or on a Node built against a shared Brotli library older than
+   * 1.2.1. It rejects with `tls/bad-servername` when `servername` is not a
+   * non-empty host name or is an IP address other than `host`, and with
+   * `tls/compromised-key` when a certificate in `ca` has a compromised key.
+   * After the dial starts, it rejects with `tls/connect-failed` when
+   * `tls.connect` throws, and otherwise with the socket's error, including
+   * the `tls/compromised-key`, `tls/server-chain-unverifiable`,
+   * `tls/non-canonical-ip-host` and `tls/bad-host` refusals that
+   * `b.network.tls.applyToContext` describes for a client.
+   *
+   * @opts
+   *   host:                   string,           // the server to dial
+   *   port:                   number,           // the server's TLS port
+   *   servername:             string,           // SNI name and certificate identity; default from host
+   *   ca:                     string|Buffer|Array, // trust anchors for this dial
+   *   checkServerIdentity:    function,         // runs after the framework's chain check
+   *   certificateCompression: string[],         // RFC 8879 algorithms to advertise; default none
+   *
+   * @example
+   *   // requires: a reachable TLS server that staples OCSP
+   *   var b = require("@blamejs/core");
+   *   var rv = await b.network.tls.ocsp.connect({ host: "example.com", port: 443 });
+   *   rv.ocspBytes === null;   // true when the server stapled nothing
+   */
   connect: function (opts) {
     return _connectAndCheckOcsp(opts || {}, false);
   },
+  /**
+   * @primitive b.network.tls.ocsp.requireStapled
+   * @signature b.network.tls.ocsp.requireStapled(opts)
+   * @since     0.7.31
+   * @status    stable
+   * @related   b.network.tls.ocsp.connect, b.network.tls.ocsp.requireGood
+   *
+   * Dial the way `b.network.tls.ocsp.connect` does, and reject with
+   * `tls/ocsp-not-stapled` when the server staples no OCSP response, or with
+   * `tls/ocsp-empty` when the stapled response is empty. It takes the same
+   * options, resolves with the same `{ authorized, ocspBytes, peerCert }`, and
+   * rejects with the same codes, including `tls/bad-cert-compression` and
+   * `tls/unsafe-cert-compression` before the dial for a bad
+   * `certificateCompression` list.
+   *
+   * @opts
+   *   host:                   string,           // the server to dial
+   *   port:                   number,           // the server's TLS port
+   *   servername:             string,           // SNI name and certificate identity; default from host
+   *   ca:                     string|Buffer|Array, // trust anchors for this dial
+   *   checkServerIdentity:    function,         // runs after the framework's chain check
+   *   certificateCompression: string[],         // RFC 8879 algorithms to advertise; default none
+   *
+   * @example
+   *   // requires: a reachable TLS server that staples OCSP
+   *   var b = require("@blamejs/core");
+   *   var rv = await b.network.tls.ocsp.requireStapled({ host: "example.com", port: 443 });
+   *   rv.ocspBytes.length > 0;   // true
+   */
   requireStapled: function (opts) {
     return _connectAndCheckOcsp(opts || {}, true);
   },
+  /**
+   * @primitive b.network.tls.ocsp.requireGood
+   * @signature b.network.tls.ocsp.requireGood(opts)
+   * @since     0.7.33
+   * @status    stable
+   * @related   b.network.tls.ocsp.requireStapled, b.network.tls.ocsp.connect
+   *
+   * Dial the way `b.network.tls.ocsp.requireStapled` does, then check the
+   * stapled response's signature against `opts.issuerPem`, its CertID against
+   * the server certificate's serial, and its update times, and resolve with the connection result plus
+   * `ocspEvaluation`. It rejects with `tls/ocsp-missing-issuer` before the
+   * dial when `issuerPem` is missing, with `tls/ocsp-empty` when the stapled
+   * response is empty, and with `tls/ocsp-not-good` when the evaluation does
+   * not report a good status. It also rejects with every code
+   * `b.network.tls.ocsp.requireStapled` names, including
+   * `tls/bad-cert-compression` and `tls/unsafe-cert-compression` before the
+   * dial for a bad `certificateCompression` list.
+   *
+   * @opts
+   *   host:                   string,           // the server to dial
+   *   port:                   number,           // the server's TLS port
+   *   servername:             string,           // SNI name and certificate identity; default from host
+   *   ca:                     string|Buffer|Array, // trust anchors for this dial
+   *   checkServerIdentity:    function,         // runs after the framework's chain check
+   *   certificateCompression: string[],         // RFC 8879 algorithms to advertise; default none
+   *   issuerPem:              string,           // PEM of the OCSP-signing certificate; required
+   *   issuerCertDer:          Buffer,           // DER of the issuer certificate for the CertID match
+   *   serialHex:              string,           // serial to match; default the server certificate's
+   *   clockSkewMs:            number,           // tolerance on thisUpdate / nextUpdate; default 5 minutes
+   *   maxAgeMs:               number,           // oldest thisUpdate accepted when nextUpdate is absent; default 24 hours
+   *
+   * @example
+   *   // requires: a reachable TLS server that staples OCSP
+   *   var b = require("@blamejs/core");
+   *   var rv = await b.network.tls.ocsp.requireGood({
+   *     host: "example.com", port: 443, issuerPem: issuerPem,
+   *   });
+   *   rv.ocspEvaluation.ok;   // true
+   */
   requireGood: async function (opts) {
     opts = opts || {};
     if (!opts.issuerPem) {
@@ -3154,10 +3353,22 @@ function _isEchSupported() {
  * through this function, including an explicit `servername` option, so an
  * address given there is not sent either.
  *
+ * A host that the resolver or a URL parser reads as an IPv4 address also
+ * returns `undefined`, whatever its spelling: `127.1`, `0x7f.0.0.1`,
+ * `0177.0.0.1`, `2130706433`, `127.0.0.1.`, fullwidth digits, or an address
+ * followed by a code point that UTS46 removes, such as U+00AD. Any host
+ * whose last label, after the UTS46 mapping that `url.domainToASCII`
+ * applies, is all digits or `0x` followed by hex digits is read this way.
+ * The framework dial then refuses such a host with
+ * `tls/non-canonical-ip-host` when it checks the server certificate (see
+ * `b.network.tls.applyToContext`).
+ *
  * @example
  *   b.network.tls.sniFor("example.com");
  *   // → "example.com"
  *   b.network.tls.sniFor("192.0.2.10");
+ *   // → undefined
+ *   b.network.tls.sniFor("127.1");
  *   // → undefined
  *   b.network.tls.sniFor("[2001:db8::1]");
  *   // → undefined
@@ -3166,7 +3377,23 @@ function sniFor(host) {
   if (typeof host !== "string" || host.length === 0) return undefined;
   var bare = (host.charAt(0) === "[" && host.charAt(host.length - 1) === "]")
     ? host.slice(1, -1) : host;
-  return net.isIP(bare) ? undefined : host;
+  var form = _dialHostForm(bare);
+  return (form === "ip" || form === "ip-spelling") ? undefined : host;
+}
+
+function _dialHostForm(host) {
+  if (typeof host !== "string" || host.length === 0) return "malformed";
+  if (net.isIP(host) !== 0 || net.isIPv6(ipUtils.dialHost(host))) return "ip";
+  for (var i = 0; i < host.length; i += 1) {
+    var c = host.charCodeAt(i);
+    if (c <= 0x20 || c === 0x7f || c === 0x25) return "malformed";
+  }
+  var end = host.charCodeAt(host.length - 1) === 0x2e ? host.length - 1 : host.length;
+  if (end === 0 || host.slice(0, end).split(".").indexOf("") !== -1) return "malformed";
+  var canonical = publicSuffix.canonicalDomain(host);
+  if (canonical === "") return ipUtils.endsInANumber(host.toLowerCase()) ? "ip-spelling" : "malformed";
+  if (net.isIP(canonical) !== 0 || ipUtils.endsInANumber(canonical)) return "ip-spelling";
+  return "name";
 }
 
 /**
@@ -3200,7 +3427,17 @@ function sniFor(host) {
  * ID is part of the address, so `fe80::1%eth0` and `fe80::1%eth1` are two
  * addresses, and so are `fe80::1%eth0` and `fe80::1`.
  * An IP-literal `servername` naming any other address throws, as does a
- * `servername` that is not a non-empty string. The error is a
+ * `servername` that is not a non-empty string. A host or `servername` that
+ * the resolver reads as an IPv4 address in a non-canonical spelling, such as
+ * `127.1` or `0x0a.0.0.5`, is an address here (see `b.network.tls.sniFor`):
+ * as the host it gives `{}`, and as a `servername` it throws, because it is
+ * not written as the same address as the host. A dial to such a host, or to a
+ * host that is not a valid host name, is refused at the certificate check with
+ * `tls/non-canonical-ip-host` or `tls/bad-host` whether or not a `servername`
+ * is set (see `b.network.tls.applyToContext`). A `servername` that is not a
+ * valid host name also throws: one that carries an ASCII control character,
+ * white space or `%`, an empty label such as `example.com..`, or that
+ * `b.publicSuffix.canonicalDomain` does not accept. The error is a
  * `NetworkTlsError` with code `tls/bad-servername` unless `opts.errorClass`
  * and `opts.code` name another; an error class with a `factory(code,
  * message)` is built through it. Every framework dial that takes a host and a
@@ -3250,9 +3487,16 @@ function identityFor(host, servername, opts) {
 function _identityFor(host, servername, label, errorClass, code) {
   if (servername === undefined || servername === null) return _identityOf(host);
   validateOpts.requireNonEmptyString(servername, label, errorClass, code);
+  var msg;
+  if (_dialHostForm(servername) === "malformed") {
+    msg = label + " " + JSON.stringify(servername) + " is not a valid host name: it carries a control " +
+      "character, white space, %, an empty label, or a character or length a host name cannot have";
+    if (errorClass && typeof errorClass.factory === "function") throw errorClass.factory(code, msg);
+    throw new errorClass(code, msg);
+  }
   var named = _identityOf(servername);
   if (named.servername !== undefined || ipUtils.sameAddress(servername, host)) return named;
-  var msg = label + " '" + servername + "' is an IP address other than the host " +
+  msg = label + " '" + servername + "' is an IP address other than the host " +
     JSON.stringify(host) + "; the certificate would be checked against the host, so dial that " +
     "address as the host or omit the servername";
   if (errorClass && typeof errorClass.factory === "function") throw errorClass.factory(code, msg);
@@ -3286,7 +3530,11 @@ function _identityFor(host, servername, label, errorClass, code) {
  *      without ECH — never throws on missing Node-side support.
  *
  * An IP-literal `host` has no HTTPS record, so step 1 is skipped and the
- * connection is made without ECH. The server name comes from
+ * connection is made without ECH. A `host` that the dial would refuse with
+ * `tls/bad-host` or `tls/non-canonical-ip-host` is refused before step 1,
+ * with or without `echOverride`, so no HTTPS-record query and no address
+ * lookup is made for it. The server
+ * name comes from
  * `b.network.tls.identityFor(host, servername)`: a name is sent as SNI and the
  * certificate is checked against it, and an IP literal sends no SNI and the
  * certificate is checked against the IP addresses for `host`. A `servername`
@@ -3300,7 +3548,13 @@ function _identityFor(host, servername, label, errorClass, code) {
  * has a compromised key (see `b.crypto.compromisedKey`) or when the server's
  * certificate chain carries one before it reaches a trust anchor, with
  * `tls/server-chain-unverifiable` when that chain reaches no trust anchor
- * (see `b.network.tls.applyToContext`), with `tls/ech-connect-failed` when
+ * (see `b.network.tls.applyToContext`), with `tls/non-canonical-ip-host`
+ * when `host` is an IPv4 address in a spelling other than dotted decimal,
+ * such as `127.1` or `0x7f.0.0.1`, with `tls/bad-host` when `host` (or the
+ * `servername` Node checks the certificate against) carries an ASCII
+ * control character, white space or `%`, an empty label, or is a name that
+ * `b.publicSuffix.canonicalDomain` does not accept (see
+ * `b.network.tls.applyToContext`), with `tls/ech-connect-failed` when
  * `tls.connect` throws,
  * with `tls/ech-timeout` when the handshake does not complete within
  * `timeoutMs`, and with `tls/ech-dns-unavailable` when the DNS module cannot
@@ -3382,6 +3636,8 @@ function connectWithEch(opts) {
       });
     }
     catch (e) { reject(e); return; }
+    var hostError = _dialHostError(dialHost);
+    if (hostError) { reject(hostError); return; }
 
     function _dial(echConfigBuf, sourceLabel) {
       try { _doConnect(echConfigBuf, sourceLabel); }
@@ -3636,11 +3892,23 @@ function _sanIpMatches(sanIp, hostIp) {
  *     entries, never wildcards. IPv6 comparison is byte-equal after
  *     canonicalization (zone-id stripped, `::` expanded, and a dotted IPv4
  *     tail such as `::ffff:192.0.2.1` read as its two hextets).
+ *   - A host that the resolver or a URL parser reads as an IPv4 address
+ *     but that is not written in dotted decimal (`0177.0.0.1`,
+ *     `0x7f.0.0.1`, `127.1`, `2130706433`, `127.0.0.1.`, fullwidth digits,
+ *     an address followed by a code point that UTS46 removes such as
+ *     U+00AD, or any host whose last label after the UTS46 mapping is all
+ *     digits or `0x` followed by hex digits) matches no SAN entry, neither
+ *     `dNSName` nor `iPAddress`.
+ *   - A host other than an IP literal that carries an ASCII control
+ *     character, white space or `%`, an empty label (`127.0.0.1..`,
+ *     `a..b.com`, `.example.com`), or that `b.publicSuffix.canonicalDomain`
+ *     does not accept as a host name, matches no SAN entry.
  *
  * Every other refusal carries `tls/pkix-hostname-mismatch`: a name no
  * SAN entry matches, a wildcard that does not cover the host, a `host`
  * that is not a non-empty string, a missing peer cert, an IP literal
- * with no matching `iPAddress` entry, and a `subjectaltname` with a
+ * with no matching `iPAddress` entry, an IPv4 address in a non-canonical
+ * spelling, a host that is not a valid host name, and a `subjectaltname` with a
  * malformed quoted entry, which leaves no entry to match the host against.
  *
  * Returns `Error | undefined` — the `Error` shape Node expects; when
@@ -3661,6 +3929,18 @@ function checkServerIdentity9525(host, cert) {
   if (typeof host !== "string" || host.length === 0) {
     return new NetworkTlsError("tls/pkix-hostname-mismatch",
       "checkServerIdentity9525: host must be a non-empty string");
+  }
+  var hostShape = _dialHostForm(host);
+  if (hostShape === "ip-spelling") {
+    return new NetworkTlsError("tls/pkix-hostname-mismatch",
+      "checkServerIdentity9525: host " + JSON.stringify(host) + " is an IPv4 address in a " +
+      "non-canonical spelling; pass the dotted-decimal address or a DNS name");
+  }
+  if (hostShape === "malformed") {
+    return new NetworkTlsError("tls/pkix-hostname-mismatch",
+      "checkServerIdentity9525: host " + JSON.stringify(host) + " is not a valid host name: it " +
+      "carries a control character, white space, %, an empty label, or a character or length " +
+      "a host name cannot have");
   }
   if (!cert || typeof cert !== "object") {
     return new NetworkTlsError("tls/pkix-hostname-mismatch",
@@ -3984,6 +4264,25 @@ function _serverChainUnverifiable(message) {
     "; the chain the server sends must lead to a trust anchor of the connection");
 }
 
+function _badHostError(host) {
+  return new NetworkTlsError("tls/bad-host",
+    "the dial host " + JSON.stringify(host) + " is not a valid host name: it carries a control " +
+    "character, white space, %, an empty label, or a character or length a host name cannot " +
+    "have; dial a DNS name or the dotted-decimal address");
+}
+
+function _dialHostError(host) {
+  var hostShape = typeof host === "string" ? _dialHostForm(host) : "name";
+  if (hostShape === "ip-spelling") {
+    return new NetworkTlsError("tls/non-canonical-ip-host",
+      "the dial host " + JSON.stringify(host) + " is an IPv4 address in a non-canonical spelling, " +
+      "which the resolver and the certificate check can read as different addresses; dial the " +
+      "dotted-decimal address or a DNS name");
+  }
+  if (hostShape === "malformed") return _badHostError(host);
+  return null;
+}
+
 var CHAIN_CHECK_BINDINGS = new WeakMap();
 
 function _withCompromisedChainCheck(identity, ca) {
@@ -3995,6 +4294,10 @@ function _withCompromisedChainCheck(identity, ca) {
   var check = typeof identity === "function" ? identity : nodeTls.checkServerIdentity;
   var wrapped = function _checkServerIdentityAndChain(host, cert) {
     var dialOptions = this !== null && typeof this === "object" && this.checkServerIdentity === wrapped ? this : null;
+    var hostError = _dialHostError(host) || (dialOptions !== null ? _dialHostError(dialOptions.host) : null) ||
+      (dialOptions !== null && dialOptions.socket && typeof dialOptions.socket === "object"
+        ? _dialHostError(dialOptions.socket._host) : null);
+    if (hostError) return hostError;
     var chainError;
     try {
       var trust = _dialTrust(dialOptions, ca);
@@ -4291,11 +4594,14 @@ module.exports = {
   NetworkTlsError:     NetworkTlsError,
   _resetForTest:       _resetForTest,
   _stripUnreachableCertCompression: _stripUnreachableCertCompression,
+  _refuseUnsafeCertCompression: _refuseUnsafeCertCompression,
+  _certCompressionOptIn: _certCompressionOptIn,
   _checkServerIdentityStrict: _checkServerIdentityStrict,
   _assertCaNotCompromised: _assertCaNotCompromised,
   _compromisedPeerChainError: _compromisedPeerChainError,
   _withCompromisedChainCheck: _withCompromisedChainCheck,
-  _isChainChecked:     _isChainChecked,
+  _dialHostForm:       _dialHostForm,
+  _isChainChecked:    _isChainChecked,
   _anchorIndexFor:     _anchorIndexFor,
   _clientChainError:   _clientChainError,
   _withNoSessionTickets: _withNoSessionTickets,

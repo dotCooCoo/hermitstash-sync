@@ -1,0 +1,55 @@
+{
+  "version": "1.1.6",
+  "date": "2026-10-29",
+  "headline": "The vendored framework moves to blamejs 0.21.8, and the poll file watcher restarts when its first scan fails",
+  "summary": "The vendored framework moves from blamejs 0.21.4 to 0.21.8. TLS connections to the server and to the release download host no longer offer certificate compression, a server address written as a non-canonical IPv4 address is refused, and a download that a timeout or a short body cuts off is retried. The poll file watcher now takes its first snapshot of the synced folder in the background, and a first scan that fails is retried instead of stopping the daemon. To upgrade, install the new binary or pull the new image. The configuration file and the state database carry over unchanged.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Each request to the server opens its own TLS connection",
+          "body": "blamejs 0.21.6 closes an HTTPS connection when its response ends, which guards against a server writing a response before the request (CVE-2026-105481). Each request to the server now opens a new connection and resumes the previous TLS session when the server allows it. In a local measurement, six sequential requests took 60 ms instead of 39 ms."
+        },
+        {
+          "title": "The poll file watcher scans the folder without blocking the daemon",
+          "body": "With `HERMITSTASH_WATCHER_MODE=poll`, which the container image uses, the watcher reads the synced folder in batches in the background. Before, the first scan ran to completion before the daemon continued. At startup, transfer recovery, the first sync and catch-up wait for that first scan to finish, and after a watcher restart the folder rescan waits for the new scan, so a file edited between the two reads is still uploaded."
+        },
+        {
+          "title": "A server address in a non-canonical IPv4 form is refused",
+          "body": "The TLS connection is refused when `server` names an IPv4 address that is not written in dotted decimal, such as `https://127.1` or `https://0x7f.0.0.1`. Write the address in dotted decimal, such as `https://127.0.0.1`, or use a DNS name."
+        }
+      ]
+    },
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "A failed first scan restarts the poll watcher",
+          "body": "When the poll watcher's first scan failed, for example because the folder held more entries than `HERMITSTASH_WATCHER_POLL_MAX_FILES`, `hermitstash-sync start` exited with status 1. The daemon now keeps running, logs `File watcher stopped after a fatal error (watcher/start-failed: watcher/poll-overflow)`, and restarts the watcher with its usual backoff. When the restarts run out, the daemon reports an error state as it does for any other watcher failure. The log line for a poll overflow now names `HERMITSTASH_WATCHER_POLL_MAX_FILES`."
+        },
+        {
+          "title": "A download cut off by a timeout or a short body is retried",
+          "body": "A file download or self-update download that stops on a timeout after the response started now fails with `ETIMEDOUT`, and one that ends before its declared length fails with `http-client/truncated-body`. Both are retried. A partial download is never kept. A JSON response from the server that ends before its declared length, such as the bundle file list at first sync, is also reported as `http-client/truncated-body` instead of being read as an empty response."
+        },
+        {
+          "title": "The state database refuses a file record without a path",
+          "body": "On Node.js 26, `node:sqlite` stores a missing value as NULL, and SQLite accepts NULL in the `files` table's key column. A file record without a path could then be written instead of failing, and a failed rename could leave the file tracked under no path. Writing such a record now throws, and the rename is rolled back."
+        }
+      ]
+    },
+    {
+      "heading": "Security",
+      "items": [
+        {
+          "title": "TLS certificate compression is off",
+          "body": "Connections to the server and to the release download host no longer offer TLS certificate compression (RFC 8879). With compression on, OpenSSL decompresses the server's certificate before it verifies the chain, so a server or anyone on the network path could send input to the decompressor before authentication."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "RFC 8879: TLS Certificate Compression", "url": "https://www.rfc-editor.org/rfc/rfc8879" },
+    { "label": "Node.js October 2026 security releases", "url": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases" }
+  ]
+}

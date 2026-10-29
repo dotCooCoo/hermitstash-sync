@@ -50,11 +50,26 @@
  *     - `safe-decompress/empty-input`          — zero-byte input
  *     - `safe-decompress/oversized-input`      — pre-decompression
  *       compressed-input cap exceeded
+ *     - `safe-decompress/trailing-input`: with `requireFullInput: true`,
+ *       the compressed stream ends before the last input byte
+ *     - `safe-decompress/unsafe-runtime`: `"brotli"` on a Node release
+ *       whose bundled Brotli decoder writes out of bounds on a crafted
+ *       stream (CVE-2026-111497). The supported releases with the fix
+ *       are 24.22.1 and later on the 24 line and 26.12.1 and later. A
+ *       prerelease build at one of those releases (`24.22.1-pre`) and
+ *       every 23.x and 25.x release are refused. On a Node built against
+ *       a shared Brotli library (`process.config.variables.node_shared_brotli`),
+ *       a `process.versions.brotli` below 1.2.1 is also refused, and the
+ *       message names that library. The input does not reach the decoder.
  *
- *   Each refusal can emit a `safe-decompress.refused` audit event
- *   when operators wire `opts.audit`. The event metadata names the
- *   algorithm, compressedBytes, refusal reason — no decompressed
- *   bytes ever cross the audit boundary on the bomb-class path.
+ *   The `output-cap-exceeded`, `ratio-exceeded`, `decompress-failed`,
+ *   `oversized-input`, `trailing-input` and `unsafe-runtime` refusals emit a
+ *   `system.safe_decompress.refused` audit event, through `opts.audit`
+ *   when it is wired and through `b.audit` otherwise. The argument
+ *   refusals (`unsupported-algorithm`, `bad-arg`, `bad-input`,
+ *   `empty-input`) throw without an audit event. The event metadata
+ *   carries the refusal code, the algorithm, `opts.ctx` and the refusal
+ *   message. No decompressed bytes are written to the audit event.
  *
  *   Threat model:
  *     - **Decompression bomb** (CWE-409 — improper handling of highly
@@ -121,11 +136,40 @@ var DEFAULT_MAX_COMPRESSED_BYTES = C.BYTES.mib(4);
  * checking `out.length / input.length` against `opts.maxRatio` and
  * dropping the buffer if the ratio is exceeded.
  *
+ * On a Node release whose bundled Brotli decoder writes past an internal
+ * buffer on a crafted stream (CVE-2026-111497), `algorithm: "brotli"`
+ * throws `safe-decompress/unsafe-runtime` before any input reaches the
+ * decoder, and emits the refusal audit event. Neither `maxOutputBytes`
+ * nor `maxRatio` prevents that write. The supported releases with the
+ * fix are 24.22.1 and later on the 24 line and 26.12.1 and later. A
+ * prerelease build at one of those releases (`24.22.1-pre`), every 23.x
+ * and 25.x release, and a version string that does not parse are
+ * refused. On a Node built against a shared Brotli library
+ * (`process.config.variables.node_shared_brotli`), the library decodes,
+ * so `algorithm: "brotli"` is also refused when `process.versions.brotli`
+ * is below 1.2.1 or does not parse; the refusal message then names the
+ * library and asks for Brotli 1.2.1 or later. The other algorithms are
+ * unaffected.
+ *
+ * By default the decoder stops at the end of the compressed stream and
+ * ignores any input bytes after it. With `requireFullInput: true`, input
+ * bytes left over after the stream ends throw
+ * `safe-decompress/trailing-input` and emit the refusal audit event.
+ * Concatenated gzip members are read as one stream.
+ *
+ * Other refusals: `safe-decompress/unsupported-algorithm`,
+ * `safe-decompress/bad-arg`, `safe-decompress/bad-input`,
+ * `safe-decompress/empty-input`, `safe-decompress/oversized-input`,
+ * `safe-decompress/output-cap-exceeded`,
+ * `safe-decompress/decompress-failed` and
+ * `safe-decompress/ratio-exceeded`.
+ *
  * @opts
  *   algorithm:           "gzip" | "deflate" | "deflate-raw" | "brotli",
  *   maxOutputBytes:      number,        // required; zlib refuses pre-alloc
  *   maxCompressedBytes:  number,        // optional; default 4 MiB input cap
  *   maxRatio:            number,        // optional; default 50:1 expansion
+ *   requireFullInput:    boolean,       // optional; default false
  *   windowBits:          number,        // optional; per-algorithm zlib opt
  *   audit:               object,        // optional b.audit handle for refusal events
  *   ctx:                 string,        // optional caller identifier (logged on refusal)
@@ -151,8 +195,10 @@ function safeDecompress(input, opts) {
   opts = opts || {};
   validateOpts(opts,
     ["algorithm", "maxOutputBytes", "maxCompressedBytes", "maxRatio",
-     "windowBits", "audit", "ctx"],
+     "requireFullInput", "windowBits", "audit", "ctx"],
     "safeDecompress");
+  validateOpts.optionalBoolean(opts.requireFullInput, "safeDecompress: opts.requireFullInput",
+    SafeDecompressError, "safe-decompress/bad-arg");
 
   if (typeof opts.algorithm !== "string" ||
       !Object.prototype.hasOwnProperty.call(_algorithms, opts.algorithm)) {
@@ -161,6 +207,13 @@ function safeDecompress(input, opts) {
       "safeDecompress: algorithm must be one of " +
         Object.keys(_algorithms).join(" | ") + "; got " +
         JSON.stringify(opts.algorithm));
+  }
+
+  var brotliRefusal = opts.algorithm === "brotli" ? C._brotliRefusal(process.versions.node) : null;
+  if (brotliRefusal !== null) {
+    _refuse(opts, "safe-decompress/unsafe-runtime",
+      "safeDecompress: algorithm \"brotli\" is refused because " + brotliRefusal.decoder +
+        " writes out of bounds on a crafted stream (CVE-2026-111497); " + brotliRefusal.remedy);
   }
 
   numericBounds.requirePositiveFiniteInt(opts.maxOutputBytes,
@@ -205,10 +258,16 @@ function safeDecompress(input, opts) {
 
   var zlibOpts = { maxOutputLength: opts.maxOutputBytes };
   if (typeof opts.windowBits === "number") zlibOpts.windowBits = opts.windowBits;
+  if (opts.requireFullInput === true) zlibOpts.info = true;
 
   var out;
+  var consumed = buf.length;
   try {
     out = _algorithms[opts.algorithm](buf, zlibOpts);
+    if (zlibOpts.info) {
+      consumed = out.engine.bytesWritten;
+      out = out.buffer;
+    }
   } catch (e) {
     var overCap = e && (e.code === "ERR_BUFFER_TOO_LARGE" ||
                         e.code === "ERR_OUT_OF_RANGE");
@@ -219,6 +278,13 @@ function safeDecompress(input, opts) {
         ((e && e.message) || String(e)));
     err.cause = e;
     _refuse(opts, err.code, err.message, err);
+  }
+
+  if (consumed !== buf.length) {
+    out.fill(0);
+    _refuse(opts, "safe-decompress/trailing-input",
+      "safeDecompress: the " + opts.algorithm + " stream ends after " + consumed +
+        " of " + buf.length + " input bytes");
   }
 
   if (maxRatio > 0) {

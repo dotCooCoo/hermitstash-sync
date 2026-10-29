@@ -75,6 +75,71 @@ function auditClassicalDowngrade(socket, meta) {
   } catch (_e) { /* drop-silent — audit is best-effort; never break TLS */ }
 }
 
+var REUSE_GUARDED_AGENTS = new WeakSet();
+var KEEPALIVE_TRUSTED_AGENTS = new WeakSet();
+
+function _socketMustNotBeReused(socket) {
+  if (!socket || socket.destroyed) return true;
+  if (socket.encrypted === true) return true;
+  var handle = socket._handle;
+  if (!handle || "_parent" in handle || typeof handle.hasPendingRead !== "function") return true;
+  try { return handle.hasPendingRead() === true; }
+  catch (_e) { return true; }
+}
+
+function _sessionKeyAgentReads(agent, options) {
+  if (!options || typeof options._agentKey !== "string" || typeof agent.getName !== "function") return null;
+  var stable = {};
+  var names = Object.keys(options);
+  for (var i = 0; i < names.length; i += 1) stable[names[i]] = options[names[i]];
+  try { return agent.getName(stable) === options._agentKey ? options._agentKey : null; }
+  catch (_e) { return null; }
+}
+
+function _cacheTlsSession(agent, socket, options) {
+  if (!agent || typeof agent._cacheSession !== "function") return;
+  if (!socket || socket.encrypted !== true || socket.destroyed || typeof socket.getSession !== "function") return;
+  var key = _sessionKeyAgentReads(agent, options);
+  if (key === null) return;
+  try {
+    var session = socket.getSession();
+    if (session) agent._cacheSession(key, session);
+  } catch (_e) { /* a session the socket cannot export is not cached */ }
+}
+
+function _refuseUncheckedSocketReuse(socket, options) {
+  if (!socket || !socket._httpMessage) return;
+  _cacheTlsSession(this, socket, options);
+  if (KEEPALIVE_TRUSTED_AGENTS.has(this) && !socket.destroyed) return;
+  if (_socketMustNotBeReused(socket)) socket.destroy();
+}
+
+function _trustKeepAlive(agent) {
+  _guardPooledSocketReuse(agent);
+  KEEPALIVE_TRUSTED_AGENTS.add(agent);
+  return agent;
+}
+
+function _agentMayReuseSockets(agent) {
+  return agent.keepAlive !== false || Number.isFinite(agent.maxSockets);
+}
+
+function _guardPooledSocketReuse(agent) {
+  if (!agent || typeof agent !== "object") return agent;
+  if (REUSE_GUARDED_AGENTS.has(agent)) return agent;
+  try {
+    if (typeof agent.prependListener === "function") {
+      agent.prependListener("free", _refuseUncheckedSocketReuse);
+      REUSE_GUARDED_AGENTS.add(agent);
+    }
+  } catch (_e) { /* an agent whose listener list cannot change is refused below */ }
+  if (!REUSE_GUARDED_AGENTS.has(agent) && _agentMayReuseSockets(agent)) {
+    throw new TypeError("agent may reuse a socket and cannot be guarded against one with unread bytes " +
+      "(it is not an EventEmitter that emits 'free')");
+  }
+  return agent;
+}
+
 // registry: https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
 var KNOWN_TLS_GROUPS = Object.freeze([
   "SecP384r1MLKEM1024",
@@ -194,6 +259,26 @@ function _buildAgentOpts(opts) {
  * `tls/server-chain-unverifiable`. After `reloadCerts` with a new `ca`, the
  * check reads its anchors from that `ca`.
  *
+ * The agent sends one request per TLS connection. When a response ends, the
+ * agent closes the connection instead of pooling it or handing it to a
+ * request waiting for a free socket, so a response the server wrote
+ * unprompted is never read as the answer to a later request. `maxSockets`
+ * still limits how many connections are open at once, and a new connection
+ * resumes the TLS session of an earlier one when the server allows it. The
+ * agent stores the session of each connection when its response ends,
+ * including a connection Node opened to the second address family after the
+ * first one failed, where the TLS socket emits no `session` event.
+ *
+ * The agent advertises no RFC 8879 certificate compression unless
+ * `opts.certificateCompression` lists algorithms from
+ * `b.network.tls.certificateCompressionAlgorithms()`. With compression on,
+ * OpenSSL decompresses the server's `Certificate` message during the
+ * handshake, before the chain is verified. A `certificateCompression` that is
+ * not an array, that names an algorithm outside that list, or that names an
+ * algorithm twice throws `tls/bad-cert-compression`, and one that lists `"brotli"` on a runtime
+ * whose Brotli decoder writes out of bounds on a crafted stream
+ * (CVE-2026-111497) throws `tls/unsafe-cert-compression`.
+ *
  * @opts
  *   keepAlive?:           boolean,
  *   keepAliveMsecs?:      number,
@@ -202,6 +287,7 @@ function _buildAgentOpts(opts) {
  *   scheduling?:          string,
  *   ecdhCurve?:           string,   // colon-separated group names; must subset C.TLS_GROUP_PREFERENCE. The TLS `groups` list tracks this value exactly (mirrored from one resolved string), so a narrowed/reordered ecdhCurve is the negotiated key-share order.
  *   allowOperatorGroups?: boolean,  // default false; opt in to operator-supplied groups outside the framework PQC preference, each one of b.pqcAgent.KNOWN_TLS_GROUPS (the hybrids, MLKEM768, MLKEM1024, X25519, X448, secp256r1/384r1/521r1)
+ *   certificateCompression?: string[], // default [] (none); RFC 8879 algorithms the agent advertises, from b.network.tls.certificateCompressionAlgorithms()
  *
  * @example
  *   var agent = b.pqcAgent.create({ maxSockets: 200 });
@@ -211,7 +297,7 @@ function _buildAgentOpts(opts) {
 function create(opts) {
   var built = _buildAgentOpts(opts);
   // allow:outbound-tls-posture — posture applied in _buildAgentOpts
-  var agent = new https.Agent(built);
+  var agent = _guardPooledSocketReuse(new https.Agent(built));
   agent._builtOpts = built;
   var _origCreateConnection = agent.createConnection.bind(agent);
   agent.createConnection = function (options, cb) {
@@ -292,6 +378,11 @@ function _reloadCertsOnAgent(agent, originalOpts, newMaterial) {
  * fixtures, internal services on a private network) shares the same
  * pool tuning as the encrypted path.
  *
+ * When a response ends, the agent closes the connection instead of pooling it
+ * or handing it to a waiting request if the connection has unread bytes, or
+ * if the Node.js runtime cannot check a socket for unread bytes (Node.js
+ * before 24.22.1).
+ *
  * @opts
  *   keepAlive?:      boolean,
  *   keepAliveMsecs?: number,
@@ -305,7 +396,7 @@ function _reloadCertsOnAgent(agent, originalOpts, newMaterial) {
  *   req.end();
  */
 function createHttp(opts) {
-  return new http.Agent(Object.assign({}, DEFAULT_OPTS, opts || {}));
+  return _guardPooledSocketReuse(new http.Agent(Object.assign({}, DEFAULT_OPTS, opts || {})));
 }
 
 var _defaultAgent = null;
@@ -382,6 +473,8 @@ module.exports = {
   createHttp:  createHttp,
   reload:      reload,
   _auditClassicalDowngrade: auditClassicalDowngrade,
+  _guardPooledSocketReuse:  _guardPooledSocketReuse,
+  _trustKeepAlive:          _trustKeepAlive,
   DEFAULT_OPTS: DEFAULT_OPTS,
   KNOWN_TLS_GROUPS: KNOWN_TLS_GROUPS,
   enforced:    true,

@@ -575,7 +575,7 @@ describe('watcher#39 — path-qualified subtree excludes are forwarded to the wa
 // on a live handle, leaving change detection off until a full daemon restart.
 // ---------------------------------------------------------------------------
 describe('watcher#40 — a degraded watcher is re-armed by an ignore-pattern change', () => {
-  it('updatePatterns re-arms a degraded (handle-less, non-stopped) watcher when the subtree set changes', () => {
+  it('updatePatterns re-arms a degraded (handle-less, non-stopped) watcher when the subtree set changes', async () => {
     const tmp = mkTmp('hs-fix40-');
     try {
       const w = new Watcher(tmp, [], []);
@@ -592,6 +592,8 @@ describe('watcher#40 — a degraded watcher is re-armed by an ignore-pattern cha
       w.updatePatterns(['huge_subtree/**'], []); // operator narrows ignores + SIGHUP
       assert.ok(w._handle, 'a degraded watcher is re-armed (was a silent no-op pre-fix)');
       assert.equal(w._recoveryAttempts, 0, 're-arm resets the recovery budget via start()');
+      assert.equal(rescans, 0, 'rescan waits for the fresh handle baseline');
+      await w.whenReady();
       assert.equal(rescans, 1, 're-arm emits rescan so the engine re-walks for edits missed while degraded');
       w.stop();
     } finally { rm(tmp); }

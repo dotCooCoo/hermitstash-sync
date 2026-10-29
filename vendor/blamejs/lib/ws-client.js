@@ -140,6 +140,8 @@ function _parseUrl(target) {
 }
 
 function _identityForDial(tlsOpts, host) {
+  networkTls()._certCompressionOptIn(tlsOpts ? tlsOpts.certificateCompression : undefined,
+    networkTls().NetworkTlsError, "wsClient.connect: tlsOpts");
   networkTls()._assertCaNotCompromised(tlsOpts ? tlsOpts.ca : undefined, {
     errorClass: WsClientError, code: "ws-client/compromised-key", label: "wsClient.connect: tlsOpts.ca",
   });
@@ -203,6 +205,20 @@ function _identityForDial(tlsOpts, host) {
  * without one) as `tls/server-chain-unverifiable` (see
  * `b.network.tls.applyToContext`). `tlsOpts.checkServerIdentity` still runs
  * after that chain check.
+ *
+ * A wss:// dial advertises no RFC 8879 certificate compression unless
+ * `tlsOpts.certificateCompression` lists algorithms from
+ * `b.network.tls.certificateCompressionAlgorithms()`; with it on, OpenSSL
+ * decompresses the server's `Certificate` message before the chain is
+ * verified. A `tlsOpts.certificateCompression` that is not an array, that
+ * names an algorithm outside that list, or that names an algorithm twice
+ * throws `tls/bad-cert-compression`.
+ * One that lists `"brotli"` throws `tls/unsafe-cert-compression` on a Node
+ * release whose Brotli decoder writes out of bounds on a crafted stream
+ * (CVE-2026-111497): 24.x older than 24.22.1, 26.x older than 26.12.1, every
+ * 23.x and 25.x release, and a Node built against a shared Brotli library
+ * older than 1.2.1. The same lists returned by `tlsOptsFor` are reported with
+ * those codes on `error` before the attempt dials.
  *
  * The target is screened before the socket opens, and one resolving to an
  * address the SSRF guard refuses raises `error` instead of connecting,
@@ -476,7 +492,7 @@ class WsClient extends EventEmitter {
         port:         port,
         rejectUnauthorized: true,
       }, networkTls().outboundPosture(), dialTlsOpts || {});
-      networkTls()._stripUnreachableCertCompression(tlsOpts, dialTlsOpts);
+      networkTls()._stripUnreachableCertCompression(tlsOpts, dialTlsOpts, "wsClient.connect: tlsOpts");
       effectiveTls = tlsOpts;
       delete tlsOpts.servername;
       Object.assign(tlsOpts, _identityForDial(dialTlsOpts, host));

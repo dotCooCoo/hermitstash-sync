@@ -100,6 +100,81 @@ describe('watcher classifies handle-dead / root-lost / err.fatal as fatal', () =
 });
 
 // ---------------------------------------------------------------------------
+// watcher — 'rescan' after a restart waits for the fresh handle's baseline, so
+// the engine's folder walk cannot read a file before the baseline does.
+// ---------------------------------------------------------------------------
+describe('watcher emits rescan only after the new handle is ready', () => {
+  function fakeHandle() {
+    let resolve;
+    const ready = new Promise((r) => { resolve = r; });
+    return { ready, resolve, stop() {} };
+  }
+
+  it('waits for ready, and drops the rescan when the handle was replaced', async () => {
+    const w = new Watcher(tmp('rr'), [], [], false);
+    let rescans = 0;
+    w.on('rescan', () => { rescans++; });
+
+    const h1 = fakeHandle();
+    w._handle = h1;
+    w._emitRescanWhenReady(h1);
+    await Promise.resolve();
+    assert.equal(rescans, 0, 'no rescan before the baseline is complete');
+    h1.resolve();
+    await w.whenReady();
+    assert.equal(rescans, 1, 'rescan follows the baseline');
+
+    const h2 = fakeHandle();
+    w._handle = h2;
+    w._emitRescanWhenReady(h2);
+    w._handle = fakeHandle();
+    h2.resolve();
+    await h2.ready;
+    await Promise.resolve();
+    assert.equal(rescans, 1, 'a replaced handle emits nothing');
+    w._handle = null;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// watcher — b.watcher's poll backend takes its first snapshot after create()
+// returns, so a first walk over pollMaxFiles no longer throws from start(). It
+// arrives on onError as watcher/start-failed (cause watcher/poll-overflow) and
+// must reach the fatal path, which drops the handle and schedules a restart.
+// ---------------------------------------------------------------------------
+describe('watcher recovers from a failed first poll walk reported after start()', () => {
+  it('start() returns, then the overflow is routed to the fatal path', async () => {
+    const root = tmp('pw');
+    for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(root, 'f' + i + '.txt'), 'x');
+    const saved = {
+      mode: process.env.HERMITSTASH_WATCHER_MODE,
+      max: process.env.HERMITSTASH_WATCHER_POLL_MAX_FILES,
+    };
+    process.env.HERMITSTASH_WATCHER_MODE = 'poll';
+    process.env.HERMITSTASH_WATCHER_POLL_MAX_FILES = '2';
+    const w = new Watcher(root, [], [], false);
+    let scheduled = 0;
+    w._scheduleRecovery = () => { scheduled++; };
+    try {
+      const fatal = new Promise((resolve) => w.once('fatal', resolve));
+      assert.doesNotThrow(() => w.start());
+      const err = await fatal;
+      assert.equal(err.code, 'watcher/start-failed');
+      assert.equal(err.cause && err.cause.code, 'watcher/poll-overflow');
+      assert.equal(w._handle, null, 'the dead handle is dropped so a restart can create a new one');
+      assert.equal(scheduled, 1, 'a restart is scheduled');
+    } finally {
+      w.stop();
+      if (saved.mode === undefined) delete process.env.HERMITSTASH_WATCHER_MODE;
+      else process.env.HERMITSTASH_WATCHER_MODE = saved.mode;
+      if (saved.max === undefined) delete process.env.HERMITSTASH_WATCHER_POLL_MAX_FILES;
+      else process.env.HERMITSTASH_WATCHER_POLL_MAX_FILES = saved.max;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // watcher — a Windows backslash-written subtree ignore must be forwarded to
 // b.watcher's poll-prune as a forward-slash path (it compares against a
 // '/'-joined walked path), aligned with path-filter's own separator folding.

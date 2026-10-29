@@ -207,7 +207,7 @@ describe('Round-two sync-engine hardening', { timeout: 30000 }, () => {
     try {
       // Stand in for the real watcher with just the shouldSync gate the
       // rescan path calls.
-      h.engine._watcher = { shouldSync: () => true };
+      h.engine._watcher = { shouldSync: () => true, whenReady: () => Promise.resolve() };
       h.engine._setState(SYNC_STATE.SYNCED);
 
       // A file appears on disk while detection was off — no DB row yet.

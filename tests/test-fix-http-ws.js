@@ -251,3 +251,31 @@ describe('http+ws#10 — body collectors enforce a true byte cap', () => {
       'a 12-byte / 4-code-unit body must trip a 10-byte cap');
   });
 });
+
+describe('http — a 200 body cut short is an error, not an empty response', () => {
+  // b.httpClient.request rejects a short body with the caller's errorClass,
+  // carrying the 200 status of the response it interrupted.
+  function rejectWith(code, statusCode) {
+    return async (opts) => {
+      throw new opts.errorClass(code, 'HTTP ' + statusCode + ': {"files":[', code !== 'http-client/truncated-body', statusCode);
+    };
+  }
+
+  it('_rawRequest rethrows http-client/truncated-body, and still translates a status error', async () => {
+    const c = new HttpClient({ server: 'https://127.0.0.1:9' }, 'apikey');
+    const real = b.httpClient.request;
+    try {
+      b.httpClient.request = rejectWith('http-client/truncated-body', 200);
+      await assert.rejects(c._rawRequest('GET', '/api/x'),
+        (err) => err && err.code === 'http-client/truncated-body');
+
+      b.httpClient.request = rejectWith('http-client/http-error', 404);
+      const resp = await c._rawRequest('GET', '/api/x');
+      assert.equal(resp.statusCode, 404);
+      assert.equal(resp.body, '{"files":[');
+    } finally {
+      b.httpClient.request = real;
+      c.destroy();
+    }
+  });
+});

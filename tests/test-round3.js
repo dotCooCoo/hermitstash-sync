@@ -214,7 +214,7 @@ describe('Round-three sync-engine hardening', { timeout: 30000 }, () => {
     const h = makeEngine({ downloads: { 'fid-race': { content, delayMs: 120 } } });
     try {
       h.engine._setState(SYNC_STATE.CATCHING_UP);
-      h.engine._watcher = { shouldSync: () => true };
+      h.engine._watcher = { shouldSync: () => true, whenReady: () => Promise.resolve() };
 
       // Seed the PENDING_DOWNLOAD row the server-event handler would have
       // written before dispatching the download, so the download's SYNCED

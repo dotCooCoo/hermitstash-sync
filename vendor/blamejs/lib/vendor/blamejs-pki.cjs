@@ -1,4 +1,4 @@
-// @blamejs/pki v0.9.7 — vendored (Apache-2.0). Zero-dep pure CJS.
+// @blamejs/pki v0.9.10 — vendored (Apache-2.0). Zero-dep pure CJS.
 // https://github.com/blamejs/pki  Exports: x509, crl, pkcs12, key, webcrypto, schema, csr, cms, ...
 // Backs lib/mtls-engine-default.js (PQC-capable CA + PKCS#12 engine).
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -797,7 +797,7 @@ var require_package = __commonJS({
   "node_modules/@blamejs/pki/package.json"(exports2, module2) {
     module2.exports = {
       name: "@blamejs/pki",
-      version: "0.9.7",
+      version: "0.9.10",
       description: "Pure-JavaScript PKI toolkit that owns its stack \u2014 X.509, ASN.1/DER, CMS, PQC-first.",
       license: "Apache-2.0",
       author: "blamejs contributors",
@@ -848,7 +848,7 @@ var require_package = __commonJS({
         "owns-its-stack"
       ],
       engines: {
-        node: ">=24.21.0"
+        node: ">=24.22.1"
       },
       files: [
         "index.js",
@@ -5809,6 +5809,29 @@ var require_ip_utils = __commonJS({
       }
       return true;
     }
+    function endsInANumber(s) {
+      if (typeof s !== "string") return false;
+      var parts = _splitOn(s, ".");
+      if (parts[parts.length - 1] === "") {
+        if (parts.length === 1) return false;
+        parts.length -= 1;
+      }
+      var last = parts[parts.length - 1], n = last.length, i;
+      if (n === 0) return false;
+      var digits = true;
+      for (i = 0; i < n; i += 1) {
+        if (!_isDigitCode(_charCodeAt(last, i))) {
+          digits = false;
+          break;
+        }
+      }
+      if (digits) return true;
+      if (n < 2 || _charCodeAt(last, 0) !== 48 || (_charCodeAt(last, 1) | 32) !== 120) return false;
+      for (i = 2; i < n; i += 1) {
+        if (!_isHexCode(_charCodeAt(last, i))) return false;
+      }
+      return true;
+    }
     function _isHexGroup(g) {
       var n = g.length, i;
       if (n < 1 || n > 4) return false;
@@ -5913,6 +5936,7 @@ var require_ip_utils = __commonJS({
     }
     module2.exports = {
       isIPv4,
+      endsInANumber,
       expandIpv6Hex,
       isIpLiteral,
       packIpLiteral,
@@ -6413,12 +6437,6 @@ var require_guard_name = __commonJS({
       for (var i = 0; i < chars.length; i++) t[_charCodeAt(chars, i)] = true;
       return t;
     }
-    var _DIGDOT_TABLE = _charTable("0123456789.");
-    function _allCharsIn(s, table) {
-      if (s.length === 0) return false;
-      for (var i = 0; i < s.length; i++) if (!table[_charCodeAt(s, i)]) return false;
-      return true;
-    }
     function stripTrailingDot(s) {
       return _charAt(s, s.length - 1) === "." ? _strSlice(s, 0, -1) : s;
     }
@@ -6431,7 +6449,7 @@ var require_guard_name = __commonJS({
       if (typeof host !== "string") return false;
       var h = stripTrailingDot(host);
       if (!_isHostName(h)) return false;
-      if (_allCharsIn(h, _DIGDOT_TABLE)) return false;
+      if (_ipUtils.endsInANumber(h)) return false;
       return true;
     }
     var _LDH_ALNUM = _charTable("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
@@ -6461,6 +6479,9 @@ var require_guard_name = __commonJS({
     }
     function isHostName(s) {
       return typeof s === "string" && _isHostName(s);
+    }
+    function isHostNameChar(c) {
+      return _LDH_ALNUM[c] === true || c === 45 || c === 46 || c === 95;
     }
     function hostLabels(s) {
       var out = [], start = 0;
@@ -6788,7 +6809,7 @@ var require_guard_name = __commonJS({
         var uriBody = _toLowerCase(base);
         if (_charAt(uriBody, 0) === ".") uriBody = _strSlice(uriBody, 1);
         if (isFqdnHost(uriBody)) return null;
-        return _allCharsIn(stripTrailingDot(uriBody), _DIGDOT_TABLE) ? "must be a domain name rather than an address, RFC 5280 sec. 4.2.1.10 naming an address in a URI's authority as what a URI constraint cannot be compared against" : "must be a domain name, which RFC 5280 sec. 4.2.1.10 requires of a URI constraint, optionally written as a subtree with a leading dot";
+        return _ipUtils.endsInANumber(uriBody) ? "must be a domain name rather than an address, RFC 5280 sec. 4.2.1.10 naming an address in a URI's authority as what a URI constraint cannot be compared against" : "must be a domain name, which RFC 5280 sec. 4.2.1.10 requires of a URI constraint, optionally written as a subtree with a leading dot";
       }
       return null;
     }
@@ -6893,6 +6914,7 @@ var require_guard_name = __commonJS({
       isFqdnHost,
       splitMailbox,
       isHostName,
+      isHostNameChar,
       hostLabels,
       isXnLabel,
       uriParts,
@@ -7383,6 +7405,30 @@ var require_guard_compress = __commonJS({
       brotli: zlib.brotliCompressSync,
       zstd: zlib.zstdCompressSync
     });
+    var _ZSTD_DID_BYTES = [0, 1, 2, 4];
+    var _ZSTD_FCS_BYTES = [0, 2, 4, 8];
+    function _zstdFrameLength(s) {
+      var n = _sizeOf(s);
+      if (n < 6 || s[0] !== 40 || s[1] !== 181 || s[2] !== 47 || s[3] !== 253) return -1;
+      var fhd = s[4];
+      if ((fhd & 8) !== 0) return -1;
+      var single = (fhd & 32) !== 0;
+      var fcs = _ZSTD_FCS_BYTES[fhd >>> 6];
+      if (fcs === 0 && single) fcs = 1;
+      var p = 5 + (single ? 0 : 1) + _ZSTD_DID_BYTES[fhd & 3] + fcs;
+      for (; ; ) {
+        if (p + 3 > n) return -1;
+        var h = s[p] | s[p + 1] << 8 | s[p + 2] << 16;
+        var type = h >>> 1 & 3;
+        if (type === 3) return -1;
+        p += 3 + (type === 1 ? 1 : h >>> 3);
+        if (p > n) return -1;
+        if ((h & 1) !== 0) break;
+      }
+      if ((fhd & 4) !== 0) p += 4;
+      return p > n ? -1 : p;
+    }
+    var FRAME_LENGTH = _intrinsic.assign(_intrinsic.create(null), { zstd: _zstdFrameLength });
     function _reportsTruncation(name) {
       var compress = _PROBE_COMPRESS[name];
       var decompress = DECOMPRESS[name];
@@ -7425,6 +7471,10 @@ var require_guard_compress = __commonJS({
         throw new TypeError("guard.compress.bounded: cap must be a positive integer");
       }
       var what = label || "the compressed input";
+      var frameLength = FRAME_LENGTH[algorithm];
+      if (frameLength && frameLength(stream) !== _sizeOf(stream)) {
+        throw E(codes.failed, what + " is not exactly one " + algorithm + " frame");
+      }
       var res;
       try {
         res = decompress(stream, { maxOutputLength: cap, info: true });
@@ -7756,21 +7806,104 @@ var require_guard_distrust = __commonJS({
     for (_ci = 0; _ci < compromisedKeys.KEYS.length; _ci++) COMPROMISED[compromisedKeys.KEYS[_ci].spkiSha256] = compromisedKeys.KEYS[_ci];
     var _ci;
     var SMALL_SCALAR_CURVES = intrinsic.assign(_create(null), {
-      "P-256": { name: "prime256v1", width: 32 },
-      "P-384": { name: "secp384r1", width: 48 },
-      "P-521": { name: "secp521r1", width: 66 },
-      "secp256k1": { name: "secp256k1", width: 32 }
+      "P-256": {
+        name: "prime256v1",
+        width: 32,
+        aMinus3: true,
+        p: "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"
+      },
+      "P-384": {
+        name: "secp384r1",
+        width: 48,
+        aMinus3: true,
+        p: "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff"
+      },
+      "P-521": {
+        name: "secp521r1",
+        width: 66,
+        aMinus3: true,
+        p: "1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "secp256k1": {
+        name: "secp256k1",
+        width: 32,
+        aMinus3: false,
+        p: "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
+      }
     });
     var SMALL_SCALAR_BOUND = 256;
     var _smallScalarTables = _create(null);
+    var _BigInt = intrinsic.BigInt;
+    var _bigIntToString = intrinsic.bigIntToString;
+    var _padStart = intrinsic.uncurry(String.prototype.padStart);
+    function _mod(v, p) {
+      var r = v % p;
+      return r < 0n ? r + p : r;
+    }
+    function _modInverse(v, p) {
+      var r = 1n, b = _mod(v, p), e = p - 2n;
+      while (e > 0n) {
+        if ((e & 1n) === 1n) r = r * b % p;
+        b = b * b % p;
+        e >>= 1n;
+      }
+      return r;
+    }
+    function _smallScalarXs(curve) {
+      var w = curve.width, p = _BigInt("0x" + curve.p), a = curve.aMinus3 ? p - 3n : 0n;
+      var one = intrinsic.bufferAlloc(w);
+      one[w - 1] = 1;
+      var g = gCrypto.ecPointFromScalar(curve.name, one);
+      var gx = _BigInt("0x" + _bufToString(g, "hex", 1, 1 + w));
+      var gy = _BigInt("0x" + _bufToString(g, "hex", 1 + w, 1 + 2 * w));
+      var lambda = _mod((3n * gx * gx + a) * _modInverse(2n * gy, p), p);
+      var x = _mod(lambda * lambda - 2n * gx, p);
+      var y = _mod(lambda * (gx - x) - gy, p);
+      var z = 1n;
+      var xs = [], zs = [];
+      gList.append(xs, gx);
+      gList.append(zs, 1n);
+      gList.append(xs, x);
+      gList.append(zs, 1n);
+      for (var d = 3; d < SMALL_SCALAR_BOUND; d++) {
+        var zz = z * z % p;
+        var h = _mod(gx * zz % p - x, p);
+        var r = _mod(gy * z % p * zz % p - y, p);
+        var hh = h * h % p, hhh = h * hh % p, v = x * hh % p;
+        var x3 = _mod(r * r - hhh - 2n * v, p);
+        y = _mod(r * (v - x3) - y * hhh, p);
+        z = z * h % p;
+        x = x3;
+        gList.append(xs, x);
+        gList.append(zs, z);
+      }
+      var n = zs.length, prefix = [], acc = 1n, i;
+      for (i = 0; i < n; i++) {
+        acc = acc * zs[i] % p;
+        gList.append(prefix, acc);
+      }
+      var inv = _modInverse(acc, p), invs = [];
+      for (i = 0; i < n; i++) gList.append(invs, 0n);
+      for (i = n - 1; i >= 0; i--) {
+        invs[i] = i === 0 ? inv : inv * prefix[i - 1] % p;
+        inv = inv * zs[i] % p;
+      }
+      var out = [];
+      for (i = 0; i < n; i++) {
+        var zInv = invs[i];
+        gList.append(out, _padStart(_bigIntToString(xs[i] * (zInv * zInv % p) % p, 16), 2 * w, "0"));
+      }
+      return out;
+    }
+    function smallScalarXs(crv) {
+      if (typeof crv !== "string" || !_hasOwn(SMALL_SCALAR_CURVES, crv)) return null;
+      return _freeze(_smallScalarXs(SMALL_SCALAR_CURVES[crv]));
+    }
     function _smallScalarTable(curve) {
       if (_smallScalarTables[curve.name]) return _smallScalarTables[curve.name];
       var table = _create(null);
-      var scalar = intrinsic.bufferAlloc(curve.width);
-      for (var d = 1; d < SMALL_SCALAR_BOUND; d++) {
-        scalar[curve.width - 1] = d;
-        table[_bufToString(gCrypto.ecPointFromScalar(curve.name, scalar), "hex", 1, 1 + curve.width)] = true;
-      }
+      var xs = _smallScalarXs(curve);
+      for (var i = 0; i < xs.length; i++) table[xs[i]] = true;
       _smallScalarTables[curve.name] = table;
       return table;
     }
@@ -7843,6 +7976,7 @@ var require_guard_distrust = __commonJS({
       refuseCompromised,
       refusal,
       smallEcScalar,
+      smallScalarXs,
       knownCompromised,
       SMALL_SCALAR_BOUND
     });
@@ -11685,6 +11819,7 @@ var require_http_transport = __commonJS({
     var constants = require_constants();
     var guard = require_guard_all();
     var intrinsic = require_guard_intrinsic();
+    var ipUtils = require_ip_utils();
     var _X509Certificate = require("node:crypto").X509Certificate;
     var _x509Verify = intrinsic.uncurry(_X509Certificate.prototype.verify);
     var _x509PublicKey = intrinsic.uncurry(intrinsic.getOwnPropertyDescriptor(_X509Certificate.prototype, "publicKey").get);
@@ -12116,6 +12251,17 @@ var require_http_transport = __commonJS({
     var PROXY_AUTH_KEYS = _keySet(["scheme", "username", "password", "allowMD5", "allowLegacyQop"]);
     var PROXY_DIGEST_KNOBS = ["allowMD5", "allowLegacyQop"];
     var PROXY_TLS_KEYS = _keySet(["anchors", "useSystemStore", "servername", "minVersion", "distrustedKeys"]);
+    function _assertServername(s, E, code, what) {
+      if (_isIP(s)) return;
+      for (var i = 0; i < s.length; i++) {
+        if (!guard.name.isHostNameChar(_charCodeAt(s, i))) {
+          throw E(code, what + " carries a character at offset " + i + " that no host name holds; a servername is a DNS name of letters, digits, hyphens, dots and underscores (RFC 6066 sec. 3) or a canonical address literal");
+        }
+      }
+      if (ipUtils.endsInANumber(s)) {
+        throw E(code, what + " " + guard.text.showValue(s) + " is an IPv4 address in a non-canonical spelling; pass the canonical dotted quad or a DNS name");
+      }
+    }
     var TLS_KEYS = _keySet(["anchors", "useSystemStore", "cert", "key", "minVersion", "servername", "checkServerIdentity", "distrustedKeys"]);
     function _copyAnchor(a) {
       return a !== null && typeof a === "object" && nodeUtil.types.isProxy(a) ? a : _isBuffer(a) ? _bufferFrom(a) : a;
@@ -12235,6 +12381,7 @@ var require_http_transport = __commonJS({
           if (!_copyableRecord(ptls)) throw E(C("bad-proxy"), "opts.proxy.tls must be a plain object with only own enumerable data properties");
           guard.identifier.assertKnownKeys(ptls, PROXY_TLS_KEYS, E, C("bad-proxy"), "opts.proxy.tls has an unknown option ");
           if (ptls.servername !== void 0 && ptls.servername !== null && typeof ptls.servername !== "string") throw E(C("bad-proxy"), "opts.proxy.tls.servername must be a string");
+          if (typeof ptls.servername === "string") _assertServername(ptls.servername, E, C("bad-proxy"), "opts.proxy.tls.servername");
         }
         var pServername = ptls && ptls.servername || null;
         var pAnchors = ptls ? ptls.anchors : void 0;
@@ -12415,6 +12562,7 @@ var require_http_transport = __commonJS({
         var rawSni = reqTls.servername;
         var sni = (rawSni !== void 0 ? rawSni : tlsDefaults.servername) || host;
         if (typeof sni !== "string") throw E(C("bad-input"), "tls.servername must be a string, got " + guard.text.showValue(sni));
+        _assertServername(sni, E, C("bad-input"), "tls.servername");
         if (sni && !_isIP(sni)) options.servername = sni;
         var caList = [];
         if (hasAnchors) {
@@ -26891,10 +27039,21 @@ var require_identity_match = __commonJS({
         throw E("identity/bad-reference", what + " carries a wildcard character. RFC 9525 sec. 6.3 covers wildcards in a presented identifier only, never in a reference identity");
       }
     }
+    function _assertNotAnAddress(v, what) {
+      for (var i = 0; i < v.length; i++) {
+        if (!guard.name.isHostNameChar(_charCodeAt(v, i))) {
+          throw E("identity/bad-reference", what + " carries " + guard.text.showValue(v[i]) + " at offset " + i + ", which no host name holds. A host name is letters, digits, hyphens, dots and underscores; a percent escape is decoded by WHATWG URL and a colon or bracket spells an IPv6 address");
+        }
+      }
+      if (ip.endsInANumber(v)) {
+        throw E("identity/bad-reference", what + " is read as an IPv4 address by a resolver and by WHATWG URL, so it is not a domain name. Pass an address as the canonical dotted quad or as octets (RFC 9525 sec. 3)");
+      }
+    }
     function _referenceDomain(v, what) {
       if (typeof v !== "string" || v === "") throw E("identity/bad-reference", what + " must be a non-empty string");
       _assertAsciiReference(v, what);
       _assertNoWildcard(v, what);
+      _assertNotAnAddress(v, what);
       var d = _stripTrailingDot(v);
       if (d === "" || d.length > MAX_HOST) {
         throw E("identity/bad-reference", what + " must be a domain name of 1 to " + MAX_HOST + " characters");
@@ -68734,6 +68893,9 @@ var require_acme = __commonJS({
         if (l.length > 63) throw E("acme/bad-identifier", "a dns label must be 1..63 characters (RFC 1035 sec. 2.3.4): " + JSON.stringify(l));
         if (!_isLdhLabel(l)) throw E("acme/bad-identifier", "a dns label must be lowercase LDH ASCII (A-label): " + JSON.stringify(l));
         if (l.indexOf("xn--") === 0 && !_isXnLabel(l)) throw E("acme/bad-identifier", "a malformed xn-- A-label: " + JSON.stringify(l));
+      }
+      if (ipUtils.endsInANumber(name)) {
+        throw E("acme/bad-identifier", "a dns identifier value is read as an IPv4 address by a resolver and by WHATWG URL; an address uses the ip identifier type (RFC 8738 sec. 3): " + _stringify(name));
       }
     }
     function _assertIpAddress(value) {
