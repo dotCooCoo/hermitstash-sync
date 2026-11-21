@@ -666,6 +666,12 @@ async function startServer(opts) {
     if (process.env.S3_TEST_ENDPOINT) env.BACKUP_S3_ENDPOINT = process.env.S3_TEST_ENDPOINT;
   }
 
+  // The test server resolves names (S3 endpoints, backup targets) through the
+  // OS resolver unless the caller sets BLAMEJS_DNS_TRANSPORT. blamejs otherwise
+  // defaults to DNS-over-HTTPS via cloudflare-dns.com, which a local DNS filter
+  // can block.
+  if (!process.env.BLAMEJS_DNS_TRANSPORT) env.BLAMEJS_DNS_TRANSPORT = 'system';
+
   const serverProcess = spawn(process.execPath, ['server.js'], {
     cwd: SERVER_DIR, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
   });

@@ -1,0 +1,24 @@
+{
+  "version": "1.1.7",
+  "date": "2026-11-20",
+  "headline": "Pre-built binaries and the container image move to Node.js 26.13.1 LTS",
+  "summary": "The binaries and the container image now embed Node.js 26.13.1, the current release of the Node.js 26 LTS line, which the Node.js project supports until April 2029. A from-source install now requires Node.js 26.13.1 or newer. Upgrade with the in-daemon auto-update, `deploy/update.sh`, or `docker pull`. The configuration file and the state database carry over unchanged.",
+  "sections": [
+    {
+      "heading": "Changed",
+      "items": [
+        {
+          "title": "Embedded runtime moves to Node.js 26.13.1",
+          "body": "Pre-built binaries are built on Node.js 26.13.1 and carry that runtime with them. Node.js 26.13.1 ships OpenSSL 3.5.9, the same OpenSSL as Node.js 24.22.1, so the TLS groups the client offers to the server do not change."
+        },
+        {
+          "title": "From-source installs require Node.js 26.13.1",
+          "body": "`engines.node` and the boot-time version check now require 26.13.1. On an older runtime, `hermitstash-sync` exits with status 78 and prints the required version. The container image builds and verifies the binary on `node:26.13.1-slim`, pinned by digest. Pre-built binaries do not depend on the Node.js installed on the machine."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "Node.js 26.13.1 release", "url": "https://nodejs.org/en/blog/release/v26.13.1" }
+  ]
+}

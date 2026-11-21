@@ -105,6 +105,11 @@ function classify(files) {
 
 function buildEnv(ctx) {
   return {
+    // Test files that reach S3 in-process resolve names through the OS
+    // resolver unless the caller sets BLAMEJS_DNS_TRANSPORT. blamejs otherwise
+    // defaults to DNS-over-HTTPS via cloudflare-dns.com, which a local DNS
+    // filter can block.
+    BLAMEJS_DNS_TRANSPORT: 'system',
     ...process.env,
     HERMITSTASH_TEST_URL: ctx.url,
     HERMITSTASH_TEST_API_KEY: ctx.apiKey,

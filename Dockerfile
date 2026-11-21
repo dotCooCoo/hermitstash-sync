@@ -20,16 +20,16 @@ ARG VERSION
 # Verify-stage base — DIGEST-PINNED for the same reason RUNTIME_BASE is. The
 # stage-1 `verify` image both RUNS the SHA3-512 + ECDSA signature check and
 # materializes the binary COPY'd into the runtime image, so a tag-republish of
-# node:24.22.1-slim (Docker Official Images re-point version tags on base-OS
+# node:26.13.1-slim (Docker Official Images re-point version tags on base-OS
 # rebuilds; a registry compromise is the same class the RUNTIME_BASE pin
 # defends) could force the check to pass on any bytes or swap the binary after
 # it — shipping a backdoored binary that is then cosign-signed + SLSA-attested.
 # Pinning the toolchain base closes that half of the build. Refresh the digest
 # deliberately on each Node bump (resolve via
-#   docker buildx imagetools inspect node:24.22.1-slim
+#   docker buildx imagetools inspect node:26.13.1-slim
 # and copy the index Digest), updating the trailing date, on the same cadence
 # as RUNTIME_BASE and the GitHub Action pins.
-ARG NODE_VERSION=24.22.1-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205  # node 24.22.1-slim 2026-10-27
+ARG NODE_VERSION=26.13.1-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc  # node 26.13.1-slim 2026-11-20
 # Runtime base: Chainguard wolfi-base — glibc-dynamic, apk-based, rebuilt
 # continuously by Chainguard when upstream CVE fixes land. Typical CVE
 # count at any given digest is near zero; chosen over debian-slim to avoid
