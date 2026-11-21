@@ -1,0 +1,33 @@
+{
+  "version": "1.1.8",
+  "date": "2026-11-21",
+  "headline": "The vendored framework moves to blamejs 0.21.9, and an HTTP/2 stream that closes early fails at once",
+  "summary": "The vendored framework moves from blamejs 0.21.8 to 0.21.9. An HTTP/2 request whose stream closes before the response headers arrive now fails at once instead of waiting for the request timeout, and an HTTP/2 download cut off when its connection closes is retried. To upgrade, install the new binary or pull the new image. The configuration file and the state database carry over unchanged.",
+  "sections": [
+    {
+      "heading": "Fixed",
+      "items": [
+        {
+          "title": "An HTTP/2 stream that closes early fails without waiting for the timeout",
+          "body": "When the server closes an HTTP/2 stream before it sends response headers, the request now fails with `http-client/h2-stream-error` and the reset code, when there is one. Before this release the request waited until its timeout expired."
+        },
+        {
+          "title": "An HTTP/2 body cut off by a closed connection is retried",
+          "body": "A response body whose HTTP/2 connection closes before the stream ends now fails with the transient `http-client/truncated-body`, and the client retries it. Before this release such a body could be read as complete."
+        }
+      ]
+    },
+    {
+      "heading": "Supply chain",
+      "items": [
+        {
+          "title": "Vendored blamejs 0.21.9",
+          "body": "`vendor/blamejs/` is `@blamejs/core` 0.21.9, checked against the integrity hash the npm registry publishes. It carries `@blamejs/pki` 0.9.13 and the 2026-11-20 Public Suffix List. blamejs 0.21.9 requires Node.js 26.13.1, which this client already requires."
+        }
+      ]
+    }
+  ],
+  "references": [
+    { "label": "blamejs v0.21.9", "url": "https://github.com/blamejs/blamejs/blob/v0.21.9/CHANGELOG.md" }
+  ]
+}
